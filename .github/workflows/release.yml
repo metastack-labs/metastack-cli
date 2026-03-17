@@ -1,0 +1,161 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing semver tag to publish or rerun (for example v0.1.0)"
+        required: true
+        type: string
+      draft:
+        description: "Keep the release as a draft"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  metadata:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+      draft: ${{ steps.meta.outputs.draft }}
+    steps:
+      - name: Resolve release metadata
+        id: meta
+        shell: bash
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            tag="${{ inputs.tag }}"
+            draft="${{ inputs.draft }}"
+          else
+            tag="${GITHUB_REF_NAME}"
+            draft="false"
+          fi
+
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::release tag must match vMAJOR.MINOR.PATCH"
+            exit 1
+          fi
+
+          printf 'tag=%s\n' "$tag" >> "$GITHUB_OUTPUT"
+          printf 'version=%s\n' "${tag#v}" >> "$GITHUB_OUTPUT"
+          printf 'draft=%s\n' "$draft" >> "$GITHUB_OUTPUT"
+
+  checks:
+    needs: metadata
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+        with:
+          ref: refs/tags/${{ needs.metadata.outputs.tag }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Run root quality gate
+        run: make quality
+
+  build:
+    needs:
+      - metadata
+      - checks
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+            asset_suffix: darwin-arm64
+          - runner: macos-latest
+            target: x86_64-apple-darwin
+            asset_suffix: darwin-x64
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            asset_suffix: linux-x64
+          - runner: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            asset_suffix: linux-arm64
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+        with:
+          ref: refs/tags/${{ needs.metadata.outputs.tag }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross for Linux musl packaging
+        if: startsWith(matrix.target, 'x86_64-unknown-linux') || startsWith(matrix.target, 'aarch64-unknown-linux')
+        run: cargo install cross --locked
+
+      - name: Build release asset
+        run: ./scripts/release-artifacts.sh --output-dir dist --expect-version "${{ needs.metadata.outputs.version }}" --target "${{ matrix.target }}"
+
+      - name: Upload packaged artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.asset_suffix }}
+          path: dist/*/*
+          if-no-files-found: error
+
+  publish:
+    needs:
+      - metadata
+      - build
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: refs/tags/${{ needs.metadata.outputs.tag }}
+
+      - name: Download packaged artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+
+      - name: Assemble release payload
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          find dist -type f -name '*.tar.gz' -exec cp {} release-assets/ \;
+          (cd release-assets && shasum -a 256 ./*.tar.gz > SHA256SUMS)
+          ls -1 release-assets
+
+      - name: Create or update GitHub Release
+        shell: bash
+        run: |
+          tag="${{ needs.metadata.outputs.tag }}"
+          draft="${{ needs.metadata.outputs.draft }}"
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" release-assets/* --clobber
+            gh release edit "$tag" --draft="$draft"
+          else
+            draft_args=()
+            if [[ "$draft" == "true" ]]; then
+              draft_args+=(--draft)
+            fi
+
+            gh release create "$tag" release-assets/* \
+              --verify-tag \
+              --generate-notes \
+              "${draft_args[@]}"
+          fi
