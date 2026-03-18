@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::agents::{
     apply_invocation_environment, command_args_for_invocation, format_agent_config_source,
-    resolve_agent_invocation_for_planning,
+    resolve_agent_invocation_for_planning, validate_invocation_command_surface,
 };
 use crate::cli::MergeArgs;
 use crate::config::{
@@ -1232,6 +1232,7 @@ fn run_agent_capture_in_dir(
         },
     )?;
     let command_args = command_args_for_invocation(&invocation, Some(workspace_path))?;
+    let attempted_command = validate_invocation_command_surface(&invocation, &command_args)?;
 
     let mut command = Command::new(&invocation.command);
     command.args(&command_args);
@@ -1246,8 +1247,8 @@ fn run_agent_capture_in_dir(
 
     let mut child = command.spawn().with_context(|| {
         format!(
-            "failed to launch agent `{}` with command `{}`",
-            invocation.agent, invocation.command
+            "failed to launch agent `{}` with command `{attempted_command}`",
+            invocation.agent
         )
     })?;
 
@@ -1271,7 +1272,7 @@ fn run_agent_capture_in_dir(
         .with_context(|| format!("failed to wait for agent `{}`", invocation.agent))?;
     if !output.status.success() {
         bail!(
-            "agent `{}` exited unsuccessfully: {}",
+            "agent `{}` exited unsuccessfully while running `{attempted_command}`: {}",
             invocation.agent,
             String::from_utf8_lossy(&output.stderr).trim()
         );

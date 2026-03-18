@@ -1,4 +1,5 @@
 pub mod dashboard;
+mod preflight;
 mod state;
 mod store;
 mod web;
@@ -35,7 +36,7 @@ use crate::cli::{
     ListenSessionResumeArgs, ListenWorkerArgs,
 };
 use crate::config::{
-    LinearConfig, LinearConfigOverrides, ListenAssignmentScope, PlanningListenSettings,
+    AppConfig, LinearConfig, LinearConfigOverrides, ListenAssignmentScope, PlanningListenSettings,
     PlanningMeta, load_required_planning_meta,
 };
 use crate::fs::{PlanningPaths, canonicalize_existing_dir, display_path};
@@ -361,6 +362,8 @@ struct AgentDaemon<C> {
     filters: IssueListFilters,
     max_pickups: usize,
     linear_config: LinearConfig,
+    app_config: AppConfig,
+    planning_meta: PlanningMeta,
     worker_agent: Option<String>,
     worker_model: Option<String>,
     worker_reasoning: Option<String>,
@@ -855,6 +858,8 @@ where
                     .map(|project| project.name.clone()),
                 parent_id: Some(parent_issue.id.clone()),
                 parent_identifier: Some(parent_issue.identifier.clone()),
+                local_hash: None,
+                remote_hash: None,
                 managed_files: Vec::<ManagedFileRecord>::new(),
             },
         )?;
@@ -919,6 +924,38 @@ where
                 ));
             }
         };
+        if let Err(error) = preflight::run_listen_preflight(
+            &self.service,
+            &self.linear_config,
+            &self.app_config,
+            &self.planning_meta,
+            preflight::ListenPreflightRequest {
+                working_dir: &workspace.workspace_path,
+                agent: self.worker_agent.as_deref(),
+                model: self.worker_model.as_deref(),
+                reasoning: self.worker_reasoning.as_deref(),
+                require_write_access: true,
+            },
+        )
+        .await
+        {
+            let log_path = self.agent_log_path(&detailed_issue.identifier);
+            let _ = worker::write_preflight_failure(&log_path, &error);
+            return Ok(self.build_session(
+                &detailed_issue,
+                SessionPhase::Blocked,
+                compact_session_summary([
+                    Some("Blocked | missing exec capability".to_string()),
+                    Some(truncate_summary(&error.to_string(), 72)),
+                ]),
+                SessionArtifacts {
+                    workspace: Some(&workspace),
+                    log_path: Some(log_path.display().to_string()),
+                    ..SessionArtifacts::default()
+                },
+                updated_at_epoch_seconds,
+            ));
+        }
         let backlog_issue = match self
             .ensure_backlog_issue(&detailed_issue, &workspace.workspace_path)
             .await
@@ -1641,6 +1678,7 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
     let root = resolve_source_project_root(&requested_root)?;
     let planning_meta = load_required_planning_meta(&root, "listen")?;
     ensure_planning_layout(&root, false)?;
+    let app_config = AppConfig::load()?;
     let poll_interval_seconds = resolve_listen_poll_interval_seconds(args, &planning_meta);
 
     if args.demo {
@@ -1701,6 +1739,27 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
         return Ok(());
     }
 
+    let startup_provider_preflight = match preflight::run_listen_provider_preflight(
+        &app_config,
+        &planning_meta,
+        preflight::ListenPreflightRequest {
+            working_dir: &root,
+            agent: args.agent.as_deref(),
+            model: args.model.as_deref(),
+            reasoning: args.reasoning.as_deref(),
+            require_write_access: false,
+        },
+    ) {
+        Ok(report) => Some(report),
+        Err(error) if !args.check && preflight::is_missing_agent_selection(&error) => None,
+        Err(error) => {
+            if args.check {
+                bail!("{}", preflight::render_listen_preflight_report(Err(&error)));
+            }
+            return Err(error);
+        }
+    };
+
     let config = LinearConfig::new_with_root(
         Some(&root),
         LinearConfigOverrides {
@@ -1714,6 +1773,27 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
     let _lock = store.acquire_listener_lock(std::process::id())?;
     let client = ReqwestLinearClient::new(config.clone())?;
     let service = LinearService::new(client, config.default_team.clone());
+    if let Some(provider_report) = startup_provider_preflight {
+        let startup_preflight =
+            preflight::complete_listen_preflight(&service, &config, provider_report).await;
+        if args.check {
+            match startup_preflight {
+                Ok(report) => {
+                    println!("{}", preflight::render_listen_preflight_report(Ok(&report)));
+                    return Ok(());
+                }
+                Err(error) => {
+                    bail!("{}", preflight::render_listen_preflight_report(Err(&error)));
+                }
+            }
+        }
+        match startup_preflight {
+            Ok(report) => preflight::emit_listen_preflight_warnings(&report),
+            Err(error) => return Err(error),
+        }
+    } else if args.check {
+        unreachable!("`--check` exits on provider preflight failures before Linear validation");
+    }
     let viewer = if planning_meta.listen.assignment_scope == ListenAssignmentScope::Viewer {
         Some(service.viewer().await?)
     } else {
@@ -1735,6 +1815,8 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
         },
         max_pickups: args.max_pickups.max(1),
         linear_config: config.clone(),
+        app_config,
+        planning_meta: planning_meta.clone(),
         worker_agent: args.agent.clone(),
         worker_model: args.model.clone(),
         worker_reasoning: args.reasoning.clone(),

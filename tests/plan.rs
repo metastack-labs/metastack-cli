@@ -812,6 +812,32 @@ default_reasoning = "low"
         fs::write(
             &stub_path,
             r##"#!/bin/sh
+if [ "__NAME__" = "claude" ] && [ "$1" = "-p" ] && [ "$2" = "--help" ]; then
+  cat <<'EOF'
+-p, --print
+--model <model>
+--effort <level>
+--permission-mode <mode>
+EOF
+  exit 0
+fi
+if [ "__NAME__" = "codex" ] && [ "$1" = "--help" ]; then
+  cat <<'EOF'
+-a, --ask-for-approval <APPROVAL_POLICY>
+-s, --sandbox <SANDBOX_MODE>
+-C, --cd <DIR>
+    --add-dir <DIR>
+    --dangerously-bypass-approvals-and-sandbox
+EOF
+  exit 0
+fi
+if [ "__NAME__" = "codex" ] && [ "$1" = "exec" ] && [ "$2" = "--help" ]; then
+  cat <<'EOF'
+-m, --model <MODEL>
+-c, --config <key=value>
+EOF
+  exit 0
+fi
 count_file="$TEST_OUTPUT_DIR/count.txt"
 count=0
 if [ -f "$count_file" ]; then

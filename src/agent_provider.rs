@@ -1,10 +1,21 @@
+use std::collections::HashMap;
+use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
 
 use anyhow::{Context, Result, bail};
 
 use crate::config::{AgentCommandConfig, PromptTransport, normalize_agent_name};
 use crate::fs::canonicalize_existing_dir;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinInvocationContext {
+    Planning,
+    Scan,
+    Listen,
+    Other,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BuiltinReasoningOption {
@@ -27,7 +38,9 @@ pub trait BuiltinProviderAdapter: Sync {
         &self,
         launch_args: &[String],
         working_dir: Option<&Path>,
+        context: BuiltinInvocationContext,
     ) -> Result<Vec<String>>;
+    fn validate_command_args(&self, command_args: &[String]) -> Result<()>;
 
     fn command_definition(&self) -> AgentCommandConfig {
         AgentCommandConfig {
@@ -50,11 +63,19 @@ const REASONING_HIGH: BuiltinReasoningOption = BuiltinReasoningOption {
     key: "high",
     label: "High",
 };
+const REASONING_MAX: BuiltinReasoningOption = BuiltinReasoningOption {
+    key: "max",
+    label: "Max",
+};
 
-const REASONING_LOW_MEDIUM: &[BuiltinReasoningOption] = &[REASONING_LOW, REASONING_MEDIUM];
 const REASONING_LOW_MEDIUM_HIGH: &[BuiltinReasoningOption] =
     &[REASONING_LOW, REASONING_MEDIUM, REASONING_HIGH];
-const REASONING_HIGH_ONLY: &[BuiltinReasoningOption] = &[REASONING_HIGH];
+const REASONING_LOW_MEDIUM_HIGH_MAX: &[BuiltinReasoningOption] = &[
+    REASONING_LOW,
+    REASONING_MEDIUM,
+    REASONING_HIGH,
+    REASONING_MAX,
+];
 
 const CODEX_MODELS: &[BuiltinModelCatalogEntry] = &[
     BuiltinModelCatalogEntry {
@@ -94,27 +115,25 @@ const CODEX_MODELS: &[BuiltinModelCatalogEntry] = &[
 const CLAUDE_MODELS: &[BuiltinModelCatalogEntry] = &[
     BuiltinModelCatalogEntry {
         key: "sonnet",
-        reasoning_options: REASONING_LOW_MEDIUM_HIGH,
+        reasoning_options: REASONING_LOW_MEDIUM_HIGH_MAX,
     },
     BuiltinModelCatalogEntry {
         key: "opus",
-        reasoning_options: REASONING_LOW_MEDIUM_HIGH,
+        reasoning_options: REASONING_LOW_MEDIUM_HIGH_MAX,
     },
     BuiltinModelCatalogEntry {
         key: "haiku",
-        reasoning_options: REASONING_LOW_MEDIUM,
+        reasoning_options: REASONING_LOW_MEDIUM_HIGH_MAX,
     },
     BuiltinModelCatalogEntry {
         key: "sonnet[1m]",
-        reasoning_options: REASONING_MEDIUM_HIGH,
+        reasoning_options: REASONING_LOW_MEDIUM_HIGH_MAX,
     },
     BuiltinModelCatalogEntry {
         key: "opusplan",
-        reasoning_options: REASONING_HIGH_ONLY,
+        reasoning_options: REASONING_LOW_MEDIUM_HIGH_MAX,
     },
 ];
-
-const REASONING_MEDIUM_HIGH: &[BuiltinReasoningOption] = &[REASONING_MEDIUM, REASONING_HIGH];
 
 struct CodexProviderAdapter;
 struct ClaudeProviderAdapter;
@@ -134,7 +153,8 @@ impl BuiltinProviderAdapter for CodexProviderAdapter {
             args.push(format!("--model={model}"));
         }
         if let Some(reasoning) = reasoning.map(str::trim).filter(|value| !value.is_empty()) {
-            args.push(format!("--reasoning={reasoning}"));
+            args.push("-c".to_string());
+            args.push(format!("reasoning.effort=\"{reasoning}\""));
         }
         args
     }
@@ -147,13 +167,19 @@ impl BuiltinProviderAdapter for CodexProviderAdapter {
         &self,
         launch_args: &[String],
         working_dir: Option<&Path>,
+        context: BuiltinInvocationContext,
     ) -> Result<Vec<String>> {
-        let mut args = vec![
-            "--sandbox".to_string(),
-            "workspace-write".to_string(),
-            "--ask-for-approval".to_string(),
-            "never".to_string(),
-        ];
+        let mut args = match context {
+            BuiltinInvocationContext::Listen => {
+                vec!["--dangerously-bypass-approvals-and-sandbox".to_string()]
+            }
+            _ => vec![
+                "--sandbox".to_string(),
+                "workspace-write".to_string(),
+                "--ask-for-approval".to_string(),
+                "never".to_string(),
+            ],
+        };
 
         if let Some(working_dir) = working_dir {
             let workspace = canonicalize_existing_dir(working_dir)?;
@@ -166,8 +192,97 @@ impl BuiltinProviderAdapter for CodexProviderAdapter {
             }
         }
 
-        args.extend(launch_args.to_vec());
+        if context == BuiltinInvocationContext::Listen
+            && launch_args.first().map(String::as_str) == Some("exec")
+        {
+            args.push("exec".to_string());
+            args.push("-c".to_string());
+            args.push("mcp_servers.linear.enabled=false".to_string());
+            args.extend(launch_args.iter().skip(1).cloned());
+        } else {
+            args.extend(launch_args.to_vec());
+        }
         Ok(args)
+    }
+
+    fn validate_command_args(&self, command_args: &[String]) -> Result<()> {
+        let exec_index = command_args
+            .iter()
+            .position(|arg| arg == "exec")
+            .ok_or_else(|| anyhow::anyhow!("built-in codex launch args are missing `exec`"))?;
+
+        let top_level_args = &command_args[..exec_index];
+        let exec_args = &command_args[exec_index + 1..];
+
+        validate_help_surface(
+            "codex",
+            &["--help"],
+            &[
+                (
+                    top_level_args.iter().any(|arg| arg == "--sandbox"),
+                    "top-level sandbox flags",
+                    &[FlagSupport::new(
+                        "--sandbox",
+                        &["--sandbox <SANDBOX_MODE>", "-s, --sandbox <SANDBOX_MODE>"],
+                    )][..],
+                ),
+                (
+                    top_level_args
+                        .iter()
+                        .any(|arg| arg == "--dangerously-bypass-approvals-and-sandbox"),
+                    "top-level sandbox flags",
+                    &[FlagSupport::new(
+                        "--dangerously-bypass-approvals-and-sandbox",
+                        &["--dangerously-bypass-approvals-and-sandbox"],
+                    )][..],
+                ),
+                (
+                    top_level_args.iter().any(|arg| arg == "--ask-for-approval"),
+                    "top-level approval flags",
+                    &[FlagSupport::new(
+                        "--ask-for-approval",
+                        &[
+                            "--ask-for-approval <APPROVAL_POLICY>",
+                            "-a, --ask-for-approval <APPROVAL_POLICY>",
+                        ],
+                    )][..],
+                ),
+                (
+                    top_level_args.iter().any(|arg| arg == "--cd"),
+                    "top-level working-directory flags",
+                    &[FlagSupport::new("--cd", &["--cd <DIR>", "-C, --cd <DIR>"])][..],
+                ),
+                (
+                    top_level_args.iter().any(|arg| arg == "--add-dir"),
+                    "top-level writable-root flags",
+                    &[FlagSupport::new("--add-dir", &["--add-dir <DIR>"])][..],
+                ),
+            ],
+        )?;
+        validate_help_surface(
+            "codex",
+            &["exec", "--help"],
+            &[
+                (
+                    exec_args.iter().any(|arg| arg.starts_with("--model=")),
+                    "exec model flags",
+                    &[FlagSupport::new(
+                        "--model",
+                        &["--model <MODEL>", "-m, --model <MODEL>"],
+                    )][..],
+                ),
+                (
+                    exec_args.iter().any(|arg| arg == "-c"),
+                    "exec config flags",
+                    &[FlagSupport::new(
+                        "-c",
+                        &["-c, --config <key=value>", "--config <key=value>"],
+                    )][..],
+                ),
+            ],
+        )?;
+
+        Ok(())
     }
 }
 
@@ -180,10 +295,13 @@ impl BuiltinProviderAdapter for ClaudeProviderAdapter {
         "claude"
     }
 
-    fn launch_args(&self, model: Option<&str>, _reasoning: Option<&str>) -> Vec<String> {
+    fn launch_args(&self, model: Option<&str>, reasoning: Option<&str>) -> Vec<String> {
         let mut args = vec!["-p".to_string()];
         if let Some(model) = model.map(str::trim).filter(|value| !value.is_empty()) {
             args.push(format!("--model={model}"));
+        }
+        if let Some(reasoning) = reasoning.map(str::trim).filter(|value| !value.is_empty()) {
+            args.push(format!("--effort={reasoning}"));
         }
         args
     }
@@ -196,8 +314,48 @@ impl BuiltinProviderAdapter for ClaudeProviderAdapter {
         &self,
         launch_args: &[String],
         _working_dir: Option<&Path>,
+        context: BuiltinInvocationContext,
     ) -> Result<Vec<String>> {
-        Ok(launch_args.to_vec())
+        let mut args = Vec::new();
+        if context == BuiltinInvocationContext::Listen {
+            args.push("--permission-mode=bypassPermissions".to_string());
+        }
+        args.extend(launch_args.to_vec());
+        Ok(args)
+    }
+
+    fn validate_command_args(&self, command_args: &[String]) -> Result<()> {
+        validate_help_surface(
+            "claude",
+            &["-p", "--help"],
+            &[
+                (
+                    command_args.iter().any(|arg| arg == "-p"),
+                    "print-mode flags",
+                    &[FlagSupport::new("-p", &["-p, --print", "--print"])][..],
+                ),
+                (
+                    command_args.iter().any(|arg| arg.starts_with("--model=")),
+                    "model flags",
+                    &[FlagSupport::new("--model", &["--model <model>"])][..],
+                ),
+                (
+                    command_args.iter().any(|arg| arg.starts_with("--effort=")),
+                    "effort flags",
+                    &[FlagSupport::new("--effort", &["--effort <level>"])][..],
+                ),
+                (
+                    command_args.iter().any(|arg| {
+                        arg == "--permission-mode" || arg.starts_with("--permission-mode=")
+                    }),
+                    "permission-mode flags",
+                    &[FlagSupport::new(
+                        "--permission-mode",
+                        &["--permission-mode <mode>"],
+                    )][..],
+                ),
+            ],
+        )
     }
 }
 
@@ -279,4 +437,107 @@ fn git_stdout(root: &Path, args: &[&str]) -> Result<String> {
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+#[derive(Clone, Copy)]
+struct FlagSupport {
+    emitted_flag: &'static str,
+    accepted_patterns: &'static [&'static str],
+}
+
+impl FlagSupport {
+    const fn new(emitted_flag: &'static str, accepted_patterns: &'static [&'static str]) -> Self {
+        Self {
+            emitted_flag,
+            accepted_patterns,
+        }
+    }
+}
+
+static HELP_OUTPUT_CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+
+fn validate_help_surface(
+    command: &str,
+    help_args: &[&str],
+    checks: &[(bool, &str, &[FlagSupport])],
+) -> Result<()> {
+    if checks.iter().all(|(required, _, _)| !*required) {
+        return Ok(());
+    }
+
+    let help_output = cached_help_output(command, help_args)?;
+    for (required, scope, flags) in checks.iter().copied() {
+        if !required {
+            continue;
+        }
+        for flag in flags {
+            if flag
+                .accepted_patterns
+                .iter()
+                .all(|pattern| !help_output.contains(*pattern))
+            {
+                bail!(
+                    "installed `{}` {} does not advertise emitted flag `{}`; checked `{}`",
+                    command,
+                    scope,
+                    flag.emitted_flag,
+                    std::iter::once(command)
+                        .chain(help_args.iter().copied())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn cached_help_output(command: &str, help_args: &[&str]) -> Result<String> {
+    let path_key = env::var("PATH").unwrap_or_default();
+    let cache_key = std::iter::once(command)
+        .chain(help_args.iter().copied())
+        .chain(std::iter::once(path_key.as_str()))
+        .collect::<Vec<_>>()
+        .join("\u{0}");
+    let cache = HELP_OUTPUT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+
+    {
+        let cache_guard = cache
+            .lock()
+            .map_err(|_| anyhow::anyhow!("built-in CLI help cache lock is poisoned"))?;
+        if let Some(output) = cache_guard.get(&cache_key) {
+            return Ok(output.clone());
+        }
+    }
+
+    let output = Command::new(command)
+        .args(help_args)
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to run `{}` while validating built-in CLI flags",
+                std::iter::once(command)
+                    .chain(help_args.iter().copied())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )
+        })?;
+    if !output.status.success() {
+        bail!(
+            "`{}` failed while validating built-in CLI flags: {}",
+            std::iter::once(command)
+                .chain(help_args.iter().copied())
+                .collect::<Vec<_>>()
+                .join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    let help_output = String::from_utf8_lossy(&output.stdout).to_string();
+    let mut cache_guard = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("built-in CLI help cache lock is poisoned"))?;
+    cache_guard.insert(cache_key, help_output.clone());
+    Ok(help_output)
 }

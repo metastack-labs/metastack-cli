@@ -48,6 +48,15 @@ query Issues($first: Int!, $after: String, $filter: IssueFilter) {
         name
         type
       }
+      attachments(first: 100) {
+        nodes {
+          id
+          title
+          url
+          sourceType
+          metadata
+        }
+      }
     }
     pageInfo {
       hasNextPage

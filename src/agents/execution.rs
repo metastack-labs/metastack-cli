@@ -4,9 +4,11 @@ use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, anyhow, bail};
 
-use crate::agent_provider::builtin_provider_adapter;
+use crate::agent_provider::{BuiltinInvocationContext, builtin_provider_adapter};
 use crate::cli::RunAgentArgs;
 use crate::config::{
+    AGENT_ROUTE_AGENTS_LISTEN, AGENT_ROUTE_BACKLOG_PLAN, AGENT_ROUTE_BACKLOG_SPLIT,
+    AGENT_ROUTE_CONTEXT_RELOAD, AGENT_ROUTE_CONTEXT_SCAN, AGENT_ROUTE_LINEAR_ISSUES_REFINE,
     AgentConfigOverrides, AgentConfigSource, AppConfig, PlanningMeta, PromptTransport,
     normalize_agent_name, resolve_agent_config,
 };
@@ -27,6 +29,7 @@ pub(crate) struct ResolvedAgentInvocation {
     pub(crate) agent: String,
     pub(crate) command: String,
     pub(crate) args: Vec<String>,
+    pub(crate) context: BuiltinInvocationContext,
     pub(crate) model: Option<String>,
     pub(crate) reasoning: Option<String>,
     pub(crate) route_key: Option<String>,
@@ -131,6 +134,32 @@ pub(crate) fn apply_invocation_environment(
     );
 }
 
+pub(crate) fn attempted_command(command: &str, command_args: &[String]) -> String {
+    format!("{command} {}", command_args.join(" "))
+}
+
+pub(crate) fn validate_invocation_command_surface(
+    invocation: &ResolvedAgentInvocation,
+    command_args: &[String],
+) -> Result<String> {
+    let attempted = attempted_command(&invocation.command, command_args);
+    if invocation.builtin_provider {
+        builtin_provider_adapter(&invocation.agent)
+            .ok_or_else(|| anyhow!("builtin provider `{}` is not configured", invocation.agent))?
+            .validate_command_args(command_args)
+            .with_context(|| {
+                format!(
+                    "built-in provider `{}` launch validation failed before running `{attempted}` (model: {}, reasoning: {})",
+                    invocation.agent,
+                    invocation.model.as_deref().unwrap_or("unset"),
+                    invocation.reasoning.as_deref().unwrap_or("unset"),
+                )
+            })?;
+    }
+
+    Ok(attempted)
+}
+
 pub fn run_agent_capture(args: &RunAgentArgs) -> Result<AgentCaptureReport> {
     let config = AppConfig::load()?;
     let planning_meta = match args.root.as_deref() {
@@ -139,6 +168,7 @@ pub fn run_agent_capture(args: &RunAgentArgs) -> Result<AgentCaptureReport> {
     };
     let invocation = resolve_agent_invocation_for_planning(&config, &planning_meta, args)?;
     let command_args = command_args_for_invocation(&invocation, None)?;
+    let attempted_command = validate_invocation_command_surface(&invocation, &command_args)?;
 
     let mut command = Command::new(&invocation.command);
     command.args(&command_args);
@@ -154,8 +184,8 @@ pub fn run_agent_capture(args: &RunAgentArgs) -> Result<AgentCaptureReport> {
 
     let mut child = command.spawn().with_context(|| {
         format!(
-            "failed to launch agent `{}` with command `{}`",
-            invocation.agent, invocation.command
+            "failed to launch agent `{}` with command `{attempted_command}`",
+            invocation.agent
         )
     })?;
 
@@ -187,7 +217,7 @@ pub fn run_agent_capture(args: &RunAgentArgs) -> Result<AgentCaptureReport> {
             .map(|value| value.to_string())
             .unwrap_or_else(|| "terminated by signal".to_string());
         bail!(
-            "agent `{}` exited unsuccessfully ({code}): {}",
+            "agent `{}` exited unsuccessfully ({code}) while running `{attempted_command}`: {}",
             invocation.agent,
             stderr.trim()
         );
@@ -222,6 +252,7 @@ pub(crate) fn resolve_agent_invocation_for_planning(
         model.as_deref(),
         reasoning.as_deref(),
     );
+    let context = builtin_invocation_context(args.route_key.as_deref());
     let (command, rendered_args, transport) =
         if let Some(provider) = builtin_provider_adapter(&agent_name) {
             let transport = args
@@ -269,6 +300,7 @@ pub(crate) fn resolve_agent_invocation_for_planning(
         agent: agent_name,
         command,
         args: rendered_args,
+        context,
         model,
         reasoning,
         route_key: resolved.route_key,
@@ -305,7 +337,24 @@ fn command_args_for_options(
 
     builtin_provider_adapter(&invocation.agent)
         .ok_or_else(|| anyhow!("builtin provider `{}` is not configured", invocation.agent))?
-        .prepare_command_args(&invocation.args, options.working_dir.as_deref())
+        .prepare_command_args(
+            &invocation.args,
+            options.working_dir.as_deref(),
+            invocation.context,
+        )
+}
+
+fn builtin_invocation_context(route_key: Option<&str>) -> BuiltinInvocationContext {
+    match route_key {
+        Some(AGENT_ROUTE_AGENTS_LISTEN) => BuiltinInvocationContext::Listen,
+        Some(AGENT_ROUTE_CONTEXT_SCAN | AGENT_ROUTE_CONTEXT_RELOAD) => {
+            BuiltinInvocationContext::Scan
+        }
+        Some(
+            AGENT_ROUTE_BACKLOG_PLAN | AGENT_ROUTE_BACKLOG_SPLIT | AGENT_ROUTE_LINEAR_ISSUES_REFINE,
+        ) => BuiltinInvocationContext::Planning,
+        _ => BuiltinInvocationContext::Other,
+    }
 }
 
 fn render_agent_payload(

@@ -399,6 +399,8 @@ fn build_issue_metadata(issue: &IssueSummary) -> BacklogIssueMetadata {
             .parent
             .as_ref()
             .map(|parent| parent.identifier.clone()),
+        local_hash: None,
+        remote_hash: None,
         managed_files: Vec::<ManagedFileRecord>::new(),
     }
 }

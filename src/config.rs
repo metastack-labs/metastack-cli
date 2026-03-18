@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::env;
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -227,6 +228,58 @@ pub struct ResolvedAgentRoute {
     pub provider_source: AgentConfigSource,
     pub model_source: Option<AgentConfigSource>,
     pub reasoning_source: Option<AgentConfigSource>,
+}
+
+/// Error returned when agent resolution cannot determine a provider.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoAgentSelectedError {
+    route_key: Option<String>,
+}
+
+impl NoAgentSelectedError {
+    fn global() -> Self {
+        Self { route_key: None }
+    }
+
+    fn for_route(route_key: impl Into<String>) -> Self {
+        Self {
+            route_key: Some(route_key.into()),
+        }
+    }
+
+    /// Returns the route key whose resolution failed, or `None` for global resolution failures.
+    pub fn route_key(&self) -> Option<&str> {
+        self.route_key.as_deref()
+    }
+}
+
+impl fmt::Display for NoAgentSelectedError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.route_key() {
+            Some(route_key) => write!(
+                f,
+                "no agent was selected for route `{route_key}`. Pass `--agent <NAME>` or configure a route or global default with `meta runtime config`."
+            ),
+            None => write!(
+                f,
+                "no agent was selected. Pass `--agent <NAME>` or run `meta runtime config` to configure a default agent."
+            ),
+        }
+    }
+}
+
+impl std::error::Error for NoAgentSelectedError {}
+
+/// Returns `true` when the provided error is a `NoAgentSelectedError`.
+pub fn is_no_agent_selected_error(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<NoAgentSelectedError>().is_some()
+}
+
+/// Returns the route key attached to a `NoAgentSelectedError`, if one is present.
+pub fn no_agent_selected_route_key(error: &anyhow::Error) -> Option<&str> {
+    error
+        .downcast_ref::<NoAgentSelectedError>()
+        .and_then(NoAgentSelectedError::route_key)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -650,14 +703,7 @@ pub fn resolve_agent_config(
             AgentConfigOverrides::default(),
         ) {
             Ok(resolved) => Some(resolved),
-            Err(error)
-                if explicit_provider.is_some()
-                    && error
-                        .to_string()
-                        .contains("no agent was selected for route") =>
-            {
-                None
-            }
+            Err(error) if explicit_provider.is_some() && is_no_agent_selected_error(&error) => None,
             Err(error) => return Err(error),
         },
         None => None,
@@ -669,11 +715,7 @@ pub fn resolve_agent_config(
         .or_else(|| normalize_optional_ref(planning_meta.agent.provider.as_deref()))
         .or_else(|| normalize_optional_ref(app_config.agents.default_agent.as_deref()))
         .map(|value| normalize_agent_name(&value))
-        .ok_or_else(|| {
-            anyhow!(
-                "no agent was selected. Pass `--agent <NAME>` or run `meta runtime config` to configure a default agent."
-            )
-        })?;
+        .ok_or_else(|| anyhow!(NoAgentSelectedError::global()))?;
     validate_agent_name(app_config, &provider)?;
     let (model, model_source) = resolve_supported_model(
         &provider,
@@ -930,10 +972,7 @@ pub fn resolve_agent_route(
     } else if let Some(provider) = global_provider.clone() {
         (provider, AgentConfigSource::GlobalDefault)
     } else {
-        return Err(anyhow!(
-            "no agent was selected for route `{}`. Pass `--agent <NAME>` or configure a route or global default with `meta runtime config`.",
-            definition.key
-        ));
+        return Err(anyhow!(NoAgentSelectedError::for_route(definition.key)));
     };
     validate_agent_name(app_config, &provider)?;
 
@@ -1446,8 +1485,9 @@ mod tests {
         AGENT_ROUTE_BACKLOG_PLAN, AGENT_ROUTE_BACKLOG_SPLIT, AgentConfigOverrides,
         AgentConfigSource, AgentRouteConfig, AgentRouteScope, AgentRoutingSettings, AgentSettings,
         AppConfig, DEFAULT_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT,
-        DEFAULT_LISTEN_POLL_INTERVAL_SECONDS, PlanningAgentSettings, PlanningListenSettings,
-        PlanningMeta, PlanningPlanSettings, normalize_agent_route_key, resolve_agent_config,
+        DEFAULT_LISTEN_POLL_INTERVAL_SECONDS, NoAgentSelectedError, PlanningAgentSettings,
+        PlanningListenSettings, PlanningMeta, PlanningPlanSettings, is_no_agent_selected_error,
+        no_agent_selected_route_key, normalize_agent_route_key, resolve_agent_config,
         resolve_agent_route, validate_agent_reasoning,
         validate_interactive_plan_follow_up_question_limit, validate_listen_poll_interval_seconds,
     };
@@ -1830,6 +1870,45 @@ mod tests {
     }
 
     #[test]
+    fn resolve_agent_route_returns_typed_missing_agent_error() {
+        let error = resolve_agent_route(
+            &AppConfig::default(),
+            &PlanningMeta::default(),
+            AGENT_ROUTE_BACKLOG_PLAN,
+            Default::default(),
+        )
+        .expect_err("route without any provider should fail");
+
+        assert!(is_no_agent_selected_error(&error));
+        assert_eq!(
+            no_agent_selected_route_key(&error),
+            Some(AGENT_ROUTE_BACKLOG_PLAN)
+        );
+        assert_eq!(
+            error.to_string(),
+            NoAgentSelectedError::for_route(AGENT_ROUTE_BACKLOG_PLAN).to_string()
+        );
+    }
+
+    #[test]
+    fn resolve_agent_config_returns_typed_missing_agent_error_without_route() {
+        let error = resolve_agent_config(
+            &AppConfig::default(),
+            &PlanningMeta::default(),
+            None,
+            Default::default(),
+        )
+        .expect_err("global config without any provider should fail");
+
+        assert!(is_no_agent_selected_error(&error));
+        assert_eq!(no_agent_selected_route_key(&error), None);
+        assert_eq!(
+            error.to_string(),
+            NoAgentSelectedError::global().to_string()
+        );
+    }
+
+    #[test]
     fn resolve_agent_config_skips_incompatible_route_values_when_provider_is_overridden() {
         let config = AppConfig {
             agents: AgentSettings {
@@ -1945,12 +2024,12 @@ mod tests {
 
     #[test]
     fn validate_agent_reasoning_rejects_invalid_builtin_reasoning() {
-        let error = validate_agent_reasoning("claude", Some("haiku"), Some("high"))
-            .expect_err("haiku should reject high reasoning");
+        let error = validate_agent_reasoning("claude", Some("haiku"), Some("xhigh"))
+            .expect_err("claude should reject unsupported reasoning");
         assert!(
             error
                 .to_string()
-                .contains("supported reasoning: low, medium")
+                .contains("supported reasoning: low, medium, high, max")
         );
     }
 
@@ -1960,7 +2039,7 @@ mod tests {
             agents: AgentSettings {
                 default_agent: Some("claude".to_string()),
                 default_model: Some("haiku".to_string()),
-                default_reasoning: Some("high".to_string()),
+                default_reasoning: Some("xhigh".to_string()),
                 routing: AgentRoutingSettings::default(),
                 commands: BTreeMap::new(),
             },
@@ -1973,7 +2052,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("supported reasoning: low, medium")
+                .contains("supported reasoning: low, medium, high, max")
         );
     }
 }

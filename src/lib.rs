@@ -95,6 +95,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 None => {
                     run_sync_dashboard_command(
                         &args.client,
+                        args.project.as_deref(),
                         SyncDashboardOptions {
                             render_once: args.render_once,
                             width: args.width,
@@ -186,6 +187,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 None => {
                     run_sync_dashboard_command(
                         &args.sync.client,
+                        args.sync.project.as_deref(),
                         SyncDashboardOptions {
                             render_once: args.sync.render_once,
                             width: args.sync.width,
@@ -285,6 +287,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 print_compatibility_hint("meta sync", "meta backlog sync");
                 run_sync_dashboard_command(
                     &args.client,
+                    args.project.as_deref(),
                     SyncDashboardOptions {
                         render_once: args.render_once,
                         width: args.width,

@@ -292,6 +292,8 @@ pub async fn run_plan(args: &PlanArgs) -> Result<PlanReport> {
                 project_name: issue.project.as_ref().map(|project| project.name.clone()),
                 parent_id: None,
                 parent_identifier: None,
+                local_hash: None,
+                remote_hash: None,
                 managed_files: Vec::<ManagedFileRecord>::new(),
             },
         )?;

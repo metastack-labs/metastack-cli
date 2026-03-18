@@ -7,7 +7,7 @@ pub(crate) use brief::{AgentBriefRequest, TicketMetadata, write_agent_brief};
 pub(crate) use execution::{
     AgentExecutionOptions, apply_invocation_environment, command_args_for_invocation,
     format_agent_config_source, render_invocation_diagnostics,
-    resolve_agent_invocation_for_planning,
+    resolve_agent_invocation_for_planning, validate_invocation_command_surface,
 };
 
 #[cfg(test)]
@@ -26,7 +26,8 @@ mod tests {
     };
     use crate::cli::RunAgentArgs;
     use crate::config::{
-        AgentCommandConfig, AgentSettings, AppConfig, PlanningMeta, PromptTransport,
+        AGENT_ROUTE_AGENTS_LISTEN, AgentCommandConfig, AgentSettings, AppConfig, PlanningMeta,
+        PromptTransport,
     };
     use crate::fs::{PlanningPaths, canonicalize_existing_dir, ensure_dir, write_text_file};
 
@@ -275,6 +276,130 @@ mod tests {
     }
 
     #[test]
+    fn builtin_codex_execution_uses_config_override_for_reasoning() -> Result<()> {
+        let config = AppConfig {
+            agents: AgentSettings {
+                default_agent: None,
+                default_model: Some("gpt-5.4".to_string()),
+                default_reasoning: Some("medium".to_string()),
+                routing: Default::default(),
+                commands: BTreeMap::new(),
+            },
+            ..AppConfig::default()
+        };
+        let invocation = resolve_agent_invocation_for_planning(
+            &config,
+            &PlanningMeta::default(),
+            &RunAgentArgs {
+                root: None,
+                route_key: None,
+                agent: Some("codex".to_string()),
+                prompt: "Ship setup flow".to_string(),
+                instructions: None,
+                model: None,
+                reasoning: None,
+                transport: None,
+            },
+        )?;
+
+        assert_eq!(invocation.args[0], "exec");
+        assert_eq!(invocation.args[1], "--model=gpt-5.4");
+        assert_eq!(invocation.args[2], "-c");
+        assert_eq!(invocation.args[3], "reasoning.effort=\"medium\"");
+
+        Ok(())
+    }
+
+    #[test]
+    fn builtin_codex_execution_omits_reasoning_override_when_unset() -> Result<()> {
+        let config = AppConfig {
+            agents: AgentSettings {
+                default_agent: None,
+                default_model: Some("gpt-5.4".to_string()),
+                default_reasoning: None,
+                routing: Default::default(),
+                commands: BTreeMap::new(),
+            },
+            ..AppConfig::default()
+        };
+        let invocation = resolve_agent_invocation_for_planning(
+            &config,
+            &PlanningMeta::default(),
+            &RunAgentArgs {
+                root: None,
+                route_key: None,
+                agent: Some("codex".to_string()),
+                prompt: "Ship setup flow".to_string(),
+                instructions: None,
+                model: None,
+                reasoning: None,
+                transport: None,
+            },
+        )?;
+
+        assert_eq!(invocation.args[0], "exec");
+        assert_eq!(invocation.args[1], "--model=gpt-5.4");
+        assert!(!invocation.args.iter().any(|arg| arg == "-c"));
+        assert!(
+            !invocation
+                .args
+                .iter()
+                .any(|arg| arg.starts_with("reasoning.effort="))
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn builtin_codex_listen_execution_uses_unrestricted_permissions() -> Result<()> {
+        let temp = tempdir()?;
+        let repo_root = temp.path().join("repo");
+        fs::create_dir_all(&repo_root)?;
+        run_git(&repo_root, &["init", "-b", "main"])?;
+
+        let config = AppConfig {
+            agents: AgentSettings {
+                default_agent: None,
+                default_model: Some("gpt-5.4".to_string()),
+                default_reasoning: Some("high".to_string()),
+                routing: Default::default(),
+                commands: BTreeMap::new(),
+            },
+            ..AppConfig::default()
+        };
+        let invocation = resolve_agent_invocation_for_planning(
+            &config,
+            &PlanningMeta::default(),
+            &RunAgentArgs {
+                root: None,
+                route_key: Some(AGENT_ROUTE_AGENTS_LISTEN.to_string()),
+                agent: Some("codex".to_string()),
+                prompt: "Ship setup flow".to_string(),
+                instructions: None,
+                model: None,
+                reasoning: None,
+                transport: None,
+            },
+        )?;
+
+        let command_args = command_args_for_invocation(&invocation, Some(&repo_root))?;
+        assert_eq!(
+            command_args[0],
+            "--dangerously-bypass-approvals-and-sandbox"
+        );
+        assert!(command_args.windows(3).any(|window| {
+            window[0] == "exec"
+                && window[1] == "-c"
+                && window[2] == "mcp_servers.linear.enabled=false"
+        }));
+        assert!(command_args.iter().any(|arg| arg == "--cd"));
+        assert!(!command_args.iter().any(|arg| arg == "--sandbox"));
+        assert!(!command_args.iter().any(|arg| arg == "--ask-for-approval"));
+
+        Ok(())
+    }
+
+    #[test]
     fn resolve_agent_invocation_supports_builtin_claude_preset() -> Result<()> {
         let config = AppConfig {
             agents: AgentSettings {
@@ -306,6 +431,113 @@ mod tests {
         assert_eq!(invocation.args[0], "-p");
         assert_eq!(invocation.args[1], "--model=sonnet");
         assert!(invocation.args[2].contains("Draft the review summary"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn builtin_claude_execution_adds_effort_when_reasoning_is_configured() -> Result<()> {
+        let config = AppConfig {
+            agents: AgentSettings {
+                default_agent: None,
+                default_model: Some("sonnet".to_string()),
+                default_reasoning: Some("max".to_string()),
+                routing: Default::default(),
+                commands: BTreeMap::new(),
+            },
+            ..AppConfig::default()
+        };
+        let invocation = resolve_agent_invocation_for_planning(
+            &config,
+            &PlanningMeta::default(),
+            &RunAgentArgs {
+                root: None,
+                route_key: None,
+                agent: Some("claude".to_string()),
+                prompt: "Draft the review summary".to_string(),
+                instructions: None,
+                model: None,
+                reasoning: None,
+                transport: None,
+            },
+        )?;
+
+        assert_eq!(invocation.args[0], "-p");
+        assert_eq!(invocation.args[1], "--model=sonnet");
+        assert_eq!(invocation.args[2], "--effort=max");
+
+        Ok(())
+    }
+
+    #[test]
+    fn builtin_claude_execution_omits_effort_when_reasoning_is_unset() -> Result<()> {
+        let config = AppConfig {
+            agents: AgentSettings {
+                default_agent: None,
+                default_model: Some("sonnet".to_string()),
+                default_reasoning: None,
+                routing: Default::default(),
+                commands: BTreeMap::new(),
+            },
+            ..AppConfig::default()
+        };
+        let invocation = resolve_agent_invocation_for_planning(
+            &config,
+            &PlanningMeta::default(),
+            &RunAgentArgs {
+                root: None,
+                route_key: None,
+                agent: Some("claude".to_string()),
+                prompt: "Draft the review summary".to_string(),
+                instructions: None,
+                model: None,
+                reasoning: None,
+                transport: None,
+            },
+        )?;
+
+        assert_eq!(invocation.args[0], "-p");
+        assert_eq!(invocation.args[1], "--model=sonnet");
+        assert!(
+            !invocation
+                .args
+                .iter()
+                .any(|arg| arg.starts_with("--effort="))
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn builtin_claude_listen_execution_bypasses_permissions() -> Result<()> {
+        let config = AppConfig {
+            agents: AgentSettings {
+                default_agent: None,
+                default_model: Some("sonnet".to_string()),
+                default_reasoning: Some("high".to_string()),
+                routing: Default::default(),
+                commands: BTreeMap::new(),
+            },
+            ..AppConfig::default()
+        };
+        let invocation = resolve_agent_invocation_for_planning(
+            &config,
+            &PlanningMeta::default(),
+            &RunAgentArgs {
+                root: None,
+                route_key: Some(AGENT_ROUTE_AGENTS_LISTEN.to_string()),
+                agent: Some("claude".to_string()),
+                prompt: "Draft the review summary".to_string(),
+                instructions: None,
+                model: None,
+                reasoning: None,
+                transport: None,
+            },
+        )?;
+
+        let command_args = command_args_for_invocation(&invocation, None)?;
+        assert_eq!(command_args[0], "--permission-mode=bypassPermissions");
+        assert!(command_args.iter().any(|arg| arg == "--effort=high"));
 
         Ok(())
     }

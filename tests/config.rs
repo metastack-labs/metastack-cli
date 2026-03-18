@@ -368,11 +368,13 @@ default_model = "haiku"
             "--root",
             repo_root.to_string_lossy().as_ref(),
             "--default-reasoning",
-            "high",
+            "xhigh",
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("supported reasoning: low, medium"));
+        .stderr(predicate::str::contains(
+            "supported reasoning: low, medium, high, max",
+        ));
 
     Ok(())
 }

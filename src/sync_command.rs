@@ -1,24 +1,26 @@
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
 
 use crate::backlog::{
-    BacklogIssueMetadata, INDEX_FILE_NAME, ManagedFileRecord, backlog_issue_dir,
-    backlog_issue_index_path, collect_local_sync_files, save_issue_metadata,
-    write_issue_attachment_file, write_issue_description,
+    BacklogIssueMetadata, BacklogSyncStatus, INDEX_FILE_NAME, ManagedFileRecord, backlog_issue_dir,
+    backlog_issue_index_path, backlog_issue_metadata_path, collect_local_sync_files,
+    compute_local_sync_hash, compute_remote_sync_hash, load_issue_metadata,
+    resolve_backlog_sync_status, save_issue_metadata, write_issue_attachment_file,
+    write_issue_description,
 };
-use crate::cli::{LinearClientArgs, SyncIssueArgs};
+use crate::cli::{LinearClientArgs, SyncPullArgs, SyncPushArgs};
 use crate::config::load_required_planning_meta;
 use crate::fs::{canonicalize_existing_dir, display_path, ensure_dir};
-use crate::linear::{
-    AttachmentCreateRequest, DashboardData, IssueEditSpec, IssueListFilters, IssueSummary,
-};
+use crate::linear::{AttachmentCreateRequest, IssueEditSpec, IssueListFilters, IssueSummary};
 use crate::scaffold::ensure_planning_layout;
 use crate::sync_dashboard::{
-    SyncDashboardExit, SyncDashboardOptions, SyncSelectionAction, run_sync_dashboard,
+    SyncDashboardData, SyncDashboardExit, SyncDashboardIssue, SyncDashboardOptions,
+    SyncSelectionAction, run_sync_dashboard,
 };
 use crate::{LinearCommandContext, load_linear_command_context};
 
@@ -26,6 +28,7 @@ const MANAGED_ATTACHMENT_MARKER: &str = "metastack-cli";
 
 pub async fn run_sync_dashboard_command(
     client_args: &LinearClientArgs,
+    project_override: Option<&str>,
     options: SyncDashboardOptions,
 ) -> Result<()> {
     let root = canonicalize_existing_dir(&client_args.root)?;
@@ -35,36 +38,76 @@ pub async fn run_sync_dashboard_command(
         default_team,
         default_project_id,
     } = load_linear_command_context(client_args, None)?;
-    let project_id = default_project_id.ok_or_else(|| {
-        anyhow!(
-            "`meta backlog sync` requires a repo default project. Run `meta runtime setup --root . --project <PROJECT>` and rerun."
+
+    let (filter, title) = if let Some(project_name) = project_override {
+        (
+            IssueListFilters {
+                team: default_team,
+                project: Some(project_name.to_string()),
+                limit: usize::MAX,
+                ..IssueListFilters::default()
+            },
+            format!("meta backlog sync ({project_name})"),
         )
-    })?;
-    let issues = service
-        .list_issues(IssueListFilters {
-            team: default_team,
-            project_id: Some(project_id.clone()),
-            limit: usize::MAX,
-            ..IssueListFilters::default()
-        })
-        .await?;
+    } else {
+        let project_id = default_project_id.ok_or_else(|| {
+            anyhow!(
+                "`meta backlog sync` requires a repo default project or `--project`. Run `meta runtime setup --root . --project <PROJECT>` or pass `--project \"Project Name\"`."
+            )
+        })?;
+        (
+            IssueListFilters {
+                team: default_team,
+                project_id: Some(project_id.clone()),
+                limit: usize::MAX,
+                ..IssueListFilters::default()
+            },
+            format!("meta backlog sync ({project_id})"),
+        )
+    };
+
+    let issues = service.list_issues(filter).await?;
 
     match run_sync_dashboard(
-        DashboardData {
-            title: format!("meta backlog sync ({project_id})"),
-            issues,
+        SyncDashboardData {
+            title,
+            issues: issues
+                .into_iter()
+                .map(|issue| {
+                    let issue_dir = backlog_issue_dir(&root, &issue.identifier);
+                    let metadata = load_issue_metadata_if_present(&issue_dir)?;
+                    let resolution = resolve_backlog_sync_status(
+                        metadata.as_ref(),
+                        compute_local_sync_hash(&issue_dir)?,
+                        Some(issue_remote_hash(&issue)),
+                    );
+                    Ok(SyncDashboardIssue {
+                        issue,
+                        local_status: resolution.status,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?,
         },
         options,
     )? {
         SyncDashboardExit::Snapshot(snapshot) => println!("{snapshot}"),
         SyncDashboardExit::Cancelled => println!("Sync canceled."),
         SyncDashboardExit::Selected(selection) => {
-            let issue_args = SyncIssueArgs {
+            let issue_args = SyncPullArgs {
                 issue: selection.issue_identifier,
             };
             match selection.action {
                 SyncSelectionAction::Pull => run_sync_pull(client_args, &issue_args).await?,
-                SyncSelectionAction::Push => run_sync_push(client_args, &issue_args).await?,
+                SyncSelectionAction::Push => {
+                    run_sync_push(
+                        client_args,
+                        &SyncPushArgs {
+                            issue: issue_args.issue,
+                            update_description: false,
+                        },
+                    )
+                    .await?
+                }
             }
         }
     }
@@ -72,7 +115,7 @@ pub async fn run_sync_dashboard_command(
     Ok(())
 }
 
-pub async fn run_sync_pull(client_args: &LinearClientArgs, args: &SyncIssueArgs) -> Result<()> {
+pub async fn run_sync_pull(client_args: &LinearClientArgs, args: &SyncPullArgs) -> Result<()> {
     let root = canonicalize_existing_dir(&client_args.root)?;
     let _planning_meta = load_required_planning_meta(&root, "sync")?;
     ensure_planning_layout(&root, false)?;
@@ -80,6 +123,38 @@ pub async fn run_sync_pull(client_args: &LinearClientArgs, args: &SyncIssueArgs)
     let issue = service.load_issue(&args.issue).await?;
     let issue_dir = backlog_issue_dir(&root, &issue.identifier);
     ensure_dir(&issue_dir)?;
+    let metadata = load_issue_metadata_if_present(&issue_dir)?;
+    let remote_hash = issue_remote_hash(&issue);
+    let resolution = resolve_backlog_sync_status(
+        metadata.as_ref(),
+        compute_local_sync_hash(&issue_dir)?,
+        Some(remote_hash.clone()),
+    );
+
+    if needs_pull_overwrite_confirmation(resolution.status) {
+        let local_description =
+            read_optional_text_file(&backlog_issue_index_path(&root, &issue.identifier))?;
+        let diff = render_sync_diff(
+            &local_description,
+            issue.description.as_deref().unwrap_or_default(),
+        );
+
+        if io::stdin().is_terminal() && io::stdout().is_terminal() {
+            if !prompt_pull_overwrite(&issue.identifier, resolution.status, &diff)? {
+                println!(
+                    "Canceled pull for {}. Local backlog files and hash baselines were left unchanged.",
+                    issue.identifier
+                );
+                return Ok(());
+            }
+        } else {
+            bail!(
+                "`meta backlog sync pull {}` refused to overwrite local backlog content because the sync state is `{}`; rerun in a TTY to review the diff and confirm the overwrite",
+                issue.identifier,
+                resolution.status.as_str(),
+            );
+        }
+    }
 
     write_issue_description(
         &root,
@@ -109,7 +184,16 @@ pub async fn run_sync_pull(client_args: &LinearClientArgs, args: &SyncIssueArgs)
         });
     }
 
-    save_issue_metadata(&issue_dir, &build_issue_metadata(&issue, managed_files))?;
+    let local_hash = compute_local_sync_hash(&issue_dir)?.ok_or_else(|| {
+        anyhow!(
+            "backlog issue directory `{}` disappeared during sync",
+            issue_dir.display()
+        )
+    })?;
+    save_issue_metadata(
+        &issue_dir,
+        &build_issue_metadata(&issue, managed_files, Some(local_hash), Some(remote_hash)),
+    )?;
 
     println!(
         "Pulled {} into {} (restored {} managed attachment file{}).",
@@ -132,11 +216,13 @@ pub async fn run_sync_pull(client_args: &LinearClientArgs, args: &SyncIssueArgs)
     Ok(())
 }
 
-pub async fn run_sync_push(client_args: &LinearClientArgs, args: &SyncIssueArgs) -> Result<()> {
+pub async fn run_sync_push(client_args: &LinearClientArgs, args: &SyncPushArgs) -> Result<()> {
     let root = canonicalize_existing_dir(&client_args.root)?;
     let _planning_meta = load_required_planning_meta(&root, "sync")?;
     ensure_planning_layout(&root, false)?;
-    guard_listen_issue_description_sync(&args.issue)?;
+    if args.update_description {
+        guard_listen_issue_description_sync(&args.issue)?;
+    }
     let LinearCommandContext { service, .. } = load_linear_command_context(client_args, None)?;
     let issue = service.load_issue(&args.issue).await?;
     let issue_dir = backlog_issue_dir(&root, &issue.identifier);
@@ -157,16 +243,43 @@ pub async fn run_sync_push(client_args: &LinearClientArgs, args: &SyncIssueArgs)
             INDEX_FILE_NAME
         )
     })?;
-    service
-        .edit_issue(IssueEditSpec {
-            identifier: issue.identifier.clone(),
-            title: None,
-            description: Some(description),
-            project: None,
-            state: None,
-            priority: None,
-        })
-        .await?;
+    let metadata = load_issue_metadata_if_present(&issue_dir)?;
+    let local_hash = compute_local_sync_hash(&issue_dir)?.ok_or_else(|| {
+        anyhow!(
+            "backlog issue directory `{}` disappeared before push",
+            issue_dir.display()
+        )
+    })?;
+    let resolution = resolve_backlog_sync_status(
+        metadata.as_ref(),
+        Some(local_hash.clone()),
+        Some(issue_remote_hash(&issue)),
+    );
+
+    if args.update_description
+        && matches!(
+            resolution.status,
+            BacklogSyncStatus::RemoteAhead | BacklogSyncStatus::Diverged
+        )
+    {
+        bail!(
+            "`meta backlog sync push {}` refused to update the Linear description because the sync state is `{}`; pull first or reconcile the local backlog before retrying with `--update-description`",
+            issue.identifier,
+            resolution.status.as_str(),
+        );
+    }
+    if args.update_description {
+        service
+            .edit_issue(IssueEditSpec {
+                identifier: issue.identifier.clone(),
+                title: None,
+                description: Some(description.clone()),
+                project: None,
+                state: None,
+                priority: None,
+            })
+            .await?;
+    }
 
     let local_files = collect_local_sync_files(&issue_dir)?
         .into_iter()
@@ -222,14 +335,28 @@ pub async fn run_sync_push(client_args: &LinearClientArgs, args: &SyncIssueArgs)
         });
     }
 
-    save_issue_metadata(&issue_dir, &build_issue_metadata(&issue, managed_files))?;
+    let remote_description = if args.update_description {
+        description
+    } else {
+        issue.description.clone().unwrap_or_default()
+    };
+    let remote_hash = compute_remote_sync_hash(&remote_description, &managed_files);
+    save_issue_metadata(
+        &issue_dir,
+        &build_issue_metadata(&issue, managed_files, Some(local_hash), Some(remote_hash)),
+    )?;
 
     println!(
-        "Pushed {} from {} (synced {} managed attachment file{}).",
+        "Pushed {} from {} (synced {} managed attachment file{}; {}).",
         issue.identifier,
         display_path(&issue_dir, &root),
         local_path_count,
         plural_suffix(local_path_count),
+        if args.update_description {
+            "updated Linear issue description from index.md"
+        } else {
+            "left the Linear issue description unchanged; pass --update-description to send index.md"
+        },
     );
 
     Ok(())
@@ -257,6 +384,8 @@ fn guard_listen_issue_description_sync(identifier: &str) -> Result<()> {
 fn build_issue_metadata(
     issue: &IssueSummary,
     managed_files: Vec<ManagedFileRecord>,
+    local_hash: Option<String>,
+    remote_hash: Option<String>,
 ) -> BacklogIssueMetadata {
     BacklogIssueMetadata {
         issue_id: issue.id.clone(),
@@ -271,6 +400,8 @@ fn build_issue_metadata(
             .parent
             .as_ref()
             .map(|parent| parent.identifier.clone()),
+        local_hash,
+        remote_hash,
         managed_files,
     }
 }
@@ -304,4 +435,144 @@ fn upload_name(relative_path: &str) -> String {
 
 fn plural_suffix(count: usize) -> &'static str {
     if count == 1 { "" } else { "s" }
+}
+
+fn load_issue_metadata_if_present(issue_dir: &Path) -> Result<Option<BacklogIssueMetadata>> {
+    let metadata_path = backlog_issue_metadata_path(issue_dir);
+    if !metadata_path.is_file() {
+        return Ok(None);
+    }
+
+    load_issue_metadata(issue_dir).map(Some)
+}
+
+fn issue_remote_hash(issue: &IssueSummary) -> String {
+    compute_remote_sync_hash(
+        issue.description.as_deref().unwrap_or_default(),
+        &managed_file_records_from_issue(issue),
+    )
+}
+
+fn managed_file_records_from_issue(issue: &IssueSummary) -> Vec<ManagedFileRecord> {
+    let mut managed_files = issue
+        .attachments
+        .iter()
+        .filter_map(|attachment| {
+            managed_attachment_path(&attachment.metadata).map(|path| ManagedFileRecord {
+                path,
+                attachment_id: Some(attachment.id.clone()),
+                url: Some(attachment.url.clone()),
+            })
+        })
+        .collect::<Vec<_>>();
+    managed_files.sort_by(|left, right| left.path.cmp(&right.path));
+    managed_files
+}
+
+fn needs_pull_overwrite_confirmation(status: BacklogSyncStatus) -> bool {
+    matches!(
+        status,
+        BacklogSyncStatus::RemoteAhead | BacklogSyncStatus::Diverged
+    )
+}
+
+fn prompt_pull_overwrite(identifier: &str, status: BacklogSyncStatus, diff: &str) -> Result<bool> {
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+    let mut reader = stdin.lock();
+    let mut writer = stdout.lock();
+    prompt_pull_overwrite_with_io(identifier, status, diff, &mut reader, &mut writer)
+}
+
+fn prompt_pull_overwrite_with_io(
+    identifier: &str,
+    status: BacklogSyncStatus,
+    diff: &str,
+    reader: &mut impl BufRead,
+    writer: &mut impl Write,
+) -> Result<bool> {
+    writeln!(
+        writer,
+        "`meta backlog sync pull {identifier}` detected `{}`. Review the incoming description diff before overwriting local backlog files:",
+        status.as_str(),
+    )?;
+    writeln!(writer, "{diff}")?;
+    writeln!(writer, "Choose [o]verwrite or [c]ancel:")?;
+    writer.flush()?;
+
+    let mut input = String::new();
+    loop {
+        input.clear();
+        reader.read_line(&mut input)?;
+        match input.trim().to_ascii_lowercase().as_str() {
+            "o" | "overwrite" => return Ok(true),
+            "c" | "cancel" => return Ok(false),
+            _ => {
+                writeln!(writer, "Enter `o` or `c`:")?;
+                writer.flush()?;
+            }
+        }
+    }
+}
+
+fn read_optional_text_file(path: &Path) -> Result<String> {
+    if !path.is_file() {
+        return Ok(String::new());
+    }
+
+    fs::read_to_string(path).with_context(|| format!("failed to read `{}`", path.display()))
+}
+
+fn render_sync_diff(local_contents: &str, remote_contents: &str) -> String {
+    let mut rows = Vec::new();
+    rows.push("--- local/index.md".to_string());
+    rows.push("+++ linear/description".to_string());
+    rows.extend(diff_lines(local_contents, remote_contents));
+    rows.join("\n")
+}
+
+fn diff_lines(left: &str, right: &str) -> Vec<String> {
+    let left_lines = left.lines().map(str::to_string).collect::<Vec<_>>();
+    let right_lines = right.lines().map(str::to_string).collect::<Vec<_>>();
+    let mut table = vec![vec![0usize; right_lines.len() + 1]; left_lines.len() + 1];
+
+    for left_index in (0..left_lines.len()).rev() {
+        for right_index in (0..right_lines.len()).rev() {
+            table[left_index][right_index] = if left_lines[left_index] == right_lines[right_index] {
+                table[left_index + 1][right_index + 1] + 1
+            } else {
+                table[left_index + 1][right_index].max(table[left_index][right_index + 1])
+            };
+        }
+    }
+
+    let mut rendered = Vec::new();
+    let mut left_index = 0usize;
+    let mut right_index = 0usize;
+    while left_index < left_lines.len() && right_index < right_lines.len() {
+        if left_lines[left_index] == right_lines[right_index] {
+            rendered.push(format!(" {}", left_lines[left_index]));
+            left_index += 1;
+            right_index += 1;
+        } else if table[left_index + 1][right_index] >= table[left_index][right_index + 1] {
+            rendered.push(format!("-{}", left_lines[left_index]));
+            left_index += 1;
+        } else {
+            rendered.push(format!("+{}", right_lines[right_index]));
+            right_index += 1;
+        }
+    }
+    while left_index < left_lines.len() {
+        rendered.push(format!("-{}", left_lines[left_index]));
+        left_index += 1;
+    }
+    while right_index < right_lines.len() {
+        rendered.push(format!("+{}", right_lines[right_index]));
+        right_index += 1;
+    }
+
+    if rendered.is_empty() {
+        rendered.push(" (no description changes)".to_string());
+    }
+    rendered
 }

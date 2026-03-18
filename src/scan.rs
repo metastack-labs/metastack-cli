@@ -13,6 +13,7 @@ use walkdir::{DirEntry, WalkDir};
 use crate::agents::{
     AgentExecutionOptions, apply_invocation_environment, command_args_for_invocation,
     render_invocation_diagnostics, resolve_agent_invocation_for_planning,
+    validate_invocation_command_surface,
 };
 use crate::cli::{RunAgentArgs, ScanArgs};
 use crate::config::{
@@ -460,6 +461,7 @@ fn run_scan_agent_with_dashboard(
     let planning_meta = PlanningMeta::load(root)?;
     let invocation = resolve_agent_invocation_for_planning(&config, &planning_meta, args)?;
     let command_args = command_args_for_invocation(&invocation, options.working_dir.as_deref())?;
+    let attempted_command = validate_invocation_command_surface(&invocation, &command_args)?;
     let log_path = paths.scan_log_path();
     if let Some(parent) = log_path.parent() {
         fs::create_dir_all(parent)
@@ -518,8 +520,8 @@ fn run_scan_agent_with_dashboard(
 
     let mut child = command.spawn().with_context(|| {
         format!(
-            "failed to launch agent `{}` with command `{}`",
-            invocation.agent, invocation.command
+            "failed to launch agent `{}` with command `{attempted_command}`",
+            invocation.agent
         )
     })?;
 

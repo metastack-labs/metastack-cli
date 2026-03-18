@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use time::macros::format_description;
 use time::{OffsetDateTime, UtcOffset};
 use walkdir::WalkDir;
@@ -154,6 +155,10 @@ pub struct BacklogIssueMetadata {
     #[serde(default)]
     pub parent_identifier: Option<String>,
     #[serde(default)]
+    pub local_hash: Option<String>,
+    #[serde(default)]
+    pub remote_hash: Option<String>,
+    #[serde(default)]
     pub managed_files: Vec<ManagedFileRecord>,
 }
 
@@ -193,6 +198,36 @@ pub struct LocalBacklogFile {
     pub title: String,
     pub content_type: String,
     pub contents: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BacklogSyncStatus {
+    Synced,
+    LocalAhead,
+    RemoteAhead,
+    Diverged,
+    Unlinked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BacklogSyncResolution {
+    pub status: BacklogSyncStatus,
+    pub current_local_hash: Option<String>,
+    pub current_remote_hash: Option<String>,
+    pub stored_local_hash: Option<String>,
+    pub stored_remote_hash: Option<String>,
+}
+
+impl BacklogSyncStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Synced => "synced",
+            Self::LocalAhead => "local-ahead",
+            Self::RemoteAhead => "remote-ahead",
+            Self::Diverged => "diverged",
+            Self::Unlinked => "unlinked",
+        }
+    }
 }
 
 pub fn template_seed_files(paths: &PlanningPaths) -> Vec<(PathBuf, String)> {
@@ -355,6 +390,85 @@ pub fn collect_local_sync_files(issue_dir: &Path) -> Result<Vec<LocalBacklogFile
 
     files.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
     Ok(files)
+}
+
+/// Compute the deterministic local sync hash for tracked backlog files in an issue directory.
+///
+/// Dotfiles, including `.linear.json`, are excluded from the tracked file set. Returns `Ok(None)`
+/// when the issue directory does not exist.
+pub fn compute_local_sync_hash(issue_dir: &Path) -> Result<Option<String>> {
+    if !issue_dir.is_dir() {
+        return Ok(None);
+    }
+
+    let files = collect_local_sync_files(issue_dir)?;
+    Ok(Some(hash_local_backlog_files(&files)))
+}
+
+/// Compute the deterministic remote sync hash for a Linear issue description and managed files.
+///
+/// The managed file list is sorted by path before hashing so repeat no-op syncs remain stable.
+pub fn compute_remote_sync_hash(description: &str, managed_files: &[ManagedFileRecord]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"description\0");
+    hasher.update(description.as_bytes());
+
+    let mut sorted_files = managed_files.to_vec();
+    sorted_files.sort_by(|left, right| left.path.cmp(&right.path));
+    for file in sorted_files {
+        hasher.update(b"\0path\0");
+        hasher.update(file.path.as_bytes());
+        hasher.update(b"\0attachment_id\0");
+        if let Some(attachment_id) = file.attachment_id {
+            hasher.update(attachment_id.as_bytes());
+        }
+        hasher.update(b"\0url\0");
+        if let Some(url) = file.url {
+            hasher.update(url.as_bytes());
+        }
+    }
+
+    hex_digest(hasher.finalize())
+}
+
+/// Resolve the current backlog sync status from stored baseline hashes and current hashes.
+///
+/// Metadata files that predate hash baselines resolve to `unlinked` for backward compatibility.
+pub fn resolve_backlog_sync_status(
+    metadata: Option<&BacklogIssueMetadata>,
+    current_local_hash: Option<String>,
+    current_remote_hash: Option<String>,
+) -> BacklogSyncResolution {
+    let stored_local_hash = metadata.and_then(|metadata| metadata.local_hash.clone());
+    let stored_remote_hash = metadata.and_then(|metadata| metadata.remote_hash.clone());
+
+    let status = match (
+        current_local_hash.as_deref(),
+        current_remote_hash.as_deref(),
+        stored_local_hash.as_deref(),
+        stored_remote_hash.as_deref(),
+    ) {
+        (Some(current_local), Some(current_remote), Some(stored_local), Some(stored_remote)) => {
+            match (
+                current_local == stored_local,
+                current_remote == stored_remote,
+            ) {
+                (true, true) => BacklogSyncStatus::Synced,
+                (false, true) => BacklogSyncStatus::LocalAhead,
+                (true, false) => BacklogSyncStatus::RemoteAhead,
+                (false, false) => BacklogSyncStatus::Diverged,
+            }
+        }
+        _ => BacklogSyncStatus::Unlinked,
+    };
+
+    BacklogSyncResolution {
+        status,
+        current_local_hash,
+        current_remote_hash,
+        stored_local_hash,
+        stored_remote_hash,
+    }
 }
 
 pub fn ensure_no_unresolved_placeholders(rendered_files: &[RenderedTemplateFile]) -> Result<()> {
@@ -545,5 +659,84 @@ fn content_type_for_path(path: &Path) -> String {
         Some("toml") => "application/toml".to_string(),
         Some("yaml") | Some("yml") => "application/yaml".to_string(),
         _ => "application/octet-stream".to_string(),
+    }
+}
+
+fn hash_local_backlog_files(files: &[LocalBacklogFile]) -> String {
+    let mut hasher = Sha256::new();
+    for file in files {
+        hasher.update(b"path\0");
+        hasher.update(file.relative_path.as_bytes());
+        hasher.update(b"\0len\0");
+        hasher.update((file.contents.len() as u64).to_le_bytes());
+        hasher.update(b"\0contents\0");
+        hasher.update(&file.contents);
+        hasher.update(b"\0");
+    }
+
+    hex_digest(hasher.finalize())
+}
+
+fn hex_digest(digest: impl AsRef<[u8]>) -> String {
+    let mut hex = String::with_capacity(digest.as_ref().len() * 2);
+    for byte in digest.as_ref() {
+        hex.push_str(&format!("{byte:02x}"));
+    }
+    hex
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        BacklogIssueMetadata, BacklogSyncStatus, ManagedFileRecord, compute_local_sync_hash,
+        resolve_backlog_sync_status,
+    };
+    use anyhow::Result;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn local_sync_hash_ignores_dotfiles() -> Result<()> {
+        let temp = tempdir()?;
+        let issue_dir = temp.path().join("MET-35");
+        fs::create_dir_all(&issue_dir)?;
+        fs::write(issue_dir.join("index.md"), "# Backlog\n")?;
+        fs::write(issue_dir.join("implementation.md"), "local notes\n")?;
+
+        let baseline = compute_local_sync_hash(&issue_dir)?
+            .expect("issue dir exists, so a local hash should resolve");
+
+        fs::write(issue_dir.join(".linear.json"), "{\"ignored\":true}\n")?;
+        fs::write(issue_dir.join(".scratch.md"), "draft\n")?;
+
+        let with_dotfiles = compute_local_sync_hash(&issue_dir)?
+            .expect("issue dir exists, so a local hash should resolve");
+
+        assert_eq!(baseline, with_dotfiles);
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_metadata_without_hashes_resolves_as_unlinked() {
+        let resolution = resolve_backlog_sync_status(
+            Some(&BacklogIssueMetadata {
+                issue_id: "issue-1".to_string(),
+                identifier: "MET-35".to_string(),
+                title: "Legacy backlog".to_string(),
+                url: "https://linear.app/issues/MET-35".to_string(),
+                team_key: "MET".to_string(),
+                project_id: Some("project-1".to_string()),
+                project_name: Some("MetaStack CLI".to_string()),
+                parent_id: None,
+                parent_identifier: None,
+                local_hash: None,
+                remote_hash: None,
+                managed_files: Vec::<ManagedFileRecord>::new(),
+            }),
+            Some("local".to_string()),
+            Some("remote".to_string()),
+        );
+
+        assert_eq!(resolution.status, BacklogSyncStatus::Unlinked);
     }
 }

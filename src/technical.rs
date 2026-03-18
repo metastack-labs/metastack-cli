@@ -32,7 +32,7 @@ use crate::backlog::{
     TemplateContext, ensure_no_unresolved_placeholders, render_template_files, save_issue_metadata,
     write_rendered_backlog_item,
 };
-use crate::cli::{RunAgentArgs, SyncIssueArgs, TechnicalArgs};
+use crate::cli::{RunAgentArgs, SyncPushArgs, TechnicalArgs};
 use crate::config::{AGENT_ROUTE_BACKLOG_SPLIT, load_required_planning_meta};
 use crate::context::load_workflow_contract;
 use crate::fs::{PlanningPaths, canonicalize_existing_dir, display_path};
@@ -216,14 +216,17 @@ pub async fn run_technical(args: &TechnicalArgs) -> Result<()> {
             project_name: child.project.as_ref().map(|project| project.name.clone()),
             parent_id: Some(generated.parent.id.clone()),
             parent_identifier: Some(generated.parent.identifier.clone()),
+            local_hash: None,
+            remote_hash: None,
             managed_files: Vec::<ManagedFileRecord>::new(),
         },
     )?;
 
     run_sync_push(
         &args.client,
-        &SyncIssueArgs {
+        &SyncPushArgs {
             issue: child.identifier.clone(),
+            update_description: false,
         },
     )
     .await?;

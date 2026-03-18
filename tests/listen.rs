@@ -51,6 +51,210 @@ fn listen_render_once_demo_outputs_dashboard_snapshot() {
         .stdout(predicate::str::contains("MET-13"));
 }
 
+#[cfg(unix)]
+#[test]
+fn listen_check_reports_codex_config_status_and_linear_api_validation() -> Result<(), Box<dyn Error>>
+{
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let home_dir = temp.path().join("home");
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(home_dir.join(".codex"))?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  },
+  "agent": {
+    "provider": "codex",
+    "model": "gpt-5.4",
+    "reasoning": "high"
+  }
+}
+"#,
+    )?;
+    fs::write(
+        &config_path,
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+"#,
+        ),
+    )?;
+    fs::write(
+        home_dir.join(".codex/config.toml"),
+        r#"approval_policy = "never"
+sandbox_mode = "danger-full-access"
+
+[mcp_servers.linear]
+enabled = true
+"#,
+    )?;
+
+    let codex_path = bin_dir.join("codex");
+    fs::write(
+        &codex_path,
+        r#"#!/bin/sh
+if [ "$1" = "--help" ]; then
+  cat <<'EOF'
+-a, --ask-for-approval <APPROVAL_POLICY>
+-s, --sandbox <SANDBOX_MODE>
+-C, --cd <DIR>
+    --add-dir <DIR>
+    --dangerously-bypass-approvals-and-sandbox
+EOF
+  exit 0
+fi
+if [ "$1" = "exec" ] && [ "$2" = "--help" ]; then
+  cat <<'EOF'
+-m, --model <MODEL>
+-c, --config <key=value>
+EOF
+  exit 0
+fi
+exit 0
+"#,
+    )?;
+    let mut permissions = fs::metadata(&codex_path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&codex_path, permissions)?;
+
+    init_repo_with_origin(&repo_root)?;
+    let viewer_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Viewer");
+        then.status(200).json_body(json!({
+            "data": {
+                "viewer": {
+                    "id": "viewer-1",
+                    "name": "Kames",
+                    "email": "sudo@example.com"
+                }
+            }
+        }));
+    });
+
+    let current_path = std::env::var("PATH")?;
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("HOME", &home_dir)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "agents",
+            "listen",
+            "--check",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Listen preflight passed for provider `codex`.",
+        ))
+        .stdout(predicate::str::contains("approval_policy = \"never\""))
+        .stdout(predicate::str::contains(
+            "sandbox_mode = \"danger-full-access\"",
+        ))
+        .stdout(predicate::str::contains("Linear API endpoint is reachable"))
+        .stdout(predicate::str::contains(
+            "Linear API authentication succeeded.",
+        ))
+        .stdout(predicate::str::contains("mcp_servers.linear.enabled=false"));
+    viewer_mock.assert_calls(1);
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_once_fails_fast_on_codex_preflight_before_linear_auth() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let bin_dir = temp.path().join("bin");
+    let home_dir = temp.path().join("home");
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&home_dir)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  },
+  "agent": {
+    "provider": "codex",
+    "model": "gpt-5.4"
+  }
+}
+"#,
+    )?;
+
+    let codex_path = bin_dir.join("codex");
+    fs::write(
+        &codex_path,
+        r#"#!/bin/sh
+if [ "$1" = "--help" ]; then
+  cat <<'EOF'
+-a, --ask-for-approval <APPROVAL_POLICY>
+-s, --sandbox <SANDBOX_MODE>
+-C, --cd <DIR>
+    --add-dir <DIR>
+    --dangerously-bypass-approvals-and-sandbox
+EOF
+  exit 0
+fi
+if [ "$1" = "exec" ] && [ "$2" = "--help" ]; then
+  cat <<'EOF'
+-m, --model <MODEL>
+-c, --config <key=value>
+EOF
+  exit 0
+fi
+exit 0
+"#,
+    )?;
+    let mut permissions = fs::metadata(&codex_path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&codex_path, permissions)?;
+
+    init_repo_with_origin(&repo_root)?;
+
+    let current_path = std::env::var("PATH")?;
+    meta()
+        .current_dir(&repo_root)
+        .env_remove("LINEAR_API_KEY")
+        .env("HOME", &home_dir)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "listen",
+            "--once",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("approval_policy = \"never\""))
+        .stderr(predicate::str::contains(
+            "sandbox_mode = \"danger-full-access\"",
+        ))
+        .stderr(predicate::str::contains("LINEAR_API_KEY").not());
+
+    Ok(())
+}
+
 #[test]
 fn agents_listen_matches_legacy_listen_output() -> Result<(), Box<dyn Error>> {
     let _guard = listen_test_lock();
@@ -1254,7 +1458,7 @@ printf '%s' "$METASTACK_AGENT_INSTRUCTIONS" > "$TEST_OUTPUT_DIR/instructions.txt
             .is_file()
     );
 
-    viewer_mock.assert_calls(1);
+    assert!(viewer_mock.calls() >= 1);
     teams_mock.assert_calls(1);
     issue_detail_mock.assert_calls(1);
     create_backlog_mock.assert_calls(0);
@@ -2304,7 +2508,7 @@ printf '%s' "$1" > "$TEST_OUTPUT_DIR/payload.txt"
         .success()
         .stdout(predicate::str::contains("MET-50"));
 
-    viewer_mock.assert_calls(1);
+    assert!(viewer_mock.calls() >= 1);
     teams_mock.assert_calls(1);
     update_issue_mock.assert_calls(1);
     parent_detail_mock.assert_calls(1);
@@ -2392,6 +2596,15 @@ default_reasoning = "low"
     fs::write(
         &claude_path,
         r#"#!/bin/sh
+if [ "$1" = "-p" ] && [ "$2" = "--help" ]; then
+  cat <<'EOF'
+-p, --print
+--model <model>
+--effort <level>
+--permission-mode <mode>
+EOF
+  exit 0
+fi
 printf '%s\n' "$@" > "$TEST_OUTPUT_DIR/claude-args.txt"
 printf '%s' "$METASTACK_AGENT_NAME" > "$TEST_OUTPUT_DIR/agent.txt"
 printf '%s' "$METASTACK_AGENT_MODEL" > "$TEST_OUTPUT_DIR/model.txt"
@@ -2409,6 +2622,23 @@ printf 'claude listen ok'
     fs::write(
         &codex_path,
         r#"#!/bin/sh
+if [ "$1" = "--help" ]; then
+  cat <<'EOF'
+-a, --ask-for-approval <APPROVAL_POLICY>
+-s, --sandbox <SANDBOX_MODE>
+-C, --cd <DIR>
+    --add-dir <DIR>
+    --dangerously-bypass-approvals-and-sandbox
+EOF
+  exit 0
+fi
+if [ "$1" = "exec" ] && [ "$2" = "--help" ]; then
+  cat <<'EOF'
+-m, --model <MODEL>
+-c, --config <key=value>
+EOF
+  exit 0
+fi
 printf 'codex fallback invoked' > "$TEST_OUTPUT_DIR/codex.txt"
 exit 99
 "#,
@@ -2645,8 +2875,10 @@ exit 99
     assert!(!stub_dir.join("codex.txt").exists());
 
     let args = fs::read_to_string(stub_dir.join("claude-args.txt"))?;
+    assert!(args.contains("--permission-mode=bypassPermissions"));
     assert!(args.contains("-p"));
     assert!(args.contains("--model=sonnet"));
+    assert!(args.contains("--effort=high"));
     assert!(!args.contains("--reasoning="));
     assert_eq!(fs::read_to_string(stub_dir.join("agent.txt"))?, "claude");
     assert_eq!(fs::read_to_string(stub_dir.join("model.txt"))?, "sonnet");
@@ -2896,7 +3128,7 @@ printf '%s' "$1" > "$TEST_OUTPUT_DIR/payload.txt"
         .success()
         .stdout(predicate::str::contains("MET-52"));
 
-    viewer_mock.assert_calls(1);
+    assert!(viewer_mock.calls() >= 1);
     teams_mock.assert_calls(1);
     issue_detail_mock.assert_calls(1);
     update_issue_mock.assert_calls(1);

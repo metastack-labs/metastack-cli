@@ -1811,13 +1811,13 @@ mod tests {
     use crate::config::{AgentSettings, AppConfig};
 
     #[test]
-    fn config_app_refreshes_reasoning_options_when_model_changes() {
+    fn config_app_refreshes_reasoning_options_when_provider_changes() {
         let view = ConfigViewData {
             config_path: PathBuf::from("/tmp/metastack-config.toml"),
             app_config: AppConfig {
                 agents: AgentSettings {
-                    default_agent: Some("claude".to_string()),
-                    default_model: Some("opus".to_string()),
+                    default_agent: Some("codex".to_string()),
+                    default_model: Some("gpt-5.4".to_string()),
                     default_reasoning: Some("high".to_string()),
                     ..AgentSettings::default()
                 },
@@ -1838,42 +1838,6 @@ mod tests {
         );
         assert_eq!(app.default_reasoning.selected_label(), Some("high"));
 
-        let haiku_index = app
-            .model_field
-            .options()
-            .iter()
-            .position(|option| option == "haiku")
-            .expect("haiku model should be listed");
-        app.model_field
-            .move_by(haiku_index as isize - app.model_field.selected() as isize);
-        app.sync_reasoning(None);
-
-        assert_eq!(
-            app.default_reasoning.options(),
-            &[
-                "Leave unset".to_string(),
-                "low".to_string(),
-                "medium".to_string(),
-            ]
-        );
-        assert_eq!(app.default_reasoning.selected(), 0);
-    }
-
-    #[test]
-    fn advanced_routing_app_refreshes_reasoning_options_when_model_changes() -> Result<()> {
-        let view = ConfigViewData {
-            config_path: PathBuf::from("/tmp/metastack-config.toml"),
-            app_config: AppConfig {
-                agents: AgentSettings {
-                    default_agent: Some("claude".to_string()),
-                    ..AgentSettings::default()
-                },
-                ..AppConfig::default()
-            },
-            detected_agents: Vec::new(),
-        };
-
-        let mut app = AdvancedRoutingApp::new(&view)?;
         let claude_index = app
             .agent_field
             .options()
@@ -1882,33 +1846,47 @@ mod tests {
             .expect("claude provider should be listed");
         app.agent_field
             .move_by(claude_index as isize - app.agent_field.selected() as isize);
-        app.sync_models(None)?;
-
-        let opusplan_index = app
-            .model_field
-            .options()
-            .iter()
-            .position(|option| option == "opusplan")
-            .expect("opusplan model should be listed");
-        app.model_field
-            .move_by(opusplan_index as isize - app.model_field.selected() as isize);
-        app.sync_reasoning(Some("high"))?;
+        app.sync_models(Some("sonnet"));
+        app.sync_reasoning(Some("max"));
 
         assert_eq!(
-            app.reasoning.options(),
-            &["Inherit".to_string(), "high".to_string()]
+            app.default_reasoning.options(),
+            &[
+                "Leave unset".to_string(),
+                "low".to_string(),
+                "medium".to_string(),
+                "high".to_string(),
+                "max".to_string(),
+            ]
         );
-        assert_eq!(app.reasoning.selected_label(), Some("high"));
+        assert_eq!(app.default_reasoning.selected_label(), Some("max"));
+    }
 
-        let haiku_index = app
-            .model_field
+    #[test]
+    fn advanced_routing_app_refreshes_reasoning_options_when_provider_changes() -> Result<()> {
+        let view = ConfigViewData {
+            config_path: PathBuf::from("/tmp/metastack-config.toml"),
+            app_config: AppConfig {
+                agents: AgentSettings {
+                    default_agent: Some("codex".to_string()),
+                    ..AgentSettings::default()
+                },
+                ..AppConfig::default()
+            },
+            detected_agents: Vec::new(),
+        };
+
+        let mut app = AdvancedRoutingApp::new(&view)?;
+        let codex_index = app
+            .agent_field
             .options()
             .iter()
-            .position(|option| option == "haiku")
-            .expect("haiku model should be listed");
-        app.model_field
-            .move_by(haiku_index as isize - app.model_field.selected() as isize);
-        app.sync_reasoning(None)?;
+            .position(|option| option == "codex")
+            .expect("codex provider should be listed");
+        app.agent_field
+            .move_by(codex_index as isize - app.agent_field.selected() as isize);
+        app.sync_models(Some("gpt-5.4"))?;
+        app.sync_reasoning(Some("high"))?;
 
         assert_eq!(
             app.reasoning.options(),
@@ -1916,9 +1894,33 @@ mod tests {
                 "Inherit".to_string(),
                 "low".to_string(),
                 "medium".to_string(),
+                "high".to_string(),
             ]
         );
-        assert_eq!(app.reasoning.selected(), 0);
+        assert_eq!(app.reasoning.selected_label(), Some("high"));
+
+        let claude_index = app
+            .agent_field
+            .options()
+            .iter()
+            .position(|option| option == "claude")
+            .expect("claude provider should be listed");
+        app.agent_field
+            .move_by(claude_index as isize - app.agent_field.selected() as isize);
+        app.sync_models(Some("sonnet"))?;
+        app.sync_reasoning(Some("max"))?;
+
+        assert_eq!(
+            app.reasoning.options(),
+            &[
+                "Inherit".to_string(),
+                "low".to_string(),
+                "medium".to_string(),
+                "high".to_string(),
+                "max".to_string(),
+            ]
+        );
+        assert_eq!(app.reasoning.selected_label(), Some("max"));
 
         Ok(())
     }

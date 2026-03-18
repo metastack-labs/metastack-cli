@@ -14,7 +14,20 @@ use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 
-use crate::linear::{DashboardData, IssueSummary};
+use crate::backlog::BacklogSyncStatus;
+use crate::linear::IssueSummary;
+
+#[derive(Debug, Clone)]
+pub struct SyncDashboardData {
+    pub title: String,
+    pub issues: Vec<SyncDashboardIssue>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SyncDashboardIssue {
+    pub issue: IssueSummary,
+    pub local_status: BacklogSyncStatus,
+}
 
 #[derive(Debug, Clone)]
 pub struct SyncDashboardOptions {
@@ -59,7 +72,7 @@ enum Focus {
 
 #[derive(Debug, Clone)]
 struct SyncDashboardApp {
-    data: DashboardData,
+    data: SyncDashboardData,
     focus: Focus,
     issue_index: usize,
     action_index: usize,
@@ -69,7 +82,7 @@ struct SyncDashboardApp {
 const ACTIONS: [SyncSelectionAction; 2] = [SyncSelectionAction::Pull, SyncSelectionAction::Push];
 
 pub fn run_sync_dashboard(
-    data: DashboardData,
+    data: SyncDashboardData,
     options: SyncDashboardOptions,
 ) -> Result<SyncDashboardExit> {
     if options.render_once {
@@ -116,7 +129,7 @@ pub fn run_sync_dashboard(
     }
 }
 
-fn render_once(data: DashboardData, options: SyncDashboardOptions) -> Result<String> {
+fn render_once(data: SyncDashboardData, options: SyncDashboardOptions) -> Result<String> {
     let backend = TestBackend::new(options.width, options.height);
     let mut terminal = Terminal::new(backend)?;
     let mut app = SyncDashboardApp::new(data);
@@ -241,19 +254,20 @@ fn render_status(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &SyncD
     frame.render_widget(status, area);
 }
 
-fn render_issue_list_item(issue: &IssueSummary) -> ListItem<'static> {
+fn render_issue_list_item(issue: &SyncDashboardIssue) -> ListItem<'static> {
     ListItem::new(Text::from(vec![
-        Line::from(format!("{}  {}", issue.identifier, issue.title)),
+        Line::from(format!("{}  {}", issue.issue.identifier, issue.issue.title)),
         Line::from(format!(
-            "{} • {}",
-            issue_state_label(issue),
-            issue.updated_at
+            "{} • local: {} • {}",
+            issue_state_label(&issue.issue),
+            issue.local_status.as_str(),
+            issue.issue.updated_at
         )),
     ]))
 }
 
 impl SyncDashboardApp {
-    fn new(data: DashboardData) -> Self {
+    fn new(data: SyncDashboardData) -> Self {
         Self {
             data,
             focus: Focus::Issues,
@@ -289,7 +303,7 @@ impl SyncDashboardApp {
                 }
                 Focus::Actions => {
                     let selection = SyncSelection {
-                        issue_identifier: self.selected_issue()?.identifier.clone(),
+                        issue_identifier: self.selected_issue()?.issue.identifier.clone(),
                         action: ACTIONS[self.action_index],
                     };
                     self.completed = Some(selection.clone());
@@ -301,7 +315,7 @@ impl SyncDashboardApp {
         None
     }
 
-    fn selected_issue(&self) -> Option<&IssueSummary> {
+    fn selected_issue(&self) -> Option<&SyncDashboardIssue> {
         self.data.issues.get(self.issue_index)
     }
 
@@ -326,7 +340,9 @@ impl SyncDashboardApp {
                 }
             }
             Focus::Actions => match self.selected_issue() {
-                Some(issue) => format!("Choose whether to pull or push {}.", issue.identifier),
+                Some(issue) => {
+                    format!("Choose whether to pull or push {}.", issue.issue.identifier)
+                }
                 None => "No issue is available to sync.".to_string(),
             },
         }
@@ -338,22 +354,25 @@ impl SyncDashboardApp {
         };
 
         let project = issue
+            .issue
             .project
             .as_ref()
             .map(|project| project.name.clone())
             .unwrap_or_else(|| "No project".to_string());
         let description = issue
+            .issue
             .description
             .as_deref()
             .filter(|description| !description.trim().is_empty())
             .unwrap_or("No description provided.");
 
         format!(
-            "{}\n{}\n\nProject: {project}\nState: {}\nUpdated: {}\n\n{}",
-            issue.identifier,
-            issue.title,
-            issue_state_label(issue),
-            issue.updated_at,
+            "{}\n{}\n\nProject: {project}\nState: {}\nLocal sync: {}\nUpdated: {}\n\n{}",
+            issue.issue.identifier,
+            issue.issue.title,
+            issue_state_label(&issue.issue),
+            issue.local_status.as_str(),
+            issue.issue.updated_at,
             description,
         )
     }
@@ -376,7 +395,7 @@ impl SyncDashboardApp {
                     "Step 1 of 2: choose an issue from the default project list.".to_string()
                 }
             }
-            Focus::Actions => "Step 2 of 2: choose pull to refresh local files or push to send local backlog files back to Linear.".to_string(),
+            Focus::Actions => "Step 2 of 2: choose pull to refresh local files or push to sync managed attachments. `index.md` only updates the Linear description when you run push with `--update-description`.".to_string(),
         }
     }
 }
@@ -393,7 +412,7 @@ impl SyncSelectionAction {
         match self {
             Self::Pull => "Refresh `.metastack/backlog/<ISSUE>/` from the Linear issue.",
             Self::Push => {
-                "Upload local backlog files from `.metastack/backlog/<ISSUE>/` back to Linear."
+                "Sync CLI-managed attachment files; `index.md` stays local unless you run `meta backlog sync push <ISSUE> --update-description`."
             }
         }
     }
@@ -457,15 +476,36 @@ impl Drop for TerminalCleanup {
 #[cfg(test)]
 mod tests {
     use super::{
-        Focus, SyncDashboardAction, SyncDashboardApp, SyncDashboardExit, SyncDashboardOptions,
-        run_sync_dashboard,
+        Focus, SyncDashboardAction, SyncDashboardApp, SyncDashboardData, SyncDashboardExit,
+        SyncDashboardIssue, SyncDashboardOptions, run_sync_dashboard,
     };
+    use crate::backlog::BacklogSyncStatus;
     use crate::linear::DashboardData;
+
+    fn demo_data() -> SyncDashboardData {
+        let demo = DashboardData::demo();
+        SyncDashboardData {
+            title: demo.title,
+            issues: demo
+                .issues
+                .into_iter()
+                .enumerate()
+                .map(|(index, issue)| SyncDashboardIssue {
+                    issue,
+                    local_status: match index {
+                        0 => BacklogSyncStatus::Synced,
+                        1 => BacklogSyncStatus::Diverged,
+                        _ => BacklogSyncStatus::Unlinked,
+                    },
+                })
+                .collect(),
+        }
+    }
 
     #[test]
     fn render_once_previews_selected_sync_action() {
         let exit = run_sync_dashboard(
-            DashboardData::demo(),
+            demo_data(),
             SyncDashboardOptions {
                 render_once: true,
                 width: 120,
@@ -485,11 +525,13 @@ mod tests {
         };
         assert!(snapshot.contains("Ready to push MET-12"));
         assert!(snapshot.contains("Sync Action [focus]"));
+        assert!(snapshot.contains("local: diverged"));
+        assert!(snapshot.contains("Local sync: diverged"));
     }
 
     #[test]
     fn back_returns_focus_to_issue_list() {
-        let mut app = SyncDashboardApp::new(DashboardData::demo());
+        let mut app = SyncDashboardApp::new(demo_data());
 
         assert_eq!(app.focus, Focus::Issues);
         app.apply(SyncDashboardAction::Enter);

@@ -56,6 +56,17 @@ fn backlog_help_lists_tech_and_sync_commands() {
 }
 
 #[test]
+fn backlog_sync_push_help_describes_opt_in_description_updates() {
+    cli()
+        .args(["backlog", "sync", "push", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--update-description"))
+        .stdout(predicate::str::contains("index.md"))
+        .stdout(predicate::str::contains("stays local unless"));
+}
+
+#[test]
 fn legacy_config_alias_prints_runtime_hint() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
@@ -156,8 +167,9 @@ fn scaffold_creates_planning_layout_and_is_repeat_safe() -> Result<(), Box<dyn E
     assert!(repo_root.join(".metastack/backlog/README.md").is_file());
     assert!(repo_root.join(".metastack/backlog/_TEMPLATE").is_dir());
     let canonical_template_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tmp")
-        .join("_TEMPLATE");
+        .join("src")
+        .join("artifacts")
+        .join("BACKLOG_TEMPLATE");
     for entry in WalkDir::new(&canonical_template_root) {
         let entry = entry?;
         let relative_path = entry.path().strip_prefix(&canonical_template_root)?;

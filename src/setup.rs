@@ -374,8 +374,9 @@ impl SetupReport {
     fn render(&self) -> String {
         let verb = if self.changed { "saved" } else { "unchanged" };
         format!(
-            "Repo setup {verb}. Repo defaults: {}.",
-            self.metastack_meta_path.display()
+            "Repo setup {verb}. Repo defaults: {}.\n{}",
+            self.metastack_meta_path.display(),
+            listen_prerequisites_summary()
         )
     }
 }
@@ -480,7 +481,15 @@ fn render_summary(view: &SetupViewData, include_paths: bool) -> String {
             "technical"
         )
     ));
+    lines.push(format!(
+        "Listen prerequisites: {}",
+        listen_prerequisites_summary()
+    ));
     lines.join("\n")
+}
+
+fn listen_prerequisites_summary() -> &'static str {
+    "Built-in Codex listen runs require `~/.codex/config.toml` with `approval_policy = \"never\"` and `sandbox_mode = \"danger-full-access\"`, plus `[mcp_servers.linear]` removed or disabled. Built-in Claude listen runs require `claude` on PATH and no `ANTHROPIC_API_KEY` override. Use `meta agents listen --check --root .` to verify."
 }
 
 fn has_direct_updates(args: &SetupArgs) -> bool {
@@ -1692,14 +1701,14 @@ mod tests {
     use std::io::Cursor;
 
     #[test]
-    fn setup_app_refreshes_reasoning_options_when_model_changes() {
+    fn setup_app_refreshes_reasoning_options_when_provider_changes() {
         let view = SetupViewData {
             root: PathBuf::from("/tmp/repo"),
             config_path: PathBuf::from("/tmp/metastack-config.toml"),
             metastack_meta_path: PathBuf::from("/tmp/repo/.metastack/meta.json"),
             app_config: AppConfig {
                 agents: AgentSettings {
-                    default_agent: Some("claude".to_string()),
+                    default_agent: Some("codex".to_string()),
                     ..AgentSettings::default()
                 },
                 ..AppConfig::default()
@@ -1707,8 +1716,8 @@ mod tests {
             app_config_changed: false,
             planning_meta: PlanningMeta {
                 agent: PlanningAgentSettings {
-                    provider: Some("claude".to_string()),
-                    model: Some("opus".to_string()),
+                    provider: Some("codex".to_string()),
+                    model: Some("gpt-5.4".to_string()),
                     reasoning: Some("high".to_string()),
                 },
                 ..PlanningMeta::default()
@@ -1728,15 +1737,16 @@ mod tests {
         );
         assert_eq!(app.reasoning.selected_label(), Some("high"));
 
-        let haiku_index = app
-            .model_field
+        let claude_index = app
+            .provider_field
             .options()
             .iter()
-            .position(|option| option == "haiku")
-            .expect("haiku model should be listed");
-        app.model_field
-            .move_by(haiku_index as isize - app.model_field.selected() as isize);
-        app.sync_reasoning(None);
+            .position(|option| option == "claude")
+            .expect("claude provider should be listed");
+        app.provider_field
+            .move_by(claude_index as isize - app.provider_field.selected() as isize);
+        app.sync_models(Some("sonnet"));
+        app.sync_reasoning(Some("max"));
 
         assert_eq!(
             app.reasoning.options(),
@@ -1744,9 +1754,11 @@ mod tests {
                 "Leave unset".to_string(),
                 "low".to_string(),
                 "medium".to_string(),
+                "high".to_string(),
+                "max".to_string(),
             ]
         );
-        assert_eq!(app.reasoning.selected(), 0);
+        assert_eq!(app.reasoning.selected_label(), Some("max"));
     }
 
     #[test]

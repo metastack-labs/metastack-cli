@@ -100,13 +100,16 @@ fn sync_pull_restores_issue_description_and_managed_attachment_files() -> Result
     let issue_dir = temp.path().join(".metastack/backlog/MET-35");
     assert!(fs::read_to_string(issue_dir.join("index.md"))?.contains("Pulled description"));
     assert!(fs::read_to_string(issue_dir.join("implementation.md"))?.contains("Downloaded"));
-    assert!(fs::read_to_string(issue_dir.join(".linear.json"))?.contains("attachment-1"));
+    let metadata = fs::read_to_string(issue_dir.join(".linear.json"))?;
+    assert!(metadata.contains("attachment-1"));
+    assert!(metadata.contains("\"local_hash\":"));
+    assert!(metadata.contains("\"remote_hash\":"));
 
     Ok(())
 }
 
 #[test]
-fn sync_push_updates_the_issue_description_and_replaces_managed_attachments()
+fn sync_push_leaves_issue_description_unchanged_by_default_and_replaces_managed_attachments()
 -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let server = MockServer::start();
@@ -187,14 +190,7 @@ fn sync_push_updates_the_issue_description_and_replaces_managed_attachments()
         }));
     });
 
-    server.mock(|when, then| {
-        when.method(POST)
-            .path("/graphql")
-            .body_includes("query Teams");
-        then.status(200).json_body(team_payload());
-    });
-
-    server.mock(|when, then| {
+    let update_issue_mock = server.mock(|when, then| {
         when.method(POST)
             .path("/graphql")
             .body_includes("mutation UpdateIssue")
@@ -296,16 +292,214 @@ fn sync_push_updates_the_issue_description_and_replaces_managed_attachments()
         .assert()
         .success()
         .stdout(predicate::str::contains("Pushed MET-35"))
-        .stdout(predicate::str::contains("synced 1 managed attachment file"));
+        .stdout(predicate::str::contains("synced 1 managed attachment file"))
+        .stdout(predicate::str::contains(
+            "left the Linear issue description unchanged",
+        ));
 
     let metadata = fs::read_to_string(issue_dir.join(".linear.json"))?;
     assert!(metadata.contains("\"attachment_id\": \"attachment-new\""));
+    assert!(metadata.contains("\"local_hash\":"));
+    assert!(metadata.contains("\"remote_hash\":"));
+    update_issue_mock.assert_calls(0);
 
     Ok(())
 }
 
 #[test]
-fn sync_push_is_blocked_for_the_active_listen_issue() -> Result<(), Box<dyn Error>> {
+fn sync_push_updates_the_issue_description_only_with_opt_in_flag() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    let issue_dir = temp.path().join(".metastack/backlog/MET-35");
+    write_minimal_planning_context(
+        temp.path(),
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+
+    fs::create_dir_all(&issue_dir)?;
+    fs::write(issue_dir.join("index.md"), "# Updated description\n")?;
+    fs::write(
+        issue_dir.join("implementation.md"),
+        "# Local implementation\n",
+    )?;
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issues");
+        then.status(200).json_body(json!({
+            "data": {
+                "issues": {
+                    "nodes": [issue_node(
+                        "issue-1",
+                        "MET-35",
+                        "Create the technical and sync commands",
+                        "Parent issue description",
+                        "state-2",
+                        "In Progress",
+                    )]
+                }
+            }
+        }));
+    });
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issue")
+            .body_includes("\"id\":\"issue-1\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "issue": issue_detail_node(
+                    "issue-1",
+                    "MET-35",
+                    "Create the technical and sync commands",
+                    "Parent issue description",
+                    vec![
+                        json!({
+                            "id": "managed-attachment",
+                            "title": "implementation.md",
+                            "url": server.url("/assets/old-implementation.md"),
+                            "sourceType": "upload",
+                            "metadata": {
+                                "managedBy": "metastack-cli",
+                                "relativePath": "implementation.md"
+                            }
+                        })
+                    ],
+                    None,
+                )
+            }
+        }));
+    });
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Teams");
+        then.status(200).json_body(team_payload());
+    });
+
+    let update_issue_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation UpdateIssue")
+            .body_includes("\"id\":\"issue-1\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "issueUpdate": {
+                    "success": true,
+                    "issue": issue_node(
+                        "issue-1",
+                        "MET-35",
+                        "Create the technical and sync commands",
+                        "# Updated description\n",
+                        "state-2",
+                        "In Progress",
+                    )
+                }
+            }
+        }));
+    });
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation DeleteAttachment")
+            .body_includes("\"id\":\"managed-attachment\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "attachmentDelete": {
+                    "success": true
+                }
+            }
+        }));
+    });
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation UploadFile")
+            .body_includes("\"filename\":\"implementation.md\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "fileUpload": {
+                    "success": true,
+                    "uploadFile": {
+                        "uploadUrl": server.url("/uploads/implementation.md"),
+                        "assetUrl": server.url("/assets/implementation.md"),
+                        "headers": [{
+                            "key": "x-goog-content-length-range",
+                            "value": "1,100000"
+                        }]
+                    }
+                }
+            }
+        }));
+    });
+
+    server.mock(|when, then| {
+        when.method(httpmock::Method::PUT)
+            .path("/uploads/implementation.md");
+        then.status(200);
+    });
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation CreateAttachment")
+            .body_includes("\"relativePath\":\"implementation.md\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "attachmentCreate": {
+                    "success": true,
+                    "attachment": {
+                        "id": "attachment-new",
+                        "title": "implementation.md",
+                        "url": server.url("/assets/implementation.md"),
+                        "sourceType": "upload",
+                        "metadata": {
+                            "managedBy": "metastack-cli",
+                            "relativePath": "implementation.md"
+                        }
+                    }
+                }
+            }
+        }));
+    });
+
+    cli()
+        .current_dir(temp.path())
+        .args([
+            "sync",
+            "--api-key",
+            "token",
+            "--api-url",
+            &api_url,
+            "push",
+            "MET-35",
+            "--update-description",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "updated Linear issue description from index.md",
+        ));
+
+    update_issue_mock.assert_calls(1);
+    Ok(())
+}
+
+#[test]
+fn sync_push_description_update_is_blocked_for_the_active_listen_issue()
+-> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let issue_dir = temp.path().join(".metastack/backlog/MET-99");
     write_minimal_planning_context(
@@ -333,6 +527,7 @@ fn sync_push_is_blocked_for_the_active_listen_issue() -> Result<(), Box<dyn Erro
             "http://127.0.0.1:9/graphql",
             "push",
             "MET-99",
+            "--update-description",
         ])
         .assert()
         .failure()
@@ -340,6 +535,596 @@ fn sync_push_is_blocked_for_the_active_listen_issue() -> Result<(), Box<dyn Erro
             "is disabled during `meta agents listen` because it would overwrite the primary Linear issue description",
         ));
 
+    Ok(())
+}
+
+#[test]
+fn sync_pull_refuses_remote_ahead_overwrite_without_a_tty() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let baseline_server = MockServer::start();
+    let baseline_api_url = baseline_server.url("/graphql");
+    write_minimal_planning_context(
+        temp.path(),
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+
+    baseline_server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issues");
+        then.status(200).json_body(json!({
+            "data": {
+                "issues": {
+                    "nodes": [issue_node(
+                        "issue-1",
+                        "MET-35",
+                        "Create the technical and sync commands",
+                        "Parent issue description",
+                        "state-2",
+                        "In Progress",
+                    )]
+                }
+            }
+        }));
+    });
+
+    baseline_server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issue")
+            .body_includes("\"id\":\"issue-1\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "issue": issue_detail_node(
+                    "issue-1",
+                    "MET-35",
+                    "Create the technical and sync commands",
+                    "# Original description\n",
+                    vec![],
+                    None,
+                )
+            }
+        }));
+    });
+
+    cli()
+        .current_dir(temp.path())
+        .args([
+            "sync",
+            "--api-key",
+            "token",
+            "--api-url",
+            &baseline_api_url,
+            "pull",
+            "MET-35",
+        ])
+        .assert()
+        .success();
+
+    let issue_dir = temp.path().join(".metastack/backlog/MET-35");
+    let metadata_before = fs::read_to_string(issue_dir.join(".linear.json"))?;
+
+    let remote_server = MockServer::start();
+    let remote_api_url = remote_server.url("/graphql");
+    remote_server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issues");
+        then.status(200).json_body(json!({
+            "data": {
+                "issues": {
+                    "nodes": [issue_node(
+                        "issue-1",
+                        "MET-35",
+                        "Create the technical and sync commands",
+                        "Parent issue description",
+                        "state-2",
+                        "In Progress",
+                    )]
+                }
+            }
+        }));
+    });
+    remote_server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issue")
+            .body_includes("\"id\":\"issue-1\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "issue": issue_detail_node(
+                    "issue-1",
+                    "MET-35",
+                    "Create the technical and sync commands",
+                    "# Remote changed description\n",
+                    vec![],
+                    None,
+                )
+            }
+        }));
+    });
+
+    cli()
+        .current_dir(temp.path())
+        .args([
+            "sync",
+            "--api-key",
+            "token",
+            "--api-url",
+            &remote_api_url,
+            "pull",
+            "MET-35",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("sync state is `remote-ahead`"))
+        .stderr(predicate::str::contains("rerun in a TTY"));
+
+    assert_eq!(
+        fs::read_to_string(issue_dir.join("index.md"))?,
+        "# Original description\n"
+    );
+    assert_eq!(
+        fs::read_to_string(issue_dir.join(".linear.json"))?,
+        metadata_before
+    );
+
+    Ok(())
+}
+
+#[test]
+fn sync_pull_refuses_diverged_overwrite_without_a_tty() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let baseline_server = MockServer::start();
+    let baseline_api_url = baseline_server.url("/graphql");
+    write_minimal_planning_context(
+        temp.path(),
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+
+    baseline_server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issues");
+        then.status(200).json_body(json!({
+            "data": {
+                "issues": {
+                    "nodes": [issue_node(
+                        "issue-1",
+                        "MET-35",
+                        "Create the technical and sync commands",
+                        "Parent issue description",
+                        "state-2",
+                        "In Progress",
+                    )]
+                }
+            }
+        }));
+    });
+
+    baseline_server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issue")
+            .body_includes("\"id\":\"issue-1\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "issue": issue_detail_node(
+                    "issue-1",
+                    "MET-35",
+                    "Create the technical and sync commands",
+                    "# Original description\n",
+                    vec![],
+                    None,
+                )
+            }
+        }));
+    });
+
+    cli()
+        .current_dir(temp.path())
+        .args([
+            "sync",
+            "--api-key",
+            "token",
+            "--api-url",
+            &baseline_api_url,
+            "pull",
+            "MET-35",
+        ])
+        .assert()
+        .success();
+
+    let issue_dir = temp.path().join(".metastack/backlog/MET-35");
+    fs::write(issue_dir.join("index.md"), "# Local changed description\n")?;
+    let metadata_before = fs::read_to_string(issue_dir.join(".linear.json"))?;
+
+    let remote_server = MockServer::start();
+    let remote_api_url = remote_server.url("/graphql");
+    remote_server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issues");
+        then.status(200).json_body(json!({
+            "data": {
+                "issues": {
+                    "nodes": [issue_node(
+                        "issue-1",
+                        "MET-35",
+                        "Create the technical and sync commands",
+                        "Parent issue description",
+                        "state-2",
+                        "In Progress",
+                    )]
+                }
+            }
+        }));
+    });
+    remote_server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issue")
+            .body_includes("\"id\":\"issue-1\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "issue": issue_detail_node(
+                    "issue-1",
+                    "MET-35",
+                    "Create the technical and sync commands",
+                    "# Remote changed description\n",
+                    vec![],
+                    None,
+                )
+            }
+        }));
+    });
+
+    cli()
+        .current_dir(temp.path())
+        .args([
+            "sync",
+            "--api-key",
+            "token",
+            "--api-url",
+            &remote_api_url,
+            "pull",
+            "MET-35",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("sync state is `diverged`"))
+        .stderr(predicate::str::contains("rerun in a TTY"));
+
+    assert_eq!(
+        fs::read_to_string(issue_dir.join("index.md"))?,
+        "# Local changed description\n"
+    );
+    assert_eq!(
+        fs::read_to_string(issue_dir.join(".linear.json"))?,
+        metadata_before
+    );
+
+    Ok(())
+}
+
+#[test]
+fn sync_push_with_update_description_refuses_remote_ahead_description_overwrite()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let baseline_server = MockServer::start();
+    let baseline_api_url = baseline_server.url("/graphql");
+    write_minimal_planning_context(
+        temp.path(),
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+
+    baseline_server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issues");
+        then.status(200).json_body(json!({
+            "data": {
+                "issues": {
+                    "nodes": [issue_node(
+                        "issue-1",
+                        "MET-35",
+                        "Create the technical and sync commands",
+                        "Parent issue description",
+                        "state-2",
+                        "In Progress",
+                    )]
+                }
+            }
+        }));
+    });
+
+    baseline_server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issue")
+            .body_includes("\"id\":\"issue-1\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "issue": issue_detail_node(
+                    "issue-1",
+                    "MET-35",
+                    "Create the technical and sync commands",
+                    "# Original description\n",
+                    vec![],
+                    None,
+                )
+            }
+        }));
+    });
+
+    cli()
+        .current_dir(temp.path())
+        .args([
+            "sync",
+            "--api-key",
+            "token",
+            "--api-url",
+            &baseline_api_url,
+            "pull",
+            "MET-35",
+        ])
+        .assert()
+        .success();
+
+    let remote_server = MockServer::start();
+    let remote_api_url = remote_server.url("/graphql");
+    remote_server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issues");
+        then.status(200).json_body(json!({
+            "data": {
+                "issues": {
+                    "nodes": [issue_node(
+                        "issue-1",
+                        "MET-35",
+                        "Create the technical and sync commands",
+                        "Parent issue description",
+                        "state-2",
+                        "In Progress",
+                    )]
+                }
+            }
+        }));
+    });
+
+    remote_server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issue")
+            .body_includes("\"id\":\"issue-1\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "issue": issue_detail_node(
+                    "issue-1",
+                    "MET-35",
+                    "Create the technical and sync commands",
+                    "# Remote changed description\n",
+                    vec![],
+                    None,
+                )
+            }
+        }));
+    });
+
+    let update_issue_mock = remote_server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation UpdateIssue");
+        then.status(200).json_body(json!({
+            "data": {
+                "issueUpdate": {
+                    "success": true,
+                    "issue": issue_node(
+                        "issue-1",
+                        "MET-35",
+                        "Create the technical and sync commands",
+                        "# Original description\n",
+                        "state-2",
+                        "In Progress",
+                    )
+                }
+            }
+        }));
+    });
+
+    cli()
+        .current_dir(temp.path())
+        .args([
+            "sync",
+            "--api-key",
+            "token",
+            "--api-url",
+            &remote_api_url,
+            "push",
+            "MET-35",
+            "--update-description",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("sync state is `remote-ahead`"))
+        .stderr(predicate::str::contains("--update-description"));
+
+    update_issue_mock.assert_calls(0);
+    Ok(())
+}
+
+#[test]
+fn sync_push_with_update_description_refuses_diverged_description_overwrite()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let baseline_server = MockServer::start();
+    let baseline_api_url = baseline_server.url("/graphql");
+    write_minimal_planning_context(
+        temp.path(),
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+
+    baseline_server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issues");
+        then.status(200).json_body(json!({
+            "data": {
+                "issues": {
+                    "nodes": [issue_node(
+                        "issue-1",
+                        "MET-35",
+                        "Create the technical and sync commands",
+                        "Parent issue description",
+                        "state-2",
+                        "In Progress",
+                    )]
+                }
+            }
+        }));
+    });
+
+    baseline_server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issue")
+            .body_includes("\"id\":\"issue-1\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "issue": issue_detail_node(
+                    "issue-1",
+                    "MET-35",
+                    "Create the technical and sync commands",
+                    "# Original description\n",
+                    vec![],
+                    None,
+                )
+            }
+        }));
+    });
+
+    cli()
+        .current_dir(temp.path())
+        .args([
+            "sync",
+            "--api-key",
+            "token",
+            "--api-url",
+            &baseline_api_url,
+            "pull",
+            "MET-35",
+        ])
+        .assert()
+        .success();
+
+    let issue_dir = temp.path().join(".metastack/backlog/MET-35");
+    fs::write(issue_dir.join("index.md"), "# Local changed description\n")?;
+
+    let remote_server = MockServer::start();
+    let remote_api_url = remote_server.url("/graphql");
+    remote_server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issues");
+        then.status(200).json_body(json!({
+            "data": {
+                "issues": {
+                    "nodes": [issue_node(
+                        "issue-1",
+                        "MET-35",
+                        "Create the technical and sync commands",
+                        "Parent issue description",
+                        "state-2",
+                        "In Progress",
+                    )]
+                }
+            }
+        }));
+    });
+
+    remote_server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issue")
+            .body_includes("\"id\":\"issue-1\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "issue": issue_detail_node(
+                    "issue-1",
+                    "MET-35",
+                    "Create the technical and sync commands",
+                    "# Remote changed description\n",
+                    vec![],
+                    None,
+                )
+            }
+        }));
+    });
+
+    let update_issue_mock = remote_server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation UpdateIssue");
+        then.status(200).json_body(json!({
+            "data": {
+                "issueUpdate": {
+                    "success": true,
+                    "issue": issue_node(
+                        "issue-1",
+                        "MET-35",
+                        "Create the technical and sync commands",
+                        "# Local changed description\n",
+                        "state-2",
+                        "In Progress",
+                    )
+                }
+            }
+        }));
+    });
+
+    cli()
+        .current_dir(temp.path())
+        .args([
+            "sync",
+            "--api-key",
+            "token",
+            "--api-url",
+            &remote_api_url,
+            "push",
+            "MET-35",
+            "--update-description",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("sync state is `diverged`"))
+        .stderr(predicate::str::contains("--update-description"));
+
+    update_issue_mock.assert_calls(0);
     Ok(())
 }
 
@@ -358,6 +1143,19 @@ fn sync_render_once_uses_default_project_and_loads_paginated_issue_list()
     "team": "MET",
     "project_id": "MetaStack CLI"
   }
+}
+"#,
+    )?;
+    fs::create_dir_all(temp.path().join(".metastack/backlog/MET-13"))?;
+    fs::write(
+        temp.path().join(".metastack/backlog/MET-13/.linear.json"),
+        r#"{
+  "issue_id": "issue-3",
+  "identifier": "MET-13",
+  "title": "Third issue",
+  "url": "https://linear.app/issues/MET-13",
+  "team_key": "MET",
+  "managed_files": []
 }
 "#,
     )?;
@@ -447,7 +1245,9 @@ fn sync_render_once_uses_default_project_and_loads_paginated_issue_list()
             "meta backlog sync (MetaStack CLI)",
         ))
         .stdout(predicate::str::contains("Ready to push MET-13"))
-        .stdout(predicate::str::contains("Third issue"));
+        .stdout(predicate::str::contains("Third issue"))
+        .stdout(predicate::str::contains("local: unlinked"))
+        .stdout(predicate::str::contains("Local sync: unlinked"));
 
     first_page.assert();
     second_page.assert();

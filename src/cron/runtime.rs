@@ -12,7 +12,7 @@ use chrono::{DateTime, Local, Utc};
 
 use crate::agents::{
     apply_invocation_environment, command_args_for_invocation, render_invocation_diagnostics,
-    resolve_agent_invocation_for_planning,
+    resolve_agent_invocation_for_planning, validate_invocation_command_surface,
 };
 use crate::cli::{CronDaemonArgs, CronRunArgs, CronStartArgs, RunAgentArgs};
 use crate::config::{
@@ -663,6 +663,7 @@ fn execute_agent_phase(
     let planning_meta = PlanningMeta::load(root)?;
     let invocation = resolve_agent_invocation_for_planning(&config, &planning_meta, &run_args)?;
     let command_args = command_args_for_invocation(&invocation, Some(working_directory))?;
+    let attempted_command = validate_invocation_command_surface(&invocation, &command_args)?;
     let stdout = log
         .try_clone()
         .with_context(|| format!("failed to clone `{}`", log_path.display()))?;
@@ -742,8 +743,8 @@ fn execute_agent_phase(
 
     let mut child = command.spawn().with_context(|| {
         format!(
-            "failed to launch agent `{}` with command `{}`",
-            invocation.agent, invocation.command
+            "failed to launch agent `{}` with command `{attempted_command}`",
+            invocation.agent
         )
     })?;
 
@@ -771,8 +772,8 @@ fn execute_agent_phase(
             .map(|value| value.to_string())
             .unwrap_or_else(|| "terminated by signal".to_string());
         bail!(
-            "agent `{}` exited unsuccessfully ({code})",
-            invocation.agent
+            "agent `{}` exited unsuccessfully ({code}) while running `{attempted_command}`",
+            invocation.agent,
         );
     }
 

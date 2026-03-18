@@ -7,7 +7,7 @@ use anyhow::{Context, Result, anyhow, bail};
 
 use crate::agents::{
     apply_invocation_environment, command_args_for_invocation, render_invocation_diagnostics,
-    resolve_agent_invocation_for_planning,
+    resolve_agent_invocation_for_planning, validate_invocation_command_surface,
 };
 use crate::backlog::load_issue_metadata;
 use crate::cli::{ListenWorkerArgs, RunAgentArgs};
@@ -26,8 +26,8 @@ use super::{
     backlog_progress_for_issue_dir, capture_workspace_snapshot, compact_blocked_summary,
     compact_completed_summary, compact_running_summary, compare_workspace_snapshots,
     current_workspace_branch, issue_state_label, issue_team_key, listen_issue_is_active,
-    now_epoch_seconds, now_timestamp, render_agent_prompt, try_transition_issue_to_review_state,
-    workspace_has_meaningful_progress, write_listen_session,
+    now_epoch_seconds, now_timestamp, preflight, render_agent_prompt,
+    try_transition_issue_to_review_state, workspace_has_meaningful_progress, write_listen_session,
 };
 
 const REQUIRED_LISTEN_PR_LABEL: &str = "metastack";
@@ -84,6 +84,44 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
     let mut saw_implementation_progress = workspace_has_meaningful_progress(&workspace_path)?;
     let mut stalled_turns = 0u32;
     let log_path = agent_log_path(&source_root, &args.issue);
+    if let Err(error) = preflight::run_listen_preflight(
+        &service,
+        &linear_config,
+        &app_config,
+        &planning_meta,
+        preflight::ListenPreflightRequest {
+            working_dir: &workspace_path,
+            agent: args.agent.as_deref(),
+            model: args.model.as_deref(),
+            reasoning: args.reasoning.as_deref(),
+            require_write_access: true,
+        },
+    )
+    .await
+    {
+        write_preflight_failure(&log_path, &error)?;
+        let backlog_progress = backlog_issue
+            .as_ref()
+            .map(|backlog_issue| {
+                backlog_progress_for_issue_dir(&workspace_path, &backlog_issue.identifier)
+            })
+            .transpose()?;
+        write_listen_session(
+            &source_root,
+            build_worker_session(
+                &issue,
+                SessionPhase::Blocked,
+                compact_blocked_summary(
+                    "Blocked | missing exec capability",
+                    backlog_progress.as_ref(),
+                    &log_path,
+                ),
+                &session_context,
+                turns_completed,
+            ),
+        )?;
+        return Err(error);
+    }
     loop {
         if !listen_issue_is_active(issue.state.as_ref().map(|state| state.name.as_str())) {
             write_listen_session(
@@ -391,13 +429,13 @@ fn load_worker_backlog_issue(
     })
 }
 
-fn execute_agent_turn(
+fn build_listen_run_args(
     issue: &IssueSummary,
     turn_number: u32,
     context: &ListenTurnContext<'_>,
-) -> Result<()> {
+) -> Result<RunAgentArgs> {
     let instructions = build_agent_instructions(issue, turn_number, context)?;
-    let run_args = RunAgentArgs {
+    Ok(RunAgentArgs {
         root: Some(context.source_root.to_path_buf()),
         route_key: Some(AGENT_ROUTE_AGENTS_LISTEN.to_string()),
         agent: context.args.agent.clone(),
@@ -413,13 +451,41 @@ fn execute_agent_turn(
         model: context.args.model.clone(),
         reasoning: context.args.reasoning.clone(),
         transport: None,
-    };
+    })
+}
+
+pub(super) fn write_preflight_failure(log_path: &Path, error: &anyhow::Error) -> Result<()> {
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create `{}`", parent.display()))?;
+    }
+    let mut log = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .with_context(|| format!("failed to open `{}`", log_path.display()))?;
+    writeln!(
+        log,
+        "\n--- meta listen preflight failed @ {} ---\n{}\n",
+        now_timestamp(),
+        error
+    )
+    .with_context(|| format!("failed to write `{}`", log_path.display()))
+}
+
+fn execute_agent_turn(
+    issue: &IssueSummary,
+    turn_number: u32,
+    context: &ListenTurnContext<'_>,
+) -> Result<()> {
+    let run_args = build_listen_run_args(issue, turn_number, context)?;
     let invocation = resolve_agent_invocation_for_planning(
         context.app_config,
         context.planning_meta,
         &run_args,
     )?;
     let command_args = command_args_for_invocation(&invocation, Some(context.workspace_path))?;
+    let attempted_command = validate_invocation_command_surface(&invocation, &command_args)?;
     let log_path = agent_log_path(context.source_root, &issue.identifier);
     if let Some(parent) = log_path.parent() {
         fs::create_dir_all(parent)
@@ -526,8 +592,8 @@ fn execute_agent_turn(
 
     let mut child = command.spawn().with_context(|| {
         format!(
-            "failed to launch agent `{}` with command `{}`",
-            invocation.agent, invocation.command
+            "failed to launch agent `{}` with command `{attempted_command}`",
+            invocation.agent
         )
     })?;
 

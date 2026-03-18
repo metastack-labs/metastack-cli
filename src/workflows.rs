@@ -12,7 +12,9 @@ use crate::agents::{
 use crate::cli::{
     LinearClientArgs, RunAgentArgs, WorkflowCommands, WorkflowRunArgs, WorkflowsArgs,
 };
-use crate::config::{AGENT_ROUTE_AGENTS_WORKFLOWS_RUN, AppConfig, PlanningMeta};
+use crate::config::{
+    AGENT_ROUTE_AGENTS_WORKFLOWS_RUN, AppConfig, PlanningMeta, is_no_agent_selected_error,
+};
 use crate::context::{
     load_codebase_context_bundle, load_effective_instructions, load_project_rules_bundle,
     load_workflow_contract, render_repo_map,
@@ -133,10 +135,7 @@ async fn run_workflow(args: &WorkflowRunArgs) -> Result<String> {
     let invocation =
         match resolve_agent_invocation_for_planning(&app_config, &planning_meta, &run_args) {
             Ok(invocation) => invocation,
-            Err(error)
-                if args.provider.is_none()
-                    && error.to_string().contains("no agent was selected") =>
-            {
+            Err(error) if args.provider.is_none() && is_no_agent_selected_error(&error) => {
                 resolve_agent_invocation_for_planning(
                     &app_config,
                     &planning_meta,

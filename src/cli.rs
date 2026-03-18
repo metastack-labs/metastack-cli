@@ -54,10 +54,8 @@ Built-in provider catalog:
   codex: gpt-5.4, gpt-5.3-codex, gpt-5.2-codex, gpt-5.1-codex-max, gpt-5.1-codex,
          gpt-5.1-codex-mini, gpt-5-codex, gpt-5-codex-mini
          reasoning: low, medium, high
-  claude: sonnet, opus (low, medium, high)
-          haiku (low, medium)
-          sonnet[1m] (medium, high)
-          opusplan (high)
+  claude: sonnet, opus, haiku, sonnet[1m], opusplan
+          reasoning: low, medium, high, max
 
 Confirm the effective selection before launch:
   meta agents workflows run ticket-implementation --root . --dry-run";
@@ -68,7 +66,14 @@ Repo defaults written by `meta runtime setup` participate in the built-in resolu
 
 Built-in provider/model/reasoning combinations are validated before they are saved.
 Use `meta agents workflows run ... --dry-run` or `meta context scan --root .` to confirm the
-resolved provider, model, reasoning, route key, and config source before or during execution.";
+resolved provider, model, reasoning, route key, and config source before or during execution.
+
+Listen prerequisites:
+  codex: `~/.codex/config.toml` must set `approval_policy = \"never\"`
+         and `sandbox_mode = \"danger-full-access\"`, and Linear MCP should be removed or
+         disabled with `-c mcp_servers.linear.enabled=false`
+  claude: `claude` must be on PATH and `ANTHROPIC_API_KEY` should be unset
+  verify: `meta agents listen --check --root .`";
 
 const DASHBOARD_HELP_EXAMPLES: &str = "\
 Examples:
@@ -729,6 +734,9 @@ pub struct ListenRunArgs {
     /// Local port for the browser dashboard served by the live listener.
     #[arg(long, default_value_t = 4000)]
     pub dashboard_port: u16,
+    /// Run listen prerequisite checks and exit without polling Linear or starting the daemon.
+    #[arg(long, conflicts_with_all = ["once", "render_once", "demo"])]
+    pub check: bool,
     /// Execute a single live poll cycle and print a textual summary.
     #[arg(long)]
     pub once: bool,
@@ -779,6 +787,9 @@ pub struct SyncArgs {
     pub client: LinearClientArgs,
     #[command(subcommand)]
     pub command: Option<SyncCommands>,
+    /// Filter to a specific project name (overrides the repo default).
+    #[arg(long)]
+    pub project: Option<String>,
     /// Render the sync dashboard once to an in-memory buffer and print the snapshot.
     #[arg(long, hide = true)]
     pub render_once: bool,
@@ -796,16 +807,26 @@ pub struct SyncArgs {
 #[derive(Debug, Clone, Subcommand)]
 pub enum SyncCommands {
     /// Pull a Linear issue into `.metastack/backlog/<ISSUE_ID>/`.
-    Pull(SyncIssueArgs),
-    /// Push a local backlog item back to Linear.
-    Push(SyncIssueArgs),
+    Pull(SyncPullArgs),
+    /// Push CLI-managed backlog files back to Linear. `index.md` stays local unless `--update-description` is passed.
+    Push(SyncPushArgs),
 }
 
 #[derive(Debug, Clone, Args)]
-pub struct SyncIssueArgs {
+pub struct SyncPullArgs {
     /// Existing issue identifier, for example MET-35.
     #[arg(value_name = "IDENTIFIER")]
     pub issue: String,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct SyncPushArgs {
+    /// Existing issue identifier, for example MET-35.
+    #[arg(value_name = "IDENTIFIER")]
+    pub issue: String,
+    /// Also update the Linear issue description from `.metastack/backlog/<ISSUE>/index.md`.
+    #[arg(long)]
+    pub update_description: bool,
 }
 
 #[derive(Debug, Clone, Args)]
