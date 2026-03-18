@@ -28,6 +28,7 @@ const MANAGED_ATTACHMENT_MARKER: &str = "metastack-cli";
 
 pub async fn run_sync_dashboard_command(
     client_args: &LinearClientArgs,
+    project_override: Option<&str>,
     options: SyncDashboardOptions,
 ) -> Result<()> {
     let root = canonicalize_existing_dir(&client_args.root)?;
@@ -37,23 +38,39 @@ pub async fn run_sync_dashboard_command(
         default_team,
         default_project_id,
     } = load_linear_command_context(client_args, None)?;
-    let project_id = default_project_id.ok_or_else(|| {
-        anyhow!(
-            "`meta backlog sync` requires a repo default project. Run `meta runtime setup --root . --project <PROJECT>` and rerun."
+
+    let (filter, title) = if let Some(project_name) = project_override {
+        (
+            IssueListFilters {
+                team: default_team,
+                project: Some(project_name.to_string()),
+                limit: usize::MAX,
+                ..IssueListFilters::default()
+            },
+            format!("meta backlog sync ({project_name})"),
         )
-    })?;
-    let issues = service
-        .list_issues(IssueListFilters {
-            team: default_team,
-            project_id: Some(project_id.clone()),
-            limit: usize::MAX,
-            ..IssueListFilters::default()
-        })
-        .await?;
+    } else {
+        let project_id = default_project_id.ok_or_else(|| {
+            anyhow!(
+                "`meta backlog sync` requires a repo default project or `--project`. Run `meta runtime setup --root . --project <PROJECT>` or pass `--project \"Project Name\"`."
+            )
+        })?;
+        (
+            IssueListFilters {
+                team: default_team,
+                project_id: Some(project_id.clone()),
+                limit: usize::MAX,
+                ..IssueListFilters::default()
+            },
+            format!("meta backlog sync ({project_id})"),
+        )
+    };
+
+    let issues = service.list_issues(filter).await?;
 
     match run_sync_dashboard(
         SyncDashboardData {
-            title: format!("meta backlog sync ({project_id})"),
+            title,
             issues: issues
                 .into_iter()
                 .map(|issue| {
