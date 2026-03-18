@@ -28,6 +28,7 @@ pub const AGENT_ROUTE_LINEAR_ISSUES_REFINE: &str = "linear.issues.refine";
 pub const AGENT_ROUTE_AGENTS_LISTEN: &str = "agents.listen";
 pub const AGENT_ROUTE_AGENTS_WORKFLOWS_RUN: &str = "agents.workflows.run";
 pub const AGENT_ROUTE_RUNTIME_CRON_PROMPT: &str = "runtime.cron.prompt";
+pub const AGENT_ROUTE_BACKLOG_REVIEW: &str = "backlog.review";
 pub const AGENT_ROUTE_MERGE: &str = "merge.run";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -36,6 +37,25 @@ pub struct AppConfig {
     pub linear: LinearSettings,
     #[serde(default)]
     pub agents: AgentSettings,
+    #[serde(default)]
+    pub backlog_review: BacklogReviewSettings,
+}
+
+/// Install-scoped defaults for `meta backlog review`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BacklogReviewSettings {
+    /// Ordered comma-separated agent chain, e.g. `"codex,claude,codex"`.
+    #[serde(default)]
+    pub agent_chain: Option<String>,
+    /// Default number of review passes per issue.
+    #[serde(default)]
+    pub passes: Option<usize>,
+    /// Default mutation mode: `"apply"` (default) or `"critique"`.
+    #[serde(default)]
+    pub default_mode: Option<String>,
+    /// Fallback behavior when a configured agent is unavailable: `"next_agent"` (default) or `"fail"`.
+    #[serde(default)]
+    pub fallback_behavior: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -789,6 +809,11 @@ pub fn supported_agent_route_definitions() -> &'static [AgentRouteDefinition] {
             key: AGENT_ROUTE_BACKLOG_SPLIT,
             family: "backlog",
             label: "meta backlog split",
+        },
+        AgentRouteDefinition {
+            key: AGENT_ROUTE_BACKLOG_REVIEW,
+            family: "backlog",
+            label: "meta backlog review",
         },
         AgentRouteDefinition {
             key: AGENT_ROUTE_CONTEXT_SCAN,

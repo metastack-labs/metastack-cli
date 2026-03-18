@@ -134,7 +134,7 @@ The preferred public surface is domain-first. Legacy top-level commands such as 
 
 | Command family | Use it for |
 | --- | --- |
-| `meta backlog` | Plan, create technical backlog children, and sync backlog work for the current repository |
+| `meta backlog` | Plan, review, create technical backlog children, and sync backlog work for the current repository |
 | `meta linear` | Browse, create, edit, refine, and dashboard Linear work |
 | `meta agents` | Run the unattended listener and reusable workflow playbooks |
 | `meta context` | Inspect, map, doctor, scan, or reload the effective agent context |
@@ -184,6 +184,7 @@ Team lead:
 ```bash
 meta linear issues list --team MET --state "In Progress"
 meta linear issues refine MET-35 --passes 2
+meta backlog review --api-key "$LINEAR_API_KEY" MET-35 --passes 3 --agents codex,claude,codex
 meta dashboard team --team MET --project "MetaStack CLI"
 ```
 
@@ -283,6 +284,7 @@ Supported command route keys:
 - `agents.listen`
 - `agents.workflows.run`
 - `runtime.cron.prompt`
+- `backlog.review`
 - `merge.run`
 
 Example global config:
@@ -551,6 +553,40 @@ Side effects:
 - uses `.metastack/backlog/<NEW_ISSUE_ID>/index.md` as the Linear issue description
 - uploads the remaining managed backlog files as Linear attachments
 
+### `backlog review`
+
+Critique and optionally rewrite one or more existing Linear issues using configurable multi-agent review passes:
+
+```bash
+meta backlog review --api-key "$LINEAR_API_KEY" MET-35
+meta backlog review --api-key "$LINEAR_API_KEY" MET-35 --critique-only
+meta backlog review --api-key "$LINEAR_API_KEY" MET-35 --passes 3 --agents codex,claude,codex
+meta backlog review --api-key "$LINEAR_API_KEY" MET-35 MET-36 --agents codex,claude
+```
+
+`meta backlog review` is the multi-agent review command for backlog issues. It is Linear-first: the latest issue description is pulled from Linear before every review run, and on successful apply the rewrite is pushed back. Each review pass is recorded as an immutable artifact under `.metastack/backlog/<ISSUE>/artifacts/review/<RUN_ID>/`.
+
+By default the command applies rewrites. Pass `--critique-only` to skip local and remote mutations and keep the run purely advisory.
+
+Multi-agent sequencing via `--agents` accepts a comma-separated chain of agent names. The chain index wraps with modulo when passes exceed chain length (e.g. `--agents codex,claude --passes 3` runs codex, claude, codex). When an agent in the chain fails and fallback is enabled, the engine tries remaining chain entries then built-in providers before giving up.
+
+Install-scoped defaults can be saved under `[backlog_review]` in the global config:
+
+```toml
+[backlog_review]
+agent_chain = "codex,claude,codex"
+passes = 3
+default_mode = "critique"
+fallback_behavior = "next_agent"
+```
+
+Side effects:
+
+- pulls the latest Linear description into `.metastack/backlog/<ISSUE>/index.md` before review
+- writes `original.md`, per-pass findings Markdown, agent records, `final-proposed.md`, and `summary.json` under `.metastack/backlog/<ISSUE>/artifacts/review/<RUN_ID>/`
+- with default apply, updates `.metastack/backlog/<ISSUE>/index.md` and pushes the rewrite to Linear
+- with `--critique-only`, no local or remote mutations beyond the artifact recording
+
 ### `issues refine`
 
 Critique and rewrite one or more existing Linear issues that already belong to the active repository scope:
@@ -767,6 +803,7 @@ The integration suite is split by command domain, so local iteration can stay fo
 - `cargo test --test sync`
 - `cargo test --test linear`
 - `cargo test --test listen`
+- `cargo test --test review`
 - `cargo test --test cron`
 
 ## Release Artifacts

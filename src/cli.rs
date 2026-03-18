@@ -22,7 +22,10 @@ Examples:
   meta backlog plan --root . --request \"Split the onboarding work into tickets\"
   meta backlog tech MET-35
   meta backlog split MET-35
-  meta backlog sync pull MET-35";
+  meta backlog sync pull MET-35
+  meta backlog review MET-35
+  meta backlog review MET-35 --critique-only
+  meta backlog review MET-35 --agents codex,claude,codex --passes 3";
 
 const AGENTS_HELP_EXAMPLES: &str = "\
 Examples:
@@ -184,6 +187,8 @@ pub enum BacklogCommands {
     Tech(TechnicalArgs),
     /// Launch the sync dashboard or run direct pull/push backlog operations.
     Sync(SyncArgs),
+    /// Review one or more backlog issues with configurable multi-agent critique and rewrite.
+    Review(BacklogReviewArgs),
 }
 
 #[derive(Debug, Clone, Args)]
@@ -806,6 +811,35 @@ pub struct SyncIssueArgs {
     /// Existing issue identifier, for example MET-35.
     #[arg(value_name = "IDENTIFIER")]
     pub issue: String,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct BacklogReviewArgs {
+    #[command(flatten)]
+    pub client: LinearClientArgs,
+    /// One or more existing issue identifiers, for example MET-35.
+    #[arg(value_name = "IDENTIFIER", required = true)]
+    pub issues: Vec<String>,
+    /// Number of review passes to run for each issue.
+    #[arg(long, default_value_t = 1)]
+    pub passes: usize,
+    /// Write review artifacts only without mutating the local backlog or Linear description.
+    #[arg(long)]
+    pub critique_only: bool,
+    /// Ordered comma-separated agent chain for multi-agent review, for example `codex,claude,codex`.
+    /// Repeats are allowed and later passes consume the latest rewritten ticket plus prior review
+    /// outputs. When omitted the default agent resolution path is used for every pass.
+    #[arg(long, value_delimiter = ',')]
+    pub agents: Vec<String>,
+    /// Override the configured default agent/provider for every review pass.
+    #[arg(long)]
+    pub agent: Option<String>,
+    /// Override the configured default model for every review pass.
+    #[arg(long)]
+    pub model: Option<String>,
+    /// Override the resolved built-in reasoning option for every review pass.
+    #[arg(long)]
+    pub reasoning: Option<String>,
 }
 
 #[derive(Debug, Clone, Args)]

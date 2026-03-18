@@ -15,6 +15,7 @@ mod merge_dashboard;
 mod plan;
 mod progress;
 mod repo_target;
+mod review;
 mod scaffold;
 mod scan;
 mod scan_dashboard;
@@ -54,6 +55,7 @@ use crate::listen::{
 use crate::merge::run_merge;
 use crate::merge_dashboard::MergeDashboardAction;
 use crate::plan::run_plan;
+use crate::review::run_backlog_review_command;
 use crate::scaffold::run_scaffold;
 use crate::scan::run_scan;
 use crate::setup::run_setup;
@@ -84,6 +86,10 @@ async fn dispatch(cli: Cli) -> Result<()> {
             }
             BacklogCommands::Tech(args) => {
                 run_technical(&args).await?;
+            }
+            BacklogCommands::Review(args) => {
+                let report = run_backlog_review_command(&args).await?;
+                println!("{report}");
             }
             BacklogCommands::Sync(args) => match args.command {
                 Some(SyncCommands::Pull(issue_args)) => {
