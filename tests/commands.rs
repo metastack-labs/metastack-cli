@@ -156,8 +156,9 @@ fn scaffold_creates_planning_layout_and_is_repeat_safe() -> Result<(), Box<dyn E
     assert!(repo_root.join(".metastack/backlog/README.md").is_file());
     assert!(repo_root.join(".metastack/backlog/_TEMPLATE").is_dir());
     let canonical_template_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tmp")
-        .join("_TEMPLATE");
+        .join("src")
+        .join("artifacts")
+        .join("BACKLOG_TEMPLATE");
     for entry in WalkDir::new(&canonical_template_root) {
         let entry = entry?;
         let relative_path = entry.path().strip_prefix(&canonical_template_root)?;
