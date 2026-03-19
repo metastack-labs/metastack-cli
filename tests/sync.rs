@@ -1431,3 +1431,432 @@ fn sync_without_subcommand_requires_default_project_configuration() {
             "`meta backlog sync` requires a repo default project",
         ));
 }
+
+fn write_linked_metadata(
+    issue_dir: &Path,
+    identifier: &str,
+    title: &str,
+    local_hash: Option<&str>,
+    remote_hash: Option<&str>,
+    last_sync_at: Option<&str>,
+) -> Result<(), Box<dyn Error>> {
+    fs::write(
+        issue_dir.join(".linear.json"),
+        serde_json::to_string_pretty(&json!({
+            "issue_id": format!("issue-{identifier}"),
+            "identifier": identifier,
+            "title": title,
+            "url": format!("https://linear.app/issues/{identifier}"),
+            "team_key": "MET",
+            "project_id": "project-1",
+            "project_name": "Repo Project",
+            "parent_id": null,
+            "parent_identifier": null,
+            "local_hash": local_hash,
+            "remote_hash": remote_hash,
+            "last_sync_at": last_sync_at,
+            "managed_files": []
+        }))?,
+    )?;
+    Ok(())
+}
+
+#[test]
+fn sync_link_in_no_interactive_mode_creates_metadata_without_hashes() -> Result<(), Box<dyn Error>>
+{
+    let temp = tempdir()?;
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    write_minimal_planning_context(
+        temp.path(),
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+
+    let issue_dir = temp.path().join(".metastack/backlog/manual-entry");
+    fs::create_dir_all(&issue_dir)?;
+    fs::write(issue_dir.join("index.md"), "# Manual notes\n")?;
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issues");
+        then.status(200).json_body(json!({
+            "data": {
+                "issues": {
+                    "nodes": [issue_node(
+                        "issue-1",
+                        "MET-35",
+                        "Create the technical and sync commands",
+                        "Parent issue description",
+                        "state-2",
+                        "In Progress",
+                    )]
+                }
+            }
+        }));
+    });
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issue")
+            .body_includes("\"id\":\"issue-1\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "issue": issue_detail_node(
+                    "issue-1",
+                    "MET-35",
+                    "Create the technical and sync commands",
+                    "# Pulled description\n",
+                    vec![],
+                    None,
+                )
+            }
+        }));
+    });
+
+    cli()
+        .current_dir(temp.path())
+        .args([
+            "sync",
+            "--api-key",
+            "token",
+            "--api-url",
+            &api_url,
+            "--no-interactive",
+            "link",
+            "MET-35",
+            "--entry",
+            "manual-entry",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Linked .metastack/backlog/manual-entry to MET-35.",
+        ));
+
+    let metadata = fs::read_to_string(issue_dir.join(".linear.json"))?;
+    assert!(metadata.contains("\"identifier\": \"MET-35\""));
+    assert!(metadata.contains("\"local_hash\": null"));
+    assert!(metadata.contains("\"remote_hash\": null"));
+    assert!(metadata.contains("\"last_sync_at\": null"));
+    assert_eq!(
+        fs::read_to_string(issue_dir.join("index.md"))?,
+        "# Manual notes\n"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn sync_status_reports_local_ahead_and_unlinked_entries_without_fetch() -> Result<(), Box<dyn Error>>
+{
+    let temp = tempdir()?;
+    write_minimal_planning_context(
+        temp.path(),
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+
+    let unlinked_dir = temp.path().join(".metastack/backlog/manual-entry");
+    fs::create_dir_all(&unlinked_dir)?;
+    fs::write(unlinked_dir.join("index.md"), "# Unlinked manual entry\n")?;
+
+    let linked_dir = temp.path().join(".metastack/backlog/MET-35");
+    fs::create_dir_all(&linked_dir)?;
+    fs::write(linked_dir.join("index.md"), "# Local changes\n")?;
+    write_linked_metadata(
+        &linked_dir,
+        "MET-35",
+        "Linked ticket",
+        Some("baseline"),
+        Some("remote-hash"),
+        Some("2026-03-18T10:15:00Z"),
+    )?;
+
+    cli()
+        .current_dir(temp.path())
+        .args(["sync", "status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Identifier"))
+        .stdout(predicate::str::contains("manual-entry"))
+        .stdout(predicate::str::contains("Unlinked manual entry"))
+        .stdout(predicate::str::contains("unlinked"))
+        .stdout(predicate::str::contains("MET-35"))
+        .stdout(predicate::str::contains("Linked ticket"))
+        .stdout(predicate::str::contains("local-ahead"))
+        .stdout(predicate::str::contains("2026-03-18T10:15:00Z"));
+
+    Ok(())
+}
+
+#[test]
+fn sync_pull_all_reports_synced_and_skipped_summary() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    write_minimal_planning_context(
+        temp.path(),
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issues");
+        then.status(200).json_body(json!({
+            "data": {
+                "issues": {
+                    "nodes": [
+                        issue_node(
+                            "issue-1",
+                            "MET-35",
+                            "Create the technical and sync commands",
+                            "Parent issue description",
+                            "state-2",
+                            "In Progress",
+                        ),
+                        issue_node(
+                            "issue-2",
+                            "MET-36",
+                            "Batch sync another entry",
+                            "Parent issue description",
+                            "state-2",
+                            "In Progress",
+                        )
+                    ]
+                }
+            }
+        }));
+    });
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issue")
+            .body_includes("\"id\":\"issue-1\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "issue": issue_detail_node(
+                    "issue-1",
+                    "MET-35",
+                    "Create the technical and sync commands",
+                    "# Existing description\n",
+                    vec![],
+                    None,
+                )
+            }
+        }));
+    });
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issue")
+            .body_includes("\"id\":\"issue-2\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "issue": issue_detail_node(
+                    "issue-2",
+                    "MET-36",
+                    "Batch sync another entry",
+                    "# Fresh description\n",
+                    vec![],
+                    None,
+                )
+            }
+        }));
+    });
+
+    cli()
+        .current_dir(temp.path())
+        .args([
+            "sync",
+            "--api-key",
+            "token",
+            "--api-url",
+            &api_url,
+            "pull",
+            "MET-35",
+        ])
+        .assert()
+        .success();
+
+    let manual_dir = temp.path().join(".metastack/backlog/manual-36");
+    fs::create_dir_all(&manual_dir)?;
+    write_linked_metadata(
+        &manual_dir,
+        "MET-36",
+        "Batch sync another entry",
+        None,
+        None,
+        None,
+    )?;
+
+    cli()
+        .current_dir(temp.path())
+        .args([
+            "sync",
+            "--api-key",
+            "token",
+            "--api-url",
+            &api_url,
+            "pull",
+            "--all",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Pull summary: 1 synced, 1 skipped, 0 errors.",
+        ));
+
+    assert_eq!(
+        fs::read_to_string(manual_dir.join("index.md"))?,
+        "# Fresh description\n"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn sync_push_all_exits_non_zero_when_any_entry_errors() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    write_minimal_planning_context(
+        temp.path(),
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issues");
+        then.status(200).json_body(json!({
+            "data": {
+                "issues": {
+                    "nodes": [
+                        issue_node(
+                            "issue-1",
+                            "MET-35",
+                            "Create the technical and sync commands",
+                            "Parent issue description",
+                            "state-2",
+                            "In Progress",
+                        ),
+                        issue_node(
+                            "issue-2",
+                            "MET-36",
+                            "Broken push entry",
+                            "Parent issue description",
+                            "state-2",
+                            "In Progress",
+                        )
+                    ]
+                }
+            }
+        }));
+    });
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issue")
+            .body_includes("\"id\":\"issue-1\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "issue": issue_detail_node(
+                    "issue-1",
+                    "MET-35",
+                    "Create the technical and sync commands",
+                    "# Existing description\n",
+                    vec![],
+                    None,
+                )
+            }
+        }));
+    });
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issue")
+            .body_includes("\"id\":\"issue-2\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "issue": issue_detail_node(
+                    "issue-2",
+                    "MET-36",
+                    "Broken push entry",
+                    "# Remote description\n",
+                    vec![],
+                    None,
+                )
+            }
+        }));
+    });
+
+    cli()
+        .current_dir(temp.path())
+        .args([
+            "sync",
+            "--api-key",
+            "token",
+            "--api-url",
+            &api_url,
+            "pull",
+            "MET-35",
+        ])
+        .assert()
+        .success();
+
+    let broken_dir = temp.path().join(".metastack/backlog/manual-36");
+    fs::create_dir_all(&broken_dir)?;
+    write_linked_metadata(&broken_dir, "MET-36", "Broken push entry", None, None, None)?;
+
+    cli()
+        .current_dir(temp.path())
+        .args([
+            "sync",
+            "--api-key",
+            "token",
+            "--api-url",
+            &api_url,
+            "push",
+            "--all",
+        ])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains(
+            "Push summary: 0 synced, 1 skipped, 1 errors.",
+        ))
+        .stderr(predicate::str::contains(
+            "`meta backlog sync push --all` completed with 1 error",
+        ));
+
+    Ok(())
+}

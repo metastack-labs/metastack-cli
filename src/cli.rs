@@ -787,6 +787,9 @@ pub struct SyncArgs {
     pub client: LinearClientArgs,
     #[command(subcommand)]
     pub command: Option<SyncCommands>,
+    /// Skip interactive sync pickers and require explicit command arguments.
+    #[arg(long)]
+    pub no_interactive: bool,
     /// Filter to a specific project name (overrides the repo default).
     #[arg(long)]
     pub project: Option<String>,
@@ -806,6 +809,10 @@ pub struct SyncArgs {
 
 #[derive(Debug, Clone, Subcommand)]
 pub enum SyncCommands {
+    /// Link an existing backlog entry to a Linear issue.
+    Link(SyncLinkArgs),
+    /// Show sync state for backlog entries under `.metastack/backlog/`.
+    Status(SyncStatusArgs),
     /// Pull a Linear issue into `.metastack/backlog/<ISSUE_ID>/`.
     Pull(SyncPullArgs),
     /// Push CLI-managed backlog files back to Linear. `index.md` stays local unless `--update-description` is passed.
@@ -813,17 +820,43 @@ pub enum SyncCommands {
 }
 
 #[derive(Debug, Clone, Args)]
+pub struct SyncLinkArgs {
+    /// Existing issue identifier, for example MET-35. Prompts in a TTY when omitted.
+    #[arg(value_name = "IDENTIFIER")]
+    pub issue: Option<String>,
+    /// Existing backlog entry slug under `.metastack/backlog/`. Prompts in a TTY when omitted.
+    #[arg(long, value_name = "SLUG")]
+    pub entry: Option<String>,
+    /// Immediately pull the linked issue into the selected backlog entry.
+    #[arg(long)]
+    pub pull: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct SyncStatusArgs {
+    /// Fetch current Linear issue state before resolving statuses.
+    #[arg(long)]
+    pub fetch: bool,
+}
+
+#[derive(Debug, Clone, Args)]
 pub struct SyncPullArgs {
     /// Existing issue identifier, for example MET-35.
-    #[arg(value_name = "IDENTIFIER")]
-    pub issue: String,
+    #[arg(value_name = "IDENTIFIER", required_unless_present = "all")]
+    pub issue: Option<String>,
+    /// Pull every linked backlog entry.
+    #[arg(long, conflicts_with = "issue")]
+    pub all: bool,
 }
 
 #[derive(Debug, Clone, Args)]
 pub struct SyncPushArgs {
     /// Existing issue identifier, for example MET-35.
-    #[arg(value_name = "IDENTIFIER")]
-    pub issue: String,
+    #[arg(value_name = "IDENTIFIER", required_unless_present = "all")]
+    pub issue: Option<String>,
+    /// Push every linked backlog entry.
+    #[arg(long, conflicts_with = "issue")]
+    pub all: bool,
     /// Also update the Linear issue description from `.metastack/backlog/<ISSUE>/index.md`.
     #[arg(long)]
     pub update_description: bool,

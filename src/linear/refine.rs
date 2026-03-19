@@ -401,6 +401,7 @@ fn build_issue_metadata(issue: &IssueSummary) -> BacklogIssueMetadata {
             .map(|parent| parent.identifier.clone()),
         local_hash: None,
         remote_hash: None,
+        last_sync_at: None,
         managed_files: Vec::<ManagedFileRecord>::new(),
     }
 }

@@ -29,7 +29,7 @@ mod workflows;
 
 use std::ffi::OsString;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::Parser;
 
 use crate::cli::{
@@ -57,7 +57,9 @@ use crate::plan::run_plan;
 use crate::scaffold::run_scaffold;
 use crate::scan::run_scan;
 use crate::setup::run_setup;
-use crate::sync_command::{run_sync_dashboard_command, run_sync_pull, run_sync_push};
+use crate::sync_command::{
+    run_sync_dashboard_command, run_sync_link, run_sync_pull, run_sync_push, run_sync_status,
+};
 use crate::sync_dashboard::{SyncDashboardAction, SyncDashboardOptions};
 use crate::technical::run_technical;
 use crate::workflows::run_workflows;
@@ -86,6 +88,18 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 run_technical(&args).await?;
             }
             BacklogCommands::Sync(args) => match args.command {
+                Some(SyncCommands::Link(link_args)) => {
+                    run_sync_link(
+                        &args.client,
+                        args.project.as_deref(),
+                        args.no_interactive,
+                        &link_args,
+                    )
+                    .await?;
+                }
+                Some(SyncCommands::Status(status_args)) => {
+                    run_sync_status(&args.client, &status_args).await?;
+                }
                 Some(SyncCommands::Pull(issue_args)) => {
                     run_sync_pull(&args.client, &issue_args).await?;
                 }
@@ -93,6 +107,11 @@ async fn dispatch(cli: Cli) -> Result<()> {
                     run_sync_push(&args.client, &issue_args).await?;
                 }
                 None => {
+                    if args.no_interactive {
+                        bail!(
+                            "`meta backlog sync --no-interactive` requires a subcommand such as `status`, `link`, `pull`, or `push`"
+                        );
+                    }
                     run_sync_dashboard_command(
                         &args.client,
                         args.project.as_deref(),
@@ -178,6 +197,18 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 run_listen(&args.listen).await?;
             }
             Some(DashboardCommands::Ops(args)) => match args.sync.command {
+                Some(SyncCommands::Link(link_args)) => {
+                    run_sync_link(
+                        &args.sync.client,
+                        args.sync.project.as_deref(),
+                        args.sync.no_interactive,
+                        &link_args,
+                    )
+                    .await?;
+                }
+                Some(SyncCommands::Status(status_args)) => {
+                    run_sync_status(&args.sync.client, &status_args).await?;
+                }
                 Some(SyncCommands::Pull(issue_args)) => {
                     run_sync_pull(&args.sync.client, &issue_args).await?;
                 }
@@ -185,6 +216,11 @@ async fn dispatch(cli: Cli) -> Result<()> {
                     run_sync_push(&args.sync.client, &issue_args).await?;
                 }
                 None => {
+                    if args.sync.no_interactive {
+                        bail!(
+                            "`meta dashboard ops --no-interactive` requires a subcommand such as `status`, `link`, `pull`, or `push`"
+                        );
+                    }
                     run_sync_dashboard_command(
                         &args.sync.client,
                         args.sync.project.as_deref(),
@@ -275,6 +311,20 @@ async fn dispatch(cli: Cli) -> Result<()> {
             run_technical(&args).await?;
         }
         Command::Sync(args) => match args.command {
+            Some(SyncCommands::Link(link_args)) => {
+                print_compatibility_hint("meta sync", "meta backlog sync");
+                run_sync_link(
+                    &args.client,
+                    args.project.as_deref(),
+                    args.no_interactive,
+                    &link_args,
+                )
+                .await?;
+            }
+            Some(SyncCommands::Status(status_args)) => {
+                print_compatibility_hint("meta sync", "meta backlog sync");
+                run_sync_status(&args.client, &status_args).await?;
+            }
             Some(SyncCommands::Pull(issue_args)) => {
                 print_compatibility_hint("meta sync", "meta backlog sync");
                 run_sync_pull(&args.client, &issue_args).await?;
@@ -285,6 +335,11 @@ async fn dispatch(cli: Cli) -> Result<()> {
             }
             None => {
                 print_compatibility_hint("meta sync", "meta backlog sync");
+                if args.no_interactive {
+                    bail!(
+                        "`meta sync --no-interactive` requires a subcommand such as `status`, `link`, `pull`, or `push`"
+                    );
+                }
                 run_sync_dashboard_command(
                     &args.client,
                     args.project.as_deref(),
