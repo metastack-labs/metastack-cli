@@ -56,6 +56,7 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
 - Use `meta issues refine <ISSUE>` as the quality-improvement step after `meta plan` or `meta backlog tech` when an existing repo-scoped ticket needs a stronger rewrite before implementation.
 - `meta issues refine` is critique-only by default and should write immutable artifacts under `.metastack/backlog/<ISSUE>/artifacts/refinement/<RUN_ID>/` for every pass.
 - When `meta issues refine --apply` is used outside `meta listen`, update `.metastack/backlog/<ISSUE>/index.md` before mutating the Linear description so the local audit trail exists first.
+- `meta backlog tech` and `meta backlog sync pull` should preserve localized ticket context by rewriting markdown image references to local `artifacts/` paths, refreshing `artifacts/ticket-images.md`, and keeping `context/ticket-discussion.md` current for agent consumption.
 
 - Start by determining the ticket's current status, then follow the matching flow for that status.
 - Start every task by opening the tracking workpad comment and bringing it up to date before doing new implementation work.

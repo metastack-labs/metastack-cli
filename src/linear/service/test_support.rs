@@ -149,6 +149,8 @@ impl LinearClient for FakeLinearClient {
         Ok(IssueComment {
             id: "comment-new".to_string(),
             body,
+            created_at: None,
+            user_name: None,
             resolved_at: None,
         })
     }
@@ -161,6 +163,8 @@ impl LinearClient for FakeLinearClient {
         Ok(IssueComment {
             id: comment_id.to_string(),
             body,
+            created_at: None,
+            user_name: None,
             resolved_at: None,
         })
     }
@@ -281,6 +285,8 @@ pub(super) fn comment(id: &str, body: &str, resolved_at: Option<&str>) -> IssueC
     IssueComment {
         id: id.to_string(),
         body: body.to_string(),
+        created_at: None,
+        user_name: None,
         resolved_at: resolved_at.map(str::to_string),
     }
 }

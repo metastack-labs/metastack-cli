@@ -211,6 +211,131 @@ async fn reqwest_client_creates_issue_labels() {
     create_mock.assert_calls(1);
 }
 
+#[tokio::test]
+async fn reqwest_client_fetches_parent_description_and_comment_attribution() {
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    let issue_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issue")
+            .body_includes("createdAt")
+            .body_includes("user {")
+            .body_includes("description")
+            .body_includes("\"id\":\"issue-1\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "issue": {
+                    "id": "issue-1",
+                    "identifier": "MET-41",
+                    "title": "Issue MET-41",
+                    "description": "Main description",
+                    "url": "https://linear.app/issues/MET-41",
+                    "priority": 2,
+                    "estimate": 3.0,
+                    "updatedAt": "2026-03-14T16:00:00Z",
+                    "team": {
+                        "id": "team-1",
+                        "key": "MET",
+                        "name": "Metastack"
+                    },
+                    "project": {
+                        "id": "project-1",
+                        "name": "MetaStack CLI"
+                    },
+                    "assignee": null,
+                    "labels": {
+                        "nodes": []
+                    },
+                    "comments": {
+                        "nodes": [{
+                            "id": "comment-1",
+                            "body": "Please localize this image",
+                            "createdAt": "2026-03-17T13:37:00Z",
+                            "user": {
+                                "name": "Jane Reviewer"
+                            },
+                            "resolvedAt": null
+                        }]
+                    },
+                    "state": {
+                        "id": "state-1",
+                        "name": "Todo",
+                        "type": "unstarted"
+                    },
+                    "attachments": {
+                        "nodes": []
+                    },
+                    "parent": {
+                        "id": "parent-1",
+                        "identifier": "MET-40",
+                        "title": "Parent issue",
+                        "url": "https://linear.app/issues/MET-40",
+                        "description": "Parent issue description"
+                    },
+                    "children": {
+                        "nodes": []
+                    }
+                }
+            }
+        }));
+    });
+    let client = client(api_url);
+
+    let issue = client
+        .get_issue("issue-1")
+        .await
+        .expect("issue detail should load");
+
+    assert_eq!(
+        issue
+            .parent
+            .as_ref()
+            .and_then(|parent| parent.description.as_deref()),
+        Some("Parent issue description")
+    );
+    assert_eq!(issue.comments.len(), 1);
+    assert_eq!(
+        issue.comments[0].created_at.as_deref(),
+        Some("2026-03-17T13:37:00Z")
+    );
+    assert_eq!(
+        issue.comments[0].user_name.as_deref(),
+        Some("Jane Reviewer")
+    );
+    issue_mock.assert_calls(1);
+}
+
+#[test]
+fn download_request_adds_raw_authorization_only_for_linear_upload_hosts() {
+    let client = client("https://api.linear.app/graphql".to_string());
+    let transport = super::graphql::GraphqlTransport::new(&client.config, &client.http);
+
+    let linear_request = transport
+        .build_download_request("https://uploads.linear.app/uploads/test.png")
+        .expect("linear upload request")
+        .build()
+        .expect("request should build");
+    let external_request = transport
+        .build_download_request("https://example.com/test.png")
+        .expect("external request")
+        .build()
+        .expect("request should build");
+
+    assert_eq!(
+        linear_request
+            .headers()
+            .get(reqwest::header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok()),
+        Some("token")
+    );
+    assert!(
+        !external_request
+            .headers()
+            .contains_key(reqwest::header::AUTHORIZATION)
+    );
+}
+
 fn client(api_url: String) -> ReqwestLinearClient {
     ReqwestLinearClient::new(LinearConfig {
         api_key: "token".to_string(),

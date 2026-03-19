@@ -45,14 +45,17 @@ fn cron_init_render_once_shows_dashboard_fields() -> Result<(), Box<dyn Error>> 
 
     cli()
         .current_dir(temp.path())
-        .args(["cron", "init", "--render-once"])
+        .args(["cron", "init", "--render-once", "--width", "220"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Cron Init Dashboard"))
         .stdout(predicate::str::contains("Schedule preset: Every N minutes"))
         .stdout(predicate::str::contains("Agent prompt: <blank>"))
         .stdout(predicate::str::contains("Save: Create cron job"))
-        .stdout(predicate::str::contains("Execution contract:"));
+        .stdout(predicate::str::contains("Execution contract:"))
+        .stdout(predicate::str::contains(
+            "Ctrl+V pastes text, but image attachments are rejected until saved-prompt persistence exists.",
+        ));
 
     Ok(())
 }
@@ -79,7 +82,7 @@ Review old output
 
     cli()
         .current_dir(temp.path())
-        .args(["cron", "init", "nightly", "--render-once"])
+        .args(["cron", "init", "nightly", "--render-once", "--width", "220"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Name: nightly"))
@@ -88,6 +91,34 @@ Review old output
         .stdout(predicate::str::contains("Working directory: apps/api"))
         .stdout(predicate::str::contains("Timeout seconds: 42"))
         .stdout(predicate::str::contains("Enabled: Disabled"));
+
+    Ok(())
+}
+
+#[test]
+fn cron_init_render_once_prefills_prompt_and_rejection_help() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    fs::create_dir_all(temp.path().join(".metastack/cron"))?;
+    fs::write(
+        temp.path().join(".metastack/cron/nightly.md"),
+        r#"---
+schedule: "0 * * * *"
+agent: "codex"
+---
+
+Review old output
+"#,
+    )?;
+
+    cli()
+        .current_dir(temp.path())
+        .args(["cron", "init", "nightly", "--render-once", "--width", "220"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Agent prompt: Review old output"))
+        .stdout(predicate::str::contains(
+            "Ctrl+V pastes text, but image attachments are rejected until saved-prompt persistence exists.",
+        ));
 
     Ok(())
 }

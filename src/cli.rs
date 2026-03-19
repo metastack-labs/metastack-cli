@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
+use crate::tui::prompt_images::PromptImageAttachment;
+
 const ROOT_HELP_EXAMPLES: &str = "\
 Example flows:
   engineer:
@@ -921,6 +923,8 @@ pub struct RunAgentArgs {
     pub reasoning: Option<String>,
     /// Override the configured transport for this launch.
     pub transport: Option<PromptTransportArg>,
+    /// Ordered prompt image attachments for built-in provider launches.
+    pub attachments: Vec<PromptImageAttachment>,
 }
 
 #[derive(Debug, Clone, Args)]

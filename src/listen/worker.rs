@@ -6,7 +6,8 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result, anyhow, bail};
 
 use crate::agents::{
-    apply_invocation_environment, command_args_for_invocation, render_invocation_diagnostics,
+    apply_invocation_environment, apply_noninteractive_agent_environment,
+    command_args_for_invocation, render_invocation_diagnostics,
     resolve_agent_invocation_for_planning, validate_invocation_command_surface,
 };
 use crate::backlog::load_issue_metadata;
@@ -451,6 +452,7 @@ fn build_listen_run_args(
         model: context.args.model.clone(),
         reasoning: context.args.reasoning.clone(),
         transport: None,
+        attachments: Vec::new(),
     })
 }
 
@@ -533,6 +535,7 @@ fn execute_agent_turn(
     command.args(&command_args);
     command.stdout(Stdio::from(stdout));
     command.stderr(Stdio::from(stderr));
+    apply_noninteractive_agent_environment(&mut command);
     apply_invocation_environment(
         &mut command,
         &invocation,

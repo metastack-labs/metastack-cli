@@ -12,6 +12,7 @@ use crate::config::{
     AgentConfigOverrides, AgentConfigSource, AppConfig, PlanningMeta, PromptTransport,
     normalize_agent_name, resolve_agent_config,
 };
+use crate::tui::prompt_images::{PromptImageAttachment, encode_prompt_images_for_provider};
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct AgentExecutionOptions {
@@ -39,6 +40,7 @@ pub(crate) struct ResolvedAgentInvocation {
     pub(crate) reasoning_source: Option<AgentConfigSource>,
     pub(crate) transport: PromptTransport,
     pub(crate) payload: String,
+    pub(crate) attachments: Vec<PromptImageAttachment>,
     pub(crate) builtin_provider: bool,
 }
 
@@ -90,6 +92,11 @@ pub(crate) fn apply_invocation_environment(
     prompt: &str,
     instructions: Option<&str>,
 ) {
+    command.env("TERM", "dumb");
+    command.env("NO_COLOR", "1");
+    command.env("CLICOLOR", "0");
+    command.env("CLICOLOR_FORCE", "0");
+    command.env("FORCE_COLOR", "0");
     command.env("METASTACK_AGENT_NAME", &invocation.agent);
     command.env("METASTACK_AGENT_PROMPT", prompt);
     command.env(
@@ -132,6 +139,19 @@ pub(crate) fn apply_invocation_environment(
             .map(format_agent_config_source)
             .unwrap_or_default(),
     );
+    command.env(
+        "METASTACK_AGENT_ATTACHMENT_COUNT",
+        invocation.attachments.len().to_string(),
+    );
+}
+
+pub(crate) fn apply_noninteractive_agent_environment(command: &mut Command) {
+    command.env("TERM", "dumb");
+    command.env("NO_COLOR", "1");
+    command.env("CLICOLOR", "0");
+    command.env("CLICOLOR_FORCE", "0");
+    command.env("FORCE_COLOR", "0");
+    command.env_remove("COLORTERM");
 }
 
 pub(crate) fn attempted_command(command: &str, command_args: &[String]) -> String {
@@ -175,6 +195,7 @@ pub fn run_agent_capture(args: &RunAgentArgs) -> Result<AgentCaptureReport> {
     command.stdin(Stdio::piped());
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
+    apply_noninteractive_agent_environment(&mut command);
     apply_invocation_environment(
         &mut command,
         &invocation,
@@ -246,12 +267,19 @@ pub(crate) fn resolve_agent_invocation_for_planning(
 
     let model = resolved.model;
     let reasoning = resolved.reasoning;
+    if !builtin_provider && !args.attachments.is_empty() {
+        bail!(
+            "agent `{agent_name}` does not support prompt image attachments; use built-in `codex` or `claude`, or remove the attachments"
+        );
+    }
     let payload = render_agent_payload(
+        &agent_name,
         &args.prompt,
         args.instructions.as_deref(),
         model.as_deref(),
         reasoning.as_deref(),
-    );
+        &args.attachments,
+    )?;
     let context = builtin_invocation_context(args.route_key.as_deref());
     let (command, rendered_args, transport) =
         if let Some(provider) = builtin_provider_adapter(&agent_name) {
@@ -310,6 +338,7 @@ pub(crate) fn resolve_agent_invocation_for_planning(
         reasoning_source: resolved.reasoning_source,
         transport,
         payload,
+        attachments: args.attachments.clone(),
         builtin_provider,
     })
 }
@@ -358,19 +387,21 @@ fn builtin_invocation_context(route_key: Option<&str>) -> BuiltinInvocationConte
 }
 
 fn render_agent_payload(
+    provider: &str,
     prompt: &str,
     instructions: Option<&str>,
     model: Option<&str>,
     reasoning: Option<&str>,
-) -> String {
+    attachments: &[PromptImageAttachment],
+) -> Result<String> {
     let instructions = instructions
         .map(str::trim)
         .filter(|value| !value.is_empty());
     let model = model.map(str::trim).filter(|value| !value.is_empty());
     let reasoning = reasoning.map(str::trim).filter(|value| !value.is_empty());
 
-    if instructions.is_none() && model.is_none() && reasoning.is_none() {
-        return prompt.to_string();
+    if instructions.is_none() && model.is_none() && reasoning.is_none() && attachments.is_empty() {
+        return Ok(prompt.to_string());
     }
 
     let mut sections = vec![format!("Prompt:\n{prompt}")];
@@ -387,7 +418,39 @@ fn render_agent_payload(
         sections.push(format!("Preferred reasoning effort:\n{reasoning}"));
     }
 
-    sections.join("\n\n")
+    if !attachments.is_empty() {
+        sections.push(render_attachment_payload(provider, attachments)?);
+    }
+
+    Ok(sections.join("\n\n"))
+}
+
+fn render_attachment_payload(
+    provider: &str,
+    attachments: &[PromptImageAttachment],
+) -> Result<String> {
+    let encoded = encode_prompt_images_for_provider(attachments)?;
+    let mut lines = vec![format!(
+        "Prompt image attachments for built-in provider `{provider}`:"
+    )];
+    for (index, attachment) in encoded.iter().enumerate() {
+        lines.push(format!("[Image #{}]", index + 1));
+        lines.push(format!("name: {}", attachment.display_name));
+        lines.push("mime: image/png".to_string());
+        lines.push(format!(
+            "dimensions: {}x{}{}",
+            attachment.width,
+            attachment.height,
+            if attachment.resized {
+                " (resized to fit 2048x768)"
+            } else {
+                ""
+            }
+        ));
+        lines.push("base64:".to_string());
+        lines.push(attachment.base64_png.clone());
+    }
+    Ok(lines.join("\n"))
 }
 
 fn render_command_args(
@@ -433,5 +496,73 @@ pub(crate) fn format_agent_config_source(source: &AgentConfigSource) -> String {
         AgentConfigSource::FamilyRoute(route) => format!("family_route:{route}"),
         AgentConfigSource::RepoDefault => "repo_default".to_string(),
         AgentConfigSource::GlobalDefault => "global_default".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ResolvedAgentInvocation, apply_invocation_environment, render_invocation_diagnostics,
+    };
+    use crate::agent_provider::BuiltinInvocationContext;
+    use crate::config::{AgentConfigSource, PromptTransport};
+    use std::process::Command;
+
+    fn test_invocation() -> ResolvedAgentInvocation {
+        ResolvedAgentInvocation {
+            agent: "codex".to_string(),
+            command: "codex".to_string(),
+            args: vec!["exec".to_string()],
+            context: BuiltinInvocationContext::Planning,
+            model: Some("gpt-5.4".to_string()),
+            reasoning: Some("high".to_string()),
+            route_key: Some("backlog.plan".to_string()),
+            family_key: Some("backlog".to_string()),
+            provider_source: AgentConfigSource::GlobalDefault,
+            model_source: Some(AgentConfigSource::RepoDefault),
+            reasoning_source: Some(AgentConfigSource::RepoDefault),
+            transport: PromptTransport::Arg,
+            payload: "Prompt:\nhello".to_string(),
+            attachments: Vec::new(),
+            builtin_provider: true,
+        }
+    }
+
+    #[test]
+    fn apply_invocation_environment_sets_non_interactive_color_guards() {
+        let invocation = test_invocation();
+        let mut command = Command::new("env");
+
+        apply_invocation_environment(&mut command, &invocation, "hello", Some("be precise"));
+
+        let envs = command
+            .get_envs()
+            .filter_map(|(key, value)| Some((key.to_str()?, value?.to_str()?)))
+            .collect::<std::collections::BTreeMap<_, _>>();
+
+        assert_eq!(envs.get("TERM"), Some(&"dumb"));
+        assert_eq!(envs.get("NO_COLOR"), Some(&"1"));
+        assert_eq!(envs.get("CLICOLOR"), Some(&"0"));
+        assert_eq!(envs.get("CLICOLOR_FORCE"), Some(&"0"));
+        assert_eq!(envs.get("FORCE_COLOR"), Some(&"0"));
+        assert_eq!(envs.get("METASTACK_AGENT_PROMPT"), Some(&"hello"));
+    }
+
+    #[test]
+    fn render_invocation_diagnostics_reports_resolved_sources() {
+        let lines = render_invocation_diagnostics(&test_invocation());
+
+        assert!(lines.iter().any(|line| line == "Resolved provider: codex"));
+        assert!(lines.iter().any(|line| line == "Resolved model: gpt-5.4"));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "Provider source: global_default")
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "Model source: repo_default")
+        );
     }
 }

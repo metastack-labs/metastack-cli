@@ -115,22 +115,69 @@ JSON
     });
 
     server.mock(|when, then| {
+        let parent_issue_detail = serde_json::from_str::<serde_json::Value>(
+            &json!({
+                "data": {
+                    "issue": {
+                        "id": "parent-1",
+                        "identifier": "MET-35",
+                        "title": "Create the technical and sync commands",
+                        "description": "Context\n\nTechnical workflow.\n\n![diagram](http://127.0.0.1:0/images/issue-diagram.png)\n\n## Acceptance Criteria\n- Generate backlog docs from the template\n- Keep sync safe for the child ticket",
+                        "url": "https://linear.app/issues/MET-35",
+                        "priority": 2,
+                        "updatedAt": "2026-03-14T16:00:00Z",
+                        "team": {
+                            "id": "team-1",
+                            "key": "MET",
+                            "name": "Metastack"
+                        },
+                        "project": {
+                            "id": "project-1",
+                            "name": "MetaStack CLI"
+                        },
+                        "labels": { "nodes": [] },
+                        "comments": {
+                            "nodes": [{
+                                "id": "comment-1",
+                                "body": "Need parent art\n\n![comment-shot](REPLACE_COMMENT_IMAGE)",
+                                "createdAt": "2026-03-16T10:00:00Z",
+                                "user": {
+                                    "name": "Alice"
+                                },
+                                "resolvedAt": null
+                            }]
+                        },
+                        "state": {
+                            "id": "state-2",
+                            "name": "In Progress",
+                            "type": "started"
+                        },
+                        "attachments": { "nodes": [] },
+                        "parent": {
+                            "id": "meta-parent-1",
+                            "identifier": "MET-10",
+                            "title": "Parent context issue",
+                            "url": "https://linear.app/issues/MET-10",
+                            "description": "Parent issue context\n\n![parent-reference](REPLACE_PARENT_IMAGE)"
+                        },
+                        "children": { "nodes": [] }
+                    }
+                }
+            })
+            .to_string()
+            .replace(
+                "http://127.0.0.1:0/images/issue-diagram.png",
+                &server.url("/images/issue-diagram.png"),
+            )
+            .replace("REPLACE_COMMENT_IMAGE", &server.url("/images/comment-shot.jpg"))
+            .replace("REPLACE_PARENT_IMAGE", &server.url("/images/parent-reference.svg")),
+        )
+        .expect("parent issue detail should be valid json");
         when.method(POST)
             .path("/graphql")
             .body_includes("query Issue")
             .body_includes("\"id\":\"parent-1\"");
-        then.status(200).json_body(json!({
-            "data": {
-                "issue": issue_detail_node(
-                    "parent-1",
-                    "MET-35",
-                    "Create the technical and sync commands",
-                    "Context\n\nTechnical workflow.\n\n## Acceptance Criteria\n- Generate backlog docs from the template\n- Keep sync safe for the child ticket",
-                    Vec::new(),
-                    None,
-                )
-            }
-        }));
+        then.status(200).json_body(parent_issue_detail);
     });
 
     server.mock(|when, then| {
@@ -245,6 +292,17 @@ JSON
         }));
     });
 
+    for path in [
+        "/images/issue-diagram.png",
+        "/images/comment-shot.jpg",
+        "/images/parent-reference.svg",
+    ] {
+        server.mock(move |when, then| {
+            when.method(GET).path(path);
+            then.status(200).body("image-bytes");
+        });
+    }
+
     for (index, file_name) in [
         "README.md",
         "checklist.md",
@@ -257,10 +315,15 @@ JSON
         "validation.md",
         "context/README.md",
         "context/context-note-template.md",
+        "context/ticket-discussion.md",
         "tasks/README.md",
         "tasks/workstream-template.md",
         "artifacts/README.md",
         "artifacts/artifact-template.md",
+        "artifacts/comment-1-comment-shot.jpg",
+        "artifacts/issue-diagram.png",
+        "artifacts/parent-parent-reference.svg",
+        "artifacts/ticket-images.md",
     ]
     .into_iter()
     .enumerate()
@@ -357,6 +420,8 @@ JSON
     let validation = fs::read_to_string(issue_dir.join("validation.md"))?;
     let metadata = fs::read_to_string(issue_dir.join(".linear.json"))?;
     let payload = fs::read_to_string(output_dir.join("payload.txt"))?;
+    let ticket_images = fs::read_to_string(issue_dir.join("artifacts/ticket-images.md"))?;
+    let ticket_discussion = fs::read_to_string(issue_dir.join("context/ticket-discussion.md"))?;
 
     assert!(index.contains("Agent-generated technical backlog"));
     assert!(!index.contains("{{BACKLOG_TITLE}}"));
@@ -369,6 +434,16 @@ JSON
     assert!(validation.contains("meta backlog tech MET-35"));
     assert!(metadata.contains("\"identifier\": \"MET-36\""));
     assert!(metadata.contains("\"parent_identifier\": \"MET-35\""));
+    assert!(ticket_images.contains("| `issue-diagram.png` | diagram | Issue description |"));
+    assert!(
+        ticket_images
+            .contains("| `parent-parent-reference.svg` | parent-reference | Parent description |")
+    );
+    assert!(
+        ticket_images.contains("| `comment-1-comment-shot.jpg` | comment-shot | Need parent art |")
+    );
+    assert!(ticket_discussion.contains("### **Alice** (2026-03-16)"));
+    assert!(ticket_discussion.contains("![comment-shot](artifacts/comment-1-comment-shot.jpg)"));
     assert!(payload.contains("Parent Linear issue"));
     assert!(payload.contains("Create the technical and sync commands"));
     assert!(payload.contains("Injected workflow contract:"));
@@ -384,6 +459,12 @@ JSON
     assert!(payload.contains("## SCAN.md"));
     assert!(payload.contains("Selected acceptance criteria for this technical sub-ticket"));
     assert!(payload.contains("- Generate backlog docs from the template"));
+    assert!(payload.contains("Parent issue context:"));
+    assert!(payload.contains("Ticket discussion context:"));
+    assert!(payload.contains("Localized ticket images:"));
+    assert!(payload.contains("artifacts/issue-diagram.png"));
+    assert!(payload.contains("artifacts/parent-parent-reference.svg"));
+    assert!(payload.contains("Need parent art"));
     assert!(payload.contains("Repository directory snapshot"));
     issue_labels_mock.assert_calls(1);
     create_issue_mock.assert_calls(1);

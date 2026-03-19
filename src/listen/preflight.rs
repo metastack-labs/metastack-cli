@@ -126,6 +126,7 @@ pub(super) fn run_listen_provider_preflight(
             model: request.model.map(str::to_string),
             reasoning: request.reasoning.map(str::to_string),
             transport: None,
+            attachments: Vec::new(),
         },
     )?;
     let command_args = command_args_for_invocation(&invocation, Some(request.working_dir))?;

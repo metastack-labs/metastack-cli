@@ -5,8 +5,8 @@ pub(crate) use execution::run_agent_capture;
 
 pub(crate) use brief::{AgentBriefRequest, TicketMetadata, write_agent_brief};
 pub(crate) use execution::{
-    AgentExecutionOptions, apply_invocation_environment, command_args_for_invocation,
-    format_agent_config_source, render_invocation_diagnostics,
+    AgentExecutionOptions, apply_invocation_environment, apply_noninteractive_agent_environment,
+    command_args_for_invocation, format_agent_config_source, render_invocation_diagnostics,
     resolve_agent_invocation_for_planning, validate_invocation_command_surface,
 };
 
@@ -18,6 +18,7 @@ mod tests {
     use std::process::Command;
 
     use anyhow::{Context, Result, bail};
+    use image::{ImageBuffer, Rgba};
     use tempfile::tempdir;
 
     use super::{
@@ -30,6 +31,7 @@ mod tests {
         PromptTransport,
     };
     use crate::fs::{PlanningPaths, canonicalize_existing_dir, ensure_dir, write_text_file};
+    use crate::tui::prompt_images::PromptImageAttachment;
 
     #[test]
     fn write_agent_brief_renders_deterministic_sections() -> Result<()> {
@@ -108,6 +110,7 @@ mod tests {
                 model: None,
                 reasoning: None,
                 transport: None,
+                attachments: Vec::new(),
             },
         )?;
 
@@ -148,6 +151,7 @@ mod tests {
                 model: None,
                 reasoning: None,
                 transport: None,
+                attachments: Vec::new(),
             },
         )?;
 
@@ -236,6 +240,7 @@ mod tests {
                 model: None,
                 reasoning: None,
                 transport: None,
+                attachments: Vec::new(),
             },
         )?;
 
@@ -299,6 +304,7 @@ mod tests {
                 model: None,
                 reasoning: None,
                 transport: None,
+                attachments: Vec::new(),
             },
         )?;
 
@@ -334,6 +340,7 @@ mod tests {
                 model: None,
                 reasoning: None,
                 transport: None,
+                attachments: Vec::new(),
             },
         )?;
 
@@ -379,6 +386,7 @@ mod tests {
                 model: None,
                 reasoning: None,
                 transport: None,
+                attachments: Vec::new(),
             },
         )?;
 
@@ -419,6 +427,7 @@ mod tests {
                 model: None,
                 reasoning: None,
                 transport: None,
+                attachments: Vec::new(),
             },
         )?;
 
@@ -454,6 +463,7 @@ mod tests {
                 model: None,
                 reasoning: None,
                 transport: None,
+                attachments: Vec::new(),
             },
         )?;
 
@@ -488,6 +498,7 @@ mod tests {
                 model: None,
                 reasoning: None,
                 transport: None,
+                attachments: Vec::new(),
             },
         )?;
 
@@ -527,6 +538,7 @@ mod tests {
                 model: None,
                 reasoning: None,
                 transport: None,
+                attachments: Vec::new(),
             },
         )?;
 
@@ -535,6 +547,100 @@ mod tests {
         assert!(command_args.iter().any(|arg| arg == "--effort=high"));
 
         Ok(())
+    }
+
+    #[test]
+    fn builtin_codex_invocation_embeds_prompt_image_payload() -> Result<()> {
+        let temp = tempdir()?;
+        let image_path = temp.path().join("diagram.png");
+        ImageBuffer::<Rgba<u8>, Vec<u8>>::from_pixel(2, 2, Rgba([1, 2, 3, 255]))
+            .save(&image_path)?;
+
+        let config = AppConfig {
+            agents: AgentSettings {
+                default_agent: None,
+                default_model: Some("gpt-5.4".to_string()),
+                default_reasoning: None,
+                routing: Default::default(),
+                commands: BTreeMap::new(),
+            },
+            ..AppConfig::default()
+        };
+        let invocation = resolve_agent_invocation_for_planning(
+            &config,
+            &PlanningMeta::default(),
+            &RunAgentArgs {
+                root: None,
+                route_key: None,
+                agent: Some("codex".to_string()),
+                prompt: "Review this mockup".to_string(),
+                instructions: None,
+                model: None,
+                reasoning: None,
+                transport: None,
+                attachments: vec![PromptImageAttachment {
+                    original_path: image_path.clone(),
+                    stored_path: image_path,
+                    display_name: "diagram.png".to_string(),
+                }],
+            },
+        )?;
+
+        assert!(invocation.payload.contains("Prompt image attachments"));
+        assert!(invocation.payload.contains("[Image #1]"));
+        assert!(invocation.payload.contains("base64:"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn custom_agents_fail_fast_when_prompt_images_are_attached() {
+        let mut commands = BTreeMap::new();
+        commands.insert(
+            "capture".to_string(),
+            AgentCommandConfig {
+                command: "capture-agent".to_string(),
+                args: vec!["{{payload}}".to_string()],
+                transport: PromptTransport::Stdin,
+            },
+        );
+        let config = AppConfig {
+            agents: AgentSettings {
+                default_agent: Some("capture".to_string()),
+                default_model: None,
+                default_reasoning: None,
+                routing: Default::default(),
+                commands,
+            },
+            ..AppConfig::default()
+        };
+
+        let error = resolve_agent_invocation_for_planning(
+            &config,
+            &PlanningMeta::default(),
+            &RunAgentArgs {
+                root: None,
+                route_key: None,
+                agent: None,
+                prompt: "Review this mockup".to_string(),
+                instructions: None,
+                model: None,
+                reasoning: None,
+                transport: None,
+                attachments: vec![PromptImageAttachment {
+                    original_path: Path::new("/tmp/mock.png").to_path_buf(),
+                    stored_path: Path::new("/tmp/mock.png").to_path_buf(),
+                    display_name: "mock.png".to_string(),
+                }],
+            },
+        )
+        .expect_err("custom agent attachments should be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("does not support prompt image attachments")
+        );
     }
 
     fn run_git(root: &Path, args: &[&str]) -> Result<()> {

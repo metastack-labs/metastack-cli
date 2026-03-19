@@ -189,6 +189,7 @@ async fn refine_issue(
             model: args.model.clone(),
             reasoning: args.reasoning.clone(),
             transport: None,
+            attachments: Vec::new(),
         })
         .with_context(|| {
             "meta issues refine requires a configured local agent to critique and rewrite existing issues"
@@ -749,6 +750,7 @@ mod tests {
                 identifier: "MET-143".to_string(),
                 title: "Parent".to_string(),
                 url: "https://linear.example/MET-143".to_string(),
+                description: None,
             }),
             children: Vec::new(),
         };

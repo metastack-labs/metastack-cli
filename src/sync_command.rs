@@ -20,7 +20,7 @@ use crate::fs::{
 };
 use crate::linear::{
     AttachmentCreateRequest, IssueEditSpec, IssueListFilters, IssueSummary, LinearService,
-    ReqwestLinearClient,
+    ReqwestLinearClient, TicketDiscussionBudgets, materialize_issue_context, prepare_issue_context,
 };
 use crate::scaffold::ensure_planning_layout;
 use crate::sync_dashboard::{
@@ -128,7 +128,19 @@ pub async fn run_sync_link(
     args: &SyncLinkArgs,
 ) -> Result<()> {
     let root = canonicalize_existing_dir(&client_args.root)?;
-    let _planning_meta = load_required_planning_meta(&root, "sync")?;
+    let planning_meta = load_required_planning_meta(&root, "sync")?;
+    let discussion_budgets = TicketDiscussionBudgets {
+        prompt_chars: planning_meta
+            .linear
+            .ticket_context
+            .discussion_prompt_chars
+            .unwrap_or(TicketDiscussionBudgets::default().prompt_chars),
+        persisted_chars: planning_meta
+            .linear
+            .ticket_context
+            .discussion_persisted_chars
+            .unwrap_or(TicketDiscussionBudgets::default().persisted_chars),
+    };
     ensure_planning_layout(&root, false)?;
     let entries = discover_backlog_entries(&root)?;
     let LinearCommandContext { service, .. } = load_linear_command_context(client_args, None)?;
@@ -169,7 +181,15 @@ pub async fn run_sync_link(
         && metadata.identifier.eq_ignore_ascii_case(&issue.identifier)
     {
         if args.pull {
-            let _ = sync_pull_issue(&root, &service, &issue, &issue_dir, false).await?;
+            let _ = sync_pull_issue(
+                &root,
+                &service,
+                &issue,
+                &issue_dir,
+                discussion_budgets,
+                false,
+            )
+            .await?;
         } else {
             println!(
                 "{} is already linked to {} at {}.",
@@ -187,7 +207,15 @@ pub async fn run_sync_link(
     )?;
 
     if args.pull {
-        let _ = sync_pull_issue(&root, &service, &issue, &issue_dir, false).await?;
+        let _ = sync_pull_issue(
+            &root,
+            &service,
+            &issue,
+            &issue_dir,
+            discussion_budgets,
+            false,
+        )
+        .await?;
     } else {
         println!(
             "Linked {} to {}.",
@@ -287,12 +315,24 @@ pub async fn run_sync_status(client_args: &LinearClientArgs, args: &SyncStatusAr
 /// local backlog paths cannot be prepared, or overwrite safeguards block the pull.
 pub async fn run_sync_pull(client_args: &LinearClientArgs, args: &SyncPullArgs) -> Result<()> {
     let root = canonicalize_existing_dir(&client_args.root)?;
-    let _planning_meta = load_required_planning_meta(&root, "sync")?;
+    let planning_meta = load_required_planning_meta(&root, "sync")?;
+    let discussion_budgets = TicketDiscussionBudgets {
+        prompt_chars: planning_meta
+            .linear
+            .ticket_context
+            .discussion_prompt_chars
+            .unwrap_or(TicketDiscussionBudgets::default().prompt_chars),
+        persisted_chars: planning_meta
+            .linear
+            .ticket_context
+            .discussion_persisted_chars
+            .unwrap_or(TicketDiscussionBudgets::default().persisted_chars),
+    };
     ensure_planning_layout(&root, false)?;
     let LinearCommandContext { service, .. } = load_linear_command_context(client_args, None)?;
 
     if args.all {
-        return run_sync_pull_all(&root, &service).await;
+        return run_sync_pull_all(&root, &service, discussion_budgets).await;
     }
 
     let issue_identifier = args
@@ -303,7 +343,15 @@ pub async fn run_sync_pull(client_args: &LinearClientArgs, args: &SyncPullArgs) 
     let entries = discover_backlog_entries(&root)?;
     let issue_dir = resolve_issue_dir_for_identifier(&root, &entries, &issue.identifier)?;
     ensure_dir(&issue_dir)?;
-    let _ = sync_pull_issue(&root, &service, &issue, &issue_dir, false).await?;
+    let _ = sync_pull_issue(
+        &root,
+        &service,
+        &issue,
+        &issue_dir,
+        discussion_budgets,
+        false,
+    )
+    .await?;
     Ok(())
 }
 
@@ -365,6 +413,7 @@ fn guard_listen_issue_description_sync(identifier: &str) -> Result<()> {
 async fn run_sync_pull_all(
     root: &Path,
     service: &LinearService<ReqwestLinearClient>,
+    discussion_budgets: TicketDiscussionBudgets,
 ) -> Result<()> {
     let entries = discover_backlog_entries(root)?;
     let linked_entries = entries
@@ -383,7 +432,15 @@ async fn run_sync_pull_all(
             .as_ref()
             .ok_or_else(|| anyhow!("linked backlog entry metadata unexpectedly missing"))?;
         match service.load_issue(&metadata.identifier).await {
-            Ok(issue) => match sync_pull_issue(root, service, &issue, &entry.issue_dir, true).await
+            Ok(issue) => match sync_pull_issue(
+                root,
+                service,
+                &issue,
+                &entry.issue_dir,
+                discussion_budgets,
+                true,
+            )
+            .await
             {
                 Ok(SyncExecutionOutcome::Synced) => summary.synced += 1,
                 Ok(SyncExecutionOutcome::Skipped) => summary.skipped += 1,
@@ -512,9 +569,11 @@ async fn sync_pull_issue(
     service: &LinearService<ReqwestLinearClient>,
     issue: &IssueSummary,
     issue_dir: &Path,
+    discussion_budgets: TicketDiscussionBudgets,
     skip_if_synced: bool,
 ) -> Result<SyncExecutionOutcome> {
     ensure_dir(issue_dir)?;
+    let prepared_context = prepare_issue_context(issue, discussion_budgets);
     let metadata = load_issue_metadata_if_present(issue_dir)?;
     let remote_hash = issue_remote_hash(issue);
     let resolution = resolve_backlog_sync_status(
@@ -531,7 +590,11 @@ async fn sync_pull_issue(
         let local_description = read_optional_text_file(&issue_dir.join(INDEX_FILE_NAME))?;
         let diff = render_sync_diff(
             &local_description,
-            issue.description.as_deref().unwrap_or_default(),
+            prepared_context
+                .issue
+                .description
+                .as_deref()
+                .unwrap_or_default(),
         );
 
         if io::stdin().is_terminal() && io::stdout().is_terminal() {
@@ -551,7 +614,14 @@ async fn sync_pull_issue(
         }
     }
 
-    write_issue_index_file(issue_dir, issue.description.as_deref().unwrap_or_default())?;
+    write_issue_index_file(
+        issue_dir,
+        prepared_context
+            .issue
+            .description
+            .as_deref()
+            .unwrap_or_default(),
+    )?;
 
     let mut managed_files = Vec::new();
     for attachment in &issue.attachments {
@@ -573,6 +643,15 @@ async fn sync_pull_issue(
             attachment_id: Some(attachment.id.clone()),
             url: Some(attachment.url.clone()),
         });
+    }
+
+    let download_failures =
+        materialize_issue_context(service, issue_dir, &prepared_context).await?;
+    for failure in download_failures {
+        eprintln!(
+            "warning: failed to localize ticket image for {}: {} from {} ({})",
+            issue.identifier, failure.filename, failure.source_label, failure.error
+        );
     }
 
     let local_hash = compute_local_sync_hash(issue_dir)?.ok_or_else(|| {

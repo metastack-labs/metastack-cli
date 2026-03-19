@@ -230,12 +230,14 @@ fn render_step_list(frame: &mut Frame<'_>, app: &IssueEditApp, area: ratatui::la
 fn render_step_panel(frame: &mut Frame<'_>, app: &IssueEditApp, area: ratatui::layout::Rect) {
     match app.step {
         EditStep::Title => {
-            let rendered = app.title.render("Type the issue title...", true);
             let block = Block::default()
                 .borders(Borders::ALL)
                 .title("Title [editing]")
                 .border_style(Style::default().add_modifier(Modifier::BOLD));
             let inner = block.inner(area);
+            let rendered =
+                app.title
+                    .render_with_width("Type the issue title...", true, inner.width);
             let paragraph = Paragraph::new(rendered.text.clone())
                 .block(block)
                 .wrap(Wrap { trim: false });
@@ -243,14 +245,16 @@ fn render_step_panel(frame: &mut Frame<'_>, app: &IssueEditApp, area: ratatui::l
             rendered.set_cursor(frame, inner);
         }
         EditStep::Description => {
-            let rendered = app
-                .description
-                .render("Type the issue description...", true);
             let block = Block::default()
                 .borders(Borders::ALL)
                 .title("Description [editing]")
                 .border_style(Style::default().add_modifier(Modifier::BOLD));
             let inner = block.inner(area);
+            let rendered = app.description.render_with_width(
+                "Type the issue description...",
+                true,
+                inner.width,
+            );
             let paragraph = Paragraph::new(rendered.text.clone())
                 .block(block)
                 .wrap(Wrap { trim: false });

@@ -9,6 +9,7 @@ use time::{OffsetDateTime, UtcOffset};
 use walkdir::WalkDir;
 
 use crate::fs::{PlanningPaths, write_text_file};
+use crate::linear::load_localized_ticket_context_ignored_paths;
 
 pub const INDEX_FILE_NAME: &str = "index.md";
 pub const METADATA_FILE_NAME: &str = ".linear.json";
@@ -350,6 +351,7 @@ pub fn write_issue_attachment_file(
 }
 
 pub fn collect_local_sync_files(issue_dir: &Path) -> Result<Vec<LocalBacklogFile>> {
+    let ignored_paths = load_localized_ticket_context_ignored_paths(issue_dir)?;
     let mut files = WalkDir::new(issue_dir)
         .into_iter()
         .filter_entry(|entry| {
@@ -368,7 +370,11 @@ pub fn collect_local_sync_files(issue_dir: &Path) -> Result<Vec<LocalBacklogFile
             Ok(_) => None,
             Err(error) => Some(Err(error)),
         })
-        .map(|entry| -> Result<LocalBacklogFile> {
+        .map(|entry| match entry {
+            Ok(entry) => Ok(entry),
+            Err(error) => Err(error),
+        })
+        .map(|entry| -> Result<Option<LocalBacklogFile>> {
             let entry = entry.with_context(|| {
                 format!(
                     "failed to traverse backlog issue directory `{}`",
@@ -376,17 +382,25 @@ pub fn collect_local_sync_files(issue_dir: &Path) -> Result<Vec<LocalBacklogFile
                 )
             })?;
             let relative_path = relative_path(issue_dir, entry.path())?;
+            if ignored_paths.contains(&relative_path) {
+                return Ok(None);
+            }
 
             let contents = fs::read(entry.path())
                 .with_context(|| format!("failed to read `{}`", entry.path().display()))?;
 
-            Ok(LocalBacklogFile {
+            Ok(Some(LocalBacklogFile {
                 title: relative_path.clone(),
                 content_type: content_type_for_path(entry.path()),
                 absolute_path: entry.into_path(),
                 relative_path,
                 contents,
-            })
+            }))
+        })
+        .filter_map(|result| match result {
+            Ok(Some(file)) => Some(Ok(file)),
+            Ok(None) => None,
+            Err(error) => Some(Err(error)),
         })
         .collect::<Result<Vec<_>>>()?;
 

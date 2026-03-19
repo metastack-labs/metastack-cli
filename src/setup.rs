@@ -1475,12 +1475,12 @@ fn render_input_panel(
     field: &InputFieldState,
     placeholder: &str,
 ) {
-    let rendered = field.render(placeholder, true);
     let block = Block::default()
         .borders(Borders::ALL)
         .title(format!("{title} [editing]"))
         .border_style(Style::default().add_modifier(Modifier::BOLD));
     let inner = block.inner(area);
+    let rendered = field.render_with_width(placeholder, true, inner.width);
     let paragraph = Paragraph::new(rendered.text.clone())
         .block(block)
         .wrap(Wrap { trim: false });

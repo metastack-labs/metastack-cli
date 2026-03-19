@@ -99,6 +99,10 @@ comments(first: 50) {
   nodes {
     id
     body
+    createdAt
+    user {
+      name
+    }
     resolvedAt
   }
 }
@@ -142,6 +146,10 @@ comments(first: 50) {
   nodes {
     id
     body
+    createdAt
+    user {
+      name
+    }
     resolvedAt
   }
 }
@@ -164,6 +172,7 @@ parent {
   identifier
   title
   url
+  description
 }
 children(first: 100) {
   nodes {

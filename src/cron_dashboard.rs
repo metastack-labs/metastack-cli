@@ -20,6 +20,7 @@ use crate::tui::theme::{Tone, badge, key_hints, list, panel_title, paragraph};
 
 const NONE_AGENT_LABEL: &str = "None";
 const ENABLED_OPTIONS: [&str; 2] = ["Enabled", "Disabled"];
+const CRON_PROMPT_ATTACHMENT_REJECTION: &str = "image attachments are not supported for saved cron prompts yet; paste text or a path after persistence support lands";
 
 #[derive(Debug, Clone)]
 pub(crate) struct CronInitFormContext {
@@ -331,7 +332,7 @@ fn render_footer(frame: &mut Frame<'_>, app: &CronInitApp, area: Rect) {
     let footer = paragraph(Text::from(vec![
         Line::from("Tab/Shift+Tab or Up/Down moves between fields. Left/Right changes selections."),
         Line::from(
-            "Type to edit text fields. Enter creates the job from any row. In Prompt, Shift+Enter inserts a newline. Ctrl+S also creates the job. Esc cancels.",
+            "Type to edit text fields. Enter creates the job from any row. In Prompt, Shift+Enter inserts a newline. Ctrl+V pastes text, but image attachments are rejected until saved-prompt persistence exists. Esc cancels.",
         ),
         Line::from(footer_message),
     ]), panel_title("Controls", false))
@@ -373,7 +374,10 @@ impl CronInitApp {
             custom_schedule: InputFieldState::new(schedule_prefill.custom_schedule),
             command: InputFieldState::new(prefill.command.unwrap_or_default()),
             agent: SelectFieldState::new(agent_options, default_agent_index),
-            prompt: InputFieldState::multiline(prefill.prompt.unwrap_or_default()),
+            prompt: InputFieldState::multiline_rejecting_prompt_attachments(
+                prefill.prompt.unwrap_or_default(),
+                CRON_PROMPT_ATTACHMENT_REJECTION,
+            ),
             working_directory: InputFieldState::new(
                 prefill.working_directory.unwrap_or_else(|| ".".to_string()),
             ),
@@ -424,6 +428,15 @@ impl CronInitApp {
             KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 return self.submit();
             }
+            KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if self.focus == CronField::Prompt {
+                    match self.prompt.paste_clipboard_with_prompt_attachments() {
+                        Ok(_) => self.error = None,
+                        Err(error) => self.error = Some(error.to_string()),
+                    }
+                }
+                return None;
+            }
             _ => {}
         }
 
@@ -460,9 +473,10 @@ impl CronInitApp {
                 let _ = self.command.paste(text);
             }
             CronField::Agent => {}
-            CronField::Prompt => {
-                let _ = self.prompt.paste(text);
-            }
+            CronField::Prompt => match self.prompt.paste_with_prompt_attachments(text) {
+                Ok(_) => {}
+                Err(error) => self.error = Some(error.to_string()),
+            },
             CronField::WorkingDirectory => {
                 let _ = self.working_directory.paste(text);
             }
@@ -1177,5 +1191,33 @@ mod tests {
 
         assert_eq!(app.prompt.value(), "First line\nSecond line\n");
         assert_eq!(app.error, None);
+    }
+
+    #[test]
+    fn prompt_rejects_image_path_paste_until_persistence_support_lands() {
+        use image::{ImageBuffer, Rgba};
+        use tempfile::tempdir;
+
+        let temp = tempdir().expect("temp dir");
+        let image_path = temp.path().join("mock.png");
+        ImageBuffer::<Rgba<u8>, Vec<u8>>::from_pixel(2, 2, Rgba([1, 2, 3, 255]))
+            .save(&image_path)
+            .expect("save image");
+
+        let mut app = CronInitApp::new(
+            CronInitFormContext {
+                agent_options: vec!["codex".to_string()],
+            },
+            CronInitFormPrefill::default(),
+        );
+        app.focus = CronField::Prompt;
+
+        app.handle_paste(image_path.to_str().expect("utf8"));
+
+        assert_eq!(app.prompt.value(), "");
+        assert_eq!(
+            app.error.as_deref(),
+            Some(super::CRON_PROMPT_ATTACHMENT_REJECTION)
+        );
     }
 }

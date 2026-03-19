@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 
+use anyhow::{Result, bail};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -7,11 +8,21 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Text};
 use unicode_width::UnicodeWidthChar;
 
+use crate::tui::prompt_images::{
+    ClipboardPromptPaste, MAX_PROMPT_IMAGES, PromptImageAttachment,
+    resolve_attachment_from_pasted_text, resolve_clipboard_prompt_paste,
+};
+
+const ATTACHMENT_MARKER: char = '\u{fffc}';
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct InputFieldState {
     value: String,
     cursor: usize,
     mode: InputFieldMode,
+    attachment_mode: AttachmentMode,
+    attachments: Vec<PromptImageAttachment>,
+    preferred_column: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -24,6 +35,20 @@ pub(crate) struct InputFieldRender {
 enum InputFieldMode {
     SingleLine,
     MultiLine,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AttachmentMode {
+    Disabled,
+    Enabled,
+    Rejected { message: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AttachmentPasteOutcome {
+    NoChange,
+    TextPasted,
+    AttachmentPasted,
 }
 
 impl Default for InputFieldState {
@@ -39,6 +64,9 @@ impl InputFieldState {
             cursor: value.len(),
             value,
             mode: InputFieldMode::SingleLine,
+            attachment_mode: AttachmentMode::Disabled,
+            attachments: Vec::new(),
+            preferred_column: None,
         }
     }
 
@@ -48,11 +76,51 @@ impl InputFieldState {
             cursor: value.len(),
             value,
             mode: InputFieldMode::MultiLine,
+            attachment_mode: AttachmentMode::Disabled,
+            attachments: Vec::new(),
+            preferred_column: None,
+        }
+    }
+
+    pub(crate) fn multiline_with_prompt_attachments(value: impl Into<String>) -> Self {
+        let value = value.into();
+        Self {
+            cursor: value.len(),
+            value,
+            mode: InputFieldMode::MultiLine,
+            attachment_mode: AttachmentMode::Enabled,
+            attachments: Vec::new(),
+            preferred_column: None,
+        }
+    }
+
+    pub(crate) fn multiline_rejecting_prompt_attachments(
+        value: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        let value = value.into();
+        Self {
+            cursor: value.len(),
+            value,
+            mode: InputFieldMode::MultiLine,
+            attachment_mode: AttachmentMode::Rejected {
+                message: message.into(),
+            },
+            attachments: Vec::new(),
+            preferred_column: None,
         }
     }
 
     pub(crate) fn value(&self) -> &str {
         &self.value
+    }
+
+    pub(crate) fn display_value(&self) -> String {
+        render_value_with_attachments(&self.value, &self.attachments)
+    }
+
+    pub(crate) fn prompt_attachments(&self) -> &[PromptImageAttachment] {
+        &self.attachments
     }
 
     #[cfg(test)]
@@ -61,7 +129,17 @@ impl InputFieldState {
     }
 
     pub(crate) fn render(&self, placeholder: &str, active: bool) -> InputFieldRender {
-        if self.value.is_empty() {
+        self.render_with_width(placeholder, active, 1)
+    }
+
+    pub(crate) fn render_with_width(
+        &self,
+        placeholder: &str,
+        active: bool,
+        _width: u16,
+    ) -> InputFieldRender {
+        let display_value = self.display_value();
+        if display_value.is_empty() {
             let text = Text::from(Line::styled(
                 placeholder.to_string(),
                 Style::default().add_modifier(Modifier::DIM),
@@ -74,14 +152,14 @@ impl InputFieldState {
 
         if !active {
             return InputFieldRender {
-                text: Text::from(self.value.clone()),
+                text: Text::from(display_value),
                 cursor_prefix: None,
             };
         }
 
         InputFieldRender {
-            text: Text::from(self.value.clone()),
-            cursor_prefix: Some(self.value[..self.cursor].to_string()),
+            text: Text::from(display_value),
+            cursor_prefix: Some(render_prefix_with_attachments(&self.value[..self.cursor])),
         }
     }
 
@@ -95,6 +173,83 @@ impl InputFieldState {
     }
 
     pub(crate) fn paste(&mut self, text: &str) -> bool {
+        self.paste_normalized_text(text)
+    }
+
+    pub(crate) fn paste_with_prompt_attachments(
+        &mut self,
+        text: &str,
+    ) -> Result<AttachmentPasteOutcome> {
+        match &self.attachment_mode {
+            AttachmentMode::Disabled => Ok(if self.paste_normalized_text(text) {
+                AttachmentPasteOutcome::TextPasted
+            } else {
+                AttachmentPasteOutcome::NoChange
+            }),
+            AttachmentMode::Rejected { message } => {
+                let message = message.clone();
+                self.paste_or_reject_prompt_attachment_text(text, &message)
+            }
+            AttachmentMode::Enabled => self.paste_prompt_attachment_text(text),
+        }
+    }
+
+    pub(crate) fn paste_clipboard_with_prompt_attachments(
+        &mut self,
+    ) -> Result<AttachmentPasteOutcome> {
+        match &self.attachment_mode {
+            AttachmentMode::Disabled => Ok(AttachmentPasteOutcome::NoChange),
+            AttachmentMode::Rejected { message } => {
+                let message = message.clone();
+                match resolve_clipboard_prompt_paste()? {
+                    ClipboardPromptPaste::Attachment(_) => bail!("{message}"),
+                    ClipboardPromptPaste::Text(text) => {
+                        self.paste_or_reject_prompt_attachment_text(&text, &message)
+                    }
+                    ClipboardPromptPaste::Empty => Ok(AttachmentPasteOutcome::NoChange),
+                }
+            }
+            AttachmentMode::Enabled => match resolve_clipboard_prompt_paste()? {
+                ClipboardPromptPaste::Attachment(attachment) => {
+                    self.insert_attachment(attachment)?;
+                    Ok(AttachmentPasteOutcome::AttachmentPasted)
+                }
+                ClipboardPromptPaste::Text(text) => self.paste_prompt_attachment_text(&text),
+                ClipboardPromptPaste::Empty => Ok(AttachmentPasteOutcome::NoChange),
+            },
+        }
+    }
+
+    fn paste_prompt_attachment_text(&mut self, text: &str) -> Result<AttachmentPasteOutcome> {
+        if let Some(attachment) = resolve_attachment_from_pasted_text(text)? {
+            self.insert_attachment(attachment)?;
+            return Ok(AttachmentPasteOutcome::AttachmentPasted);
+        }
+
+        Ok(if self.paste_normalized_text(text) {
+            AttachmentPasteOutcome::TextPasted
+        } else {
+            AttachmentPasteOutcome::NoChange
+        })
+    }
+
+    fn paste_or_reject_prompt_attachment_text(
+        &mut self,
+        text: &str,
+        message: &str,
+    ) -> Result<AttachmentPasteOutcome> {
+        if resolve_attachment_from_pasted_text(text)?.is_some() {
+            bail!("{message}");
+        }
+
+        Ok(if self.paste_normalized_text(text) {
+            AttachmentPasteOutcome::TextPasted
+        } else {
+            AttachmentPasteOutcome::NoChange
+        })
+    }
+
+    fn paste_normalized_text(&mut self, text: &str) -> bool {
         let normalized = match self.mode {
             InputFieldMode::SingleLine => normalize_single_line_paste(text),
             InputFieldMode::MultiLine => normalize_multi_line_paste(text),
@@ -140,6 +295,20 @@ impl InputFieldState {
     fn insert(&mut self, ch: char) {
         self.value.insert(self.cursor, ch);
         self.cursor += ch.len_utf8();
+        self.preferred_column = None;
+    }
+
+    fn insert_attachment(&mut self, attachment: PromptImageAttachment) -> Result<()> {
+        if self.attachments.len() >= MAX_PROMPT_IMAGES {
+            bail!("prompt editors support at most {MAX_PROMPT_IMAGES} image attachments");
+        }
+
+        let attachment_index = attachment_index_for_cursor(&self.value, self.cursor);
+        self.value.insert(self.cursor, ATTACHMENT_MARKER);
+        self.cursor += ATTACHMENT_MARKER.len_utf8();
+        self.attachments.insert(attachment_index, attachment);
+        self.preferred_column = None;
+        Ok(())
     }
 
     fn backspace(&mut self) {
@@ -148,30 +317,124 @@ impl InputFieldState {
         }
 
         let start = previous_boundary(&self.value, self.cursor);
+        if self.value[start..self.cursor].starts_with(ATTACHMENT_MARKER) {
+            self.remove_attachment_at_raw_index(start);
+            return;
+        }
         self.value.drain(start..self.cursor);
         self.cursor = start;
+        self.preferred_column = None;
+    }
+
+    fn delete_forward(&mut self) {
+        if self.cursor >= self.value.len() {
+            return;
+        }
+
+        let end = next_boundary(&self.value, self.cursor);
+        if self.value[self.cursor..end].starts_with(ATTACHMENT_MARKER) {
+            self.remove_attachment_at_raw_index(self.cursor);
+            return;
+        }
+        self.value.drain(self.cursor..end);
+        self.preferred_column = None;
     }
 
     fn clear(&mut self) {
         self.value.clear();
         self.cursor = 0;
+        self.attachments.clear();
+        self.preferred_column = None;
     }
 
     fn move_left(&mut self) {
         self.cursor = previous_boundary(&self.value, self.cursor);
+        self.preferred_column = None;
     }
 
     fn move_right(&mut self) {
         self.cursor = next_boundary(&self.value, self.cursor);
+        self.preferred_column = None;
     }
 
     fn move_home(&mut self) {
         self.cursor = 0;
+        self.preferred_column = None;
     }
 
     fn move_end(&mut self) {
         self.cursor = self.value.len();
+        self.preferred_column = None;
     }
+
+    fn remove_attachment_at_raw_index(&mut self, raw_index: usize) {
+        let attachment_index = attachment_index_before_raw_index(&self.value, raw_index);
+        let end = next_boundary(&self.value, raw_index);
+        self.value.drain(raw_index..end);
+        self.cursor = raw_index;
+        if attachment_index < self.attachments.len() {
+            self.attachments.remove(attachment_index);
+        }
+        self.preferred_column = None;
+    }
+
+    fn move_up(&mut self, width: u16) {
+        self.move_vertical(width, -1);
+    }
+
+    fn move_down(&mut self, width: u16) {
+        self.move_vertical(width, 1);
+    }
+
+    fn move_vertical(&mut self, width: u16, delta: isize) {
+        if self.mode != InputFieldMode::MultiLine {
+            return;
+        }
+
+        let points = cursor_points(&self.value, width);
+        let Some(current_index) = points.iter().position(|point| point.byte == self.cursor) else {
+            return;
+        };
+        let current = &points[current_index];
+        let preferred_column = self.preferred_column.unwrap_or(current.column);
+        let target_row = current.row as isize + delta;
+        if target_row < 0 {
+            self.cursor = points
+                .iter()
+                .find(|point| point.row == 0)
+                .map(|point| point.byte)
+                .unwrap_or(0);
+            self.preferred_column = Some(preferred_column);
+            return;
+        }
+
+        let target_row = target_row as usize;
+        let mut best_match = None;
+        for point in points.iter().filter(|point| point.row == target_row) {
+            match best_match {
+                None => best_match = Some(point),
+                Some(best) if point.column <= preferred_column && point.column >= best.column => {
+                    best_match = Some(point);
+                }
+                Some(best) if best.column > preferred_column && point.column < best.column => {
+                    best_match = Some(point);
+                }
+                _ => {}
+            }
+        }
+
+        if let Some(target) = best_match {
+            self.cursor = target.byte;
+            self.preferred_column = Some(preferred_column);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CursorPoint {
+    byte: usize,
+    row: usize,
+    column: usize,
 }
 
 fn normalize_single_line_paste(text: &str) -> String {
@@ -232,40 +495,101 @@ fn normalize_multi_line_paste(text: &str) -> String {
     normalized
 }
 
-fn wrapped_cursor_position(prefix: &str, width: u16) -> (u16, u16) {
-    let width = usize::from(width.max(1));
-    let mut row = 0usize;
-    let mut column = 0usize;
+fn render_value_with_attachments(value: &str, _attachments: &[PromptImageAttachment]) -> String {
+    let mut rendered = String::new();
+    let mut attachment_index = 0usize;
 
-    for ch in prefix.chars() {
-        if ch == '\n' {
-            row += 1;
-            column = 0;
-            continue;
-        }
-
-        let char_width = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if char_width == 0 {
-            continue;
-        }
-
-        if column + char_width > width {
-            row += 1;
-            column = 0;
-        }
-
-        column += char_width;
-        if column >= width {
-            row += column / width;
-            column %= width;
+    for ch in value.chars() {
+        if ch == ATTACHMENT_MARKER {
+            rendered.push_str(&format!("[Image #{}]", attachment_index + 1));
+            attachment_index += 1;
+        } else {
+            rendered.push(ch);
         }
     }
 
-    (column as u16, row as u16)
+    rendered
+}
+
+fn render_prefix_with_attachments(value: &str) -> String {
+    render_value_with_attachments(value, &[])
+}
+
+fn attachment_index_for_cursor(value: &str, cursor: usize) -> usize {
+    value[..cursor]
+        .chars()
+        .filter(|ch| *ch == ATTACHMENT_MARKER)
+        .count()
+}
+
+fn attachment_index_before_raw_index(value: &str, raw_index: usize) -> usize {
+    value
+        .char_indices()
+        .take_while(|(index, _)| *index < raw_index)
+        .filter(|(_, ch)| *ch == ATTACHMENT_MARKER)
+        .count()
+}
+
+fn wrapped_cursor_position(prefix: &str, width: u16) -> (u16, u16) {
+    let boundaries = wrapped_cursor_boundaries(prefix, width);
+    boundaries
+        .last()
+        .map(|boundary| (boundary.column, boundary.row))
+        .unwrap_or((0, 0))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CursorBoundary {
+    byte: usize,
+    column: u16,
+    row: u16,
+}
+
+fn wrapped_cursor_boundaries(value: &str, width: u16) -> Vec<CursorBoundary> {
+    let width = usize::from(width.max(1));
+    let mut boundaries = Vec::with_capacity(value.chars().count() + 1);
+    let mut row = 0usize;
+    let mut column = 0usize;
+    boundaries.push(CursorBoundary {
+        byte: 0,
+        column: 0,
+        row: 0,
+    });
+
+    for (byte_index, ch) in value.char_indices() {
+        if ch == '\n' {
+            row += 1;
+            column = 0;
+        } else {
+            let char_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if char_width > 0 && column + char_width > width {
+                row += 1;
+                column = 0;
+            }
+
+            column += char_width;
+            if column >= width {
+                row += column / width;
+                column %= width;
+            }
+        }
+
+        boundaries.push(CursorBoundary {
+            byte: byte_index + ch.len_utf8(),
+            column: column as u16,
+            row: row as u16,
+        });
+    }
+
+    boundaries
 }
 
 impl InputFieldState {
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> bool {
+        self.handle_key_with_width(key, 1)
+    }
+
+    pub(crate) fn handle_key_with_width(&mut self, key: KeyEvent, width: u16) -> bool {
         match key.code {
             KeyCode::Enter
                 if self.mode == InputFieldMode::MultiLine
@@ -276,6 +600,10 @@ impl InputFieldState {
             }
             KeyCode::Backspace => {
                 self.backspace();
+                true
+            }
+            KeyCode::Delete => {
+                self.delete_forward();
                 true
             }
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -302,9 +630,65 @@ impl InputFieldState {
                 self.move_end();
                 true
             }
+            KeyCode::Up if self.mode == InputFieldMode::MultiLine => {
+                self.move_up(width);
+                true
+            }
+            KeyCode::Down if self.mode == InputFieldMode::MultiLine => {
+                self.move_down(width);
+                true
+            }
             _ => false,
         }
     }
+}
+
+fn cursor_points(value: &str, width: u16) -> Vec<CursorPoint> {
+    let width = usize::from(width.max(1));
+    let mut points = Vec::with_capacity(value.chars().count() + 1);
+    let mut row = 0usize;
+    let mut column = 0usize;
+
+    points.push(CursorPoint {
+        byte: 0,
+        row,
+        column,
+    });
+
+    for (index, ch) in value.char_indices() {
+        if ch == '\n' {
+            row += 1;
+            column = 0;
+            points.push(CursorPoint {
+                byte: index + ch.len_utf8(),
+                row,
+                column,
+            });
+            continue;
+        }
+
+        let char_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if char_width > 0 {
+            if column + char_width > width {
+                row += 1;
+                column = 0;
+            }
+
+            column += char_width;
+            if column >= width {
+                row += column / width;
+                column %= width;
+            }
+        }
+
+        points.push(CursorPoint {
+            byte: index + ch.len_utf8(),
+            row,
+            column,
+        });
+    }
+
+    points
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -476,6 +860,8 @@ fn next_boundary(value: &str, cursor: usize) -> usize {
 mod tests {
     use super::{InputFieldState, MultiSelectFieldState, SelectFieldState};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use image::{ImageBuffer, Rgba};
+    use tempfile::tempdir;
 
     #[test]
     fn input_field_tracks_text_and_clear() {
@@ -570,6 +956,198 @@ mod tests {
         assert!(!multi_line.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert_eq!(multi_line.value(), "repo");
         assert_eq!(multi_line.cursor(), multi_line.value().len());
+    }
+
+    #[test]
+    fn prompt_attachment_paste_inserts_placeholder_and_tracks_order() {
+        let temp = tempdir().expect("temp dir");
+        let first_path = temp.path().join("first.png");
+        let second_path = temp.path().join("second.png");
+        ImageBuffer::<Rgba<u8>, Vec<u8>>::from_pixel(2, 2, Rgba([1, 2, 3, 255]))
+            .save(&first_path)
+            .expect("save first");
+        ImageBuffer::<Rgba<u8>, Vec<u8>>::from_pixel(2, 2, Rgba([4, 5, 6, 255]))
+            .save(&second_path)
+            .expect("save second");
+
+        let mut field = InputFieldState::multiline_with_prompt_attachments("Plan ");
+        field
+            .paste_with_prompt_attachments(first_path.to_str().expect("utf8"))
+            .expect("first attachment");
+        field
+            .paste_with_prompt_attachments(second_path.to_str().expect("utf8"))
+            .expect("second attachment");
+
+        assert_eq!(field.display_value(), "Plan [Image #1][Image #2]");
+        assert_eq!(field.prompt_attachments().len(), 2);
+    }
+
+    #[test]
+    fn backspace_removes_attachment_and_renumbers_placeholders() {
+        let temp = tempdir().expect("temp dir");
+        let first_path = temp.path().join("first.png");
+        let second_path = temp.path().join("second.png");
+        ImageBuffer::<Rgba<u8>, Vec<u8>>::from_pixel(2, 2, Rgba([1, 2, 3, 255]))
+            .save(&first_path)
+            .expect("save first");
+        ImageBuffer::<Rgba<u8>, Vec<u8>>::from_pixel(2, 2, Rgba([4, 5, 6, 255]))
+            .save(&second_path)
+            .expect("save second");
+
+        let mut field = InputFieldState::multiline_with_prompt_attachments(String::new());
+        field
+            .paste_with_prompt_attachments(first_path.to_str().expect("utf8"))
+            .expect("first attachment");
+        field
+            .paste_with_prompt_attachments(second_path.to_str().expect("utf8"))
+            .expect("second attachment");
+        assert!(field.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)));
+        assert!(field.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)));
+
+        assert_eq!(field.display_value(), "[Image #1]");
+        assert_eq!(field.prompt_attachments().len(), 1);
+    }
+
+    #[test]
+    fn delete_forward_removes_attachment_and_renumbers_placeholders() {
+        let temp = tempdir().expect("temp dir");
+        let first_path = temp.path().join("first.png");
+        let second_path = temp.path().join("second.png");
+        ImageBuffer::<Rgba<u8>, Vec<u8>>::from_pixel(2, 2, Rgba([1, 2, 3, 255]))
+            .save(&first_path)
+            .expect("save first");
+        ImageBuffer::<Rgba<u8>, Vec<u8>>::from_pixel(2, 2, Rgba([4, 5, 6, 255]))
+            .save(&second_path)
+            .expect("save second");
+
+        let mut field = InputFieldState::multiline_with_prompt_attachments(String::new());
+        field
+            .paste_with_prompt_attachments(first_path.to_str().expect("utf8"))
+            .expect("first attachment");
+        field
+            .paste_with_prompt_attachments(second_path.to_str().expect("utf8"))
+            .expect("second attachment");
+        assert!(field.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE)));
+        assert!(field.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE)));
+
+        assert_eq!(field.display_value(), "[Image #1]");
+        assert_eq!(field.prompt_attachments().len(), 1);
+    }
+
+    #[test]
+    fn prompt_attachment_paste_falls_back_to_text_for_non_image_paths() {
+        let temp = tempdir().expect("temp dir");
+        let note_path = temp.path().join("notes.txt");
+        std::fs::write(&note_path, "plain text").expect("save note");
+
+        let mut field = InputFieldState::multiline_with_prompt_attachments("Plan: ");
+        let outcome = field
+            .paste_with_prompt_attachments(note_path.to_str().expect("utf8"))
+            .expect("text fallback");
+
+        assert_eq!(outcome, super::AttachmentPasteOutcome::TextPasted);
+        assert_eq!(
+            field.value(),
+            format!("Plan: {}", note_path.to_str().expect("utf8"))
+        );
+        assert!(field.prompt_attachments().is_empty());
+    }
+
+    #[test]
+    fn clipboard_text_image_path_is_normalized_into_an_attachment() {
+        let temp = tempdir().expect("temp dir");
+        let image_path = temp.path().join("clipboard-image.png");
+        ImageBuffer::<Rgba<u8>, Vec<u8>>::from_pixel(2, 2, Rgba([1, 2, 3, 255]))
+            .save(&image_path)
+            .expect("save image");
+
+        let mut field = InputFieldState::multiline_with_prompt_attachments("Plan: ");
+        let outcome = field
+            .paste_prompt_attachment_text(image_path.to_str().expect("utf8"))
+            .expect("attachment from clipboard text");
+
+        assert_eq!(outcome, super::AttachmentPasteOutcome::AttachmentPasted);
+        assert_eq!(field.display_value(), "Plan: [Image #1]");
+        assert_eq!(field.prompt_attachments().len(), 1);
+    }
+
+    #[test]
+    fn rejecting_prompt_attachment_fields_reject_clipboard_image_paths() {
+        let temp = tempdir().expect("temp dir");
+        let image_path = temp.path().join("clipboard-image.png");
+        ImageBuffer::<Rgba<u8>, Vec<u8>>::from_pixel(2, 2, Rgba([1, 2, 3, 255]))
+            .save(&image_path)
+            .expect("save image");
+
+        let mut field = InputFieldState::multiline_rejecting_prompt_attachments(
+            String::new(),
+            "attachments disabled",
+        );
+        let error = field
+            .paste_or_reject_prompt_attachment_text(
+                image_path.to_str().expect("utf8"),
+                "attachments disabled",
+            )
+            .expect_err("image path should be rejected");
+
+        assert!(error.to_string().contains("attachments disabled"));
+        assert_eq!(field.value(), "");
+        assert!(field.prompt_attachments().is_empty());
+    }
+
+    #[test]
+    fn prompt_attachment_paste_enforces_the_documented_cap() {
+        let temp = tempdir().expect("temp dir");
+        let mut paths = Vec::new();
+        for index in 0..=5 {
+            let path = temp.path().join(format!("{index}.png"));
+            ImageBuffer::<Rgba<u8>, Vec<u8>>::from_pixel(2, 2, Rgba([1, 2, 3, 255]))
+                .save(&path)
+                .expect("save image");
+            paths.push(path);
+        }
+
+        let mut field = InputFieldState::multiline_with_prompt_attachments(String::new());
+        for path in paths.iter().take(5) {
+            field
+                .paste_with_prompt_attachments(path.to_str().expect("utf8"))
+                .expect("attachment within cap");
+        }
+
+        let error = field
+            .paste_with_prompt_attachments(paths[5].to_str().expect("utf8"))
+            .expect_err("sixth attachment should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("prompt editors support at most 5 image attachments")
+        );
+        assert_eq!(field.prompt_attachments().len(), 5);
+    }
+
+    #[test]
+    fn input_field_up_down_moves_between_wrapped_lines() {
+        let mut field = InputFieldState::multiline("12345\n12");
+
+        assert!(field.handle_key_with_width(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), 4));
+        assert_eq!(field.cursor(), 5);
+
+        assert!(field.handle_key_with_width(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), 4));
+        assert_eq!(field.cursor(), field.value().len());
+    }
+
+    #[test]
+    fn input_field_vertical_navigation_preserves_preferred_column() {
+        let mut field = InputFieldState::multiline("abcdef\nab\nabcdef");
+
+        assert!(field.handle_key_with_width(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), 8));
+        assert_eq!(field.cursor(), "abcdef\nab".len());
+
+        assert!(field.handle_key_with_width(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), 8));
+        assert_eq!(field.cursor(), 6);
+
+        assert!(field.handle_key_with_width(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), 8));
+        assert_eq!(field.cursor(), "abcdef\nab".len());
     }
 
     #[test]

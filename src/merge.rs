@@ -9,8 +9,9 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::agents::{
-    apply_invocation_environment, command_args_for_invocation, format_agent_config_source,
-    resolve_agent_invocation_for_planning, validate_invocation_command_surface,
+    apply_invocation_environment, apply_noninteractive_agent_environment,
+    command_args_for_invocation, format_agent_config_source, resolve_agent_invocation_for_planning,
+    validate_invocation_command_surface,
 };
 use crate::cli::MergeArgs;
 use crate::config::{
@@ -1438,6 +1439,7 @@ fn resolve_merge_agent_resolution(
             model: args.model.clone(),
             reasoning: args.reasoning.clone(),
             transport: None,
+            attachments: Vec::new(),
         },
     )?;
 
@@ -1478,6 +1480,7 @@ fn run_agent_capture_in_dir(
             model: overrides.model,
             reasoning: overrides.reasoning,
             transport: None,
+            attachments: Vec::new(),
         },
     )?;
     let command_args = command_args_for_invocation(&invocation, Some(workspace_path))?;
@@ -1489,6 +1492,7 @@ fn run_agent_capture_in_dir(
     command.stdin(Stdio::piped());
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
+    apply_noninteractive_agent_environment(&mut command);
     apply_invocation_environment(&mut command, &invocation, prompt, None);
     for (key, value) in extra_env {
         command.env(key, value);

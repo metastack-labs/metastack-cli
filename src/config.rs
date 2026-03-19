@@ -85,6 +85,14 @@ pub struct PlanningLinearSettings {
     pub profile: Option<String>,
     pub team: Option<String>,
     pub project_id: Option<String>,
+    #[serde(default)]
+    pub ticket_context: PlanningTicketContextSettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PlanningTicketContextSettings {
+    pub discussion_prompt_chars: Option<usize>,
+    pub discussion_persisted_chars: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

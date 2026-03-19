@@ -131,6 +131,7 @@ async fn run_workflow(args: &WorkflowRunArgs) -> Result<String> {
         model: args.model.clone(),
         reasoning: args.reasoning.clone(),
         transport: None,
+        attachments: Vec::new(),
     };
     let invocation =
         match resolve_agent_invocation_for_planning(&app_config, &planning_meta, &run_args) {
