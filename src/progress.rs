@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::io::{self, IsTerminal};
 use std::path::PathBuf;
 
@@ -16,9 +17,14 @@ use ratatui::{Frame, Terminal};
 use serde::{Deserialize, Serialize};
 
 use crate::fs::write_text_file;
-use crate::tui::theme::{Tone, badge, empty_state, key_hints, list, panel_title, paragraph};
+use crate::tui::theme::{
+    Tone, badge, emphasis_style, empty_state, key_hints, label_style, list, muted_style,
+    panel_title, paragraph, tone_style,
+};
 
-pub(crate) const SPINNER_FRAMES: &[&str] = &["|", "/", "-", "\\"];
+pub(crate) const SPINNER_FRAMES: &[&str] = &[
+    "[=   ]", "[==  ]", "[=== ]", "[ ===]", "[  ===]", "[   ==]", "[   =]", "[  ==]",
+];
 
 #[derive(Debug, Clone)]
 pub(crate) struct LoadingPanelData {
@@ -91,6 +97,24 @@ impl ProgressStepState {
     }
 }
 
+impl ProgressRunState {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Succeeded => "success",
+            Self::Failed => "failed",
+        }
+    }
+
+    fn tone(self) -> Tone {
+        match self {
+            Self::Running => Tone::Info,
+            Self::Succeeded => Tone::Success,
+            Self::Failed => Tone::Danger,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ProgressRunState {
@@ -148,6 +172,7 @@ pub(crate) enum ProgressOutputMode {
 #[derive(Debug, Clone)]
 pub(crate) struct ProgressViewData {
     pub(crate) title: String,
+    pub(crate) status: ProgressRunState,
     pub(crate) status_line: String,
     pub(crate) active_detail: Option<String>,
     pub(crate) steps: Vec<ProgressStepRecord>,
@@ -158,6 +183,8 @@ enum ProgressDisplay {
     Tui(Terminal<CrosstermBackend<io::Stdout>>),
     Text {
         last_line: Option<String>,
+        last_detail: Option<String>,
+        emitted_notes: BTreeSet<String>,
     },
     #[cfg(test)]
     Hidden,
@@ -172,9 +199,11 @@ impl ProgressDisplay {
                 let backend = CrosstermBackend::new(stdout);
                 Self::Tui(Terminal::new(backend)?)
             }
-            ProgressOutputMode::Interactive | ProgressOutputMode::Text => {
-                Self::Text { last_line: None }
-            }
+            ProgressOutputMode::Interactive | ProgressOutputMode::Text => Self::Text {
+                last_line: None,
+                last_detail: None,
+                emitted_notes: BTreeSet::new(),
+            },
             #[cfg(test)]
             ProgressOutputMode::Hidden => Self::Hidden,
         })
@@ -185,17 +214,28 @@ impl ProgressDisplay {
             Self::Tui(terminal) => {
                 terminal.draw(|frame| render_progress_dashboard(frame, data))?;
             }
-            Self::Text { last_line } => {
-                let mut line = data.status_line.clone();
-                if let Some(detail) = &data.active_detail
-                    && !detail.is_empty()
-                {
-                    line.push_str(": ");
-                    line.push_str(detail);
+            Self::Text {
+                last_line,
+                last_detail,
+                emitted_notes,
+            } => {
+                for note in &data.notes {
+                    if emitted_notes.insert(note.clone()) {
+                        println!("{note}");
+                    }
                 }
-                if last_line.as_ref() != Some(&line) {
-                    println!("{line}");
-                    *last_line = Some(line);
+                if last_line.as_ref() != Some(&data.status_line) {
+                    println!("==> {}", data.status_line);
+                    *last_line = Some(data.status_line.clone());
+                }
+                match &data.active_detail {
+                    Some(detail) if !detail.is_empty() => {
+                        if last_detail.as_ref() != Some(detail) {
+                            println!("    {detail}");
+                            *last_detail = Some(detail.clone());
+                        }
+                    }
+                    _ => *last_detail = None,
                 }
             }
             #[cfg(test)]
@@ -355,19 +395,41 @@ impl ProgressTracker {
             .and_then(|key| self.artifact.steps.iter().position(|step| step.key == key))
             .map(|index| index + 1);
         let total = self.artifact.steps.len();
-        let status_line = match (&self.artifact.current_phase, active_index) {
-            (Some(label), Some(index)) => format!("Phase {index}/{total}: {label}"),
-            _ => self.artifact.title.clone(),
+        let status_line = match (
+            self.artifact.status,
+            &self.artifact.current_phase,
+            active_index,
+        ) {
+            (ProgressRunState::Running, Some(label), Some(index)) => {
+                format!("Running phase {index}/{total}: {label}")
+            }
+            (ProgressRunState::Running, _, _) => {
+                format!("Starting merge run ({total} phases queued)")
+            }
+            (ProgressRunState::Succeeded, _, _) => {
+                format!("Merge run succeeded after {total} phases")
+            }
+            (ProgressRunState::Failed, Some(label), Some(index)) => {
+                format!("Merge run failed during phase {index}/{total}: {label}")
+            }
+            (ProgressRunState::Failed, _, _) => "Merge run failed".to_string(),
         };
         ProgressViewData {
             title: self.artifact.title.clone(),
+            status: self.artifact.status,
             status_line,
             active_detail: self.artifact.active_detail.clone(),
             steps: self.artifact.steps.clone(),
-            notes: vec![format!(
-                "Progress artifact: {}",
-                self.artifact_path.display()
-            )],
+            notes: vec![
+                format!(
+                    "Run artifacts: {}",
+                    self.artifact_path
+                        .parent()
+                        .unwrap_or(self.artifact_path.as_path())
+                        .display()
+                ),
+                format!("Progress JSON: {}", self.artifact_path.display()),
+            ],
         }
     }
 }
@@ -398,63 +460,90 @@ pub(crate) fn render_progress_dashboard(frame: &mut Frame<'_>, data: &ProgressVi
 
     let header = paragraph(
         Text::from(vec![
-            Line::from(data.title.clone()),
-            Line::from(data.status_line.clone()),
+            Line::from(vec![
+                badge(data.status.label(), data.status.tone()),
+                Span::raw(" "),
+                Span::styled(data.title.clone(), emphasis_style()),
+            ]),
+            Line::from(Span::styled(data.status_line.clone(), emphasis_style())),
             Line::from(
-                "The merge runner keeps this progress view visible until success or failure.",
+                "The merge runner keeps the current phase, live detail, and saved artifacts visible until exit.",
             ),
             key_hints(&[("Ctrl-C", "exit"), ("JSON", "saved every update")]),
         ]),
-        panel_title("Long-Running Progress", false),
+        panel_title("Merge Run Status", false),
     );
     frame.render_widget(header, outer[0]);
 
     let step_items = data
         .steps
         .iter()
-        .map(|step| {
+        .enumerate()
+        .map(|(index, step)| {
             let tone = match step.state {
                 ProgressStepState::Pending => Tone::Muted,
                 ProgressStepState::Running => Tone::Info,
                 ProgressStepState::Complete => Tone::Success,
                 ProgressStepState::Failed => Tone::Danger,
             };
+            let label = if step.state == ProgressStepState::Running {
+                Span::styled(step.label.clone(), emphasis_style())
+            } else {
+                Span::raw(step.label.clone())
+            };
             ListItem::new(Text::from(vec![
                 Line::from(vec![
+                    Span::styled(format!("{:02}. ", index + 1), label_style()),
                     badge(step.state.label(), tone),
                     Span::raw(" "),
-                    Span::raw(step.label.clone()),
+                    label,
+                    if step.state == ProgressStepState::Running {
+                        Span::raw(" ")
+                    } else {
+                        Span::raw("")
+                    },
+                    if step.state == ProgressStepState::Running {
+                        badge("active", Tone::Accent)
+                    } else {
+                        Span::raw("")
+                    },
                 ]),
-                Line::from(
+                Line::from(Span::styled(
                     step.detail
                         .clone()
-                        .unwrap_or_else(|| "Waiting for work.".to_string()),
-                ),
+                        .unwrap_or_else(|| "Waiting for this phase to start.".to_string()),
+                    muted_style(),
+                )),
             ]))
         })
         .collect::<Vec<_>>();
-    let steps = list(step_items, panel_title("Phases", false));
+    let steps = list(step_items, panel_title("Phase Timeline", false));
     frame.render_widget(steps, body[0]);
 
     let active_text = if let Some(detail) = &data.active_detail {
         Text::from(vec![
             Line::from(vec![
                 badge("active", Tone::Accent),
-                Span::raw(" Active substep"),
+                Span::raw(" Current activity"),
             ]),
             Line::from(""),
-            Line::from(detail.clone()),
+            Line::from(Span::styled(detail.clone(), tone_style(Tone::Accent))),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Confirm and cancel prompts appear here as phases advance.",
+                muted_style(),
+            )),
         ])
     } else {
         empty_state(
-            "No substep is active yet.",
-            "Waiting for the next structured progress update.",
+            "No phase detail is active yet.",
+            "The next structured progress event will appear here.",
         )
     };
-    let active = paragraph(active_text, panel_title("Details", false));
+    let active = paragraph(active_text, panel_title("Current Step", false));
     frame.render_widget(active, body[1]);
 
-    let footer = paragraph(data.notes.join("\n"), panel_title("Notes", false));
+    let footer = paragraph(data.notes.join("\n"), panel_title("Artifacts", false));
     frame.render_widget(footer, outer[2]);
 }
 
@@ -526,7 +615,7 @@ mod tests {
         .expect("shared loading panel should render");
 
         assert!(snapshot.contains("Agent Working [loading]"));
-        assert!(snapshot.contains("/ Planning backlog slice"));
+        assert!(snapshot.contains("[==  ] Planning backlog slice"));
         assert!(snapshot.contains("Waiting for the agent to answer."));
     }
 
@@ -576,7 +665,8 @@ mod tests {
         let snapshot = render_progress_snapshot(
             &ProgressViewData {
                 title: "meta merge progress".to_string(),
-                status_line: "Phase 3/6: Merge application".to_string(),
+                status: ProgressRunState::Running,
+                status_line: "Running phase 3/6: Merge application".to_string(),
                 active_detail: Some(
                     "Applying pull request #101 and waiting for git merge to finish.".to_string(),
                 ),
@@ -601,7 +691,8 @@ mod tests {
                     },
                 ],
                 notes: vec![
-                    "Progress artifact: .metastack/merge-runs/run/progress.json".to_string(),
+                    "Run artifacts: .metastack/merge-runs/run".to_string(),
+                    "Progress JSON: .metastack/merge-runs/run/progress.json".to_string(),
                 ],
             },
             120,
@@ -609,9 +700,9 @@ mod tests {
         )
         .expect("progress dashboard should render");
 
-        assert!(snapshot.contains("Long-Running Progress"));
-        assert!(snapshot.contains("Phase 3/6: Merge application"));
+        assert!(snapshot.contains("Merge Run Status"));
+        assert!(snapshot.contains("Running phase 3/6: Merge application"));
         assert!(snapshot.contains("Applying pull request #101"));
-        assert!(snapshot.contains("Progress artifact: .metastack/merge-runs/run/progress.json"));
+        assert!(snapshot.contains("Progress JSON: .metastack/merge-runs/run/progress.json"));
     }
 }

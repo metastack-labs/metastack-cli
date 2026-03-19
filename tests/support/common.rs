@@ -108,11 +108,13 @@ fn meta() -> Command {
 fn listen_project_store_dir(
     config_path: &Path,
     repo_root: &Path,
+    project_selector: Option<&str>,
 ) -> Result<PathBuf, Box<dyn Error>> {
     let source_root = listen_source_root(repo_root)?;
     let metastack_root = source_root.join(".metastack").canonicalize()?;
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     metastack_root.display().to_string().hash(&mut hasher);
+    listen_project_scope_key(project_selector, repo_root)?.hash(&mut hasher);
     let project_key = format!("{:016x}", hasher.finish());
     Ok(config_path
         .parent()
@@ -125,7 +127,7 @@ fn listen_project_store_dir(
 
 #[cfg(unix)]
 fn listen_state_path(config_path: &Path, repo_root: &Path) -> Result<PathBuf, Box<dyn Error>> {
-    Ok(listen_project_store_dir(config_path, repo_root)?.join("session.json"))
+    Ok(listen_project_store_dir(config_path, repo_root, None)?.join("session.json"))
 }
 
 #[cfg(unix)]
@@ -134,9 +136,36 @@ fn listen_log_path(
     repo_root: &Path,
     issue_identifier: &str,
 ) -> Result<PathBuf, Box<dyn Error>> {
-    Ok(listen_project_store_dir(config_path, repo_root)?
+    Ok(listen_project_store_dir(config_path, repo_root, None)?
         .join("logs")
         .join(format!("{issue_identifier}.log")))
+}
+
+#[cfg(unix)]
+fn listen_project_scope_key(
+    project_selector: Option<&str>,
+    repo_root: &Path,
+) -> Result<String, Box<dyn Error>> {
+    let selector = match project_selector
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+    {
+        Some(selector) => Some(selector),
+        None => {
+            let meta = fs::read_to_string(repo_root.join(".metastack/meta.json"))?;
+            serde_json::from_str::<serde_json::Value>(&meta)?
+                .get("linear")
+                .and_then(|value| value.get("project_id"))
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+        }
+    };
+
+    Ok(match selector {
+        Some(selector) => format!("project:{}", selector.to_ascii_lowercase()),
+        None => "project:all".to_string(),
+    })
 }
 
 #[cfg(unix)]
@@ -361,14 +390,26 @@ fn commit_and_push_pull_ref(
 
 #[cfg(unix)]
 fn wait_for_path(path: &Path) -> Result<(), Box<dyn Error>> {
-    for _ in 0..1_200 {
+    wait_for_path_with_timeout(path, Duration::from_secs(60))
+}
+
+#[cfg(unix)]
+fn wait_for_path_with_timeout(path: &Path, timeout: Duration) -> Result<(), Box<dyn Error>> {
+    let poll_interval = Duration::from_millis(50);
+    let attempts = timeout.as_millis() / poll_interval.as_millis();
+    for _ in 0..attempts {
         if path.exists() {
             return Ok(());
         }
-        thread::sleep(Duration::from_millis(50));
+        thread::sleep(poll_interval);
     }
 
-    Err(format!("timed out waiting for `{}`", path.display()).into())
+    Err(format!(
+        "timed out waiting for `{}` after {}s",
+        path.display(),
+        timeout.as_secs()
+    )
+    .into())
 }
 
 #[cfg(unix)]
@@ -593,6 +634,7 @@ fn listen_test_lock() -> std::sync::MutexGuard<'static, ()> {
 struct DynamicLinearState {
     claimed: bool,
     issue_refreshes_after_claim: usize,
+    review_transition_applied: bool,
 }
 
 #[cfg(unix)]
@@ -807,6 +849,14 @@ fn dynamic_linear_response(
     if body.contains("mutation UpdateIssue") {
         let mut state = state.lock().expect("state mutex should lock");
         state.claimed = true;
+        if body.contains(r#""stateId":"state-3""#) {
+            state.review_transition_applied = true;
+        }
+        let (state_id, state_name, state_type) = if state.review_transition_applied {
+            ("state-3", "Human Review", "started")
+        } else {
+            ("state-2", "In Progress", "started")
+        };
         return Ok(json!({
             "data": {
                 "issueUpdate": {
@@ -829,9 +879,9 @@ fn dynamic_linear_response(
                             "name": "MetaStack CLI"
                         },
                         "state": {
-                            "id": "state-2",
-                            "name": "In Progress",
-                            "type": "started"
+                            "id": state_id,
+                            "name": state_name,
+                            "type": state_type
                         }
                     }
                 }
@@ -906,7 +956,9 @@ fn dynamic_linear_response(
             }));
         }
         let state = state.lock().expect("state mutex should lock");
-        let (state_id, state_name) = if state.claimed {
+        let (state_id, state_name) = if state.review_transition_applied {
+            ("state-3", "Human Review")
+        } else if state.claimed {
             ("state-2", "In Progress")
         } else {
             ("state-1", "Todo")
@@ -930,9 +982,12 @@ fn dynamic_linear_response(
 
     if body.contains("query Issues") {
         let mut state = state.lock().expect("state mutex should lock");
-        let issue_state = if state.claimed {
+        let issue_state = if state.review_transition_applied {
+            ("state-3", "Human Review", "started")
+        } else if state.claimed {
             state.issue_refreshes_after_claim += 1;
             if state.issue_refreshes_after_claim >= 6 {
+                state.review_transition_applied = true;
                 ("state-3", "Human Review", "started")
             } else {
                 ("state-2", "In Progress", "started")

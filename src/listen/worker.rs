@@ -69,6 +69,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
         planning_meta: &planning_meta,
         args,
         source_root: &source_root,
+        project_selector: args.project.as_deref(),
         workspace_path: &workspace_path,
         workpad_comment_id: &args.workpad_comment_id,
         backlog_issue: backlog_issue.as_ref(),
@@ -76,6 +77,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
     };
     let session_context = WorkerSessionContext {
         source_root: &source_root,
+        project_selector: args.project.as_deref(),
         workspace_path: &workspace_path,
         branch: branch.as_deref(),
         workpad_comment_id: &args.workpad_comment_id,
@@ -84,7 +86,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
     };
     let mut saw_implementation_progress = workspace_has_meaningful_progress(&workspace_path)?;
     let mut stalled_turns = 0u32;
-    let log_path = agent_log_path(&source_root, &args.issue);
+    let log_path = agent_log_path(&source_root, args.project.as_deref(), &args.issue);
     if let Err(error) = preflight::run_listen_preflight(
         &service,
         &linear_config,
@@ -109,6 +111,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
             .transpose()?;
         write_listen_session(
             &source_root,
+            args.project.as_deref(),
             build_worker_session(
                 &issue,
                 SessionPhase::Blocked,
@@ -127,6 +130,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
         if !listen_issue_is_active(issue.state.as_ref().map(|state| state.name.as_str())) {
             write_listen_session(
                 &source_root,
+                args.project.as_deref(),
                 build_worker_session(
                     &issue,
                     SessionPhase::Completed,
@@ -147,6 +151,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                 .transpose()?;
             write_listen_session(
                 &source_root,
+                args.project.as_deref(),
                 build_worker_session(
                     &issue,
                     SessionPhase::Blocked,
@@ -172,6 +177,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
             .transpose()?;
         write_listen_session(
             &source_root,
+            args.project.as_deref(),
             build_worker_session(
                 &issue,
                 SessionPhase::Running,
@@ -189,6 +195,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
         if let Err(error) = execute_agent_turn(&issue, turn_number, &turn_context) {
             write_listen_session(
                 &source_root,
+                args.project.as_deref(),
                 build_worker_session(
                     &issue,
                     SessionPhase::Blocked,
@@ -232,6 +239,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                 if !saw_implementation_progress {
                     write_listen_session(
                         &source_root,
+                        args.project.as_deref(),
                         build_worker_session(
                             &issue,
                             SessionPhase::Blocked,
@@ -276,6 +284,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     );
                     write_listen_session(
                         &source_root,
+                        args.project.as_deref(),
                         build_worker_session(
                             &refreshed_issue,
                             SessionPhase::Completed,
@@ -289,6 +298,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
 
                 write_listen_session(
                     &source_root,
+                    args.project.as_deref(),
                     build_worker_session(
                         &refreshed_issue,
                         SessionPhase::Blocked,
@@ -307,6 +317,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
             if stalled_turns >= MAX_STALLED_TURNS {
                 write_listen_session(
                     &source_root,
+                    args.project.as_deref(),
                     build_worker_session(
                         &issue,
                         SessionPhase::Blocked,
@@ -324,6 +335,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
 
             write_listen_session(
                 &source_root,
+                args.project.as_deref(),
                 build_worker_session(
                     &issue,
                     SessionPhase::Running,
@@ -340,6 +352,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
         } else {
             write_listen_session(
                 &source_root,
+                args.project.as_deref(),
                 build_worker_session(
                     &issue,
                     SessionPhase::Running,
@@ -357,6 +370,7 @@ struct ListenTurnContext<'a> {
     planning_meta: &'a crate::config::PlanningMeta,
     args: &'a ListenWorkerArgs,
     source_root: &'a Path,
+    project_selector: Option<&'a str>,
     workspace_path: &'a Path,
     workpad_comment_id: &'a str,
     backlog_issue: Option<&'a IssueSummary>,
@@ -365,6 +379,7 @@ struct ListenTurnContext<'a> {
 
 struct WorkerSessionContext<'a> {
     source_root: &'a Path,
+    project_selector: Option<&'a str>,
     workspace_path: &'a Path,
     branch: Option<&'a str>,
     workpad_comment_id: &'a str,
@@ -488,7 +503,11 @@ fn execute_agent_turn(
     )?;
     let command_args = command_args_for_invocation(&invocation, Some(context.workspace_path))?;
     let attempted_command = validate_invocation_command_surface(&invocation, &command_args)?;
-    let log_path = agent_log_path(context.source_root, &issue.identifier);
+    let log_path = agent_log_path(
+        context.source_root,
+        context.project_selector,
+        &issue.identifier,
+    );
     if let Some(parent) = log_path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create `{}`", parent.display()))?;
@@ -745,9 +764,13 @@ fn build_worker_session(
         turns: Some(turns),
         tokens: TokenUsage::default(),
         log_path: Some(
-            agent_log_path(context.source_root, &issue.identifier)
-                .display()
-                .to_string(),
+            agent_log_path(
+                context.source_root,
+                context.project_selector,
+                &issue.identifier,
+            )
+            .display()
+            .to_string(),
         ),
     }
 }

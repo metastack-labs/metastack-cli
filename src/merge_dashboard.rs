@@ -10,10 +10,15 @@ use crossterm::terminal::{
 };
 use ratatui::backend::{CrosstermBackend, TestBackend};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Text};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::style::Style;
+use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::{ListItem, ListState};
 use ratatui::{Frame, Terminal};
+
+use crate::tui::theme::{
+    Tone, badge, emphasis_style, empty_state, key_hints, label_style, list, muted_style,
+    panel_title, paragraph,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MergeDashboardPullRequest {
@@ -140,26 +145,41 @@ fn render_once(data: MergeDashboardData, options: MergeDashboardOptions) -> Resu
 fn render_dashboard(frame: &mut Frame<'_>, app: &MergeDashboardApp) {
     let outer = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(4), Constraint::Min(0)])
+        .constraints([Constraint::Length(6), Constraint::Min(0)])
         .split(frame.area());
     let body = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(48), Constraint::Percentage(52)])
+        .constraints([Constraint::Percentage(46), Constraint::Percentage(54)])
         .split(outer[1]);
     let sidebar = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(8), Constraint::Min(0)])
+        .constraints([Constraint::Length(12), Constraint::Min(0)])
         .split(body[1]);
 
-    let header = Paragraph::new(Text::from(vec![
-        Line::from(app.data.title.clone()),
-        Line::from(app.summary_line()),
-        Line::from(
-            "Keys: Up/Down moves, Space selects PRs, Enter advances, Esc goes back, q exits",
-        ),
-    ]))
-    .wrap(Wrap { trim: true })
-    .block(Block::default().borders(Borders::ALL).title("meta merge"));
+    let header = paragraph(
+        Text::from(vec![
+            Line::from(vec![
+                app.status_badge(),
+                Span::raw(" "),
+                Span::styled(app.data.title.clone(), emphasis_style()),
+            ]),
+            Line::from(Span::styled(app.summary_line(), emphasis_style())),
+            Line::from(vec![
+                Span::styled("Repo ", label_style()),
+                Span::raw(app.data.repo_label.clone()),
+                Span::styled("  Base ", label_style()),
+                Span::raw(app.data.base_branch.clone()),
+            ]),
+            key_hints(&[
+                ("Up/Down", "move"),
+                ("Space", "select"),
+                ("Enter", "advance"),
+                ("Esc", "back"),
+                ("q", "exit"),
+            ]),
+        ]),
+        panel_title("meta merge", false),
+    );
     frame.render_widget(header, outer[0]);
 
     render_pr_list(frame, body[0], app);
@@ -168,34 +188,41 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &MergeDashboardApp) {
 }
 
 fn render_pr_list(frame: &mut Frame<'_>, area: Rect, app: &MergeDashboardApp) {
-    let title = if app.focus == Focus::PullRequests {
-        format!(
-            "Open Pull Requests [focus] ({})",
-            app.data.pull_requests.len()
-        )
-    } else {
-        format!("Open Pull Requests ({})", app.data.pull_requests.len())
-    };
+    let title = panel_title(
+        format!("Pull Request Queue ({})", app.data.pull_requests.len()),
+        app.focus == Focus::PullRequests,
+    );
     let items = if app.data.pull_requests.is_empty() {
-        vec![ListItem::new(
+        vec![ListItem::new(empty_state(
             "No open pull requests are available for this repository.",
-        )]
+            "Open work on GitHub before launching a one-shot merge batch.",
+        ))]
     } else {
         app.data
             .pull_requests
             .iter()
             .enumerate()
             .map(|(index, pr)| {
-                let marker = if app.selected.contains(&index) {
-                    "[x]"
+                let (state_label, tone) = if app.selected.contains(&index) {
+                    ("selected", Tone::Accent)
                 } else {
-                    "[ ]"
+                    ("queued", Tone::Muted)
                 };
                 ListItem::new(Text::from(vec![
-                    Line::from(format!("{marker} #{} {}", pr.number, pr.title)),
-                    Line::from(format!(
-                        "{} • {} • {}",
-                        pr.author, pr.head_ref, pr.updated_at
+                    Line::from(vec![
+                        badge(state_label, tone),
+                        Span::raw(" "),
+                        Span::styled(format!("#{} {}", pr.number, pr.title), emphasis_style()),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("Author ", label_style()),
+                        Span::raw(pr.author.clone()),
+                        Span::styled("  Branch ", label_style()),
+                        Span::raw(pr.head_ref.clone()),
+                    ]),
+                    Line::from(Span::styled(
+                        format!("Updated {}", pr.updated_at),
+                        muted_style(),
                     )),
                 ]))
             })
@@ -207,33 +234,23 @@ fn render_pr_list(frame: &mut Frame<'_>, area: Rect, app: &MergeDashboardApp) {
         app.pr_index
             .min(app.data.pull_requests.len().saturating_sub(1)),
     ));
-    let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title(title))
-        .highlight_style(Style::default().add_modifier(Modifier::BOLD))
-        .highlight_symbol("> ");
+    let list = list(items, title)
+        .highlight_style(Style::default())
+        .highlight_symbol(">> ");
     frame.render_stateful_widget(list, area, &mut state);
 }
 
 fn render_selection_summary(frame: &mut Frame<'_>, area: Rect, app: &MergeDashboardApp) {
-    let title = if app.focus == Focus::Confirm {
-        "Selected Batch [focus]"
-    } else {
-        "Selected Batch"
-    };
-    let summary = Paragraph::new(app.selection_text())
-        .wrap(Wrap { trim: true })
-        .block(Block::default().borders(Borders::ALL).title(title));
+    let summary = paragraph(
+        app.selection_text(),
+        panel_title("Selected Batch Review", app.focus == Focus::Confirm),
+    );
     frame.render_widget(summary, area);
 }
 
 fn render_details(frame: &mut Frame<'_>, area: Rect, app: &MergeDashboardApp) {
-    let details = Paragraph::new(app.detail_text())
-        .wrap(Wrap { trim: false })
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Planner Input Preview"),
-        );
+    let details = paragraph(app.detail_text(), panel_title("Focused PR Preview", false))
+        .wrap(ratatui::widgets::Wrap { trim: false });
     frame.render_widget(details, area);
 }
 
@@ -306,6 +323,25 @@ impl MergeDashboardApp {
             .collect()
     }
 
+    fn status_badge(&self) -> Span<'static> {
+        if let Some(selected) = &self.completed {
+            if selected.is_empty() {
+                return badge("canceled", Tone::Muted);
+            }
+            return badge("ready", Tone::Success);
+        }
+
+        if self.data.pull_requests.is_empty() {
+            return badge("empty", Tone::Muted);
+        }
+
+        match self.focus {
+            Focus::PullRequests if self.selected.is_empty() => badge("select", Tone::Info),
+            Focus::PullRequests => badge("review", Tone::Accent),
+            Focus::Confirm => badge("confirm", Tone::Success),
+        }
+    }
+
     fn summary_line(&self) -> String {
         if let Some(selected) = &self.completed {
             if selected.is_empty() {
@@ -350,14 +386,14 @@ impl MergeDashboardApp {
         let selected = self.selected_prs();
         if selected.is_empty() {
             return format!(
-                "Step 1 of 2: choose the PRs to batch for `{}`.\n\nNothing is selected yet.",
-                self.data.repo_label
+                "Step 1 of 2: choose the pull requests to batch for `{}`.\n\nNothing is selected yet.\n\nSelect one or more entries on the left, then press Enter to review the launch summary.",
+                self.data.repo_label,
             );
         }
 
         let mut lines = vec![
             format!(
-                "Step 2 of 2: this batch is one-shot and will merge into `{}` once launched.",
+                "Step 2 of 2: this is a one-shot batch targeting `{}`.",
                 self.data.base_branch
             ),
             format!(
@@ -367,13 +403,20 @@ impl MergeDashboardApp {
         ];
 
         for pr in selected {
-            lines.push(format!("- #{} {}", pr.number, pr.title));
+            lines.push(format!("- #{} {} ({})", pr.number, pr.title, pr.head_ref));
         }
 
         if self.focus == Focus::Confirm {
             lines.push(String::new());
             lines.push(
-                "Press Enter to start the merge run, or Esc to return to the PR list.".to_string(),
+                "Press Enter to start the merge run. Press Esc to return to the PR list without launching anything."
+                    .to_string(),
+            );
+        } else {
+            lines.push(String::new());
+            lines.push(
+                "Press Enter to review the final confirmation screen before the merge run starts."
+                    .to_string(),
             );
         }
 
@@ -383,13 +426,13 @@ impl MergeDashboardApp {
     fn detail_text(&self) -> String {
         let Some(pr) = self.data.pull_requests.get(self.pr_index) else {
             return format!(
-                "Repository: {}\nBase branch: {}\n\nOpen PR discovery is empty, so there is nothing to preview.",
+                "Repository: {}\nBase branch: {}\n\nOpen PR discovery is empty, so there is nothing to preview.\n\nThe planner preview will appear here once GitHub returns open pull requests.",
                 self.data.repo_label, self.data.base_branch
             );
         };
 
         format!(
-            "Repository: {}\nBase branch: {}\n\nSelected PR preview:\n#{} {}\nAuthor: {}\nHead ref: {}\nUpdated: {}\nURL: {}\n\nThe merge planner receives the selected PR metadata, chooses an explicit merge order, and calls out likely conflict hotspots before execution.",
+            "Repository: {}\nBase branch: {}\n\nFocused pull request\n#{} {}\nAuthor: {}\nHead ref: {}\nUpdated: {}\nURL: {}\n\nPlanner handoff\nThe merge planner receives every selected PR title, author, branch, timestamp, and URL, then proposes an explicit merge order and conflict hotspots before execution.",
             self.data.repo_label,
             self.data.base_branch,
             pr.number,

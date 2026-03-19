@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 
 use crate::tui::prompt_images::PromptImageAttachment;
 
@@ -34,6 +34,23 @@ Examples:
   meta agents listen --team MET --project \"MetaStack CLI\"
   meta agents workflows list --root .
   meta agents workflows run ticket-implementation --root . --dry-run";
+
+const LISTEN_HELP_EXAMPLES: &str = "\
+Terminal-only examples:
+  meta agents listen --check --root .
+  meta agents listen --team MET --once
+  meta listen sessions list
+
+Concurrent project-scoped examples from one checkout:
+  meta agents listen --team MET --project \"MetaStack CLI\"
+  meta agents listen --team MET --project \"MetaStack API\"
+  meta listen sessions inspect --root . --project \"MetaStack API\"
+  meta listen sessions clear --root . --project \"MetaStack API\"
+  meta listen sessions resume --root . --project \"MetaStack API\" --once
+
+Default-project example:
+  meta runtime setup --root . --team MET --project \"MetaStack CLI\"
+  meta agents listen --team MET";
 
 const CONTEXT_HELP_EXAMPLES: &str = "\
 Examples:
@@ -642,6 +659,7 @@ pub struct SetupArgs {
 }
 
 #[derive(Debug, Clone, Args)]
+#[command(after_help = LISTEN_HELP_EXAMPLES)]
 pub struct ListenArgs {
     #[command(subcommand)]
     pub command: Option<ListenCommands>,
@@ -667,7 +685,7 @@ pub enum ListenSessionCommands {
     List(ListenSessionListArgs),
     /// Inspect one stored MetaListen project session.
     Inspect(ListenSessionInspectArgs),
-    /// Clear one stored MetaListen project session.
+    /// Clear selected stored MetaListen project sessions.
     Clear(ListenSessionClearArgs),
     /// Resume listening for a stored MetaListen project session.
     Resume(Box<ListenSessionResumeArgs>),
@@ -678,6 +696,9 @@ pub struct ListenSessionTargetArgs {
     /// Resolve the stored project session from this repository root.
     #[arg(long, value_name = "PATH", default_value = ".")]
     pub root: PathBuf,
+    /// Resolve the stored project session for this effective Linear project selector.
+    #[arg(long)]
+    pub project: Option<String>,
     /// Resolve the stored project session from an install-scoped project key.
     #[arg(long, value_name = "KEY")]
     pub project_key: Option<String>,
@@ -693,9 +714,30 @@ pub struct ListenSessionInspectArgs {
 }
 
 #[derive(Debug, Clone, Args)]
+#[command(group(
+    ArgGroup::new("selector")
+        .required(true)
+        .multiple(false)
+        .args(["issue_identifier", "blocked", "completed", "stale", "all"])
+))]
 pub struct ListenSessionClearArgs {
     #[command(flatten)]
     pub target: ListenSessionTargetArgs,
+    /// Clear the stored session for this issue identifier, for example ENG-1234.
+    #[arg(value_name = "IDENTIFIER")]
+    pub issue_identifier: Option<String>,
+    /// Clear only blocked stored sessions.
+    #[arg(long)]
+    pub blocked: bool,
+    /// Clear only completed stored sessions.
+    #[arg(long)]
+    pub completed: bool,
+    /// Clear only stored sessions whose worker pid is no longer running.
+    #[arg(long)]
+    pub stale: bool,
+    /// Clear every stored session record for the selected project.
+    #[arg(long)]
+    pub all: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -869,6 +911,9 @@ pub struct ListenWorkerArgs {
     /// Repository root whose listen state should be updated.
     #[arg(long, value_name = "PATH")]
     pub source_root: PathBuf,
+    /// Effective Linear project selector for the listener session store.
+    #[arg(long)]
+    pub project: Option<String>,
     /// Workspace checkout where the agent should run.
     #[arg(long, value_name = "PATH")]
     pub workspace: PathBuf,

@@ -484,13 +484,20 @@ transport = "arg"
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Phase 1/6: Workspace preparation"))
-        .stdout(predicate::str::contains("Phase 3/6: Merge application"))
+        .stdout(predicate::str::contains("Run artifacts:"))
         .stdout(predicate::str::contains(
-            "Applying pull request #11 (PR 11) onto the aggregate branch.",
+            "Running phase 1/6: Workspace preparation",
+        ))
+        .stdout(predicate::str::contains(
+            "Running phase 3/6: Merge application",
+        ))
+        .stdout(predicate::str::contains(
+            "Merging pull request #11 (PR 11) onto the aggregate branch.",
         ))
         .stdout(predicate::str::contains("Pull request #12 merged cleanly."))
-        .stdout(predicate::str::contains("Phase 6/6: PR publication"))
+        .stdout(predicate::str::contains(
+            "Running phase 6/6: PR publication",
+        ))
         .stdout(predicate::str::contains(
             "Created aggregate PR https://github.com/example/pull/999",
         ));
@@ -571,7 +578,7 @@ transport = "arg"
         ])
         .assert()
         .failure()
-        .stdout(predicate::str::contains("Phase 4/6: Validation"))
+        .stdout(predicate::str::contains("Running phase 4/6: Validation"))
         .stderr(predicate::str::contains(
             "validation failed for aggregate branch",
         ))

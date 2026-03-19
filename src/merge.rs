@@ -240,12 +240,12 @@ pub async fn run_merge(args: &MergeArgs) -> Result<()> {
             },
         )? {
             MergeDashboardExit::Selected(numbers) if numbers.is_empty() => {
-                println!("Merge canceled.");
+                println!("Merge canceled before execution. No aggregate branch or PR was created.");
                 return Ok(());
             }
             MergeDashboardExit::Selected(numbers) => numbers,
             MergeDashboardExit::Cancelled => {
-                println!("Merge canceled.");
+                println!("Merge canceled before execution. No aggregate branch or PR was created.");
                 return Ok(());
             }
             MergeDashboardExit::Snapshot(_) => unreachable!(),
@@ -270,7 +270,7 @@ pub async fn run_merge(args: &MergeArgs) -> Result<()> {
         _ => "Created",
     };
     println!(
-        "{publication_verb} aggregate PR {} for {} pull request(s). Run artifacts: {}",
+        "{publication_verb} aggregate PR {} for {} pull request(s). Run artifacts saved in {}",
         run.publication.url,
         run.selected_count,
         run.run_dir.display()
@@ -394,7 +394,10 @@ fn execute_merge_run(
     let aggregate_branch = format!("meta-merge/{run_id}");
     tracker.start_step(
         STEP_PREPARE_WORKSPACE,
-        format!("Preparing an isolated workspace for aggregate branch `{aggregate_branch}`."),
+        format!(
+            "Preparing an isolated aggregate workspace for `{aggregate_branch}` from `origin/{}`.",
+            repository.default_branch
+        ),
     )?;
     let workspace_path =
         match prepare_workspace(root, &run_id, &aggregate_branch, &repository.default_branch) {
@@ -411,7 +414,7 @@ fn execute_merge_run(
     tracker.complete_step(
         STEP_PREPARE_WORKSPACE,
         format!(
-            "Workspace ready at `{}` and checked out to `{aggregate_branch}`.",
+            "Workspace ready: `{}` checked out to `{aggregate_branch}`.",
             workspace_path.display()
         ),
     )?;
@@ -433,7 +436,7 @@ fn execute_merge_run(
     tracker.start_step(
         STEP_PLAN,
         format!(
-            "Creating the merge plan for {} selected pull request(s).",
+            "Drafting the merge plan for {} selected pull request(s).",
             selected_pull_requests.len()
         ),
     )?;
@@ -460,7 +463,7 @@ fn execute_merge_run(
     tracker.complete_step(
         STEP_PLAN,
         format!(
-            "Recorded merge order [{}].",
+            "Merge order recorded as [{}].",
             plan.merge_order
                 .iter()
                 .map(u64::to_string)
@@ -595,7 +598,10 @@ fn execute_merge_run(
         write_merge_progress_artifact(&run_dir, &tracker, &progress)?;
         return Err(error);
     }
-    tracker.complete_step(STEP_PUSH, format!("Pushed `{aggregate_branch}` to origin."))?;
+    tracker.complete_step(
+        STEP_PUSH,
+        format!("Aggregate branch `{aggregate_branch}` is now on origin."),
+    )?;
 
     let pr_title = aggregate_pr_title(&selected_pull_requests);
     let pr_body = aggregate_pr_body(repository, &selected_pull_requests, &plan, &run_id);
@@ -646,7 +652,7 @@ fn execute_merge_run(
         ),
     )?;
     tracker.finish_success(format!(
-        "{} aggregate pull request {}.",
+        "{} aggregate pull request {}. Review the run artifacts for planner, validation, and publication details.",
         match publication_artifact.action.as_str() {
             "updated" => "Updated",
             _ => "Created",
@@ -917,7 +923,7 @@ fn apply_pull_requests(
         tracker.update_detail(
             STEP_APPLY,
             format!(
-                "Applying pull request #{} ({}) onto the aggregate branch.",
+                "Merging pull request #{} ({}) onto the aggregate branch.",
                 pr.number, pr.title
             ),
             Some(pr.number),

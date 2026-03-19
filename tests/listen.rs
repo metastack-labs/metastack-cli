@@ -2,6 +2,71 @@
 
 include!("support/common.rs");
 
+#[cfg(unix)]
+fn write_listen_store_session(
+    config_path: &Path,
+    repo_root: &Path,
+    sessions: Vec<serde_json::Value>,
+) -> Result<PathBuf, Box<dyn Error>> {
+    let store_dir = listen_project_store_dir(config_path, repo_root, None)?;
+    let source_root = listen_source_root(repo_root)?;
+    let metastack_root = source_root.join(".metastack").canonicalize()?;
+    fs::create_dir_all(store_dir.join("logs"))?;
+    fs::write(
+        store_dir.join("project.json"),
+        serde_json::to_vec_pretty(&json!({
+            "version": 1,
+            "project_key": store_dir
+                .file_name()
+                .expect("store dir should have a file name")
+                .to_string_lossy(),
+            "project_label": source_root
+                .file_name()
+                .expect("source root should have a file name")
+                .to_string_lossy(),
+            "source_root": source_root.display().to_string(),
+            "metastack_root": metastack_root.display().to_string()
+        }))?,
+    )?;
+    let state_path = store_dir.join("session.json");
+    fs::write(
+        &state_path,
+        serde_json::to_vec_pretty(&json!({
+            "version": 1,
+            "sessions": sessions
+        }))?,
+    )?;
+    Ok(state_path)
+}
+
+#[cfg(unix)]
+fn listen_session_json(
+    issue_identifier: &str,
+    phase: &str,
+    updated_at_epoch_seconds: u64,
+    pid: Option<u32>,
+) -> serde_json::Value {
+    json!({
+        "issue_id": format!("{issue_identifier}-id"),
+        "issue_identifier": issue_identifier,
+        "issue_title": format!("{issue_identifier} title"),
+        "project_name": "MetaStack CLI",
+        "team_key": "MET",
+        "issue_url": format!("https://linear.app/issues/{issue_identifier}"),
+        "phase": phase,
+        "summary": format!("{issue_identifier} summary"),
+        "brief_path": format!(".metastack/agents/briefs/{issue_identifier}.md"),
+        "workspace_path": format!("/tmp/{issue_identifier}"),
+        "workpad_comment_id": format!("comment-{issue_identifier}"),
+        "updated_at_epoch_seconds": updated_at_epoch_seconds,
+        "pid": pid,
+        "session_id": format!("session-{issue_identifier}"),
+        "turns": 1,
+        "tokens": {},
+        "log_path": format!("logs/{issue_identifier}.log")
+    })
+}
+
 #[test]
 fn listen_requires_auth_when_not_in_demo_mode() -> Result<(), Box<dyn Error>> {
     let _guard = listen_test_lock();
@@ -33,6 +98,453 @@ fn listen_requires_auth_when_not_in_demo_mode() -> Result<(), Box<dyn Error>> {
                     .and(predicate::str::contains("is not configured"))),
         );
 
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_sessions_clear_issue_identifier_removes_only_matching_session()
+-> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    fs::write(&config_path, "\n")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+    init_repo_with_origin(&repo_root)?;
+
+    let state_path = write_listen_store_session(
+        &config_path,
+        &repo_root,
+        vec![
+            listen_session_json("ENG-10163", "blocked", 200, None),
+            listen_session_json("ENG-10164", "blocked", 300, None),
+        ],
+    )?;
+    fs::write(
+        listen_log_path(&config_path, &repo_root, "ENG-10163")?,
+        "log 63\n",
+    )?;
+    fs::write(
+        listen_log_path(&config_path, &repo_root, "ENG-10164")?,
+        "log 64\n",
+    )?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "clear",
+            "ENG-10163",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Cleared 1 stored MetaListen session(s) matched by issue `ENG-10163`",
+        ))
+        .stdout(predicate::str::contains("ENG-10163 [Blocked]"));
+
+    let state: serde_json::Value = serde_json::from_slice(&fs::read(&state_path)?)?;
+    let sessions = state["sessions"]
+        .as_array()
+        .expect("sessions should remain an array");
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0]["issue_identifier"], "ENG-10164");
+    assert!(listen_log_path(&config_path, &repo_root, "ENG-10164")?.is_file());
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "inspect",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ENG-10164 [Blocked]"))
+        .stdout(predicate::str::contains("ENG-10163").not());
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_sessions_clear_refuses_live_pid_records() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    fs::write(&config_path, "\n")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+    init_repo_with_origin(&repo_root)?;
+
+    let mut child = ProcessCommand::new("sleep").arg("30").spawn()?;
+    write_listen_store_session(
+        &config_path,
+        &repo_root,
+        vec![listen_session_json(
+            "ENG-10163",
+            "running",
+            300,
+            Some(child.id()),
+        )],
+    )?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "clear",
+            "--all",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "cannot clear live MetaListen session record(s)",
+        ))
+        .stderr(predicate::str::contains("ENG-10163"))
+        .stderr(predicate::str::contains("pid"));
+
+    let _ = child.kill();
+    let _ = child.wait();
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn agents_listen_sessions_clear_blocked_preserves_other_selector_states()
+-> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    fs::write(&config_path, "\n")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+    init_repo_with_origin(&repo_root)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+
+    let state_path = write_listen_store_session(
+        &config_path,
+        &repo_root,
+        vec![
+            listen_session_json("ENG-10163", "blocked", now, None),
+            listen_session_json("ENG-10164", "completed", now, None),
+            listen_session_json("ENG-10165", "running", now, None),
+        ],
+    )?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "agents",
+            "listen",
+            "sessions",
+            "clear",
+            "--blocked",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Cleared 1 stored MetaListen session(s) matched by `--blocked`",
+        ))
+        .stdout(predicate::str::contains("ENG-10163 [Blocked]"));
+
+    let state: serde_json::Value = serde_json::from_slice(&fs::read(&state_path)?)?;
+    let sessions = state["sessions"]
+        .as_array()
+        .expect("sessions should remain an array");
+    assert_eq!(sessions.len(), 2);
+    assert_eq!(sessions[0]["issue_identifier"], "ENG-10164");
+    assert_eq!(sessions[1]["issue_identifier"], "ENG-10165");
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "agents",
+            "listen",
+            "sessions",
+            "inspect",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ENG-10164 [Completed]"))
+        .stdout(predicate::str::contains("ENG-10165 [Running]"))
+        .stdout(predicate::str::contains("ENG-10163").not());
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_sessions_clear_completed_preserves_blocked_records() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    fs::write(&config_path, "\n")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+    init_repo_with_origin(&repo_root)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+
+    let state_path = write_listen_store_session(
+        &config_path,
+        &repo_root,
+        vec![
+            listen_session_json("ENG-10163", "completed", now, None),
+            listen_session_json("ENG-10164", "blocked", now, None),
+        ],
+    )?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "clear",
+            "--completed",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Cleared 1 stored MetaListen session(s) matched by `--completed`",
+        ))
+        .stdout(predicate::str::contains("ENG-10163 [Completed]"));
+
+    let state: serde_json::Value = serde_json::from_slice(&fs::read(&state_path)?)?;
+    let sessions = state["sessions"]
+        .as_array()
+        .expect("sessions should remain an array");
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0]["issue_identifier"], "ENG-10164");
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_sessions_clear_stale_removes_only_dead_pid_records() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    fs::write(&config_path, "\n")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+    init_repo_with_origin(&repo_root)?;
+
+    let mut child = ProcessCommand::new("sleep").arg("30").spawn()?;
+    let state_path = write_listen_store_session(
+        &config_path,
+        &repo_root,
+        vec![
+            listen_session_json("ENG-10163", "blocked", 100, Some(99_999)),
+            listen_session_json("ENG-10164", "running", 200, Some(child.id())),
+        ],
+    )?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "clear",
+            "--stale",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Cleared 1 stored MetaListen session(s) matched by `--stale`",
+        ))
+        .stdout(predicate::str::contains("ENG-10163 [Blocked]"));
+
+    let state: serde_json::Value = serde_json::from_slice(&fs::read(&state_path)?)?;
+    let sessions = state["sessions"]
+        .as_array()
+        .expect("sessions should remain an array");
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0]["issue_identifier"], "ENG-10164");
+
+    let _ = child.kill();
+    let _ = child.wait();
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_sessions_list_prunes_expired_completed_sessions_on_load() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    fs::write(&config_path, "\n")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+    init_repo_with_origin(&repo_root)?;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+    let state_path = write_listen_store_session(
+        &config_path,
+        &repo_root,
+        vec![
+            listen_session_json("ENG-10163", "completed", now - (24 * 60 * 60) - 1, None),
+            listen_session_json("ENG-10164", "blocked", now, None),
+        ],
+    )?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args(["listen", "sessions", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ENG-10164"))
+        .stdout(predicate::str::contains("ENG-10163").not());
+
+    let state: serde_json::Value = serde_json::from_slice(&fs::read(&state_path)?)?;
+    let sessions = state["sessions"]
+        .as_array()
+        .expect("sessions should remain an array");
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0]["issue_identifier"], "ENG-10164");
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_sessions_inspect_prunes_expired_completed_sessions_on_load() -> Result<(), Box<dyn Error>>
+{
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    fs::write(&config_path, "\n")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+    init_repo_with_origin(&repo_root)?;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+    let state_path = write_listen_store_session(
+        &config_path,
+        &repo_root,
+        vec![
+            listen_session_json("ENG-10163", "completed", now - (24 * 60 * 60) - 1, None),
+            listen_session_json("ENG-10164", "blocked", now, None),
+        ],
+    )?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "inspect",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Tracked sessions:"))
+        .stdout(predicate::str::contains("ENG-10164 [Blocked]"))
+        .stdout(predicate::str::contains("ENG-10163").not());
+
+    let state: serde_json::Value = serde_json::from_slice(&fs::read(&state_path)?)?;
+    let sessions = state["sessions"]
+        .as_array()
+        .expect("sessions should remain an array");
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0]["issue_identifier"], "ENG-10164");
     Ok(())
 }
 
@@ -138,6 +650,16 @@ fn legacy_listen_help_omits_browser_dashboard_flags() {
         .args(["listen", "--help"])
         .assert()
         .success()
+        .stdout(predicate::str::contains("meta listen sessions list"))
+        .stdout(predicate::str::contains(
+            "meta listen sessions inspect --root . --project \"MetaStack API\"",
+        ))
+        .stdout(predicate::str::contains(
+            "meta listen sessions clear --root . --project \"MetaStack API\"",
+        ))
+        .stdout(predicate::str::contains(
+            "meta agents listen --team MET --project \"MetaStack API\"",
+        ))
         .stdout(predicate::str::contains("--dashboard-port").not())
         .stdout(predicate::str::contains("browser").not());
 }
@@ -729,7 +1251,7 @@ fn listen_rejects_duplicate_active_listener_lock_for_same_project() -> Result<()
     )?;
     init_repo_with_origin(&repo_root)?;
 
-    let project_dir = listen_project_store_dir(&config_path, &repo_root)?;
+    let project_dir = listen_project_store_dir(&config_path, &repo_root, Some("MetaStack CLI"))?;
     fs::create_dir_all(&project_dir)?;
     fs::write(
         project_dir.join("active-listener.lock.json"),
@@ -756,12 +1278,79 @@ fn listen_rejects_duplicate_active_listener_lock_for_same_project() -> Result<()
             "listen",
             "--demo",
             "--once",
+            "--project",
+            "MetaStack CLI",
             "--root",
             repo_root.to_str().expect("temp path should be utf-8"),
         ])
         .assert()
         .failure()
         .stderr(predicate::str::contains("already owns project"));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_allows_active_listener_lock_for_different_project() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    fs::write(&config_path, "\n")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+    init_repo_with_origin(&repo_root)?;
+
+    let alpha_dir = listen_project_store_dir(&config_path, &repo_root, Some("Alpha"))?;
+    fs::create_dir_all(&alpha_dir)?;
+    fs::write(
+        alpha_dir.join("active-listener.lock.json"),
+        format!(
+            r#"{{
+  "pid": {},
+  "acquired_at_epoch_seconds": 1773575600,
+  "source_root": "{}",
+  "metastack_root": "{}"
+}}"#,
+            std::process::id(),
+            listen_source_root(&repo_root)?.display(),
+            listen_source_root(&repo_root)?
+                .join(".metastack")
+                .canonicalize()?
+                .display()
+        ),
+    )?;
+
+    let beta_state_path =
+        listen_project_store_dir(&config_path, &repo_root, Some("Beta"))?.join("session.json");
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "--demo",
+            "--once",
+            "--project",
+            "Beta",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "State file: {}",
+            beta_state_path.display()
+        )))
+        .stdout(predicate::str::contains(alpha_dir.display().to_string()).not());
 
     Ok(())
 }
@@ -786,7 +1375,7 @@ fn listen_recovers_stale_active_listener_lock() -> Result<(), Box<dyn Error>> {
     )?;
     init_repo_with_origin(&repo_root)?;
 
-    let project_dir = listen_project_store_dir(&config_path, &repo_root)?;
+    let project_dir = listen_project_store_dir(&config_path, &repo_root, None)?;
     fs::create_dir_all(&project_dir)?;
     let lock_path = project_dir.join("active-listener.lock.json");
     fs::write(
@@ -825,6 +1414,53 @@ fn listen_recovers_stale_active_listener_lock() -> Result<(), Box<dyn Error>> {
                 .as_ref(),
         ));
     assert!(!lock_path.exists());
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_omitted_project_uses_repo_default_project_identity() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    fs::write(&config_path, "\n")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-default"
+  }
+}
+"#,
+    )?;
+    init_repo_with_origin(&repo_root)?;
+
+    let default_project_dir =
+        listen_project_store_dir(&config_path, &repo_root, Some("project-default"))?;
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "--demo",
+            "--once",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "State file: {}",
+            default_project_dir.join("session.json").display()
+        )));
+
+    let metadata = fs::read_to_string(default_project_dir.join("project.json"))?;
+    assert!(metadata.contains("\"project_selector\": \"project-default\""));
+    assert!(metadata.contains("\"project_label\": \"project-default\""));
 
     Ok(())
 }
@@ -1177,8 +1813,8 @@ fn listen_uses_the_same_project_identity_for_repo_and_worktree_roots() -> Result
     init_repo_with_origin(&repo_root)?;
     let worktree_root = create_worktree_checkout(&repo_root, "feature/listen", "repo-worktree")?;
 
-    let repo_store_dir = listen_project_store_dir(&config_path, &repo_root)?;
-    let worktree_store_dir = listen_project_store_dir(&config_path, &worktree_root)?;
+    let repo_store_dir = listen_project_store_dir(&config_path, &repo_root, None)?;
+    let worktree_store_dir = listen_project_store_dir(&config_path, &worktree_root, None)?;
     assert_eq!(repo_store_dir, worktree_store_dir);
 
     meta()
@@ -1734,15 +2370,200 @@ printf '%s' "$METASTACK_AGENT_INSTRUCTIONS" > "$TEST_OUTPUT_DIR/instructions.txt
             "listen",
             "sessions",
             "clear",
+            "--all",
             "--root",
             repo_root.to_str().expect("temp path should be utf-8"),
         ])
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Cleared stored MetaListen session data",
+            "Cleared 1 stored MetaListen session(s) matched by `--all`",
         ));
-    assert!(!state_path.exists());
+    let cleared_state: serde_json::Value = serde_json::from_slice(&fs::read(&state_path)?)?;
+    assert_eq!(
+        cleared_state["sessions"]
+            .as_array()
+            .expect("sessions should remain an array")
+            .len(),
+        0
+    );
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_sessions_target_multiple_project_scopes_from_one_repo() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    fs::write(&config_path, "\n")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-default"
+  }
+}
+"#,
+    )?;
+    init_repo_with_origin(&repo_root)?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "--demo",
+            "--once",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success();
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "--demo",
+            "--once",
+            "--project",
+            "project-beta",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success();
+
+    let default_state_path =
+        listen_project_store_dir(&config_path, &repo_root, Some("project-default"))?
+            .join("session.json");
+    let beta_state_path = listen_project_store_dir(&config_path, &repo_root, Some("project-beta"))?
+        .join("session.json");
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args(["listen", "sessions", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("project-default"))
+        .stdout(predicate::str::contains("project-beta"))
+        .stdout(predicate::str::contains(
+            repo_root.canonicalize()?.display().to_string(),
+        ));
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "inspect",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            default_state_path.display().to_string(),
+        ))
+        .stdout(predicate::str::contains("Project: project-default"));
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "inspect",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+            "--project",
+            "project-beta",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            beta_state_path.display().to_string(),
+        ))
+        .stdout(predicate::str::contains("Project: project-beta"));
+
+    let beta_project_key = beta_state_path
+        .parent()
+        .and_then(|path| path.file_name())
+        .and_then(|value| value.to_str())
+        .expect("beta project key should be present")
+        .to_string();
+
+    meta()
+        .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "inspect",
+            "--project-key",
+            &beta_project_key,
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            beta_state_path.display().to_string(),
+        ))
+        .stdout(predicate::str::contains("Project: project-beta"));
+
+    meta()
+        .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "resume",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+            "--project",
+            "project-beta",
+            "--demo",
+            "--once",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            beta_state_path.display().to_string(),
+        ));
+
+    meta()
+        .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "clear",
+            "--project-key",
+            &beta_project_key,
+            "--all",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("project-beta"));
+
+    assert!(default_state_path.parent().is_some_and(Path::exists));
+    assert!(beta_state_path.parent().is_some_and(Path::exists));
+    if beta_state_path.is_file() {
+        let beta_state: serde_json::Value = serde_json::from_slice(&fs::read(&beta_state_path)?)?;
+        assert_eq!(
+            beta_state["sessions"]
+                .as_array()
+                .expect("sessions should remain an array")
+                .len(),
+            0
+        );
+    }
 
     Ok(())
 }
@@ -3420,7 +4241,11 @@ printf '// turn %s\n' "$count" > "src/turn-$count.rs"
         .stdout(predicate::str::contains("1 claimed this cycle"))
         .stdout(predicate::str::contains("MET-32"));
 
-    wait_for_path(&stub_dir.join("payload-2.txt"))?;
+    wait_for_path_with_timeout(&stub_dir.join("payload-2.txt"), Duration::from_secs(120))?;
+    wait_for_path_with_timeout(
+        &stub_dir.join("instructions-2.txt"),
+        Duration::from_secs(120),
+    )?;
     let turn_count = fs::read_to_string(stub_dir.join("count.txt"))?
         .trim()
         .parse::<u32>()?;
@@ -3540,9 +4365,15 @@ printf '%s' "$METASTACK_AGENT_INSTRUCTIONS" > "$TEST_OUTPUT_DIR/instructions-$co
         .stdout(predicate::str::contains("1 claimed this cycle"))
         .stdout(predicate::str::contains("MET-32"));
 
-    wait_for_path(&stub_dir.join("payload-2.txt"))?;
     let state_path = listen_state_path(&config_path, &repo_root)?;
     wait_for_file_substring(&state_path, "\"phase\": \"blocked\"")?;
+    let turn_count = fs::read_to_string(stub_dir.join("count.txt"))?
+        .trim()
+        .parse::<u32>()?;
+    assert!(
+        turn_count >= 2,
+        "expected at least two agent turns before the worker stalled, observed {turn_count}"
+    );
     let state = fs::read_to_string(state_path)?;
     assert!(state.contains("\"issue_identifier\": \"MET-32\""));
     assert!(state.contains("\"phase\": \"blocked\""));

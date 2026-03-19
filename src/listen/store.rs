@@ -4,8 +4,6 @@ use std::hash::{Hash, Hasher};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::thread;
-use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -13,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::resolve_data_root;
 use crate::fs::{canonicalize_existing_dir, ensure_dir};
 
-use super::state::ListenState;
+use super::state::{AgentSession, COMPLETED_SESSION_TTL_SECONDS, ListenState, SessionPhase};
 
 const LISTEN_STORE_VERSION: u8 = 1;
 
@@ -28,6 +26,8 @@ pub(super) struct ListenProjectIdentity {
     pub(super) project_key: String,
     pub(super) source_root: PathBuf,
     pub(super) metastack_root: PathBuf,
+    pub(super) source_label: String,
+    pub(super) project_selector: Option<String>,
     pub(super) project_label: String,
 }
 
@@ -45,9 +45,13 @@ pub(super) struct ListenProjectPaths {
 pub(super) struct ListenProjectMetadata {
     pub(super) version: u8,
     pub(super) project_key: String,
+    #[serde(default)]
+    pub(super) project_selector: Option<String>,
     pub(super) project_label: String,
     pub(super) source_root: String,
     pub(super) metastack_root: String,
+    #[serde(default)]
+    pub(super) source_label: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,8 +68,45 @@ pub(super) struct StoredListenProjectSummary {
     pub(super) state_path: PathBuf,
     pub(super) lock_path: PathBuf,
     pub(super) logs_dir: PathBuf,
-    pub(super) latest_session: Option<super::state::AgentSession>,
+    pub(super) latest_session: Option<AgentSession>,
     pub(super) active_lock: Option<ActiveListenerLock>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum SessionSelector {
+    IssueIdentifier(String),
+    Blocked,
+    Completed,
+    Stale,
+    All,
+}
+
+impl SessionSelector {
+    pub(super) fn display_label(&self) -> String {
+        match self {
+            Self::IssueIdentifier(identifier) => format!("issue `{identifier}`"),
+            Self::Blocked => "`--blocked`".to_string(),
+            Self::Completed => "`--completed`".to_string(),
+            Self::Stale => "`--stale`".to_string(),
+            Self::All => "`--all`".to_string(),
+        }
+    }
+
+    fn matches(&self, session: &AgentSession) -> bool {
+        match self {
+            Self::IssueIdentifier(identifier) => session.issue_matches(identifier),
+            Self::Blocked => matches!(session.phase, SessionPhase::Blocked),
+            Self::Completed => matches!(session.phase, SessionPhase::Completed),
+            Self::Stale => session.pid.is_some_and(|pid| !pid_is_running(pid)),
+            Self::All => true,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct SessionClearOutcome {
+    pub(super) cleared_sessions: Vec<AgentSession>,
+    pub(super) remaining_sessions: usize,
 }
 
 #[derive(Debug)]
@@ -75,13 +116,17 @@ pub(super) struct ListenerLockGuard {
 }
 
 impl ListenProjectStore {
-    pub(super) fn resolve(root: &Path) -> Result<Self> {
+    pub(super) fn resolve(root: &Path, project_selector: Option<&str>) -> Result<Self> {
         let data_root = resolve_data_root()?;
-        Self::resolve_with_data_root(root, data_root)
+        Self::resolve_with_data_root(root, data_root, project_selector)
     }
 
-    fn resolve_with_data_root(root: &Path, data_root: PathBuf) -> Result<Self> {
-        let identity = resolve_project_identity(root)?;
+    fn resolve_with_data_root(
+        root: &Path,
+        data_root: PathBuf,
+        project_selector: Option<&str>,
+    ) -> Result<Self> {
+        let identity = resolve_project_identity(root, project_selector)?;
         let projects_root = data_root.join("listen").join("projects");
         let project_dir = projects_root.join(&identity.project_key);
         let paths = ListenProjectPaths {
@@ -101,10 +146,22 @@ impl ListenProjectStore {
         let project_dir = data_root.join("listen").join("projects").join(project_key);
         let metadata_path = project_dir.join("project.json");
         let metadata = read_json::<ListenProjectMetadata>(&metadata_path)?;
+        let source_label = if metadata.source_label.trim().is_empty() {
+            Path::new(&metadata.source_root)
+                .file_name()
+                .and_then(OsStr::to_str)
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or("project")
+                .to_string()
+        } else {
+            metadata.source_label.clone()
+        };
         let identity = ListenProjectIdentity {
             project_key: metadata.project_key.clone(),
             source_root: PathBuf::from(&metadata.source_root),
             metastack_root: PathBuf::from(&metadata.metastack_root),
+            source_label,
+            project_selector: metadata.project_selector.clone(),
             project_label: metadata.project_label.clone(),
         };
         let paths = ListenProjectPaths {
@@ -139,21 +196,25 @@ impl ListenProjectStore {
             &ListenProjectMetadata {
                 version: LISTEN_STORE_VERSION,
                 project_key: self.identity.project_key.clone(),
+                project_selector: self.identity.project_selector.clone(),
                 project_label: self.identity.project_label.clone(),
                 source_root: self.identity.source_root.display().to_string(),
                 metastack_root: self.identity.metastack_root.display().to_string(),
+                source_label: self.identity.source_label.clone(),
             },
         )
     }
 
     pub(super) fn load_state(&self) -> Result<ListenState> {
-        match fs::read_to_string(&self.paths.state_path) {
-            Ok(contents) => serde_json::from_str(&contents)
-                .with_context(|| format!("failed to decode `{}`", self.paths.state_path.display())),
-            Err(error) if error.kind() == ErrorKind::NotFound => Ok(ListenState::default()),
-            Err(error) => Err(error)
-                .with_context(|| format!("failed to read `{}`", self.paths.state_path.display())),
+        let (mut state, state_exists) = self.load_state_from_disk()?;
+        let pruned = state.prune_completed_sessions_older_than(
+            now_epoch_seconds(),
+            COMPLETED_SESSION_TTL_SECONDS,
+        );
+        if state_exists && !pruned.is_empty() {
+            self.save_state(&state)?;
         }
+        Ok(state)
     }
 
     pub(super) fn save_state(&self, state: &ListenState) -> Result<()> {
@@ -161,10 +222,47 @@ impl ListenProjectStore {
         write_json(&self.paths.state_path, state)
     }
 
-    pub(super) fn upsert_session(&self, session: super::state::AgentSession) -> Result<()> {
+    pub(super) fn upsert_session(&self, session: AgentSession) -> Result<()> {
         let mut state = self.load_state()?;
         state.upsert(session);
         self.save_state(&state)
+    }
+
+    pub(super) fn clear_sessions(&self, selector: &SessionSelector) -> Result<SessionClearOutcome> {
+        let mut state = self.load_state()?;
+        let live_sessions = state
+            .sessions
+            .iter()
+            .filter(|session| selector.matches(session))
+            .filter_map(|session| {
+                session
+                    .pid
+                    .filter(|pid| pid_is_running(*pid))
+                    .map(|pid| (session.issue_identifier.clone(), pid))
+            })
+            .collect::<Vec<_>>();
+        if !live_sessions.is_empty() {
+            let sessions = live_sessions
+                .into_iter()
+                .map(|(identifier, pid)| format!("{identifier} (pid {pid})"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            bail!(
+                "cannot clear live MetaListen session record(s) matched by {}: {}",
+                selector.display_label(),
+                sessions
+            );
+        }
+
+        let cleared_sessions = state.remove_sessions(|session| selector.matches(session));
+        if !cleared_sessions.is_empty() {
+            self.save_state(&state)?;
+        }
+
+        Ok(SessionClearOutcome {
+            cleared_sessions,
+            remaining_sessions: state.sessions.len(),
+        })
     }
 
     pub(super) fn log_path(&self, issue_identifier: &str) -> PathBuf {
@@ -244,37 +342,12 @@ impl ListenProjectStore {
         }
     }
 
-    pub(super) fn clear(&self) -> Result<()> {
-        if let Some(active_lock) = self.load_active_lock()?
-            && pid_is_running(active_lock.pid)
-        {
-            bail!(
-                "cannot clear project `{}` while active listener pid {} still owns it",
-                self.identity.project_label,
-                active_lock.pid
-            );
-        }
-
-        for attempt in 0..5 {
-            match fs::remove_dir_all(&self.paths.project_dir) {
-                Ok(()) => return Ok(()),
-                Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
-                Err(error) if is_directory_not_empty(&error) && attempt < 4 => {
-                    thread::sleep(Duration::from_millis(25));
-                }
-                Err(error) => {
-                    return Err(error).with_context(|| {
-                        format!("failed to remove `{}`", self.paths.project_dir.display())
-                    });
-                }
-            }
-        }
-
-        Ok(())
-    }
-
     pub(super) fn list_projects() -> Result<Vec<StoredListenProjectSummary>> {
         let data_root = resolve_data_root()?;
+        Self::list_projects_with_data_root(data_root)
+    }
+
+    fn list_projects_with_data_root(data_root: PathBuf) -> Result<Vec<StoredListenProjectSummary>> {
         let projects_root = data_root.join("listen").join("projects");
         let mut projects = Vec::new();
 
@@ -307,18 +380,29 @@ impl ListenProjectStore {
                 Ok(metadata) => metadata,
                 Err(_) => continue,
             };
-            let latest_session = match fs::read_to_string(&state_path) {
-                Ok(contents) => serde_json::from_str::<ListenState>(&contents)
-                    .ok()
-                    .and_then(|state| state.latest_session()),
-                Err(error) if error.kind() == ErrorKind::NotFound => None,
+            let store = Self {
+                identity: ListenProjectIdentity {
+                    project_key: metadata.project_key.clone(),
+                    source_root: PathBuf::from(&metadata.source_root),
+                    metastack_root: PathBuf::from(&metadata.metastack_root),
+                    source_label: metadata.source_label.clone(),
+                    project_selector: metadata.project_selector.clone(),
+                    project_label: metadata.project_label.clone(),
+                },
+                paths: ListenProjectPaths {
+                    projects_root: projects_root.clone(),
+                    project_dir: project_dir.clone(),
+                    project_metadata_path: metadata_path.clone(),
+                    state_path: state_path.clone(),
+                    lock_path: lock_path.clone(),
+                    logs_dir: logs_dir.clone(),
+                },
+            };
+            let latest_session = match store.load_state() {
+                Ok(state) => state.latest_session(),
                 Err(_) => None,
             };
-            let active_lock = match fs::read_to_string(&lock_path) {
-                Ok(contents) => serde_json::from_str::<ActiveListenerLock>(&contents).ok(),
-                Err(error) if error.kind() == ErrorKind::NotFound => None,
-                Err(_) => None,
-            };
+            let active_lock = store.load_active_lock().ok().flatten();
 
             projects.push(StoredListenProjectSummary {
                 metadata,
@@ -351,6 +435,19 @@ impl ListenProjectStore {
         });
         Ok(projects)
     }
+
+    fn load_state_from_disk(&self) -> Result<(ListenState, bool)> {
+        match fs::read_to_string(&self.paths.state_path) {
+            Ok(contents) => serde_json::from_str(&contents)
+                .map(|state| (state, true))
+                .with_context(|| format!("failed to decode `{}`", self.paths.state_path.display())),
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                Ok((ListenState::default(), false))
+            }
+            Err(error) => Err(error)
+                .with_context(|| format!("failed to read `{}`", self.paths.state_path.display())),
+        }
+    }
 }
 
 impl Drop for ListenerLockGuard {
@@ -367,21 +464,30 @@ impl Drop for ListenerLockGuard {
     }
 }
 
-fn resolve_project_identity(root: &Path) -> Result<ListenProjectIdentity> {
+fn resolve_project_identity(
+    root: &Path,
+    project_selector: Option<&str>,
+) -> Result<ListenProjectIdentity> {
     let requested_root = canonicalize_existing_dir(root)?;
     let source_root = resolve_source_root(&requested_root)?;
     let metastack_root = canonicalize_existing_dir(&source_root.join(".metastack"))?;
-    let project_label = source_root
+    let source_label = source_root
         .file_name()
         .and_then(OsStr::to_str)
         .filter(|value| !value.trim().is_empty())
         .unwrap_or("project")
         .to_string();
+    let project_selector = normalize_project_selector(project_selector);
+    let project_label = project_selector
+        .clone()
+        .unwrap_or_else(|| "All projects".to_string());
 
     Ok(ListenProjectIdentity {
-        project_key: project_key_for_metastack_root(&metastack_root),
+        project_key: project_key_for_metastack_root(&metastack_root, project_selector.as_deref()),
         source_root,
         metastack_root,
+        source_label,
+        project_selector,
         project_label,
     })
 }
@@ -409,10 +515,25 @@ fn resolve_source_root(root: &Path) -> Result<PathBuf> {
     Ok(root.to_path_buf())
 }
 
-fn project_key_for_metastack_root(metastack_root: &Path) -> String {
+fn project_key_for_metastack_root(metastack_root: &Path, project_selector: Option<&str>) -> String {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     metastack_root.display().to_string().hash(&mut hasher);
+    normalized_project_scope_key(project_selector).hash(&mut hasher);
     format!("{:016x}", hasher.finish())
+}
+
+fn normalize_project_selector(project_selector: Option<&str>) -> Option<String> {
+    project_selector
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn normalized_project_scope_key(project_selector: Option<&str>) -> String {
+    match normalize_project_selector(project_selector) {
+        Some(selector) => format!("project:{}", selector.to_ascii_lowercase()),
+        None => "project:all".to_string(),
+    }
 }
 
 fn git_stdout(root: &Path, args: &[&str]) -> Result<String> {
@@ -457,7 +578,7 @@ where
         .with_context(|| format!("failed to decode `{}`", path.display()))
 }
 
-fn pid_is_running(pid: u32) -> bool {
+pub(super) fn pid_is_running(pid: u32) -> bool {
     Command::new("ps")
         .arg("-p")
         .arg(pid.to_string())
@@ -475,26 +596,20 @@ fn now_epoch_seconds() -> u64 {
         .as_secs()
 }
 
-fn is_directory_not_empty(error: &std::io::Error) -> bool {
-    matches!(
-        error.kind(),
-        ErrorKind::DirectoryNotEmpty | ErrorKind::Other
-    ) && error
-        .raw_os_error()
-        .is_some_and(|code| matches!(code, 39 | 66))
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::process::{Child, Command, Stdio};
 
-    use anyhow::Result;
+    use anyhow::{Context, Result};
     use tempfile::tempdir;
 
     use crate::config::data_root_from_config_path;
+    use crate::listen::TokenUsage;
 
     use super::{
-        ActiveListenerLock, ListenProjectStore, project_key_for_metastack_root,
+        ActiveListenerLock, AgentSession, COMPLETED_SESSION_TTL_SECONDS, ListenProjectStore,
+        ListenState, SessionPhase, SessionSelector, project_key_for_metastack_root,
         resolve_source_root, write_json,
     };
 
@@ -564,8 +679,16 @@ mod tests {
         fs::create_dir_all(&metastack_root)?;
 
         assert_eq!(
-            project_key_for_metastack_root(&metastack_root),
-            project_key_for_metastack_root(&metastack_root)
+            project_key_for_metastack_root(&metastack_root, Some("MetaStack CLI")),
+            project_key_for_metastack_root(&metastack_root, Some("metastack cli"))
+        );
+        assert_ne!(
+            project_key_for_metastack_root(&metastack_root, Some("MetaStack CLI")),
+            project_key_for_metastack_root(&metastack_root, Some("MetaStack API"))
+        );
+        assert_ne!(
+            project_key_for_metastack_root(&metastack_root, Some("MetaStack CLI")),
+            project_key_for_metastack_root(&metastack_root, None)
         );
 
         Ok(())
@@ -578,19 +701,70 @@ mod tests {
         let config_path = temp.path().join("metastack.toml");
         fs::create_dir_all(repo_root.join(".metastack"))?;
         let data_root = data_root_from_config_path(&config_path)?;
-        let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root.clone())?;
+        let store = ListenProjectStore::resolve_with_data_root(
+            &repo_root,
+            data_root.clone(),
+            Some("MetaStack CLI"),
+        )?;
         assert!(data_root.starts_with(temp.path()));
         assert!(store.paths().state_path.starts_with(data_root));
         Ok(())
     }
 
+    fn default_session(
+        issue_identifier: &str,
+        phase: SessionPhase,
+        updated_at: u64,
+    ) -> AgentSession {
+        AgentSession {
+            issue_id: Some(format!("{issue_identifier}-id")),
+            issue_identifier: issue_identifier.to_string(),
+            issue_title: format!("{issue_identifier} title"),
+            project_name: Some("MetaStack CLI".to_string()),
+            team_key: "MET".to_string(),
+            issue_url: format!("https://linear.app/metastack/{issue_identifier}"),
+            phase,
+            summary: format!("{issue_identifier} summary"),
+            brief_path: Some(format!(".metastack/agents/briefs/{issue_identifier}.md")),
+            backlog_issue_identifier: Some(format!("TECH-{issue_identifier}")),
+            backlog_issue_title: Some(format!("Backlog for {issue_identifier}")),
+            backlog_path: Some(format!(".metastack/backlog/{issue_identifier}")),
+            workspace_path: Some(format!("/tmp/{issue_identifier}")),
+            branch: Some(format!("branch-{issue_identifier}")),
+            workpad_comment_id: Some(format!("workpad-{issue_identifier}")),
+            updated_at_epoch_seconds: updated_at,
+            pid: None,
+            session_id: Some(format!("session-{issue_identifier}")),
+            turns: Some(1),
+            tokens: TokenUsage::default(),
+            log_path: Some(format!("logs/{issue_identifier}.log")),
+        }
+    }
+
+    fn seed_state(store: &ListenProjectStore, sessions: Vec<AgentSession>) -> Result<()> {
+        store.ensure_layout()?;
+        write_json(
+            &store.paths().state_path,
+            &ListenState::from_sessions(sessions),
+        )
+    }
+
+    fn spawn_sleep_process() -> Result<Child> {
+        Command::new("sleep")
+            .arg("30")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .context("failed to spawn sleep process for listen store test")
+    }
+
     #[test]
-    fn clear_removes_project_dir_when_only_a_stale_lock_remains() -> Result<()> {
+    fn clear_by_issue_identifier_preserves_other_sessions_and_project_files() -> Result<()> {
         let temp = tempdir()?;
         let repo_root = temp.path().join("repo");
         let data_root = temp.path().join("data");
         fs::create_dir_all(repo_root.join(".metastack"))?;
-        let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root)?;
+        let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
         store.ensure_layout()?;
         fs::write(store.paths().state_path.clone(), "{}")?;
         write_json(
@@ -602,10 +776,169 @@ mod tests {
                 metastack_root: repo_root.join(".metastack").display().to_string(),
             },
         )?;
+        seed_state(
+            &store,
+            vec![
+                default_session("ENG-10163", SessionPhase::Blocked, 100),
+                default_session("ENG-10164", SessionPhase::Blocked, 200),
+            ],
+        )?;
 
-        store.clear()?;
+        let outcome =
+            store.clear_sessions(&SessionSelector::IssueIdentifier("ENG-10163".to_string()))?;
+        let state = store.load_state()?;
 
-        assert!(!store.paths().project_dir.exists());
+        assert_eq!(outcome.cleared_sessions.len(), 1);
+        assert_eq!(outcome.cleared_sessions[0].issue_identifier, "ENG-10163");
+        assert_eq!(outcome.remaining_sessions, 1);
+        assert!(store.paths().project_dir.is_dir());
+        assert!(store.paths().project_metadata_path.is_file());
+        assert_eq!(state.sessions.len(), 1);
+        assert_eq!(state.sessions[0].issue_identifier, "ENG-10164");
+        assert!(
+            store
+                .paths()
+                .lock_path
+                .parent()
+                .is_some_and(|parent| parent.is_dir())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn clear_stale_removes_only_dead_pid_sessions() -> Result<()> {
+        let temp = tempdir()?;
+        let repo_root = temp.path().join("repo");
+        let data_root = temp.path().join("data");
+        fs::create_dir_all(repo_root.join(".metastack"))?;
+        let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
+
+        let mut stale = default_session("ENG-10163", SessionPhase::Blocked, 100);
+        stale.pid = Some(99_999);
+        let mut running = default_session("ENG-10164", SessionPhase::Running, 200);
+        let mut child = spawn_sleep_process()?;
+        running.pid = Some(child.id());
+        seed_state(&store, vec![stale, running.clone()])?;
+
+        let outcome = store.clear_sessions(&SessionSelector::Stale)?;
+        let state = store.load_state()?;
+
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert_eq!(outcome.cleared_sessions.len(), 1);
+        assert_eq!(outcome.cleared_sessions[0].issue_identifier, "ENG-10163");
+        assert_eq!(state.sessions.len(), 1);
+        assert_eq!(state.sessions[0].issue_identifier, "ENG-10164");
+        Ok(())
+    }
+
+    #[test]
+    fn clear_refuses_live_targeted_sessions() -> Result<()> {
+        let temp = tempdir()?;
+        let repo_root = temp.path().join("repo");
+        let data_root = temp.path().join("data");
+        fs::create_dir_all(repo_root.join(".metastack"))?;
+        let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
+
+        let mut live = default_session("ENG-10163", SessionPhase::Running, 100);
+        let mut child = spawn_sleep_process()?;
+        live.pid = Some(child.id());
+        seed_state(&store, vec![live])?;
+
+        let error = store
+            .clear_sessions(&SessionSelector::All)
+            .expect_err("live session clear should fail");
+
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert!(
+            error
+                .to_string()
+                .contains("cannot clear live MetaListen session record(s)")
+        );
+        assert_eq!(store.load_state()?.sessions.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn load_state_prunes_only_completed_sessions_older_than_ttl() -> Result<()> {
+        let temp = tempdir()?;
+        let repo_root = temp.path().join("repo");
+        let data_root = temp.path().join("data");
+        fs::create_dir_all(repo_root.join(".metastack"))?;
+        let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
+        let now = super::now_epoch_seconds();
+        let ttl = COMPLETED_SESSION_TTL_SECONDS;
+
+        seed_state(
+            &store,
+            vec![
+                default_session("ENG-10163", SessionPhase::Completed, now - ttl - 1),
+                default_session("ENG-10164", SessionPhase::Completed, now - ttl),
+                default_session("ENG-10165", SessionPhase::Blocked, now - ttl - 1),
+            ],
+        )?;
+
+        let state = store.load_state()?;
+
+        assert_eq!(state.sessions.len(), 2);
+        assert!(
+            state
+                .sessions
+                .iter()
+                .any(|session| session.issue_identifier == "ENG-10164")
+        );
+        assert!(
+            state
+                .sessions
+                .iter()
+                .any(|session| session.issue_identifier == "ENG-10165")
+        );
+        assert!(
+            !state
+                .sessions
+                .iter()
+                .any(|session| session.issue_identifier == "ENG-10163")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn list_projects_uses_pruned_state_for_latest_session() -> Result<()> {
+        let temp = tempdir()?;
+        let repo_root = temp.path().join("repo");
+        let data_root = temp.path().join("data");
+        fs::create_dir_all(repo_root.join(".metastack"))?;
+        let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
+        let now = super::now_epoch_seconds();
+
+        seed_state(
+            &store,
+            vec![
+                default_session(
+                    "ENG-10163",
+                    SessionPhase::Completed,
+                    now - COMPLETED_SESSION_TTL_SECONDS - 1,
+                ),
+                default_session("ENG-10164", SessionPhase::Blocked, now),
+            ],
+        )?;
+
+        let projects = ListenProjectStore::list_projects_with_data_root(temp.path().join("data"))?;
+        let summary = projects
+            .into_iter()
+            .find(|project| project.metadata.project_key == store.identity().project_key)
+            .expect("project summary should exist");
+
+        assert_eq!(
+            summary
+                .latest_session
+                .as_ref()
+                .map(|session| session.issue_identifier.as_str()),
+            Some("ENG-10164")
+        );
         Ok(())
     }
 }

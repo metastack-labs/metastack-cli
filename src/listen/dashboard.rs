@@ -406,9 +406,16 @@ mod tests {
         build_dashboard_data,
     };
 
+    fn demo_cycle() -> ListenCycleData {
+        ListenCycleData::demo(
+            Path::new("."),
+            ".metastack/agents/sessions/listen-state.json".to_string(),
+        )
+    }
+
     #[test]
     fn snapshot_contains_runtime_summary_and_agent_columns() {
-        let cycle = ListenCycleData::demo(Path::new("."));
+        let cycle = demo_cycle();
         let data = build_dashboard_data(
             &cycle,
             &DashboardRuntimeContext {
@@ -434,7 +441,7 @@ mod tests {
 
     #[test]
     fn completed_view_renders_only_completed_sessions() {
-        let mut cycle = ListenCycleData::demo(Path::new("."));
+        let mut cycle = demo_cycle();
         let mut completed = cycle
             .sessions
             .first()
@@ -468,7 +475,7 @@ mod tests {
 
     #[test]
     fn snapshot_keeps_unknown_tokens_and_compact_session_ids() {
-        let mut cycle = ListenCycleData::demo(Path::new("."));
+        let mut cycle = demo_cycle();
         let session = cycle
             .sessions
             .first_mut()
@@ -497,7 +504,7 @@ mod tests {
 
     #[test]
     fn snapshot_surfaces_empty_completed_state_in_compact_layout() {
-        let cycle = ListenCycleData::demo(Path::new("."));
+        let cycle = demo_cycle();
         let data = build_dashboard_data(
             &cycle,
             &DashboardRuntimeContext {

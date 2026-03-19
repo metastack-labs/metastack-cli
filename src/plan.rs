@@ -2620,7 +2620,7 @@ mod tests {
             spinner_index: 1,
         });
 
-        assert!(snapshot.contains("/ Generating suggested tickets"));
+        assert!(snapshot.contains("[==  ] Generating suggested tickets"));
         assert!(snapshot.contains("Agent Working [loading]"));
     }
 

@@ -25,33 +25,59 @@ The initial implementation delivered in `MET-13` focuses on the smallest end-to-
 9. Session state is persisted to the install-scoped MetaStack data root under
    `listen/projects/<PROJECT_KEY>/session.json`, and agent stdout/stderr are appended to
    `listen/projects/<PROJECT_KEY>/logs/<TICKET>.log`.
-10. A full-screen ratatui dashboard renders runtime summary rows, a colorized agent table, the pending queue, daemon notes, and an active/completed session toggle.
-11. The hidden listen worker keeps refreshing the Linear issue and re-running the agent with first-turn and continuation prompts while the issue remains active.
-12. The hidden listen worker keeps looping while the issue remains active, but it treats repeated planning-only or no-op turns as a local stall instead of silently spinning.
-13. When the technical backlog is complete and meaningful non-`.metastack/` workspace progress was observed, the worker attempts to move both the parent issue and backlog child into a review-style state.
-14. The worker records `completed` or `blocked` state locally, including stall summaries and recent agent log output for unattended failures.
-15. Live mode keeps the ratatui dashboard open in the terminal and uses the same shared listen snapshot for deterministic `--render-once` output.
+10. Session cleanup is record-only: targeted session records are removed or rewritten inside
+    `session.json` without deleting `project.json`, `active-listener.lock.json`, or unrelated
+    per-issue logs, and live worker PIDs are never cleared automatically.
+11. A full-screen ratatui dashboard renders runtime summary rows, a colorized agent table, the pending queue, daemon notes, and an active/completed session toggle.
+12. The hidden listen worker keeps refreshing the Linear issue and re-running the agent with first-turn and continuation prompts while the issue remains active.
+13. The hidden listen worker keeps looping while the issue remains active, but it treats repeated planning-only or no-op turns as a local stall instead of silently spinning.
+14. When the technical backlog is complete and meaningful non-`.metastack/` workspace progress was observed, the worker attempts to move both the parent issue and backlog child into a review-style state.
+15. The worker records `completed` or `blocked` state locally, including stall summaries and recent agent log output for unattended failures.
+16. During reconciliation, a stored `running` session with a dead worker PID is marked `blocked`
+    with stale/worker-died context preserved in its summary and log references instead of being
+    auto-resumed.
+17. Completed sessions older than the default 24-hour TTL are pruned automatically during store
+    loads and reconciliation, while blocked sessions are retained until explicit cleanup.
+18. Live mode keeps the ratatui dashboard open in the terminal and uses the same shared listen snapshot for deterministic `--render-once` output.
 
 This mirrors the scheduler + status-surface split in Symphony while using one clear workspace
 contract: each claimed ticket gets its own standalone clone and ticket branch under the configured
 workspace root, while listener session state lives in a shared install-scoped store. The store key
-is derived from the canonical source project `.metastack` root, so the source repo checkout and any
-related worktrees resolve to the same stored project session and active-listener lock.
+is derived from the canonical source project root plus the effective project selector used for the
+run, so the source repo checkout and any related worktrees still share one stored session per
+project target while different project targets in the same checkout keep separate locks and logs.
 
 ## Command Surface
 
 Primary options:
 
 - `--team <KEY>`: Linear team scope.
-- `--project <NAME>`: optional project scope.
+- `--project <NAME|ID>`: optional project scope. Omitting it falls back to the repo default
+  `linear.project_id` when configured.
 - `--max-pickups <N>`: cap newly claimed issues per poll.
 - `--poll-interval <SECONDS>`: refresh cadence for the live loop. Overrides the repo-scoped default when set.
 - `--once`: run a single live cycle and print a textual summary.
 - `--render-once`: run a single cycle and print a deterministic ratatui snapshot.
 - `--demo`: skip Linear and render sample queue/session data.
 - `listen sessions list|inspect|clear|resume`: inspect or reuse stored project sessions from the
-  install-scoped listener store.
+  install-scoped listener store. Use `--project` with `inspect`, `clear`, or `resume` to target a
+  non-default project from the same checkout, or `--project-key` when you already know the stored
+  install-scoped key.
+- `listen sessions clear` accepts an issue identifier, `--blocked`, `--completed`, `--stale`, or
+  `--all`; it refuses to remove any targeted record whose stored PID is still alive.
 - Live dashboard keys: `Tab` toggles between active and completed sessions, `Left` selects active sessions, `Right` selects completed sessions, and `q` / `Ctrl-C` exits.
+
+Examples:
+
+```bash
+meta agents listen --team MET
+meta listen sessions list
+meta agents listen --team MET --project "MetaStack CLI"
+meta agents listen --team MET --project "MetaStack API"
+meta listen sessions inspect --root . --project "MetaStack API"
+meta listen sessions clear --root . --project "MetaStack API"
+meta listen sessions resume --root . --project "MetaStack API" --once
+```
 
 Repo-scoped listen settings in `.metastack/meta.json`:
 

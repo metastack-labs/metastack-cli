@@ -4,6 +4,8 @@ use crate::linear::IssueSummary;
 
 use super::{compact_identifier, format_duration, format_number};
 
+pub(super) const COMPLETED_SESSION_TTL_SECONDS: u64 = 24 * 60 * 60;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingIssue {
     pub identifier: String,
@@ -206,6 +208,33 @@ impl ListenState {
         } else {
             self.sessions.push(session);
         }
+    }
+
+    pub(super) fn remove_sessions<F>(&mut self, mut predicate: F) -> Vec<AgentSession>
+    where
+        F: FnMut(&AgentSession) -> bool,
+    {
+        let mut removed = Vec::new();
+        self.sessions.retain(|session| {
+            if predicate(session) {
+                removed.push(session.clone());
+                false
+            } else {
+                true
+            }
+        });
+        removed
+    }
+
+    pub(super) fn prune_completed_sessions_older_than(
+        &mut self,
+        now_epoch_seconds: u64,
+        ttl_seconds: u64,
+    ) -> Vec<AgentSession> {
+        self.remove_sessions(|session| {
+            session.phase.is_completed()
+                && now_epoch_seconds.saturating_sub(session.updated_at_epoch_seconds) > ttl_seconds
+        })
     }
 
     pub(super) fn sorted_sessions(&self) -> Vec<AgentSession> {
