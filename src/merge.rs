@@ -35,6 +35,7 @@ const STEP_APPLY: &str = "merge_application";
 const STEP_VALIDATE: &str = "validation";
 const STEP_PUSH: &str = "push";
 const STEP_PUBLISH: &str = "publish_pr";
+const MAX_VALIDATION_REPAIR_ATTEMPTS: usize = 3;
 
 #[derive(Debug, Clone, Serialize)]
 struct MergeDiscovery {
@@ -128,7 +129,16 @@ struct MergeStepRecord {
 
 #[derive(Debug, Clone, Serialize)]
 struct ValidationArtifact {
+    attempts: Vec<ValidationAttemptRecord>,
+    success: bool,
+    repair_attempts: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ValidationAttemptRecord {
+    attempt: usize,
     commands: Vec<ValidationCommandRecord>,
+    repair: Option<ValidationRepairRecord>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -137,6 +147,12 @@ struct ValidationCommandRecord {
     exit_code: i32,
     stdout: String,
     stderr: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ValidationRepairRecord {
+    attempt: usize,
+    commit: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -516,46 +532,44 @@ fn execute_merge_run(
             validation_commands.join(" && ")
         ),
     )?;
-    let validation = match run_validation_commands(&workspace_path, validation_commands) {
+    let validation = match run_validation_until_passes(
+        root,
+        &workspace_path,
+        args,
+        repository,
+        &aggregate_branch,
+        &selected_pull_requests,
+        &plan,
+        &run_dir,
+        &mut tracker,
+        validation_commands,
+    ) {
         Ok(validation) => validation,
         Err(error) => {
-            tracker.fail_step(
-                STEP_VALIDATE,
-                format!("Validation execution failed: {error:#}"),
-                None,
-            )?;
+            let detail = if error
+                .to_string()
+                .contains("validation failed for aggregate branch")
+            {
+                format!("{error:#}")
+            } else {
+                format!("Validation execution failed: {error:#}")
+            };
+            tracker.fail_step(STEP_VALIDATE, detail, None)?;
             write_merge_progress_artifact(&run_dir, &tracker, &progress)?;
             return Err(error);
         }
     };
     write_json_artifact(&run_dir.join("validation.json"), &validation)?;
-    if validation
-        .commands
-        .iter()
-        .any(|record| record.exit_code != 0)
-    {
-        let failing_command = validation
-            .commands
-            .iter()
-            .find(|record| record.exit_code != 0)
-            .map(|record| format!("`{}` exited with {}", record.command, record.exit_code))
-            .unwrap_or_else(|| "a validation command failed".to_string());
-        tracker.fail_step(
-            STEP_VALIDATE,
-            format!("{failing_command}. Publication was skipped."),
-            None,
-        )?;
-        write_merge_progress_artifact(&run_dir, &tracker, &progress)?;
-        bail!(
-            "validation failed for aggregate branch `{}`; publication was skipped",
-            aggregate_branch
-        );
-    }
     tracker.complete_step(
         STEP_VALIDATE,
         format!(
-            "Validation passed for {} command(s).",
-            validation.commands.len()
+            "Validation passed after {} attempt(s) across {} command(s).",
+            validation.attempts.len(),
+            validation
+                .attempts
+                .last()
+                .map(|attempt| attempt.commands.len())
+                .unwrap_or(0)
         ),
     )?;
 
@@ -1084,7 +1098,7 @@ fn makefile_has_target(contents: &str, target: &str) -> bool {
 fn run_validation_commands(
     workspace_path: &Path,
     commands: Vec<String>,
-) -> Result<ValidationArtifact> {
+) -> Result<Vec<ValidationCommandRecord>> {
     let mut records = Vec::new();
     for command in commands {
         let output = Command::new("/bin/sh")
@@ -1100,7 +1114,242 @@ fn run_validation_commands(
             stderr: String::from_utf8_lossy(&output.stderr).to_string(),
         });
     }
-    Ok(ValidationArtifact { commands: records })
+    Ok(records)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_validation_until_passes(
+    root: &Path,
+    workspace_path: &Path,
+    args: &MergeArgs,
+    repository: &GithubRepository,
+    aggregate_branch: &str,
+    selected_pull_requests: &[GithubPullRequest],
+    plan: &MergePlan,
+    run_dir: &Path,
+    tracker: &mut ProgressTracker,
+    validation_commands: Vec<String>,
+) -> Result<ValidationArtifact> {
+    let mut attempts = Vec::new();
+
+    for attempt in 1..=(MAX_VALIDATION_REPAIR_ATTEMPTS + 1) {
+        let commands = run_validation_commands(workspace_path, validation_commands.clone())?;
+        let failing_command = commands
+            .iter()
+            .find(|record| record.exit_code != 0)
+            .map(|record| format!("`{}` exited with {}", record.command, record.exit_code));
+        let mut attempt_record = ValidationAttemptRecord {
+            attempt,
+            commands,
+            repair: None,
+        };
+
+        if failing_command.is_none() {
+            attempts.push(attempt_record);
+            let artifact = ValidationArtifact {
+                attempts,
+                success: true,
+                repair_attempts: attempt.saturating_sub(1),
+            };
+            write_json_artifact(&run_dir.join("validation.json"), &artifact)?;
+            return Ok(artifact);
+        }
+
+        if attempt > MAX_VALIDATION_REPAIR_ATTEMPTS {
+            attempts.push(attempt_record);
+            let artifact = ValidationArtifact {
+                attempts,
+                success: false,
+                repair_attempts: MAX_VALIDATION_REPAIR_ATTEMPTS,
+            };
+            write_json_artifact(&run_dir.join("validation.json"), &artifact)?;
+            bail!(
+                "validation failed for aggregate branch `{aggregate_branch}` after {} repair attempt(s); last failure: {}",
+                MAX_VALIDATION_REPAIR_ATTEMPTS,
+                failing_command.unwrap_or_else(|| "a validation command failed".to_string())
+            );
+        }
+
+        let repair_attempt = attempt;
+        tracker.update_detail(
+            STEP_VALIDATE,
+            format!(
+                "Validation attempt {attempt} failed on {}. Invoking repair assistance ({repair_attempt}/{MAX_VALIDATION_REPAIR_ATTEMPTS}).",
+                failing_command
+                    .clone()
+                    .unwrap_or_else(|| "a validation command failed".to_string())
+            ),
+            None,
+        )?;
+
+        let repair_prompt = build_validation_repair_prompt(
+            repository,
+            aggregate_branch,
+            selected_pull_requests,
+            plan,
+            workspace_path,
+            repair_attempt,
+            &attempt_record.commands,
+        )?;
+        write_text_file(
+            &run_dir.join(format!(
+                "validation-repair-prompt-attempt-{repair_attempt}.md"
+            )),
+            &repair_prompt,
+            true,
+        )?;
+        let repair_output = run_agent_capture_in_dir(
+            root,
+            workspace_path,
+            AgentConfigOverrides {
+                provider: args.agent.clone(),
+                model: args.model.clone(),
+                reasoning: args.reasoning.clone(),
+            },
+            &repair_prompt,
+            vec![(
+                "METASTACK_MERGE_VALIDATION_ATTEMPT".to_string(),
+                repair_attempt.to_string(),
+            )],
+        )?;
+        write_text_file(
+            &run_dir.join(format!(
+                "validation-repair-output-attempt-{repair_attempt}.md"
+            )),
+            &repair_output,
+            true,
+        )?;
+
+        let repair_commit = commit_validation_repair(workspace_path, repair_attempt)?;
+        tracker.update_detail(
+            STEP_VALIDATE,
+            match &repair_commit {
+                Some(commit) => format!(
+                    "Recorded validation repair commit `{commit}` for attempt {repair_attempt}; rerunning validation."
+                ),
+                None => format!(
+                    "Repair attempt {repair_attempt} produced no tracked changes; rerunning validation."
+                ),
+            },
+            None,
+        )?;
+        attempt_record.repair = Some(ValidationRepairRecord {
+            attempt: repair_attempt,
+            commit: repair_commit,
+        });
+        attempts.push(attempt_record);
+        write_json_artifact(
+            &run_dir.join("validation.json"),
+            &ValidationArtifact {
+                attempts: attempts.clone(),
+                success: false,
+                repair_attempts: repair_attempt,
+            },
+        )?;
+    }
+
+    bail!("validation retry loop terminated unexpectedly for aggregate branch `{aggregate_branch}`")
+}
+
+fn commit_validation_repair(
+    workspace_path: &Path,
+    repair_attempt: usize,
+) -> Result<Option<String>> {
+    run_git(workspace_path, &["add", "-A"])?;
+    if !workspace_has_tracked_changes(workspace_path)? {
+        return Ok(None);
+    }
+    run_git(
+        workspace_path,
+        &[
+            "commit",
+            "-m",
+            &format!("meta merge: repair validation failures (attempt {repair_attempt})"),
+        ],
+    )?;
+    Ok(Some(git_stdout(
+        workspace_path,
+        &["rev-parse", "--short", "HEAD"],
+    )?))
+}
+
+fn workspace_has_tracked_changes(workspace_path: &Path) -> Result<bool> {
+    Ok(!git_stdout(workspace_path, &["status", "--short"])?
+        .trim()
+        .is_empty())
+}
+
+fn build_validation_repair_prompt(
+    repository: &GithubRepository,
+    aggregate_branch: &str,
+    selected_pull_requests: &[GithubPullRequest],
+    plan: &MergePlan,
+    workspace_path: &Path,
+    repair_attempt: usize,
+    commands: &[ValidationCommandRecord],
+) -> Result<String> {
+    let head = git_stdout(workspace_path, &["rev-parse", "--short", "HEAD"])?;
+    let mut lines = vec![
+        format!(
+            "Repair a failing aggregate merge validation inside `{}` for `{}`.",
+            workspace_path.display(),
+            repository.name_with_owner
+        ),
+        format!("Aggregate branch: `{aggregate_branch}`"),
+        format!("Current aggregate HEAD: `{head}`"),
+        format!("Validation repair attempt: {repair_attempt}/{MAX_VALIDATION_REPAIR_ATTEMPTS}"),
+        format!(
+            "Selected pull requests: {}",
+            selected_pull_requests
+                .iter()
+                .map(|pr| format!("#{} {}", pr.number, pr.title))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        format!(
+            "Planner hotspots: {}",
+            if plan.conflict_hotspots.is_empty() {
+                "none recorded".to_string()
+            } else {
+                plan.conflict_hotspots.join(", ")
+            }
+        ),
+        String::new(),
+        "Validation failures:".to_string(),
+    ];
+
+    for record in commands.iter().filter(|record| record.exit_code != 0) {
+        lines.push(format!(
+            "- Command: `{}` (exit {})",
+            record.command, record.exit_code
+        ));
+        if !record.stdout.trim().is_empty() {
+            lines.push("  stdout:".to_string());
+            lines.push(format!(
+                "  ```\n{}\n  ```",
+                truncate_validation_output(&record.stdout, 4000)
+            ));
+        }
+        if !record.stderr.trim().is_empty() {
+            lines.push("  stderr:".to_string());
+            lines.push(format!(
+                "  ```\n{}\n  ```",
+                truncate_validation_output(&record.stderr, 4000)
+            ));
+        }
+    }
+
+    lines.push(String::new());
+    lines.push("Edit the workspace in place to make the configured validation commands pass. You may run repo-local formatting, lint, and test commands as needed. Stage any intended changes before finishing. Leave the repository in a clean state ready for the merge runner to commit and rerun validation. Then print a short Markdown summary of the fix.".to_string());
+    Ok(lines.join("\n"))
+}
+
+fn truncate_validation_output(value: &str, max_len: usize) -> String {
+    if value.len() <= max_len {
+        value.to_string()
+    } else {
+        format!("{}...", &value[..max_len])
+    }
 }
 
 fn aggregate_pr_title(selected_pull_requests: &[GithubPullRequest]) -> String {

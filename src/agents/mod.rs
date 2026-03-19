@@ -387,11 +387,6 @@ mod tests {
             command_args[0],
             "--dangerously-bypass-approvals-and-sandbox"
         );
-        assert!(command_args.windows(3).any(|window| {
-            window[0] == "exec"
-                && window[1] == "-c"
-                && window[2] == "mcp_servers.linear.enabled=false"
-        }));
         assert!(command_args.iter().any(|arg| arg == "--cd"));
         assert!(!command_args.iter().any(|arg| arg == "--sandbox"));
         assert!(!command_args.iter().any(|arg| arg == "--ask-for-approval"));

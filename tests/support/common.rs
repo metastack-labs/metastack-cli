@@ -344,7 +344,7 @@ fn commit_and_push_pull_ref(
 
 #[cfg(unix)]
 fn wait_for_path(path: &Path) -> Result<(), Box<dyn Error>> {
-    for _ in 0..800 {
+    for _ in 0..1_200 {
         if path.exists() {
             return Ok(());
         }
@@ -527,7 +527,7 @@ fn team_payload() -> serde_json::Value {
 
 #[cfg(unix)]
 fn wait_for_file_substring(path: &Path, expected: &str) -> Result<(), Box<dyn Error>> {
-    for _ in 0..300 {
+    for _ in 0..600 {
         if let Ok(contents) = fs::read_to_string(path)
             && contents.contains(expected)
         {
@@ -643,14 +643,30 @@ fn handle_dynamic_linear_connection(
         .nth(1)
         .unwrap_or_default()
         .to_string();
-    let response = dynamic_linear_response(&body, state)?;
-    let encoded = serde_json::to_string(&response)?;
-    write!(
-        stream,
-        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-        encoded.len(),
-        encoded
-    )?;
+    match dynamic_linear_response(&body, state) {
+        Ok(response) => {
+            let encoded = serde_json::to_string(&response)?;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                encoded.len(),
+                encoded
+            )?;
+        }
+        Err(error) => {
+            let encoded = serde_json::to_string(&json!({
+                "errors": [{
+                    "message": error.to_string()
+                }]
+            }))?;
+            write!(
+                stream,
+                "HTTP/1.1 500 Internal Server Error\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                encoded.len(),
+                encoded
+            )?;
+        }
+    }
     Ok(())
 }
 

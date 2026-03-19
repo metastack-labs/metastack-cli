@@ -159,6 +159,8 @@ pub struct BacklogIssueMetadata {
     #[serde(default)]
     pub remote_hash: Option<String>,
     #[serde(default)]
+    pub last_sync_at: Option<String>,
+    #[serde(default)]
     pub managed_files: Vec<ManagedFileRecord>,
 }
 
@@ -731,6 +733,7 @@ mod tests {
                 parent_identifier: None,
                 local_hash: None,
                 remote_hash: None,
+                last_sync_at: None,
                 managed_files: Vec::<ManagedFileRecord>::new(),
             }),
             Some("local".to_string()),

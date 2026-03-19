@@ -105,7 +105,7 @@ approval_policy = "never"
 sandbox_mode = "danger-full-access"
 ```
 
-- Remove `[mcp_servers.linear]` from the Codex config when possible. The harness also forces `-c mcp_servers.linear.enabled=false` for listen workers as defense in depth.
+- Remove `[mcp_servers.linear]` from the Codex config when possible. The preflight warns when Linear MCP is detected.
 - Built-in Claude workers require `claude` on `PATH`.
 - Built-in Claude listen runs should not inherit `ANTHROPIC_API_KEY`; headless listen is expected to use the local Claude subscription instead of an API-key override.
 - Run `meta agents listen --check` to validate the active listen provider prerequisites plus Linear reachability/auth without starting the daemon.
@@ -405,7 +405,7 @@ Behavior summary:
 - `--render-once` prints a deterministic dashboard snapshot for tests and proofs.
 - `--no-interactive` skips the dashboard and runs the selected `--pull-request` values directly while printing textual phase updates to stdout.
 - `--validate <COMMAND>` overrides the post-merge validation commands. When omitted, `meta merge` prefers `make quality` when the repo Makefile exposes that target, otherwise `make all`, otherwise `cargo test` for Rust repositories.
-- Publication is gated on those validation commands succeeding; when validation fails, the aggregate branch artifacts are kept locally and no GitHub PR is created or updated.
+- Publication is gated on those validation commands succeeding. When validation fails, `meta merge` invokes the configured merge agent inside the isolated workspace, commits any repair edits onto the aggregate branch, and reruns validation. The run only stops without publication after the bounded repair loop is exhausted or validation execution itself cannot proceed.
 - Both interactive and non-interactive runs publish the same major phases: workspace preparation, plan generation, merge application, validation, push, and PR publication. Merge application also records finer-grained per-PR substeps such as the active pull request and whether conflict assistance ran.
 
 Each run writes local audit artifacts under `.metastack/merge-runs/<RUN_ID>/`, including:
@@ -415,10 +415,11 @@ Each run writes local audit artifacts under `.metastack/merge-runs/<RUN_ID>/`, i
 - `plan.json` with the agent-selected merge order and conflict hotspots
 - `progress.json` with the current phase, active substep detail, phase states, and the full structured event trail needed to reconstruct success and failure paths
 - `merge-progress.json` with the structured run snapshot plus per-PR outcomes
-- `validation.json` with the executed validation commands and captured output
+- `validation.json` with each validation attempt, captured command output, and any repair commits recorded between attempts
 - `aggregate-pr-body.md` with the Markdown body used when creating or updating the aggregate PR
 - `publication.json` with the aggregate PR publication result
 - `conflict-prompt-pr-<NUMBER>.md` and `conflict-resolution-pr-<NUMBER>.md` when agent-assisted conflict handling was required
+- `validation-repair-prompt-attempt-<N>.md` and `validation-repair-output-attempt-<N>.md` when agent-assisted validation repair was required
 
 ### `context scan`
 
@@ -598,9 +599,15 @@ Browse issues from the repo default Linear project, then pull or push the select
 
 ```bash
 meta backlog sync --api-key "$LINEAR_API_KEY"
+meta backlog sync --api-key "$LINEAR_API_KEY" status
+meta backlog sync --api-key "$LINEAR_API_KEY" status --fetch
+meta backlog sync --api-key "$LINEAR_API_KEY" link MET-35 --entry manual-notes
+meta backlog sync --api-key "$LINEAR_API_KEY" link MET-35 --entry manual-notes --pull
 meta backlog sync --api-key "$LINEAR_API_KEY" pull MET-35
+meta backlog sync --api-key "$LINEAR_API_KEY" pull --all
 meta backlog sync --api-key "$LINEAR_API_KEY" push MET-35
 meta backlog sync --api-key "$LINEAR_API_KEY" push MET-35 --update-description
+meta backlog sync --api-key "$LINEAR_API_KEY" push --all
 ```
 
 Legacy alias: `meta sync`
@@ -608,15 +615,23 @@ Legacy alias: `meta sync`
 Side effects:
 
 - bare `meta backlog sync` opens a ratatui issue browser scoped by `.metastack/meta.json` `linear.project_id`
+- `link` associates an existing `.metastack/backlog/<ENTRY>/` directory with a Linear issue by writing `.linear.json`
+- `link` prompts for an unlinked backlog entry in a TTY when `--entry <SLUG>` is omitted
+- `link --pull` immediately hydrates the linked entry from Linear after writing metadata
+- `status` scans `.metastack/backlog/` and prints `identifier | title | status | last sync`
+- `status` resolves only local change state by default; pass `--fetch` to check the current Linear issue and surface `remote-ahead` or `diverged`
 - `pull` refreshes `.metastack/backlog/<ISSUE_ID>/index.md` from the Linear description
 - `pull` restores CLI-managed attachment files into the same directory when present
-- `pull` persists `.metastack/backlog/<ISSUE_ID>/.linear.json`, including `local_hash` and `remote_hash` baselines alongside the existing issue metadata
+- `pull` persists `.linear.json`, including `local_hash`, `remote_hash`, and `last_sync_at` alongside the existing issue metadata
 - when `pull` sees a `remote-ahead` or `diverged` packet, it shows a diff between the local `index.md` and the incoming Linear description before any files are overwritten
 - in a TTY, `pull` asks for confirmation before overwriting local backlog content; in non-interactive runs it exits non-zero instead of silently replacing changed files
+- `pull --all` walks every linked backlog entry sequentially and prints a synced/skipped/error summary
 - `push` replaces only CLI-managed attachments by default, leaving unrelated Linear attachments untouched
 - `push` leaves the Linear issue description unchanged unless you pass `--update-description`
 - `push --update-description` refuses to overwrite the Linear description when the stored baselines resolve to `remote-ahead` or `diverged`
+- `push --all` walks every linked backlog entry sequentially, respects `--update-description`, and exits non-zero when any entry fails
 - during `meta listen`, `push --update-description` is blocked for the active ticket so the primary issue description stays untouched
+- pass `--no-interactive` with `link`, `pull`, or `push` when scripting; in that mode every required selector must be explicit
 
 The sync dashboard and render-once snapshot also show each issue's local sync state:
 
@@ -692,7 +707,7 @@ approval_policy = "never"
 sandbox_mode = "danger-full-access"
 ```
 
-- Codex: remove `[mcp_servers.linear]` from the Codex config or disable it; `meta agents listen` also passes `-c mcp_servers.linear.enabled=false` as a defense-in-depth override.
+- Codex: remove `[mcp_servers.linear]` from the Codex config or disable it; the preflight warns when Linear MCP is detected.
 - Claude: `claude` must be on `PATH`, and `ANTHROPIC_API_KEY` should be unset for unattended subscription-backed runs.
 - `meta agents listen --check --root .` runs the same startup preflight, including Linear reachability/auth validation, without starting the daemon.
 
