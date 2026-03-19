@@ -1555,6 +1555,161 @@ fn sync_link_in_no_interactive_mode_creates_metadata_without_hashes() -> Result<
 }
 
 #[test]
+fn sync_link_with_pull_hydrates_the_selected_backlog_entry() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    write_minimal_planning_context(
+        temp.path(),
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+
+    let issue_dir = temp.path().join(".metastack/backlog/manual-entry");
+    fs::create_dir_all(&issue_dir)?;
+    fs::write(issue_dir.join("index.md"), "# Manual notes\n")?;
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issues");
+        then.status(200).json_body(json!({
+            "data": {
+                "issues": {
+                    "nodes": [issue_node(
+                        "issue-1",
+                        "MET-35",
+                        "Create the technical and sync commands",
+                        "Parent issue description",
+                        "state-2",
+                        "In Progress",
+                    )]
+                }
+            }
+        }));
+    });
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issue")
+            .body_includes("\"id\":\"issue-1\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "issue": issue_detail_node(
+                    "issue-1",
+                    "MET-35",
+                    "Create the technical and sync commands",
+                    "# Pulled after link\n",
+                    vec![],
+                    None,
+                )
+            }
+        }));
+    });
+
+    cli()
+        .current_dir(temp.path())
+        .args([
+            "sync",
+            "--api-key",
+            "token",
+            "--api-url",
+            &api_url,
+            "--no-interactive",
+            "link",
+            "MET-35",
+            "--entry",
+            "manual-entry",
+            "--pull",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Pulled MET-35 into .metastack/backlog/manual-entry",
+        ));
+
+    let metadata = fs::read_to_string(issue_dir.join(".linear.json"))?;
+    assert!(metadata.contains("\"identifier\": \"MET-35\""));
+    assert!(metadata.contains("\"local_hash\": \""));
+    assert!(metadata.contains("\"remote_hash\": \""));
+    assert!(metadata.contains("\"last_sync_at\": \""));
+    assert_eq!(
+        fs::read_to_string(issue_dir.join("index.md"))?,
+        "# Pulled after link\n"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn sync_link_does_not_write_metadata_when_the_issue_is_missing() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    write_minimal_planning_context(
+        temp.path(),
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+
+    let issue_dir = temp.path().join(".metastack/backlog/manual-entry");
+    fs::create_dir_all(&issue_dir)?;
+    fs::write(issue_dir.join("index.md"), "# Manual notes\n")?;
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issues");
+        then.status(200).json_body(json!({
+            "data": {
+                "issues": {
+                    "nodes": []
+                }
+            }
+        }));
+    });
+
+    cli()
+        .current_dir(temp.path())
+        .args([
+            "sync",
+            "--api-key",
+            "token",
+            "--api-url",
+            &api_url,
+            "--no-interactive",
+            "link",
+            "MET-35",
+            "--entry",
+            "manual-entry",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "issue `MET-35` was not found in Linear",
+        ));
+
+    assert!(!issue_dir.join(".linear.json").exists());
+    assert_eq!(
+        fs::read_to_string(issue_dir.join("index.md"))?,
+        "# Manual notes\n"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn sync_status_reports_local_ahead_and_unlinked_entries_without_fetch() -> Result<(), Box<dyn Error>>
 {
     let temp = tempdir()?;
@@ -1598,6 +1753,135 @@ fn sync_status_reports_local_ahead_and_unlinked_entries_without_fetch() -> Resul
         .stdout(predicate::str::contains("Linked ticket"))
         .stdout(predicate::str::contains("local-ahead"))
         .stdout(predicate::str::contains("2026-03-18T10:15:00Z"));
+
+    Ok(())
+}
+
+#[test]
+fn sync_status_fetch_reports_remote_ahead_with_live_linear_state() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let baseline_server = MockServer::start();
+    let baseline_api_url = baseline_server.url("/graphql");
+    write_minimal_planning_context(
+        temp.path(),
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+
+    baseline_server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issues");
+        then.status(200).json_body(json!({
+            "data": {
+                "issues": {
+                    "nodes": [issue_node(
+                        "issue-1",
+                        "MET-35",
+                        "Initial linked title",
+                        "Parent issue description",
+                        "state-2",
+                        "In Progress",
+                    )]
+                }
+            }
+        }));
+    });
+
+    baseline_server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issue")
+            .body_includes("\"id\":\"issue-1\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "issue": issue_detail_node(
+                    "issue-1",
+                    "MET-35",
+                    "Initial linked title",
+                    "# Original description\n",
+                    vec![],
+                    None,
+                )
+            }
+        }));
+    });
+
+    cli()
+        .current_dir(temp.path())
+        .args([
+            "sync",
+            "--api-key",
+            "token",
+            "--api-url",
+            &baseline_api_url,
+            "pull",
+            "MET-35",
+        ])
+        .assert()
+        .success();
+
+    let remote_server = MockServer::start();
+    let remote_api_url = remote_server.url("/graphql");
+    remote_server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issues");
+        then.status(200).json_body(json!({
+            "data": {
+                "issues": {
+                    "nodes": [issue_node(
+                        "issue-1",
+                        "MET-35",
+                        "Fetched linked title",
+                        "Parent issue description",
+                        "state-2",
+                        "In Progress",
+                    )]
+                }
+            }
+        }));
+    });
+
+    remote_server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issue")
+            .body_includes("\"id\":\"issue-1\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "issue": issue_detail_node(
+                    "issue-1",
+                    "MET-35",
+                    "Fetched linked title",
+                    "# Remote changed description\n",
+                    vec![],
+                    None,
+                )
+            }
+        }));
+    });
+
+    cli()
+        .current_dir(temp.path())
+        .args([
+            "sync",
+            "--api-key",
+            "token",
+            "--api-url",
+            &remote_api_url,
+            "status",
+            "--fetch",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Fetched linked title"))
+        .stdout(predicate::str::contains("remote-ahead"));
 
     Ok(())
 }

@@ -116,6 +116,11 @@ pub async fn run_sync_dashboard_command(
     Ok(())
 }
 
+/// Link an existing backlog entry to a Linear issue and optionally pull the remote packet.
+///
+/// Returns an error when planning metadata is missing, the requested issue or backlog entry
+/// cannot be resolved, interactive selection is required without a TTY, or metadata cannot be
+/// written to disk.
 pub async fn run_sync_link(
     client_args: &LinearClientArgs,
     project_override: Option<&str>,
@@ -194,6 +199,10 @@ pub async fn run_sync_link(
     Ok(())
 }
 
+/// Show the current sync state for every backlog entry under `.metastack/backlog/`.
+///
+/// Returns an error when planning metadata is missing, backlog entries cannot be scanned, or
+/// `--fetch` is used and Linear issue state cannot be loaded.
 pub async fn run_sync_status(client_args: &LinearClientArgs, args: &SyncStatusArgs) -> Result<()> {
     let root = canonicalize_existing_dir(&client_args.root)?;
     let _planning_meta = load_required_planning_meta(&root, "sync")?;
@@ -272,6 +281,10 @@ pub async fn run_sync_status(client_args: &LinearClientArgs, args: &SyncStatusAr
     Ok(())
 }
 
+/// Pull one Linear issue, or every linked backlog entry with `--all`, into local backlog files.
+///
+/// Returns an error when planning metadata is missing, the requested issue cannot be resolved,
+/// local backlog paths cannot be prepared, or overwrite safeguards block the pull.
 pub async fn run_sync_pull(client_args: &LinearClientArgs, args: &SyncPullArgs) -> Result<()> {
     let root = canonicalize_existing_dir(&client_args.root)?;
     let _planning_meta = load_required_planning_meta(&root, "sync")?;
@@ -294,6 +307,10 @@ pub async fn run_sync_pull(client_args: &LinearClientArgs, args: &SyncPullArgs) 
     Ok(())
 }
 
+/// Push managed backlog files for one issue, or every linked backlog entry with `--all`, to Linear.
+///
+/// Returns an error when planning metadata is missing, the requested issue cannot be resolved,
+/// required local files are missing, or the description overwrite safeguards reject the push.
 pub async fn run_sync_push(client_args: &LinearClientArgs, args: &SyncPushArgs) -> Result<()> {
     let root = canonicalize_existing_dir(&client_args.root)?;
     let _planning_meta = load_required_planning_meta(&root, "sync")?;
