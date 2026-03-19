@@ -860,6 +860,7 @@ where
                 parent_identifier: Some(parent_issue.identifier.clone()),
                 local_hash: None,
                 remote_hash: None,
+                last_sync_at: None,
                 managed_files: Vec::<ManagedFileRecord>::new(),
             },
         )?;

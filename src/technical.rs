@@ -218,6 +218,7 @@ pub async fn run_technical(args: &TechnicalArgs) -> Result<()> {
             parent_identifier: Some(generated.parent.identifier.clone()),
             local_hash: None,
             remote_hash: None,
+            last_sync_at: None,
             managed_files: Vec::<ManagedFileRecord>::new(),
         },
     )?;
@@ -225,7 +226,8 @@ pub async fn run_technical(args: &TechnicalArgs) -> Result<()> {
     run_sync_push(
         &args.client,
         &SyncPushArgs {
-            issue: child.identifier.clone(),
+            issue: Some(child.identifier.clone()),
+            all: false,
             update_description: false,
         },
     )
