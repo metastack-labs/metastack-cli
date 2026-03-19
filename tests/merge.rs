@@ -130,6 +130,12 @@ case "$METASTACK_AGENT_PROMPT" in
   *"Return strict JSON"*)
     printf '%s' '{{"merge_order":[{order}],"conflict_hotspots":["shared.txt"],"summary":"Use the selected order."}}'
     ;;
+  *"Repair a failing aggregate merge validation"*)
+    if [ -n "${{TEST_VALIDATE_FIX_FILE:-}}" ]; then
+      printf 'fixed\n' > "$TEST_VALIDATE_FIX_FILE"
+    fi
+    printf '%s' 'Repaired validation failure'
+    ;;
   *)
     if [ -f shared.txt ]; then
       printf 'resolved\n' > shared.txt
@@ -517,7 +523,8 @@ transport = "arg"
 
 #[cfg(unix)]
 #[test]
-fn merge_persists_failed_progress_when_validation_stops_the_run() -> Result<(), Box<dyn Error>> {
+fn merge_persists_failed_progress_when_validation_repairs_are_exhausted()
+-> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
     let config_path = temp.path().join("metastack.toml");
@@ -560,14 +567,15 @@ transport = "arg"
             "--pull-request",
             "21",
             "--validate",
-            "false",
+            "test -f repaired.txt",
         ])
         .assert()
         .failure()
         .stdout(predicate::str::contains("Phase 4/6: Validation"))
         .stderr(predicate::str::contains(
             "validation failed for aggregate branch",
-        ));
+        ))
+        .stderr(predicate::str::contains("after 3 repair attempt(s)"));
 
     let run_root = repo_root.join(".metastack/merge-runs");
     let mut run_dirs = fs::read_dir(&run_root)?
@@ -583,12 +591,25 @@ transport = "arg"
     let progress = fs::read_to_string(run_dir.join("progress.json"))?;
     assert!(progress.contains("\"status\": \"failed\""));
     assert!(progress.contains("\"current_phase_key\": \"validation\""));
-    assert!(progress.contains("Publication was skipped."));
+    assert!(progress.contains("after 3 repair attempt(s)"));
     let merge_progress = fs::read_to_string(run_dir.join("merge-progress.json"))?;
     assert!(merge_progress.contains("\"status\": \"failed\""));
     assert!(merge_progress.contains("\"current_phase_key\": \"validation\""));
     assert!(merge_progress.contains("\"pull_request\": 21"));
     assert!(merge_progress.contains("\"status\": \"merged\""));
+    let validation = fs::read_to_string(run_dir.join("validation.json"))?;
+    assert!(validation.contains("\"success\": false"));
+    assert!(validation.contains("\"repair_attempts\": 3"));
+    assert!(
+        run_dir
+            .join("validation-repair-prompt-attempt-1.md")
+            .is_file()
+    );
+    assert!(
+        run_dir
+            .join("validation-repair-output-attempt-3.md")
+            .is_file()
+    );
 
     Ok(())
 }
@@ -864,7 +885,7 @@ transport = "arg"
 
 #[cfg(unix)]
 #[test]
-fn merge_skips_publication_when_validation_fails() -> Result<(), Box<dyn Error>> {
+fn merge_repairs_validation_failures_and_publishes() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
     let config_path = temp.path().join("metastack.toml");
@@ -902,6 +923,7 @@ transport = "arg"
         .current_dir(&repo_root)
         .env("METASTACK_CONFIG", &config_path)
         .env("PATH", prepend_path(&bin_dir)?)
+        .env("TEST_VALIDATE_FIX_FILE", "repaired.txt")
         .args([
             "merge",
             "--no-interactive",
@@ -912,14 +934,13 @@ transport = "arg"
             "--validate",
             "test -f one.txt",
             "--validate",
-            "false",
+            "test -f repaired.txt",
         ])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "validation failed for aggregate branch",
-        ))
-        .stderr(predicate::str::contains("publication was skipped"));
+        .success()
+        .stdout(predicate::str::contains(
+            "Created aggregate PR https://github.com/example/pull/1999",
+        ));
 
     let run_root = repo_root.join(".metastack/merge-runs");
     let mut run_dirs = fs::read_dir(&run_root)?
@@ -932,8 +953,23 @@ transport = "arg"
     assert!(run_dir.join("plan.json").is_file());
     assert!(run_dir.join("merge-progress.json").is_file());
     assert!(run_dir.join("validation.json").is_file());
-    assert!(!run_dir.join("publication.json").exists());
-    assert!(fs::read_to_string(run_dir.join("validation.json"))?.contains("\"exit_code\": 1"));
+    assert!(run_dir.join("publication.json").is_file());
+    assert!(
+        run_dir
+            .join("validation-repair-prompt-attempt-1.md")
+            .is_file()
+    );
+    assert!(
+        run_dir
+            .join("validation-repair-output-attempt-1.md")
+            .is_file()
+    );
+    let validation = fs::read_to_string(run_dir.join("validation.json"))?;
+    assert!(validation.contains("\"success\": true"));
+    assert!(validation.contains("\"repair_attempts\": 1"));
+    assert!(validation.contains("\"command\": \"test -f repaired.txt\""));
+    assert!(validation.contains("\"exit_code\": 1"));
+    assert!(validation.contains("\"exit_code\": 0"));
 
     Ok(())
 }

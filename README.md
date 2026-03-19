@@ -405,7 +405,7 @@ Behavior summary:
 - `--render-once` prints a deterministic dashboard snapshot for tests and proofs.
 - `--no-interactive` skips the dashboard and runs the selected `--pull-request` values directly while printing textual phase updates to stdout.
 - `--validate <COMMAND>` overrides the post-merge validation commands. When omitted, `meta merge` prefers `make quality` when the repo Makefile exposes that target, otherwise `make all`, otherwise `cargo test` for Rust repositories.
-- Publication is gated on those validation commands succeeding; when validation fails, the aggregate branch artifacts are kept locally and no GitHub PR is created or updated.
+- Publication is gated on those validation commands succeeding. When validation fails, `meta merge` invokes the configured merge agent inside the isolated workspace, commits any repair edits onto the aggregate branch, and reruns validation. The run only stops without publication after the bounded repair loop is exhausted or validation execution itself cannot proceed.
 - Both interactive and non-interactive runs publish the same major phases: workspace preparation, plan generation, merge application, validation, push, and PR publication. Merge application also records finer-grained per-PR substeps such as the active pull request and whether conflict assistance ran.
 
 Each run writes local audit artifacts under `.metastack/merge-runs/<RUN_ID>/`, including:
@@ -415,10 +415,11 @@ Each run writes local audit artifacts under `.metastack/merge-runs/<RUN_ID>/`, i
 - `plan.json` with the agent-selected merge order and conflict hotspots
 - `progress.json` with the current phase, active substep detail, phase states, and the full structured event trail needed to reconstruct success and failure paths
 - `merge-progress.json` with the structured run snapshot plus per-PR outcomes
-- `validation.json` with the executed validation commands and captured output
+- `validation.json` with each validation attempt, captured command output, and any repair commits recorded between attempts
 - `aggregate-pr-body.md` with the Markdown body used when creating or updating the aggregate PR
 - `publication.json` with the aggregate PR publication result
 - `conflict-prompt-pr-<NUMBER>.md` and `conflict-resolution-pr-<NUMBER>.md` when agent-assisted conflict handling was required
+- `validation-repair-prompt-attempt-<N>.md` and `validation-repair-output-attempt-<N>.md` when agent-assisted validation repair was required
 
 ### `context scan`
 
