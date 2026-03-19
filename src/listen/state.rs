@@ -237,6 +237,13 @@ impl ListenState {
         })
     }
 
+    pub(super) fn remove_issue(&mut self, identifier: &str) -> bool {
+        let original_len = self.sessions.len();
+        self.sessions
+            .retain(|session| !session.issue_matches(identifier));
+        self.sessions.len() != original_len
+    }
+
     pub(super) fn sorted_sessions(&self) -> Vec<AgentSession> {
         let mut sessions = self.sessions.clone();
         sessions.sort_by(|left, right| {

@@ -1,7 +1,7 @@
 pub mod dashboard;
 mod preflight;
 mod state;
-mod store;
+pub(crate) mod store;
 mod worker;
 mod workpad;
 mod workspace;

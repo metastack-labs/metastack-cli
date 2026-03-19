@@ -32,6 +32,7 @@ Most planning tools split work across issue trackers, docs, scripts, and ad hoc 
 - `meta merge` batches open GitHub PRs into one isolated aggregate merge run and publish step.
 - `meta linear ...` and `meta backlog sync` keep Linear and local files aligned.
 - `meta agents listen` runs unattended ticket execution in dedicated workspace clones instead of your source checkout.
+- `meta workspace` inventories and cleans those sibling listener workspace clones after the listener finishes.
 
 ## Install `meta` During Development
 
@@ -157,6 +158,7 @@ The preferred public surface is domain-first. Legacy top-level commands such as 
 | `meta runtime` | Configure install-scoped and repo-scoped defaults and supervise cron jobs |
 | `meta dashboard` | Open Linear, agents, team, or ops-oriented dashboard views |
 | `meta merge` | Discover open GitHub PRs, batch them in a one-shot dashboard, and publish one aggregate PR |
+| `meta workspace` | List, clean, and prune sibling listener workspace clones under the fixed workspace root |
 
 ## Build From Source
 
@@ -183,6 +185,7 @@ A typical end-to-end loop looks like this:
 5. Use `meta linear ...`, `meta dashboard ...`, or `meta backlog sync` to coordinate with Linear.
 6. Use `meta merge` when you want to batch open GitHub PRs in one isolated aggregate merge run.
 7. Use `meta agents listen` when you want unattended ticket execution inside a dedicated workspace clone.
+8. Use `meta workspace` when you want to inspect or clean those listener-created clones later.
 
 ## Example Flows
 
@@ -499,7 +502,7 @@ Side effects:
 - runs the shell command first when configured, then the optional agent in the same working directory
 - creates `.metastack/cron/.runtime/` on demand for scheduler state and logs
 
-In the interactive cron editor, the prompt field submits on `Enter` and inserts a newline on `Shift+Enter`. Image attachments are intentionally rejected there in v1 so saved cron jobs never persist dangling temp-file references.
+In the interactive cron editor, the prompt field submits on `Enter` and inserts a newline on `Shift+Enter`.
 
 Cron job files use this shape:
 
@@ -530,18 +533,7 @@ Legacy alias: `meta plan`
 
 In a TTY, `meta backlog plan` opens one persistent ratatui planning session to capture the request, collect follow-up answers, and review the generated ticket breakdown before creating Backlog issues in Linear.
 
-Multiline request and follow-up editors submit on `Enter`; use `Shift+Enter` when you need to insert a newline without advancing the workflow. In the request editor, `Up` and `Down` move the cursor between lines and preserve the visual column across wrapped text when possible.
-
-The request editor and follow-up answer editors support up to 5 pasted images per editor in v1. `Ctrl+V` checks the clipboard for an image first and falls back to normal text paste when no image is present. Pasted local image paths and `file://` URLs are normalized into session-local temp PNG attachments outside the repository, and the editor renders them as non-editable `[Image #N]` placeholders.
-
-Current prompt-image support matrix:
-
-- `meta backlog plan` request editor: supported
-- `meta backlog plan` follow-up answer editors: supported
-- review-only planning screens: text only
-- macOS clipboard image paste: supported
-- Linux clipboard image paste: supported through `wl-paste -t image/png` on Wayland and `xclip -selection clipboard -t image/png -o` on X11
-- Windows / WSL clipboard image paste: not supported yet; the UI reports a clear error and path / `file://` paste still works
+Multiline request and follow-up editors submit on `Enter`; use `Shift+Enter` when you need to insert a newline without advancing the workflow.
 
 For deterministic automation, pass `--no-interactive` with `--request` and repeated `--answer` values.
 
@@ -578,7 +570,6 @@ In a TTY, the parent-issue picker now uses the shared Linear issue browser:
 - matching is case-insensitive and ranks exact identifiers first, then identifier prefixes and exact token matches, then broader substring matches
 - shared semantic styling highlights identifiers, titles, state, priority, project, and preview metadata while you review the selected parent issue
 
-Before the agent prompt is rendered, `meta backlog tech` now localizes markdown image references found in the parent issue description, parent-of-parent description, and Linear comments. The generated backlog item always includes `artifacts/ticket-images.md` as a traceability manifest plus `context/ticket-discussion.md` with author-attributed comment context, and the agent sees those rewritten `artifacts/...` paths in its prompt context. Downloads from `uploads.linear.app` send the raw Linear API key in the `Authorization` header; other hosts are fetched with a plain GET.
 Side effects:
 
 - ensures `.metastack/backlog/_TEMPLATE/` exists
@@ -586,9 +577,6 @@ Side effects:
 - creates a new Linear child issue under the referenced parent
 - copies the full canonical template tree into `.metastack/backlog/<NEW_ISSUE_ID>/`
 - writes the generated backlog item to `.metastack/backlog/<NEW_ISSUE_ID>/`
-- downloads localized ticket images into `.metastack/backlog/<NEW_ISSUE_ID>/artifacts/`
-- writes `.metastack/backlog/<NEW_ISSUE_ID>/artifacts/ticket-images.md` with file name, alt text, source label, and original URL for every discovered markdown image
-- writes `.metastack/backlog/<NEW_ISSUE_ID>/context/ticket-discussion.md` with chronological `### **Author** (YYYY-MM-DD)` comment context
 - uses `.metastack/backlog/<NEW_ISSUE_ID>/index.md` as the Linear issue description
 - uploads the remaining managed backlog files as Linear attachments
 
@@ -641,14 +629,9 @@ Side effects:
 - `link --pull` immediately hydrates the linked entry from Linear after writing metadata
 - `status` scans `.metastack/backlog/` and prints `identifier | title | status | last sync`
 - `status` resolves only local change state by default; pass `--fetch` to check the current Linear issue and surface `remote-ahead` or `diverged`
-- `pull` refreshes `.metastack/backlog/<ISSUE_ID>/index.md` from the Linear description and rewrites markdown image references to local `artifacts/...` paths
+- `pull` refreshes `.metastack/backlog/<ISSUE_ID>/index.md` from the Linear description
 - `pull` restores CLI-managed attachment files into the same directory when present
-- `pull` re-downloads every markdown image referenced by the issue description, parent description, and Linear comments into `.metastack/backlog/<ISSUE_ID>/artifacts/`
-- `pull` writes `.metastack/backlog/<ISSUE_ID>/artifacts/ticket-images.md` as a localized-image manifest
-- `pull` writes `.metastack/backlog/<ISSUE_ID>/context/ticket-discussion.md` with chronological author-attributed comment context
-- `pull` logs per-image download failures without failing the overall sync
-- `pull` uses raw `Authorization: <LINEAR_API_KEY>` only for `uploads.linear.app` image downloads; other hosts are fetched without that special auth header
-- `pull` persists `.metastack/backlog/<ISSUE_ID>/.linear.json`, including `local_hash`, `remote_hash`, and `last_sync_at` alongside the existing issue metadata
+- `pull` persists `.linear.json`, including `local_hash`, `remote_hash`, and `last_sync_at` alongside the existing issue metadata
 - when `pull` sees a `remote-ahead` or `diverged` packet, it shows a diff between the local `index.md` and the incoming Linear description before any files are overwritten
 - in a TTY, `pull` asks for confirmation before overwriting local backlog content; in non-interactive runs it exits non-zero instead of silently replacing changed files
 - `pull --all` walks every linked backlog entry sequentially and prints a synced/skipped/error summary
@@ -701,7 +684,7 @@ Notes:
 - `meta linear issues list`, `meta dashboard linear`, and `meta dashboard team` share the same free-text search behavior when the issue list is focused: type to search by identifier, title, state, project, or description, with exact identifiers ranked ahead of broader matches
 - the shared Linear dashboards keep their existing filters, and the search query narrows the visible issue set after those filters are applied
 - `meta linear issues create` and `meta linear issues edit` open ratatui workflows when stdin/stdout are attached to a TTY
-- In the interactive create/edit forms, multiline descriptions advance on `Enter`, insert a newline on `Shift+Enter`, and support `Up`/`Down` cursor movement within multi-line text
+- In the interactive create/edit forms, multiline descriptions advance on `Enter` and insert a newline on `Shift+Enter`
 - `meta linear issues refine` is non-interactive, uses the configured local agent, and defaults to critique-only unless you pass `--apply`
 - `meta dashboard linear` is the preferred Linear dashboard path; bare `meta dashboard` remains a compatibility alias during migration
 
@@ -719,16 +702,15 @@ Legacy alias: `meta listen`
 
 `meta agents listen` keeps the same repository identity as the source checkout, but the worker prompt is anchored to the provided workspace checkout as the only local write scope. Implementation, validation, and local backlog updates must stay inside that workspace for the active repository unless the issue explicitly asks for a narrower subproject.
 
-The live terminal dashboard refreshes locally every second so session-state changes stay visible, while the configured listen poll interval continues to control how often Linear is queried. `meta agents listen` is terminal-only: steady-state runs stay in the TUI, and `--once` / `--render-once` emit terminal-only summary output without serving a browser app or local dashboard port.
+The live terminal dashboard refreshes locally every second so session-state changes stay visible, while the configured listen poll interval continues to control how often Linear is queried. Steady-state listen runs stay entirely in the terminal TUI, and `--once` / `--render-once` emit terminal-only summary output.
 
 Examples:
 
 ```bash
 meta agents listen --demo --render-once
 meta agents listen --check --root .
-meta agents listen --team MET --once
 meta agents listen --team MET --project "MetaStack CLI" --once
-meta agents listen --team MET --project "MetaStack API"
+meta agents listen --team MET --project "MetaStack CLI"
 meta runtime setup --listen-label agent --assignment-scope viewer --refresh-policy reuse-and-refresh
 ```
 
@@ -752,7 +734,7 @@ Outputs:
 - `<parent>/<repo>-workspace/<TICKET>/.metastack/agents/briefs/<TICKET>.md`
 - `<parent>/<repo>-workspace/<TICKET>/.metastack/agents/issue-context/<TICKET>/README.md`
 - install-scoped MetaListen state under the global MetaStack data root, keyed by the canonical
-  source project root plus the effective listen project selector for that run
+  source project `.metastack` root
 - install-scoped MetaListen logs under the same project store
 - a live terminal dashboard in steady-state mode, or a render-once terminal snapshot when requested
 
@@ -760,41 +742,54 @@ When `$METASTACK_CONFIG` points to a custom config file, the listener store live
 config file's parent `data/` directory. Otherwise the default install-scoped root is derived from
 the existing config path rules, for example `~/.config/metastack/data/`. Each project is stored in
 `listen/projects/<PROJECT_KEY>/` with `project.json`, `session.json`, an active-listener lock, and
-per-issue logs. The same checkout can keep multiple stored listener sessions side by side as long
-as each run targets a different effective project selector; omitting `--project` uses the repo's
-configured default project identity when one is set.
-per-issue logs. `session.json` remains the source of truth for tracked agent sessions; session
-cleanup rewrites only the selected `AgentSession` records and preserves the project metadata, active
-listener lock, and unrelated logs. Completed sessions older than the default 24-hour TTL are pruned
-automatically when the store is loaded, while blocked sessions are retained until explicitly
-cleared.
+per-issue logs.
 
 Stored-session management commands:
 
 ```bash
 meta listen sessions list
-meta listen sessions inspect --root .
-meta listen sessions inspect --root . --project "MetaStack API"
-meta listen sessions clear ENG-1234 --root .
-meta listen sessions clear --blocked --root .
-meta listen sessions clear --completed --root .
-meta listen sessions clear --stale --root .
-meta listen sessions clear --all --root .
-meta listen sessions clear --root . --project "MetaStack API"
-meta listen sessions resume --root . --project "MetaStack API" --once
+meta listen sessions inspect
+meta listen sessions clear
+meta listen sessions resume --project-key <PROJECT_KEY> --once
 ```
 
-If you already know the stored install-scoped key, `meta listen sessions resume --project-key
-<PROJECT_KEY> --once` targets the same project-scoped session directly.
+`meta listen sessions ...` manages the install-scoped listener store only. It does not inventory or delete the sibling workspace clones themselves.
 
-`meta listen sessions clear` is record-only cleanup. It never kills worker processes, and it refuses
-to remove any targeted session whose stored PID is still alive.
+### `workspace`
+
+Manage the sibling listener workspace clones created by `meta agents listen`. These commands always resolve the workspace root from the repository root with the fixed sibling convention:
+
+- `<parent>/<repo>-workspace/`
+
+That root is intentionally not configurable in this backlog, and TTL-based or automatic pruning is intentionally out of scope.
+
+Examples:
+
+```bash
+meta workspace list --root .
+meta workspace clean ENG-10175 --root .
+meta workspace clean --target-only --root .
+meta workspace clean --target-only ENG-10175 --root .
+meta workspace prune --dry-run --root .
+meta workspace prune --root .
+```
+
+Behavior:
+
+- `meta workspace list` prints one row per ticket clone with the ticket directory name, branch, disk usage, last modified timestamp, local git safety state, Linear state, and optional GitHub PR state.
+- Done or Cancelled tickets are marked as safe removal candidates in the list output.
+- GitHub PR enrichment is optional. When `gh` auth is unavailable, `list` and `prune` still succeed and mark PR data as unavailable while continuing from Linear completion state alone.
+- `meta workspace clean <TICKET>` deletes one clone after confirmation unless `--force` is passed, and it always reports dirty or ahead safety signals before removal.
+- `meta workspace clean --target-only` removes `target/` directories across all listener clones by default, or narrows to one ticket when a ticket identifier is also supplied.
+- `meta workspace prune --dry-run` previews every clone, whether it would be removed or kept, why, and the estimated reclaimed space.
+- `meta workspace prune` removes clones whose Linear tickets are Done or Cancelled, keeps clones with open PRs when PR data is available, skips clones with unpushed commits, and prints a final `Removed N clones, freed X GB. Kept M clones.` summary.
+- Clone deletion also removes only the matching ticket-scoped MetaListen session entry and per-ticket log artifact from the install-scoped project store, leaving unrelated sessions for the same repository intact.
 
 Reference:
 
 - [`docs/agent-daemon.md`](docs/agent-daemon.md)
 
-Linear commands also read repo-scoped defaults from `.metastack/meta.json`, plus optional project-specific Linear auth stored in install-scoped CLI config for the current repo root. Repo defaults should store the canonical Linear project ID; `meta setup --project <NAME>` resolves names to IDs before saving, while older name-based values are still resolved at read time for compatibility. `meta listen` also reads the optional required label, assignee filter, instructions file, and default poll interval from `.metastack/meta.json`, while interactive `meta plan` reads the optional `plan.interactive_follow_up_questions` override there and `meta plan` / `meta backlog tech` resolve the repo-scoped issue-label defaults to real Linear label IDs before issue creation, falling back to `plan` / `technical` when unset. The optional `linear.ticket_context.discussion_prompt_chars` and `linear.ticket_context.discussion_persisted_chars` settings control the comment-character budgets used for agent-facing and persisted `context/ticket-discussion.md` output. During `meta setup` saves, metastack checks that the effective listen, plan, and technical labels exist on the selected team and creates any missing team labels so later issue creation stays deterministic. When `meta linear issues list` returns no rows, it prints the applied filters so hidden repo defaults are visible.
+Linear commands also read repo-scoped defaults from `.metastack/meta.json`, plus optional project-specific Linear auth stored in install-scoped CLI config for the current repo root. Repo defaults should store the canonical Linear project ID; `meta setup --project <NAME>` resolves names to IDs before saving, while older name-based values are still resolved at read time for compatibility. `meta listen` also reads the optional required label, assignee filter, instructions file, and default poll interval from `.metastack/meta.json`, while interactive `meta plan` reads the optional `plan.interactive_follow_up_questions` override there and `meta plan` / `meta backlog tech` resolve the repo-scoped issue-label defaults to real Linear label IDs before issue creation, falling back to `plan` / `technical` when unset. During `meta setup` saves, metastack checks that the effective listen, plan, and technical labels exist on the selected team and creates any missing team labels so later issue creation stays deterministic. When `meta linear issues list` returns no rows, it prints the applied filters so hidden repo defaults are visible.
 ## Agent Configuration
 
 Agent-backed commands use stable route keys so different workflows can resolve different defaults from the same install-scoped config. `meta backlog plan`, `meta backlog split`, `meta context scan`, `meta context reload`, `meta linear issues refine`, `meta agents workflows run`, `meta runtime cron run`, `meta agents listen`, and `meta merge run` all resolve provider/model/reasoning in this order:
@@ -808,8 +803,6 @@ Agent-backed commands use stable route keys so different workflows can resolve d
 Workflow playbooks can still declare a built-in provider, but that value is now only used as the final fallback when the explicit, route, repo, and global config layers do not select one.
 
 The built-in provider adapters are the single source of truth for metadata and launch behavior. They run `codex exec` and `claude -p`, pass `--model=<value>` automatically when a model is configured, validate reasoning against the selected provider/model, and expose resolution diagnostics before launch. Before spawning a built-in provider, the CLI now checks the installed shell help surface for the emitted flags and fails fast with the resolved provider/model/reasoning plus the exact attempted command if the local binary has drifted. Codex reasoning is passed as `-c reasoning.effort="<value>"`; Claude reasoning is passed as `--effort=<value>`.
-
-Built-in providers are also the only prompt-image launch path in v1. When a supported prompt-bearing editor submits attachments, the CLI preserves attachment order, resizes oversized images to fit within `2048x768`, base64-encodes the resulting PNG payloads, and appends an explicit attachment block to the built-in provider prompt. Custom configured agents fail fast with a clear unsupported-provider error instead of dropping the images silently.
 
 Sandbox and permission handling depends on the command path:
 

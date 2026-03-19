@@ -16,7 +16,7 @@ use super::state::{AgentSession, COMPLETED_SESSION_TTL_SECONDS, ListenState, Ses
 const LISTEN_STORE_VERSION: u8 = 1;
 
 #[derive(Debug, Clone)]
-pub(super) struct ListenProjectStore {
+pub(crate) struct ListenProjectStore {
     identity: ListenProjectIdentity,
     paths: ListenProjectPaths,
 }
@@ -116,7 +116,10 @@ pub(super) struct ListenerLockGuard {
 }
 
 impl ListenProjectStore {
-    pub(super) fn resolve(root: &Path, project_selector: Option<&str>) -> Result<Self> {
+    /// Resolves the install-scoped listen project store for the provided repository root.
+    ///
+    /// Returns an error when the repository root or install-scoped data root cannot be resolved.
+    pub(crate) fn resolve(root: &Path, project_selector: Option<&str>) -> Result<Self> {
         let data_root = resolve_data_root()?;
         Self::resolve_with_data_root(root, data_root, project_selector)
     }
@@ -342,6 +345,29 @@ impl ListenProjectStore {
         }
     }
 
+    /// Removes the stored session entry and per-ticket log file for one Linear ticket.
+    ///
+    /// Returns an error when the persisted state cannot be read or updated, or when the matching
+    /// log file cannot be removed.
+    pub(crate) fn remove_ticket_artifacts(&self, issue_identifier: &str) -> Result<()> {
+        let mut state = self.load_state()?;
+        if state.remove_issue(issue_identifier) {
+            self.save_state(&state)?;
+        }
+
+        let log_path = self.log_path(issue_identifier);
+        match fs::remove_file(&log_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to remove `{}`", log_path.display()));
+            }
+        }
+
+        Ok(())
+    }
+
     pub(super) fn list_projects() -> Result<Vec<StoredListenProjectSummary>> {
         let data_root = resolve_data_root()?;
         Self::list_projects_with_data_root(data_root)
@@ -492,7 +518,11 @@ fn resolve_project_identity(
     })
 }
 
-pub(super) fn resolve_source_project_root(root: &Path) -> Result<PathBuf> {
+/// Resolves the source repository root for a requested path, collapsing git worktrees back to the
+/// owning repository when the shared `.metastack/` directory lives there.
+///
+/// Returns an error when the requested path cannot be resolved.
+pub(crate) fn resolve_source_project_root(root: &Path) -> Result<PathBuf> {
     let requested_root = canonicalize_existing_dir(root)?;
     resolve_source_root(&requested_root)
 }

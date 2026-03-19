@@ -53,6 +53,7 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
 - Default scope is the full top-level repository directory for that root, including monorepos. Only narrow the scope when the user explicitly requests a subproject.
 - Planning, backlog creation, and code changes must stay within that target repository. Do not spill into sibling repositories or parent directories.
 - For `meta listen`, the provided workspace checkout is the only local write root for implementation, validation, and backlog updates, even though the repository identity still comes from the active project checkout.
+- Listener-created sibling clones under `<repo>-workspace/` are managed by `meta workspace`; install-scoped `meta listen sessions` commands manage only the stored listener state and logs.
 - Use `meta issues refine <ISSUE>` as the quality-improvement step after `meta plan` or `meta backlog tech` when an existing repo-scoped ticket needs a stronger rewrite before implementation.
 - `meta issues refine` is critique-only by default and should write immutable artifacts under `.metastack/backlog/<ISSUE>/artifacts/refinement/<RUN_ID>/` for every pass.
 - When `meta issues refine --apply` is used outside `meta listen`, update `.metastack/backlog/<ISSUE>/index.md` before mutating the Linear description so the local audit trail exists first.

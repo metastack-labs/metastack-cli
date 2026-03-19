@@ -16,6 +16,7 @@ fn top_level_help_lists_domain_families_aliases_and_examples() {
         .stdout(predicate::str::contains("\n  runtime "))
         .stdout(predicate::str::contains("\n  dashboard "))
         .stdout(predicate::str::contains("\n  merge "))
+        .stdout(predicate::str::contains("\n  workspace "))
         .stdout(predicate::str::contains("\n  cron "))
         .stdout(predicate::str::contains("\n  plan "))
         .stdout(predicate::str::contains("\n  config "))
@@ -31,6 +32,20 @@ fn top_level_help_lists_domain_families_aliases_and_examples() {
         .stdout(predicate::str::contains("engineer:"))
         .stdout(predicate::str::contains("team lead:"))
         .stdout(predicate::str::contains("ops operator:"));
+}
+
+#[test]
+fn workspace_help_lists_lifecycle_commands() {
+    cli()
+        .args(["workspace", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\n  list "))
+        .stdout(predicate::str::contains("\n  clean "))
+        .stdout(predicate::str::contains("\n  prune "))
+        .stdout(predicate::str::contains(
+            "meta workspace prune --dry-run --root .",
+        ));
 }
 
 #[test]

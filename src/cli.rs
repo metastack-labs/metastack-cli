@@ -111,6 +111,13 @@ Examples:
   meta merge --render-once --events space,down,space,enter
   meta merge --no-interactive --pull-request 101 --pull-request 102 --validate \"make quality\"";
 
+const WORKSPACE_HELP_EXAMPLES: &str = "\
+Examples:
+  meta workspace list --root .
+  meta workspace clean ENG-10175 --root .
+  meta workspace clean --target-only --root .
+  meta workspace prune --dry-run --root .";
+
 #[derive(Debug, Parser)]
 #[command(
     name = "meta",
@@ -140,6 +147,8 @@ pub enum Command {
     Dashboard(DashboardArgs),
     /// Inspect open pull requests, batch them in a one-shot dashboard, and publish one aggregate PR.
     Merge(MergeArgs),
+    /// List and clean sibling listener workspace clones under the fixed `<repo>-workspace/` root.
+    Workspace(WorkspaceArgs),
     /// Compatibility alias for `meta backlog plan`.
     Plan(PlanArgs),
     /// Compatibility alias for `meta backlog tech`.
@@ -218,6 +227,56 @@ pub enum BacklogCommands {
 pub struct AgentsArgs {
     #[command(subcommand)]
     pub command: AgentsCommands,
+}
+
+#[derive(Debug, Clone, Args)]
+#[command(after_help = WORKSPACE_HELP_EXAMPLES)]
+pub struct WorkspaceArgs {
+    #[command(subcommand)]
+    pub command: WorkspaceCommands,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum WorkspaceCommands {
+    /// List ticket workspace clones with local git safety signals plus Linear and optional PR status.
+    List(WorkspaceListArgs),
+    /// Remove one workspace clone or delete `target/` directories across all clones.
+    Clean(WorkspaceCleanArgs),
+    /// Remove completed workspace clones and print reclaimed-space summaries.
+    Prune(WorkspacePruneArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct WorkspaceListArgs {
+    #[command(flatten)]
+    pub client: LinearClientArgs,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct WorkspaceCleanArgs {
+    #[command(flatten)]
+    pub root: RepositoryRootArgs,
+    /// Ticket identifier to clean, for example ENG-10175.
+    #[arg(value_name = "TICKET", required_unless_present = "target_only")]
+    pub ticket: Option<String>,
+    /// Remove `target/` directories instead of deleting workspace clones.
+    #[arg(long)]
+    pub target_only: bool,
+    /// Skip confirmation before deleting a workspace clone.
+    #[arg(long)]
+    pub force: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct WorkspacePruneArgs {
+    #[command(flatten)]
+    pub client: LinearClientArgs,
+    /// Preview which clones would be removed without deleting anything.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Skip confirmation before removing workspace clones.
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Debug, Clone, Subcommand)]

@@ -26,6 +26,8 @@ mod technical;
 mod tui;
 mod workflow_contract;
 mod workflows;
+mod workspace;
+mod workspace_dashboard;
 
 use std::ffi::OsString;
 
@@ -63,6 +65,7 @@ use crate::sync_command::{
 use crate::sync_dashboard::{SyncDashboardAction, SyncDashboardOptions};
 use crate::technical::run_technical;
 use crate::workflows::run_workflows;
+use crate::workspace::{run_workspace_clean, run_workspace_list, run_workspace_prune};
 
 pub async fn run() -> Result<()> {
     run_with_args(std::env::args_os()).await
@@ -247,6 +250,17 @@ async fn dispatch(cli: Cli) -> Result<()> {
         Command::Merge(args) => {
             run_merge(&args).await?;
         }
+        Command::Workspace(args) => match args.command {
+            crate::cli::WorkspaceCommands::List(args) => {
+                println!("{}", run_workspace_list(&args).await?);
+            }
+            crate::cli::WorkspaceCommands::Clean(args) => {
+                println!("{}", run_workspace_clean(&args)?);
+            }
+            crate::cli::WorkspaceCommands::Prune(args) => {
+                println!("{}", run_workspace_prune(&args).await?);
+            }
+        },
         Command::Scaffold(args) => {
             let report = run_scaffold(&args)?;
             println!("{}", report.render());

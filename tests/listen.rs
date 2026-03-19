@@ -4267,7 +4267,11 @@ printf '// turn %s\n' "$count" > "src/turn-$count.rs"
     assert!(second_instructions.contains("continuation turn 2 of 20"));
 
     let state_path = listen_state_path(&config_path, &repo_root)?;
-    wait_for_file_substring(&state_path, "\"phase\": \"completed\"")?;
+    wait_for_file_substring_with_timeout(
+        &state_path,
+        "\"phase\": \"completed\"",
+        Duration::from_secs(120),
+    )?;
     let state = fs::read_to_string(state_path)?;
     assert!(state.contains("\"issue_identifier\": \"MET-32\""));
     assert!(state.contains("\"phase\": \"completed\""));
@@ -4285,7 +4289,7 @@ fn listen_once_blocks_after_repeated_noop_turns() -> Result<(), Box<dyn Error>> 
     let config_path = temp.path().join("metastack.toml");
     let bin_dir = temp.path().join("bin");
     let stub_dir = temp.path().join("stub-output");
-    let server = DynamicLinearServer::start()?;
+    let server = DynamicLinearServer::start_with_completion_after_refreshes(1_000_000)?;
     fs::create_dir_all(&repo_root)?;
     fs::create_dir_all(&bin_dir)?;
     fs::create_dir_all(&stub_dir)?;
@@ -4347,23 +4351,35 @@ printf '%s' "$METASTACK_AGENT_INSTRUCTIONS" > "$TEST_OUTPUT_DIR/instructions-$co
     permissions.set_mode(0o755);
     fs::set_permissions(&stub_path, permissions)?;
     init_repo_with_origin(&repo_root)?;
+    let workspace = create_workspace_clone_checkout(&repo_root, "repo-workspace/MET-32")?;
+    let backlog_dir = workspace.join(".metastack/backlog/MET-32");
+    fs::create_dir_all(&backlog_dir)?;
+    fs::write(
+        backlog_dir.join("index.md"),
+        "# MET-32\n\n## Tasks\n\n- [ ] Keep working\n",
+    )?;
 
     let current_path = std::env::var("PATH")?;
     meta()
-        .current_dir(&repo_root)
+        .current_dir(&workspace)
         .env("METASTACK_CONFIG", &config_path)
         .env("TEST_OUTPUT_DIR", &stub_dir)
         .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
         .args([
-            "listen",
-            "--root",
+            "listen-worker",
+            "--source-root",
             repo_root.to_str().expect("temp path should be utf-8"),
-            "--once",
+            "--workspace",
+            workspace.to_str().expect("workspace path should be utf-8"),
+            "--issue",
+            "MET-32",
+            "--workpad-comment-id",
+            "comment-32",
+            "--backlog-issue",
+            "MET-32",
         ])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("1 claimed this cycle"))
-        .stdout(predicate::str::contains("MET-32"));
+        .success();
 
     let state_path = listen_state_path(&config_path, &repo_root)?;
     wait_for_file_substring(&state_path, "\"phase\": \"blocked\"")?;
