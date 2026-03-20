@@ -298,6 +298,27 @@ impl ProgressTracker {
         Ok(tracker)
     }
 
+    pub(crate) fn resume(
+        artifact_path: impl Into<PathBuf>,
+        mode: ProgressOutputMode,
+    ) -> Result<Self> {
+        let artifact_path = artifact_path.into();
+        let contents = std::fs::read_to_string(&artifact_path)
+            .with_context(|| format!("failed to read `{}`", artifact_path.display()))?;
+        let mut artifact: ProgressArtifact = serde_json::from_str(&contents)
+            .with_context(|| format!("failed to parse `{}`", artifact_path.display()))?;
+        artifact.status = ProgressRunState::Running;
+        artifact.finished_at = None;
+        artifact.updated_at = now_timestamp();
+        let mut tracker = Self {
+            artifact_path,
+            artifact,
+            display: ProgressDisplay::start(mode)?,
+        };
+        tracker.persist()?;
+        Ok(tracker)
+    }
+
     pub(crate) fn start_step(&mut self, key: &str, detail: impl Into<String>) -> Result<()> {
         let detail = detail.into();
         self.transition_step(key, ProgressStepState::Running, Some(detail), None)

@@ -351,6 +351,57 @@ fn config_builtin_defaults_do_not_persist_builtin_command_override_entries()
 }
 
 #[test]
+fn config_persists_merge_validation_repair_attempt_limit() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+
+    cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "config",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--merge-validation-repair-attempts",
+            "8",
+        ])
+        .assert()
+        .success();
+
+    let saved = fs::read_to_string(config_path)?;
+    assert!(saved.contains("[merge]"));
+    assert!(saved.contains("validation_repair_attempts = 8"));
+
+    Ok(())
+}
+
+#[test]
+fn config_rejects_zero_merge_validation_repair_attempt_limit() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+
+    cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "config",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--merge-validation-repair-attempts",
+            "0",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "merge validation repair attempt limit must be at least 1; got 0",
+        ));
+
+    Ok(())
+}
+
+#[test]
 fn config_rejects_invalid_builtin_reasoning_for_selected_model() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");

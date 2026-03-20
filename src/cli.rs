@@ -461,6 +461,9 @@ pub struct MergeArgs {
     /// Skip the one-shot dashboard and run the selected pull requests directly.
     #[arg(long, conflicts_with = "render_once")]
     pub no_interactive: bool,
+    /// Resume an existing merge run by run id under `.metastack/merge-runs/<RUN_ID>/`.
+    #[arg(long, value_name = "RUN_ID", conflicts_with_all = ["json", "render_once", "pull_requests"])]
+    pub resume_run: Option<String>,
     /// Repeatable pull request number used with `--no-interactive`.
     #[arg(long = "pull-request", value_name = "NUMBER")]
     pub pull_requests: Vec<u64>,
@@ -667,6 +670,15 @@ pub struct ConfigArgs {
     /// Update the global default built-in reasoning option.
     #[arg(long)]
     pub default_reasoning: Option<String>,
+    /// Update how many times `meta merge` will ask the agent to repair failed validation by default.
+    #[arg(long)]
+    pub merge_validation_repair_attempts: Option<String>,
+    /// Update how many transient validation reruns `meta merge` will allow before escalating.
+    #[arg(long)]
+    pub merge_validation_transient_retry_attempts: Option<String>,
+    /// Update how many times `meta merge` retries push and PR publication after transient remote failures.
+    #[arg(long)]
+    pub merge_publication_retry_attempts: Option<String>,
     /// Set or update an advanced agent route override for a family key like `backlog` or a command key like `backlog.plan`.
     #[arg(long)]
     pub route: Option<String>,
