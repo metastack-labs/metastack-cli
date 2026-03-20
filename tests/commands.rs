@@ -9,7 +9,7 @@ fn write_onboarded_config(config_path: &Path) -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn top_level_help_lists_domain_families_aliases_and_examples() {
+fn top_level_help_lists_primary_commands_and_examples() {
     cli()
         .arg("--help")
         .assert()
@@ -23,21 +23,80 @@ fn top_level_help_lists_domain_families_aliases_and_examples() {
         .stdout(predicate::str::contains("\n  merge "))
         .stdout(predicate::str::contains("\n  workspace "))
         .stdout(predicate::str::contains("\n  upgrade "))
-        .stdout(predicate::str::contains("\n  cron "))
-        .stdout(predicate::str::contains("\n  plan "))
-        .stdout(predicate::str::contains("\n  config "))
+        .stdout(predicate::str::contains("\n  help "))
+        .stdout(predicate::str::contains("\n  cron ").not())
+        .stdout(predicate::str::contains("\n  plan ").not())
+        .stdout(predicate::str::contains("\n  config ").not())
         .stdout(predicate::str::contains("\n  scaffold ").not())
-        .stdout(predicate::str::contains("\n  technical "))
-        .stdout(predicate::str::contains("\n  sync "))
-        .stdout(predicate::str::contains("\n  projects "))
-        .stdout(predicate::str::contains("\n  issues "))
-        .stdout(predicate::str::contains("\n  setup "))
-        .stdout(predicate::str::contains(
-            "Compatibility alias for `meta backlog plan`",
-        ))
+        .stdout(predicate::str::contains("\n  technical ").not())
+        .stdout(predicate::str::contains("\n  sync ").not())
+        .stdout(predicate::str::contains("\n  projects ").not())
+        .stdout(predicate::str::contains("\n  issues ").not())
+        .stdout(predicate::str::contains("\n  setup ").not())
+        .stdout(predicate::str::contains("\n  listen ").not())
+        .stdout(predicate::str::contains("\n  scan ").not())
+        .stdout(predicate::str::contains("\n  workflows ").not())
+        .stdout(predicate::str::contains("Compatibility alias for `meta backlog plan`").not())
         .stdout(predicate::str::contains("engineer:"))
         .stdout(predicate::str::contains("team lead:"))
         .stdout(predicate::str::contains("ops operator:"));
+}
+
+#[test]
+fn bare_meta_renders_the_same_cleaned_top_level_help() {
+    cli()
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("\n  backlog "))
+        .stderr(predicate::str::contains("\n  agents "))
+        .stderr(predicate::str::contains("\n  linear "))
+        .stderr(predicate::str::contains("\n  context "))
+        .stderr(predicate::str::contains("\n  runtime "))
+        .stderr(predicate::str::contains("\n  dashboard "))
+        .stderr(predicate::str::contains("\n  merge "))
+        .stderr(predicate::str::contains("\n  workspace "))
+        .stderr(predicate::str::contains("\n  upgrade "))
+        .stderr(predicate::str::contains("\n  help "))
+        .stderr(predicate::str::contains("\n  plan ").not())
+        .stderr(predicate::str::contains("\n  technical ").not())
+        .stderr(predicate::str::contains("\n  listen ").not())
+        .stderr(predicate::str::contains("\n  issues ").not())
+        .stderr(predicate::str::contains("\n  projects ").not())
+        .stderr(predicate::str::contains("\n  cron ").not())
+        .stderr(predicate::str::contains("\n  scan ").not())
+        .stderr(predicate::str::contains("\n  workflows ").not())
+        .stderr(predicate::str::contains("\n  config ").not())
+        .stderr(predicate::str::contains("\n  setup ").not())
+        .stderr(predicate::str::contains("\n  sync ").not());
+}
+
+#[test]
+fn explicit_meta_help_renders_the_same_cleaned_top_level_help() {
+    cli()
+        .arg("help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\n  backlog "))
+        .stdout(predicate::str::contains("\n  agents "))
+        .stdout(predicate::str::contains("\n  linear "))
+        .stdout(predicate::str::contains("\n  context "))
+        .stdout(predicate::str::contains("\n  runtime "))
+        .stdout(predicate::str::contains("\n  dashboard "))
+        .stdout(predicate::str::contains("\n  merge "))
+        .stdout(predicate::str::contains("\n  workspace "))
+        .stdout(predicate::str::contains("\n  upgrade "))
+        .stdout(predicate::str::contains("\n  help "))
+        .stdout(predicate::str::contains("\n  plan ").not())
+        .stdout(predicate::str::contains("\n  technical ").not())
+        .stdout(predicate::str::contains("\n  listen ").not())
+        .stdout(predicate::str::contains("\n  issues ").not())
+        .stdout(predicate::str::contains("\n  projects ").not())
+        .stdout(predicate::str::contains("\n  cron ").not())
+        .stdout(predicate::str::contains("\n  scan ").not())
+        .stdout(predicate::str::contains("\n  workflows ").not())
+        .stdout(predicate::str::contains("\n  config ").not())
+        .stdout(predicate::str::contains("\n  setup ").not())
+        .stdout(predicate::str::contains("\n  sync ").not());
 }
 
 #[test]

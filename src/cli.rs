@@ -165,27 +165,38 @@ pub enum Command {
     /// Securely self-update a GitHub Release install of `meta` on macOS/Linux.
     Upgrade(UpgradeArgs),
     /// Compatibility alias for `meta backlog plan`.
+    #[command(hide = true)]
     Plan(PlanArgs),
     /// Compatibility alias for `meta backlog tech`.
+    #[command(hide = true)]
     Technical(TechnicalArgs),
     /// Compatibility alias for `meta agents listen`.
+    #[command(hide = true)]
     Listen(ListenArgs),
     /// Compatibility alias for `meta linear issues`.
+    #[command(hide = true)]
     #[command(visible_alias = "tickets")]
     Issues(IssuesArgs),
     /// Compatibility alias for `meta linear projects`.
+    #[command(hide = true)]
     Projects(ProjectsArgs),
     /// Compatibility alias for `meta runtime cron`.
+    #[command(hide = true)]
     Cron(CronArgs),
     /// Compatibility alias for `meta context scan`.
+    #[command(hide = true)]
     Scan(ScanArgs),
     /// Compatibility alias for `meta agents workflows`.
+    #[command(hide = true)]
     Workflows(WorkflowsArgs),
     /// Compatibility alias for `meta runtime config`.
+    #[command(hide = true)]
     Config(ConfigArgs),
     /// Compatibility alias for `meta runtime setup`.
+    #[command(hide = true)]
     Setup(SetupArgs),
     /// Compatibility alias for `meta backlog sync`.
+    #[command(hide = true)]
     Sync(SyncArgs),
     /// Hidden worker used by `meta listen` to supervise repeated agent turns.
     #[command(hide = true)]
