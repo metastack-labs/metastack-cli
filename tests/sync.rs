@@ -1448,6 +1448,103 @@ fn sync_push_updates_the_issue_description_only_with_opt_in_flag() -> Result<(),
 }
 
 #[test]
+fn sync_push_identifier_stays_linked_entry_driven_outside_dashboard() -> Result<(), Box<dyn Error>>
+{
+    let temp = tempdir()?;
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    let issue_dir = temp.path().join(".metastack/backlog/generated-child");
+    write_minimal_planning_context(
+        temp.path(),
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+
+    fs::create_dir_all(&issue_dir)?;
+    fs::write(issue_dir.join("index.md"), "# Local child backlog\n")?;
+    write_linked_metadata(
+        &issue_dir,
+        "MET-77",
+        "Linked child backlog issue",
+        None,
+        None,
+        None,
+    )?;
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issues");
+        then.status(200).json_body(json!({
+            "data": {
+                "issues": {
+                    "nodes": [issue_node(
+                        "issue-77",
+                        "MET-77",
+                        "Linked child backlog issue",
+                        "Remote child issue",
+                        "state-2",
+                        "In Progress",
+                    )]
+                }
+            }
+        }));
+    });
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issue")
+            .body_includes("\"id\":\"issue-77\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "issue": issue_detail_node(
+                    "issue-77",
+                    "MET-77",
+                    "Linked child backlog issue",
+                    "Remote child issue",
+                    Vec::new(),
+                    None,
+                )
+            }
+        }));
+    });
+
+    cli()
+        .current_dir(temp.path())
+        .args([
+            "sync",
+            "--api-key",
+            "token",
+            "--api-url",
+            &api_url,
+            "push",
+            "MET-77",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Pushed MET-77 from .metastack/backlog/generated-child",
+        ))
+        .stdout(predicate::str::contains(
+            "synced 0 managed attachment files",
+        ));
+
+    assert!(!temp.path().join(".metastack/backlog/MET-77").exists());
+    let metadata = fs::read_to_string(issue_dir.join(".linear.json"))?;
+    assert!(metadata.contains("\"identifier\": \"MET-77\""));
+    assert!(metadata.contains("\"issue_id\": \"issue-77\""));
+    assert!(metadata.contains("\"local_hash\":"));
+    assert!(metadata.contains("\"remote_hash\":"));
+
+    Ok(())
+}
+
+#[test]
 fn sync_push_description_update_is_blocked_for_the_active_listen_issue()
 -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
@@ -2079,26 +2176,26 @@ fn sync_push_with_update_description_refuses_diverged_description_overwrite()
 }
 
 #[test]
-fn sync_render_once_uses_default_project_and_loads_paginated_issue_list()
+fn sync_render_once_uses_local_backlog_entries_and_only_hydrates_linked_rows()
 -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let server = MockServer::start();
     let api_url = server.url("/graphql");
 
-    fs::create_dir_all(temp.path().join(".metastack"))?;
-    fs::write(
-        temp.path().join(".metastack/meta.json"),
+    write_minimal_planning_context(
+        temp.path(),
         r#"{
   "linear": {
-    "team": "MET",
-    "project_id": "MetaStack CLI"
+    "team": "MET"
   }
 }
 "#,
     )?;
-    fs::create_dir_all(temp.path().join(".metastack/backlog/MET-13"))?;
+    let linked_dir = temp.path().join(".metastack/backlog/linked-entry");
+    fs::create_dir_all(&linked_dir)?;
+    fs::write(linked_dir.join("index.md"), "# Linked entry\n")?;
     fs::write(
-        temp.path().join(".metastack/backlog/MET-13/.linear.json"),
+        linked_dir.join(".linear.json"),
         r#"{
   "issue_id": "issue-3",
   "identifier": "MET-13",
@@ -2109,67 +2206,51 @@ fn sync_render_once_uses_default_project_and_loads_paginated_issue_list()
 }
 "#,
     )?;
+    let unlinked_dir = temp.path().join(".metastack/backlog/manual-entry");
+    fs::create_dir_all(&unlinked_dir)?;
+    fs::write(unlinked_dir.join("index.md"), "# Manual entry\n")?;
 
-    let first_page = server.mock(|when, then| {
+    let linked_issue_lookup = server.mock(|when, then| {
         when.method(POST)
             .path("/graphql")
             .header("authorization", "token")
-            .body_includes("query Issues")
-            .body_includes("\"after\":null");
+            .body_includes("query Issues");
         then.status(200).json_body(json!({
             "data": {
                 "issues": {
-                    "nodes": [
-                        issue_node(
-                            "issue-1",
-                            "MET-11",
-                            "First issue",
-                            "First page issue",
-                            "state-2",
-                            "In Progress",
-                        ),
-                        issue_node(
-                            "issue-2",
-                            "MET-12",
-                            "Second issue",
-                            "First page issue",
-                            "state-1",
-                            "Todo",
-                        )
-                    ],
+                    "nodes": [issue_node(
+                        "issue-3",
+                        "MET-13",
+                        "Third issue",
+                        "Second page issue",
+                        "state-2",
+                        "In Progress",
+                    )],
                     "pageInfo": {
-                        "hasNextPage": true,
-                        "endCursor": "cursor-1"
+                        "hasNextPage": false,
+                        "endCursor": null
                     }
                 }
             }
         }));
     });
 
-    let second_page = server.mock(|when, then| {
+    let linked_issue_detail = server.mock(|when, then| {
         when.method(POST)
             .path("/graphql")
             .header("authorization", "token")
-            .body_includes("query Issues")
-            .body_includes("\"after\":\"cursor-1\"");
+            .body_includes("query Issue")
+            .body_includes("\"id\":\"issue-3\"");
         then.status(200).json_body(json!({
             "data": {
-                "issues": {
-                    "nodes": [
-                        issue_node(
-                            "issue-3",
-                            "MET-13",
-                            "Third issue",
-                            "Second page issue",
-                            "state-2",
-                            "In Progress",
-                        )
-                    ],
-                    "pageInfo": {
-                        "hasNextPage": false,
-                        "endCursor": null
-                    }
-                }
+                "issue": issue_detail_node(
+                    "issue-3",
+                    "MET-13",
+                    "Third issue",
+                    "Second page issue",
+                    Vec::new(),
+                    None,
+                )
             }
         }));
     });
@@ -2184,23 +2265,22 @@ fn sync_render_once_uses_default_project_and_loads_paginated_issue_list()
             &api_url,
             "--render-once",
             "--events",
-            "down,down,enter,down,enter",
+            "enter,down,enter",
         ])
         .assert()
         .success()
         .stderr(predicate::str::contains(
             "hint: `meta sync` is a compatibility alias; prefer `meta backlog sync`.",
         ))
-        .stdout(predicate::str::contains(
-            "meta backlog sync (MetaStack CLI)",
-        ))
+        .stdout(predicate::str::contains("meta backlog sync"))
         .stdout(predicate::str::contains("Ready to push MET-13"))
-        .stdout(predicate::str::contains("Issue Search"))
+        .stdout(predicate::str::contains("Backlog Search"))
         .stdout(predicate::str::contains("Third issue"))
+        .stdout(predicate::str::contains("manual-entry"))
         .stdout(predicate::str::contains("sync: unlinked"));
 
-    first_page.assert();
-    second_page.assert();
+    linked_issue_lookup.assert();
+    linked_issue_detail.assert();
 
     Ok(())
 }
@@ -2228,6 +2308,16 @@ fn sync_uses_repo_selected_profile_and_project_over_conflicting_global_defaults(
 }
 "#,
     )?;
+    let linked_dir = repo_root.join(".metastack/backlog/MET-210");
+    fs::create_dir_all(&linked_dir)?;
+    write_linked_metadata(
+        &linked_dir,
+        "MET-210",
+        "Repo default sync issue",
+        None,
+        None,
+        None,
+    )?;
     fs::write(
         &config_path,
         format!(
@@ -2249,6 +2339,17 @@ team = "PER"
 "#
         ),
     )?;
+    let issue_dir = repo_root.join(".metastack/backlog/MET-210");
+    fs::create_dir_all(&issue_dir)?;
+    fs::write(issue_dir.join("index.md"), "# Repo default sync issue\n")?;
+    write_linked_metadata(
+        &issue_dir,
+        "MET-210",
+        "Repo default sync issue",
+        Some("baseline"),
+        Some("remote-baseline"),
+        Some("2026-03-18T10:15:00Z"),
+    )?;
 
     let issues_mock = right_server.mock(|when, then| {
         when.method(POST)
@@ -2258,74 +2359,34 @@ team = "PER"
         then.status(200).json_body(json!({
             "data": {
                 "issues": {
-                    "nodes": [{
-                        "id": "issue-selected",
-                        "identifier": "MET-210",
-                        "title": "Repo default sync issue",
-                        "description": "Selected from the repo-scoped Linear project",
-                        "url": "https://linear.app/issues/MET-210",
-                        "priority": 2,
-                        "updatedAt": "2026-03-14T16:00:00Z",
-                        "team": {
-                            "id": "team-1",
-                            "key": "MET",
-                            "name": "Metastack"
-                        },
-                        "project": {
-                            "id": "project-1",
-                            "name": "Repo Project"
-                        },
-                        "state": {
-                            "id": "state-1",
-                            "name": "Todo",
-                            "type": "unstarted"
-                        }
-                    }, {
-                        "id": "issue-wrong-project",
-                        "identifier": "MET-211",
-                        "title": "Wrong project sync issue",
-                        "description": "Should be filtered out by the repo project default",
-                        "url": "https://linear.app/issues/MET-211",
-                        "priority": 2,
-                        "updatedAt": "2026-03-14T16:00:00Z",
-                        "team": {
-                            "id": "team-1",
-                            "key": "MET",
-                            "name": "Metastack"
-                        },
-                        "project": {
-                            "id": "project-2",
-                            "name": "Wrong Project"
-                        },
-                        "state": {
-                            "id": "state-1",
-                            "name": "Todo",
-                            "type": "unstarted"
-                        }
-                    }, {
-                        "id": "issue-wrong-team",
-                        "identifier": "PER-212",
-                        "title": "Wrong team sync issue",
-                        "description": "Should be filtered out by the repo team default",
-                        "url": "https://linear.app/issues/PER-212",
-                        "priority": 2,
-                        "updatedAt": "2026-03-14T16:00:00Z",
-                        "team": {
-                            "id": "team-2",
-                            "key": "PER",
-                            "name": "Personal"
-                        },
-                        "project": {
-                            "id": "project-1",
-                            "name": "Repo Project"
-                        },
-                        "state": {
-                            "id": "state-1",
-                            "name": "Todo",
-                            "type": "unstarted"
-                        }
-                    }]
+                    "nodes": [issue_node(
+                        "issue-selected",
+                        "MET-210",
+                        "Repo default sync issue",
+                        "Selected from the repo-scoped Linear project",
+                        "state-1",
+                        "Todo",
+                    )]
                 }
+            }
+        }));
+    });
+    let issue_detail_mock = right_server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .header("authorization", "repo-token")
+            .body_includes("query Issue($id: String!)")
+            .body_includes("\"id\":\"issue-selected\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "issue": issue_detail_node(
+                    "issue-selected",
+                    "MET-210",
+                    "Repo default sync issue",
+                    "Selected from the repo-scoped Linear project",
+                    Vec::new(),
+                    None,
+                )
             }
         }));
     });
@@ -2348,16 +2409,125 @@ team = "PER"
         ))
         .stdout(predicate::str::contains("meta backlog sync (project-1)"))
         .stdout(predicate::str::contains("Repo default sync issue"))
-        .stdout(predicate::str::contains("Wrong project sync issue").not())
-        .stdout(predicate::str::contains("Wrong team sync issue").not());
+        .stdout(predicate::str::contains("Backlog Search"));
 
     issues_mock.assert();
+    issue_detail_mock.assert();
     Ok(())
 }
 
 #[test]
-fn sync_without_subcommand_requires_default_project_configuration() {
-    let temp = tempdir().expect("tempdir should build");
+fn sync_render_once_prefers_linked_backlog_children_over_project_rows() -> Result<(), Box<dyn Error>>
+{
+    let temp = tempdir()?;
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    write_minimal_planning_context(
+        temp.path(),
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+
+    let issue_dir = temp.path().join(".metastack/backlog/MET-36");
+    fs::create_dir_all(&issue_dir)?;
+    fs::write(issue_dir.join("index.md"), "# Child backlog docs\n")?;
+    write_linked_metadata(
+        &issue_dir,
+        "MET-36",
+        "Technical child sync issue",
+        Some("baseline"),
+        Some("remote-baseline"),
+        Some("2026-03-18T10:15:00Z"),
+    )?;
+
+    let issues_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issues");
+        then.status(200).json_body(json!({
+            "data": {
+                "issues": {
+                    "nodes": [
+                        issue_node(
+                            "parent-1",
+                            "MET-35",
+                            "Parent issue",
+                            "Parent issue description",
+                            "state-2",
+                            "In Progress",
+                        ),
+                        issue_node(
+                            "child-1",
+                            "MET-36",
+                            "Technical child sync issue",
+                            "Technical child description",
+                            "state-1",
+                            "Todo",
+                        )
+                    ]
+                }
+            }
+        }));
+    });
+    let child_detail_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issue($id: String!)")
+            .body_includes("\"id\":\"child-1\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "issue": issue_detail_node(
+                    "child-1",
+                    "MET-36",
+                    "Technical child sync issue",
+                    "Technical child description",
+                    Vec::new(),
+                    Some(json!({
+                        "id": "parent-1",
+                        "identifier": "MET-35",
+                        "title": "Parent issue",
+                        "url": "https://linear.app/issues/MET-35"
+                    })),
+                )
+            }
+        }));
+    });
+
+    cli()
+        .current_dir(temp.path())
+        .args([
+            "sync",
+            "--api-key",
+            "token",
+            "--api-url",
+            &api_url,
+            "--render-once",
+            "--events",
+            "enter,down,enter",
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "hint: `meta sync` is a compatibility alias; prefer `meta backlog sync`.",
+        ))
+        .stdout(predicate::str::contains("Ready to push MET-36"))
+        .stdout(predicate::str::contains("Backlog Entries (1/1)"))
+        .stdout(predicate::str::contains("Parent issue").not());
+
+    issues_mock.assert();
+    child_detail_mock.assert();
+    Ok(())
+}
+
+#[test]
+fn sync_without_subcommand_renders_local_backlog_without_default_project_configuration()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
     write_minimal_planning_context(
         temp.path(),
         r#"{
@@ -2368,18 +2538,33 @@ fn sync_without_subcommand_requires_default_project_configuration() {
 "#,
     )
     .expect("planning context should write");
+    let issue_dir = temp.path().join(".metastack/backlog/manual-entry");
+    fs::create_dir_all(&issue_dir)?;
+    fs::write(issue_dir.join("index.md"), "# Manual entry\n")?;
 
     cli()
         .current_dir(temp.path())
-        .args(["sync", "--api-key", "token", "--render-once"])
+        .args([
+            "sync",
+            "--api-key",
+            "token",
+            "--render-once",
+            "--events",
+            "enter,down,enter",
+        ])
         .assert()
-        .failure()
+        .success()
         .stderr(predicate::str::contains(
             "hint: `meta sync` is a compatibility alias; prefer `meta backlog sync`.",
         ))
-        .stderr(predicate::str::contains(
-            "`meta backlog sync` requires a repo default project",
-        ));
+        .stdout(predicate::str::contains("manual-entry"))
+        .stdout(predicate::str::contains("state: Unlinked"))
+        .stdout(predicate::str::contains("link required"))
+        .stdout(predicate::str::contains("meta backlog sync link"))
+        .stdout(predicate::str::contains("--entry manual-entry"))
+        .stdout(predicate::str::contains("Ready to push").not());
+
+    Ok(())
 }
 
 fn write_linked_metadata(

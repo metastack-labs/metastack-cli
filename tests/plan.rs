@@ -11,9 +11,610 @@ fn plan_help_lists_non_interactive_inputs() {
         .stdout(predicate::str::contains(
             "Compatibility alias for `meta backlog plan`",
         ))
+        .stdout(predicate::str::contains("[IDENTIFIER]"))
         .stdout(predicate::str::contains("--request <REQUEST>"))
         .stdout(predicate::str::contains("--answer <ANSWERS>"))
+        .stdout(predicate::str::contains("--velocity"))
         .stdout(predicate::str::contains("--no-interactive"));
+}
+
+#[cfg(unix)]
+fn write_reshape_agent_stub(
+    bin_dir: &Path,
+    stub_dir: &Path,
+    response: &str,
+) -> Result<(), Box<dyn Error>> {
+    let stub_path = bin_dir.join("plan-agent-stub");
+    fs::write(
+        &stub_path,
+        format!(
+            r#"#!/bin/sh
+count_file="$TEST_OUTPUT_DIR/count.txt"
+count=0
+if [ -f "$count_file" ]; then
+  count=$(cat "$count_file")
+fi
+count=$((count + 1))
+printf '%s' "$count" > "$count_file"
+cat > "$TEST_OUTPUT_DIR/payload-$count.txt"
+printf '%s' '{response}'
+"#
+        ),
+    )?;
+    let mut permissions = fs::metadata(&stub_path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&stub_path, permissions)?;
+    let _ = stub_dir;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn write_reshape_config(
+    config_path: &Path,
+    api_url: &str,
+    include_agent: bool,
+) -> Result<(), Box<dyn Error>> {
+    let config = if include_agent {
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+
+[agents]
+default_agent = "stub"
+
+[agents.commands.stub]
+command = "plan-agent-stub"
+transport = "stdin"
+"#
+        )
+    } else {
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+"#
+        )
+    };
+    fs::write(config_path, config)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn reshape_issue_list_node() -> serde_json::Value {
+    json!({
+        "id": "issue-reshape",
+        "identifier": "ENG-10144",
+        "title": "Technical: old reshape ticket",
+        "description": "The current ticket body needs structure.",
+        "url": "https://linear.app/issues/ENG-10144",
+        "priority": 2,
+        "updatedAt": "2026-03-19T12:00:00Z",
+        "team": {
+            "id": "team-1",
+            "key": "ENG",
+            "name": "Engineering"
+        },
+        "project": {
+            "id": "project-1",
+            "name": "MetaStack CLI"
+        },
+        "state": {
+            "id": "state-2",
+            "name": "In Progress",
+            "type": "started"
+        }
+    })
+}
+
+#[cfg(unix)]
+fn reshape_issue_detail(existing_workpad: bool) -> serde_json::Value {
+    let mut comments = vec![json!({
+        "id": "comment-context",
+        "body": "Need to preserve project and labels.",
+        "createdAt": "2026-03-18T15:00:00Z",
+        "user": {
+            "name": "Reviewer"
+        },
+        "resolvedAt": null
+    })];
+    if existing_workpad {
+        comments.push(json!({
+            "id": "comment-active",
+            "body": "## Codex Workpad\n\nExisting audit note",
+            "createdAt": "2026-03-18T15:30:00Z",
+            "user": {
+                "name": "Harness"
+            },
+            "resolvedAt": null
+        }));
+    }
+
+    json!({
+        "id": "issue-reshape",
+        "identifier": "ENG-10144",
+        "title": "Technical: old reshape ticket",
+        "description": "Current description.\n\nIt is too loose and missing acceptance criteria.",
+        "url": "https://linear.app/issues/ENG-10144",
+        "priority": 2,
+        "updatedAt": "2026-03-19T12:00:00Z",
+        "team": {
+            "id": "team-1",
+            "key": "ENG",
+            "name": "Engineering"
+        },
+        "project": {
+            "id": "project-1",
+            "name": "MetaStack CLI"
+        },
+        "assignee": {
+            "id": "viewer-1",
+            "name": "Kames",
+            "email": "sudo@example.com"
+        },
+        "labels": {
+            "nodes": [{
+                "id": "label-1",
+                "name": "tech"
+            }]
+        },
+        "comments": {
+            "nodes": comments,
+            "pageInfo": {
+                "hasNextPage": false,
+                "endCursor": null
+            }
+        },
+        "state": {
+            "id": "state-2",
+            "name": "In Progress",
+            "type": "started"
+        },
+        "attachments": {
+            "nodes": [{
+                "id": "attachment-1",
+                "title": "current-screenshot.png",
+                "url": "https://example.com/current-screenshot.png",
+                "sourceType": "upload",
+                "metadata": {
+                    "kind": "image"
+                }
+            }]
+        },
+        "parent": null,
+        "children": {
+            "nodes": []
+        }
+    })
+}
+
+#[cfg(unix)]
+fn reshape_team_payload() -> serde_json::Value {
+    json!({
+        "data": {
+            "teams": {
+                "nodes": [{
+                    "id": "team-1",
+                    "key": "ENG",
+                    "name": "Engineering",
+                    "states": {
+                        "nodes": [{
+                            "id": "state-backlog",
+                            "name": "Backlog",
+                            "type": "backlog"
+                        }, {
+                            "id": "state-2",
+                            "name": "In Progress",
+                            "type": "started"
+                        }]
+                    }
+                }]
+            }
+        }
+    })
+}
+
+#[cfg(unix)]
+#[test]
+fn plan_reshape_velocity_updates_existing_issue_and_workpad() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let stub_dir = temp.path().join("stub-output");
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&stub_dir)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "ENG",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+    write_reshape_config(&config_path, &api_url, true)?;
+    write_reshape_agent_stub(
+        &bin_dir,
+        &stub_dir,
+        r#"{"summary":"Rewrite the ticket in place with clearer scope and acceptance criteria.","title":"Plan reshape existing Linear tickets in place","description":"Improve the current planning ticket by preserving its intent, tightening the scope, and making the acceptance criteria explicit.","acceptance_criteria":["`meta backlog plan ENG-10144` updates the existing issue instead of creating a new one","Interactive runs preview the diff and `--velocity` auto-applies the reshape"]}"#,
+    )?;
+
+    let issues_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issues");
+        then.status(200).json_body(json!({
+            "data": {
+                "issues": {
+                    "nodes": [reshape_issue_list_node()]
+                }
+            }
+        }));
+    });
+    let issue_detail_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issue($id: String!)")
+            .body_includes("\"id\":\"issue-reshape\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "issue": reshape_issue_detail(true)
+            }
+        }));
+    });
+    let teams_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Teams");
+        then.status(200).json_body(reshape_team_payload());
+    });
+    let update_issue_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation UpdateIssue")
+            .body_includes("\"id\":\"issue-reshape\"")
+            .body_includes("\"title\":\"Plan reshape existing Linear tickets in place\"")
+            .body_includes("## Acceptance Criteria")
+            .body_includes("updates the existing issue instead of creating a new one");
+        then.status(200).json_body(json!({
+            "data": {
+                "issueUpdate": {
+                    "success": true,
+                    "issue": {
+                        "id": "issue-reshape",
+                        "identifier": "ENG-10144",
+                        "title": "Plan reshape existing Linear tickets in place",
+                        "description": "# Plan reshape existing Linear tickets in place\n\nImprove the current planning ticket by preserving its intent, tightening the scope, and making the acceptance criteria explicit.\n\n## Acceptance Criteria\n\n- `meta backlog plan ENG-10144` updates the existing issue instead of creating a new one\n- Interactive runs preview the diff and `--velocity` auto-applies the reshape",
+                        "url": "https://linear.app/issues/ENG-10144",
+                        "priority": 2,
+                        "updatedAt": "2026-03-19T13:00:00Z",
+                        "team": {
+                            "id": "team-1",
+                            "key": "ENG",
+                            "name": "Engineering"
+                        },
+                        "project": {
+                            "id": "project-1",
+                            "name": "MetaStack CLI"
+                        },
+                        "state": {
+                            "id": "state-2",
+                            "name": "In Progress",
+                            "type": "started"
+                        }
+                    }
+                }
+            }
+        }));
+    });
+    let update_comment_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation UpdateComment")
+            .body_includes("\"id\":\"comment-active\"")
+            .body_includes(
+                "Rewrite the ticket in place with clearer scope and acceptance criteria.",
+            )
+            .body_includes("Local `.metastack/backlog/` files were not modified");
+        then.status(200).json_body(json!({
+            "data": {
+                "commentUpdate": {
+                    "success": true,
+                    "comment": {
+                        "id": "comment-active",
+                        "body": "## Codex Workpad\n\nupdated",
+                        "resolvedAt": null
+                    }
+                }
+            }
+        }));
+    });
+    let create_issue_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation CreateIssue");
+        then.status(200).json_body(json!({
+            "data": {
+                "issueCreate": {
+                    "success": true,
+                    "issue": reshape_issue_list_node()
+                }
+            }
+        }));
+    });
+    let create_comment_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation CreateComment");
+        then.status(200).json_body(json!({
+            "data": {
+                "commentCreate": {
+                    "success": true,
+                    "comment": {
+                        "id": "comment-created",
+                        "body": "## Codex Workpad",
+                        "resolvedAt": null
+                    }
+                }
+            }
+        }));
+    });
+
+    let current_path = std::env::var("PATH")?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &stub_dir)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "plan",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+            "--no-interactive",
+            "--velocity",
+            "ENG-10144",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Reshaped ENG-10144 in place"));
+
+    issues_mock.assert_calls(2);
+    issue_detail_mock.assert_calls(1);
+    teams_mock.assert_calls(1);
+    update_issue_mock.assert_calls(1);
+    update_comment_mock.assert_calls(1);
+    create_issue_mock.assert_calls(0);
+    create_comment_mock.assert_calls(0);
+
+    let payload = fs::read_to_string(stub_dir.join("payload-1.txt"))?;
+    assert!(payload.contains("\"identifier\": \"ENG-10144\""));
+    assert!(payload.contains("current-screenshot.png"));
+    assert!(payload.contains("Need to preserve project and labels."));
+    assert!(payload.contains("Preserve the issue's intent"));
+    assert!(!repo_root.join(".metastack/backlog/ENG-10144").exists());
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn plan_reshape_interactive_preview_requires_confirmation() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let stub_dir = temp.path().join("stub-output");
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&stub_dir)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "ENG",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+    write_reshape_config(&config_path, &api_url, true)?;
+    write_reshape_agent_stub(
+        &bin_dir,
+        &stub_dir,
+        r#"{"summary":"Interactive reshape proof.","title":"Plan reshape existing Linear tickets in place","description":"Add a deterministic diff preview before updating the existing ticket.","acceptance_criteria":["Interactive reshape previews the current and replacement ticket body"]}"#,
+    )?;
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issues");
+        then.status(200).json_body(json!({
+            "data": {
+                "issues": {
+                    "nodes": [reshape_issue_list_node()]
+                }
+            }
+        }));
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issue($id: String!)")
+            .body_includes("\"id\":\"issue-reshape\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "issue": reshape_issue_detail(false)
+            }
+        }));
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Teams");
+        then.status(200).json_body(reshape_team_payload());
+    });
+    let update_issue_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation UpdateIssue")
+            .body_includes("\"id\":\"issue-reshape\"")
+            .body_includes("\"title\":\"Plan reshape existing Linear tickets in place\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "issueUpdate": {
+                    "success": true,
+                    "issue": {
+                        "id": "issue-reshape",
+                        "identifier": "ENG-10144",
+                        "title": "Plan reshape existing Linear tickets in place",
+                        "description": "# Plan reshape existing Linear tickets in place\n\nAdd a deterministic diff preview before updating the existing ticket.\n\n## Acceptance Criteria\n\n- Interactive reshape previews the current and replacement ticket body",
+                        "url": "https://linear.app/issues/ENG-10144",
+                        "priority": 2,
+                        "updatedAt": "2026-03-19T13:05:00Z",
+                        "team": {
+                            "id": "team-1",
+                            "key": "ENG",
+                            "name": "Engineering"
+                        },
+                        "project": {
+                            "id": "project-1",
+                            "name": "MetaStack CLI"
+                        },
+                        "state": {
+                            "id": "state-2",
+                            "name": "In Progress",
+                            "type": "started"
+                        }
+                    }
+                }
+            }
+        }));
+    });
+    let create_comment_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation CreateComment")
+            .body_includes("Interactive reshape proof.");
+        then.status(200).json_body(json!({
+            "data": {
+                "commentCreate": {
+                    "success": true,
+                    "comment": {
+                        "id": "comment-created",
+                        "body": "## Codex Workpad",
+                        "resolvedAt": null
+                    }
+                }
+            }
+        }));
+    });
+
+    let current_path = std::env::var("PATH")?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &stub_dir)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .write_stdin("a\n")
+        .args([
+            "plan",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+            "ENG-10144",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Description diff:"))
+        .stdout(predicate::str::contains("Choose [a]pply or [c]ancel"))
+        .stdout(predicate::str::contains("--- linear/current-description"))
+        .stdout(predicate::str::contains("Reshaped ENG-10144 in place"));
+
+    update_issue_mock.assert_calls(1);
+    create_comment_mock.assert_calls(1);
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn plan_reshape_missing_issue_fails_without_creating_new_ticket() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    fs::create_dir_all(&repo_root)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "ENG",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+    write_reshape_config(&config_path, &api_url, false)?;
+
+    let issues_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issues");
+        then.status(200).json_body(json!({
+            "data": {
+                "issues": {
+                    "nodes": []
+                }
+            }
+        }));
+    });
+    let create_issue_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation CreateIssue");
+        then.status(200).json_body(json!({
+            "data": {
+                "issueCreate": {
+                    "success": true,
+                    "issue": reshape_issue_list_node()
+                }
+            }
+        }));
+    });
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "plan",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+            "--no-interactive",
+            "--velocity",
+            "ENG-10144",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "issue `ENG-10144` was not found in Linear",
+        ));
+
+    issues_mock.assert_calls(1);
+    create_issue_mock.assert_calls(0);
+
+    Ok(())
 }
 
 #[cfg(unix)]

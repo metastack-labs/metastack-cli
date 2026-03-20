@@ -9,7 +9,7 @@ use crossterm::terminal::{
 };
 use ratatui::backend::{CrosstermBackend, TestBackend};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::text::{Line, Text};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, ListItem, ListState, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 
@@ -30,7 +30,9 @@ pub struct SyncDashboardData {
 
 #[derive(Debug, Clone)]
 pub struct SyncDashboardIssue {
+    pub entry_slug: String,
     pub issue: IssueSummary,
+    pub linked_issue_identifier: Option<String>,
     pub local_status: BacklogSyncStatus,
 }
 
@@ -97,7 +99,7 @@ pub fn run_sync_dashboard(
 
     if !io::stdout().is_terminal() {
         bail!(
-            "the interactive sync dashboard requires a TTY; use `meta sync pull <ISSUE>` or `meta sync push <ISSUE>` for scripted runs"
+            "the interactive sync dashboard requires a TTY; use `meta backlog sync pull <ISSUE>` or `meta backlog sync push <ISSUE>` for scripted runs"
         );
     }
 
@@ -197,15 +199,15 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &SyncDashboardApp) {
     frame.render_widget(header, outer[0]);
 
     let rendered_query = app.query.render(
-        "Search by identifier, title, state, project, or description...",
+        "Search by backlog slug, linked identifier, title, state, project, or description...",
         app.focus == Focus::Issues,
     );
     let query_block = Block::default()
         .borders(Borders::ALL)
         .title(if app.focus == Focus::Issues {
-            "Issue Search [active]"
+            "Backlog Search [active]"
         } else {
-            "Issue Search"
+            "Backlog Search"
         });
     let query_inner = query_block.inner(outer[1]);
     let query = Paragraph::new(rendered_query.text.clone())
@@ -224,7 +226,7 @@ fn render_issue_list(frame: &mut Frame<'_>, area: Rect, app: &SyncDashboardApp) 
     let results = app.visible_issue_results();
     let title = panel_title(
         format!(
-            "Project Issues ({}/{})",
+            "Backlog Entries ({}/{})",
             results.len(),
             app.data.issues.len()
         ),
@@ -232,12 +234,12 @@ fn render_issue_list(frame: &mut Frame<'_>, area: Rect, app: &SyncDashboardApp) 
     );
     let items = if app.data.issues.is_empty() {
         vec![ListItem::new(empty_state(
-            "No issues found for the configured default project.",
-            "Choose a default project with active Linear work, then rerun `meta sync`.",
+            "No backlog entries were found under `.metastack/backlog/`.",
+            "Create or link a backlog entry, then rerun `meta backlog sync`.",
         ))]
     } else if results.is_empty() {
         vec![ListItem::new(empty_state(
-            "No issues match the current search.",
+            "No backlog entries match the current search.",
             "Clear or broaden the query to choose a sync target.",
         ))]
     } else {
@@ -267,7 +269,7 @@ fn render_issue_list(frame: &mut Frame<'_>, area: Rect, app: &SyncDashboardApp) 
 }
 
 fn render_issue_preview(frame: &mut Frame<'_>, area: Rect, app: &SyncDashboardApp) {
-    let preview = paragraph(app.preview_text(), panel_title("Issue Preview", false))
+    let preview = paragraph(app.preview_text(), panel_title("Entry Preview", false))
         .wrap(Wrap { trim: false });
     frame.render_widget(preview, area);
 }
@@ -278,9 +280,10 @@ fn render_action_list(frame: &mut Frame<'_>, area: Rect, app: &SyncDashboardApp)
     let items = ACTIONS
         .iter()
         .map(|action| {
+            let enabled = app.action_enabled(*action);
             ListItem::new(Text::from(vec![
-                Line::from(vec![badge(action.label(), Tone::Accent)]),
-                Line::from(action.description()),
+                Line::from(app.action_badges(*action, enabled)),
+                Line::from(app.action_description(*action, enabled)),
             ]))
         })
         .collect::<Vec<_>>();
@@ -339,8 +342,10 @@ impl SyncDashboardApp {
                     }
                 }
                 Focus::Actions => {
+                    let issue = self.selected_issue()?;
+                    let issue_identifier = issue.linked_issue_identifier.clone()?;
                     let selection = SyncSelection {
-                        issue_identifier: self.selected_issue()?.issue.identifier.clone(),
+                        issue_identifier,
                         action: ACTIONS[self.action_index],
                     };
                     self.completed = Some(selection.clone());
@@ -374,7 +379,7 @@ impl SyncDashboardApp {
             .data
             .issues
             .iter()
-            .map(|issue| issue.issue.clone())
+            .map(SyncDashboardIssue::search_issue)
             .collect::<Vec<_>>();
         search_issues(&issues, self.query.value().trim())
     }
@@ -397,19 +402,24 @@ impl SyncDashboardApp {
         match self.focus {
             Focus::Issues => {
                 if self.data.issues.is_empty() {
-                    "No issues matched the configured default project.".to_string()
+                    "No backlog entries were discovered under `.metastack/backlog/`.".to_string()
                 } else {
                     format!(
-                        "{} issues loaded from the repo default project. Search narrows the list before you choose pull or push.",
+                        "{} backlog entries loaded from local `.metastack/backlog/`. Search narrows the list before you choose pull or push.",
                         self.visible_issue_results().len()
                     )
                 }
             }
             Focus::Actions => match self.selected_issue() {
-                Some(issue) => {
-                    format!("Choose whether to pull or push {}.", issue.issue.identifier)
-                }
-                None => "No issue is available to sync.".to_string(),
+                Some(issue) if issue.is_linked() => format!(
+                    "Choose whether to pull or push {}.",
+                    issue.linked_issue_identifier.as_deref().unwrap_or_default()
+                ),
+                Some(issue) => format!(
+                    "{} is local-only. Link it before pull or push becomes available.",
+                    issue.entry_slug
+                ),
+                None => "No backlog entry is available to sync.".to_string(),
             },
         }
     }
@@ -417,15 +427,10 @@ impl SyncDashboardApp {
     fn preview_text(&self) -> Text<'static> {
         let results = self.visible_issue_results();
         let Some(result) = results.get(self.issue_index) else {
-            return Text::from("No issue is available for the current search.");
+            return Text::from("No backlog entry is available for the current search.");
         };
         let issue = &self.data.issues[result.issue_index];
-        render_linear_issue_preview(
-            &issue.issue,
-            Some(result),
-            Some(issue.local_status.as_str()),
-            "No description provided.",
-        )
+        issue.preview_text(Some(result))
     }
 
     fn status_text(&self) -> String {
@@ -440,14 +445,114 @@ impl SyncDashboardApp {
         match self.focus {
             Focus::Issues => {
                 if self.data.issues.is_empty() {
-                    "Configure `.metastack/meta.json` with a default project that has Linear issues, then rerun `meta sync`."
+                    "Create or link backlog entries under `.metastack/backlog/`, then rerun `meta backlog sync`."
                         .to_string()
                 } else {
-                    "Step 1 of 2: search or choose an issue from the default project list.".to_string()
+                    "Step 1 of 2: search or choose a backlog entry sourced from local `.metastack/backlog/`."
+                        .to_string()
                 }
             }
-            Focus::Actions => "Step 2 of 2: choose pull to refresh local files or push to sync managed attachments. `index.md` only updates the Linear description when you run push with `--update-description`.".to_string(),
+            Focus::Actions => match self.selected_issue() {
+                Some(issue) if issue.is_linked() => "Step 2 of 2: choose pull to refresh local files or push to sync managed attachments. `index.md` only updates the Linear description when you run push with `--update-description`.".to_string(),
+                Some(issue) => format!(
+                    "This backlog entry is unlinked. Run `meta backlog sync link <ISSUE> --entry {}` before pull or push becomes available.",
+                    issue.entry_slug
+                ),
+                None => "No backlog entry is selected.".to_string(),
+            },
         }
+    }
+
+    fn action_enabled(&self, _action: SyncSelectionAction) -> bool {
+        self.selected_issue()
+            .is_some_and(SyncDashboardIssue::is_linked)
+    }
+
+    fn action_badges(&self, action: SyncSelectionAction, enabled: bool) -> Vec<Span<'static>> {
+        let mut badges = vec![badge(
+            action.label(),
+            if enabled { Tone::Accent } else { Tone::Muted },
+        )];
+        if !enabled {
+            badges.push(Span::raw(" "));
+            badges.push(badge("link required", Tone::Muted));
+        }
+        badges
+    }
+
+    fn action_description(&self, action: SyncSelectionAction, enabled: bool) -> &'static str {
+        if enabled {
+            action.description()
+        } else {
+            "Link this backlog entry first; remote sync actions stay disabled until `.linear.json` points at a Linear issue."
+        }
+    }
+}
+
+impl SyncDashboardIssue {
+    fn is_linked(&self) -> bool {
+        self.linked_issue_identifier.is_some()
+    }
+
+    fn search_issue(&self) -> IssueSummary {
+        let mut issue = self.issue.clone();
+        let entry_context = format!("Backlog entry: {}", self.entry_slug);
+        issue.description = Some(match issue.description.as_deref() {
+            Some(description) if !description.trim().is_empty() => {
+                format!("{entry_context}\n\n{description}")
+            }
+            _ => entry_context,
+        });
+        issue
+    }
+
+    fn preview_text(&self, result: Option<&IssueSearchResult>) -> Text<'static> {
+        let mut lines = vec![
+            Line::from(vec![
+                Span::raw("entry "),
+                Span::raw(self.entry_slug.clone()),
+            ]),
+            Line::from(vec![
+                Span::raw("link "),
+                Span::raw(
+                    self.linked_issue_identifier
+                        .clone()
+                        .unwrap_or_else(|| "unlinked".to_string()),
+                ),
+            ]),
+            Line::from(""),
+        ];
+
+        if self.is_linked() {
+            let mut preview = render_linear_issue_preview(
+                &self.issue,
+                result,
+                Some(self.local_status.as_str()),
+                "No description provided.",
+            );
+            lines.append(&mut preview.lines);
+            return Text::from(lines);
+        }
+
+        lines.extend([
+            Line::from(vec![Span::raw(format!("title {}", self.issue.title))]),
+            Line::from(vec![Span::raw("state local-only")]),
+            Line::from(vec![Span::raw(format!(
+                "sync {}",
+                self.local_status.as_str()
+            ))]),
+            Line::from(vec![Span::raw(format!(
+                "path .metastack/backlog/{}",
+                self.entry_slug
+            ))]),
+            Line::from(""),
+            Line::from("This backlog entry is not linked to Linear yet."),
+            Line::from(format!(
+                "Run `meta backlog sync link <ISSUE> --entry {}` to enable pull and push.",
+                self.entry_slug
+            )),
+        ]);
+        Text::from(lines)
     }
 }
 
@@ -523,19 +628,56 @@ mod tests {
         SyncDashboardIssue, SyncDashboardOptions, run_sync_dashboard,
     };
     use crate::backlog::BacklogSyncStatus;
-    use crate::linear::DashboardData;
+    use crate::linear::{DashboardData, IssueSummary, ProjectRef, WorkflowState};
     use crate::tui::fields::InputFieldState;
 
     fn demo_data() -> SyncDashboardData {
         let demo = DashboardData::demo();
+        let mut issues = demo.issues;
+        let team = issues
+            .first()
+            .map(|issue| issue.team.clone())
+            .expect("demo issues should not be empty");
+        issues.push(IssueSummary {
+            id: "issue-13".to_string(),
+            identifier: "MET-13".to_string(),
+            title: "Manual Follow-up".to_string(),
+            description: Some(
+                "Track the local-only backlog entry before it is linked to Linear.".to_string(),
+            ),
+            url: "https://linear.app/metastack/MET-13".to_string(),
+            priority: None,
+            estimate: None,
+            updated_at: "2026-03-14T16:10:00Z".to_string(),
+            team,
+            project: Some(ProjectRef {
+                id: "project-demo".to_string(),
+                name: "MetaStack CLI".to_string(),
+            }),
+            assignee: None,
+            labels: Vec::new(),
+            comments: Vec::new(),
+            state: Some(WorkflowState {
+                id: "state-backlog".to_string(),
+                name: "Backlog".to_string(),
+                kind: Some("backlog".to_string()),
+            }),
+            attachments: Vec::new(),
+            parent: None,
+            children: Vec::new(),
+        });
         SyncDashboardData {
             title: demo.title,
-            issues: demo
-                .issues
+            issues: issues
                 .into_iter()
                 .enumerate()
                 .map(|(index, issue)| SyncDashboardIssue {
+                    entry_slug: issue.identifier.clone(),
                     issue,
+                    linked_issue_identifier: match index {
+                        0 | 1 => Some(format!("MET-1{}", index + 1)),
+                        _ => None,
+                    },
                     local_status: match index {
                         0 => BacklogSyncStatus::Synced,
                         1 => BacklogSyncStatus::Diverged,
@@ -568,9 +710,10 @@ mod tests {
             panic!("render_once should return a snapshot");
         };
         assert!(snapshot.contains("Ready to push MET-12"));
-        assert!(snapshot.contains("Issue Search"));
+        assert!(snapshot.contains("Backlog Search"));
         assert!(snapshot.contains("Sync Action [focus]"));
         assert!(snapshot.contains("diverged"));
+        assert!(snapshot.contains("Backlog Entries"));
     }
 
     #[test]
@@ -590,6 +733,36 @@ mod tests {
         app.query = InputFieldState::new("zzz");
 
         assert!(app.visible_issue_results().is_empty());
-        assert!(format!("{:?}", app.preview_text()).contains("No issue is available"));
+        assert!(format!("{:?}", app.preview_text()).contains("No backlog entry is available"));
+    }
+
+    #[test]
+    fn unlinked_rows_do_not_complete_push_actions() {
+        let exit = run_sync_dashboard(
+            demo_data(),
+            SyncDashboardOptions {
+                render_once: true,
+                width: 120,
+                height: 32,
+                actions: vec![
+                    SyncDashboardAction::Down,
+                    SyncDashboardAction::Down,
+                    SyncDashboardAction::Enter,
+                    SyncDashboardAction::Down,
+                    SyncDashboardAction::Enter,
+                ],
+            },
+        )
+        .expect("render once should succeed");
+
+        let SyncDashboardExit::Snapshot(snapshot) = exit else {
+            panic!("render_once should return a snapshot");
+        };
+        assert!(snapshot.contains("link required"));
+        assert!(snapshot.contains("This backlog entry is unlinked."));
+        assert!(
+            snapshot.contains("<ISSUE> --entry MET-13` before pull or push becomes available.")
+        );
+        assert!(!snapshot.contains("Ready to push"));
     }
 }

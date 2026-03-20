@@ -23,6 +23,7 @@ mod setup;
 mod sync_command;
 mod sync_dashboard;
 mod technical;
+mod text_diff;
 mod tui;
 mod workflow_contract;
 mod workflows;

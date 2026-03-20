@@ -529,6 +529,8 @@ Turn a planning request into one or more Linear backlog issues:
 ```bash
 meta backlog plan
 meta backlog plan --no-interactive --request "Plan a dashboard for feature intake" --answer "Use the existing TUI patterns" --answer "Split the work into multiple tickets"
+meta backlog plan ENG-10144
+meta backlog plan ENG-10144 --velocity
 ```
 
 Legacy alias: `meta plan`
@@ -538,6 +540,10 @@ In a TTY, `meta backlog plan` opens one persistent ratatui planning session to c
 Multiline request and follow-up editors submit on `Enter`; use `Shift+Enter` when you need to insert a newline without advancing the workflow.
 
 For deterministic automation, pass `--no-interactive` with `--request` and repeated `--answer` values.
+
+`meta backlog plan <IDENTIFIER>` reshapes an existing Linear issue in place instead of creating a new one. The command loads the current issue context, asks the configured planning agent for a stronger rewrite, and then updates the same ticket through `issueUpdate`.
+
+Interactive reshape runs print a before/after diff preview and require confirmation before the update. Pass `--velocity` to skip that preview and auto-apply the rewrite. Reshape mode preserves assignee, labels, project, state, cycle, and priority, updates or creates the active `## Codex Workpad` comment, and intentionally leaves local `.metastack/backlog/<ISSUE>/` files unchanged in this slice.
 
 The planning prompt is repo-scoped by default: it derives the active project identity from the resolved repository root, plans for the full repository directory, and asks the agent to create backlog issues only for that repository unless the user explicitly narrows the request to a subproject.
 
@@ -606,7 +612,7 @@ Side effects:
 
 ### `backlog sync`
 
-Browse issues from the repo default Linear project, then pull or push the selected backlog item without leaving the terminal:
+Browse backlog entries from local `.metastack/backlog/`, hydrate linked rows from Linear, and pull or push the selected linked entry without leaving the terminal:
 
 ```bash
 meta backlog sync --api-key "$LINEAR_API_KEY"
@@ -625,7 +631,9 @@ Legacy alias: `meta sync`
 
 Side effects:
 
-- bare `meta backlog sync` opens a ratatui issue browser scoped by `.metastack/meta.json` `linear.project_id`
+- bare `meta backlog sync` opens a ratatui backlog-entry dashboard sourced from local `.metastack/backlog/` state
+- linked dashboard rows hydrate the mapped Linear issue from `.linear.json`, while unlinked rows stay visible with explicit `unlinked` state
+- unlinked dashboard rows are local-only until you run `meta backlog sync link <ISSUE> --entry <SLUG>`
 - `link` associates an existing `.metastack/backlog/<ENTRY>/` directory with a Linear issue by writing `.linear.json`
 - `link` prompts for an unlinked backlog entry in a TTY when `--entry <SLUG>` is omitted
 - `link --pull` immediately hydrates the linked entry from Linear after writing metadata

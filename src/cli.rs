@@ -22,6 +22,8 @@ Example flows:
 const BACKLOG_HELP_EXAMPLES: &str = "\
 Examples:
   meta backlog plan --root . --request \"Split the onboarding work into tickets\"
+  meta backlog plan --root . ENG-10144
+  meta backlog plan --root . ENG-10144 --velocity
   meta backlog tech MET-35
   meta backlog split MET-35
   meta backlog sync status
@@ -561,6 +563,9 @@ pub struct CronDaemonArgs {
 pub struct PlanArgs {
     #[command(flatten)]
     pub client: LinearClientArgs,
+    /// Existing issue identifier to reshape in place, for example ENG-10144.
+    #[arg(value_name = "IDENTIFIER", conflicts_with = "request")]
+    pub target: Option<String>,
     /// Override the Linear team used for created backlog issues.
     #[arg(long)]
     pub team: Option<String>,
@@ -582,6 +587,9 @@ pub struct PlanArgs {
     /// Override the resolved built-in reasoning option for this planning run.
     #[arg(long)]
     pub reasoning: Option<String>,
+    /// Skip the reshape diff preview and apply the in-place update immediately.
+    #[arg(long)]
+    pub velocity: bool,
     /// Skip the ratatui workflow and run directly from flags/stdin context.
     #[arg(long)]
     pub no_interactive: bool,

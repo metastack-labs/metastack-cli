@@ -32,7 +32,7 @@ use crate::backlog::{
     TemplateContext, ensure_no_unresolved_placeholders, render_template_files, save_issue_metadata,
     write_rendered_backlog_item,
 };
-use crate::cli::{RunAgentArgs, SyncPushArgs, TechnicalArgs};
+use crate::cli::{RunAgentArgs, TechnicalArgs};
 use crate::config::{AGENT_ROUTE_BACKLOG_SPLIT, load_required_planning_meta};
 use crate::context::load_workflow_contract;
 use crate::fs::{PlanningPaths, canonicalize_existing_dir, display_path};
@@ -45,7 +45,7 @@ use crate::linear::{
 };
 use crate::progress::{LoadingPanelData, SPINNER_FRAMES, render_loading_panel};
 use crate::scaffold::{ensure_backlog_templates, ensure_planning_layout};
-use crate::sync_command::run_sync_push;
+use crate::sync_command::run_sync_push_for_issue;
 use crate::tui::fields::{InputFieldState, MultiSelectFieldState};
 use crate::{LinearCommandContext, load_linear_command_context};
 
@@ -148,6 +148,11 @@ enum InteractiveTechnicalExit {
     Confirmed(TechnicalGeneratedBacklog),
 }
 
+/// Create a technical child issue, materialize its local backlog packet, and sync attachments.
+///
+/// Returns an error when planning metadata is missing, the parent issue cannot be loaded,
+/// backlog generation fails, the Linear child issue cannot be created, or the initial child sync
+/// push cannot publish the generated managed files.
 pub async fn run_technical(args: &TechnicalArgs) -> Result<()> {
     let root = canonicalize_existing_dir(&args.client.root)?;
     let planning_meta = load_required_planning_meta(&root, "technical")?;
@@ -248,15 +253,7 @@ pub async fn run_technical(args: &TechnicalArgs) -> Result<()> {
         },
     )?;
 
-    run_sync_push(
-        &args.client,
-        &SyncPushArgs {
-            issue: Some(child.identifier.clone()),
-            all: false,
-            update_description: false,
-        },
-    )
-    .await?;
+    run_sync_push_for_issue(&root, &service, &child, &issue_dir).await?;
 
     println!(
         "Created technical sub-issue {} under {} at {}.",
