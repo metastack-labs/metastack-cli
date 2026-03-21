@@ -10,9 +10,10 @@ use crate::agent_provider::{BuiltinInvocationContext, builtin_provider_adapter};
 use crate::cli::RunAgentArgs;
 use crate::config::{
     AGENT_ROUTE_AGENTS_LISTEN, AGENT_ROUTE_BACKLOG_IMPROVE, AGENT_ROUTE_BACKLOG_PLAN,
-    AGENT_ROUTE_BACKLOG_SPLIT, AGENT_ROUTE_CONTEXT_RELOAD, AGENT_ROUTE_CONTEXT_SCAN,
-    AGENT_ROUTE_LINEAR_ISSUES_REFINE, AgentConfigOverrides, AgentConfigSource, AppConfig,
-    PlanningMeta, PromptTransport, normalize_agent_name, resolve_agent_config,
+    AGENT_ROUTE_BACKLOG_SPEC, AGENT_ROUTE_BACKLOG_SPLIT, AGENT_ROUTE_CONTEXT_RELOAD,
+    AGENT_ROUTE_CONTEXT_SCAN, AGENT_ROUTE_LINEAR_ISSUES_REFINE, AgentConfigOverrides,
+    AgentConfigSource, AppConfig, PlanningMeta, PromptTransport, normalize_agent_name,
+    resolve_agent_config,
 };
 use crate::tui::prompt_images::{PromptImageAttachment, encode_prompt_images_for_provider};
 
@@ -430,7 +431,8 @@ fn builtin_invocation_context(route_key: Option<&str>) -> BuiltinInvocationConte
             BuiltinInvocationContext::Scan
         }
         Some(
-            AGENT_ROUTE_BACKLOG_PLAN
+            AGENT_ROUTE_BACKLOG_SPEC
+            | AGENT_ROUTE_BACKLOG_PLAN
             | AGENT_ROUTE_BACKLOG_IMPROVE
             | AGENT_ROUTE_BACKLOG_SPLIT
             | AGENT_ROUTE_LINEAR_ISSUES_REFINE,

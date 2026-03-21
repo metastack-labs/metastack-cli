@@ -23,6 +23,9 @@ Example flows:
 
 const BACKLOG_HELP_EXAMPLES: &str = "\
 Examples:
+  meta backlog spec --root .
+  meta backlog spec --root . --no-interactive --request \"Add a repo-local SPEC workflow\"
+  meta backlog spec --root . --no-interactive --request \"Improve the current SPEC\" --answer \"Clarify the non-goals\"
   meta backlog plan --root . --request \"Split the onboarding work into tickets\"
   meta backlog plan --root . ENG-10144
   meta backlog plan --root . ENG-10144 --velocity
@@ -282,6 +285,8 @@ pub struct BacklogArgs {
 
 #[derive(Debug, Clone, Subcommand)]
 pub enum BacklogCommands {
+    /// Create or improve the repo-local `.metastack/SPEC.md` through a staged workflow.
+    Spec(BacklogSpecArgs),
     /// Plan a backlog request into one or more Linear backlog issues.
     Plan(PlanArgs),
     /// Review repo-scoped backlog issues for hygiene gaps and optionally apply improvements.
@@ -1270,6 +1275,42 @@ pub struct TechnicalArgs {
 }
 
 #[derive(Debug, Clone, Args)]
+pub struct BacklogSpecArgs {
+    #[command(flatten)]
+    pub root: RepositoryRootArgs,
+    /// Seed the initial build goal or improvement request for non-interactive runs.
+    #[arg(long)]
+    pub request: Option<String>,
+    /// Provide one or more follow-up answers for non-interactive runs.
+    #[arg(long = "answer")]
+    pub answers: Vec<String>,
+    /// Skip the ratatui workflow and require explicit prompt input instead of prompting.
+    #[arg(long, conflicts_with = "render_once")]
+    pub no_interactive: bool,
+    /// Override the configured default agent/provider for SPEC generation.
+    #[arg(long)]
+    pub agent: Option<String>,
+    /// Override the configured default model for SPEC generation.
+    #[arg(long)]
+    pub model: Option<String>,
+    /// Override the resolved built-in reasoning option for SPEC generation.
+    #[arg(long)]
+    pub reasoning: Option<String>,
+    /// Render the SPEC workflow once to an in-memory buffer and print the snapshot.
+    #[arg(long, hide = true, conflicts_with = "no_interactive")]
+    pub render_once: bool,
+    /// Apply SPEC workflow actions before a render-once snapshot.
+    #[arg(long, hide = true, value_enum, value_delimiter = ',')]
+    pub events: Vec<SpecEventArg>,
+    /// Snapshot width when --render-once is set.
+    #[arg(long, hide = true, default_value_t = 120)]
+    pub width: u16,
+    /// Snapshot height when --render-once is set.
+    #[arg(long, hide = true, default_value_t = 32)]
+    pub height: u16,
+}
+
+#[derive(Debug, Clone, Args)]
 pub struct SyncArgs {
     #[command(flatten)]
     pub client: LinearClientArgs,
@@ -1788,6 +1829,16 @@ pub enum IssueEditEventArg {
     BackTab,
     Enter,
     Esc,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum SpecEventArg {
+    Up,
+    Down,
+    Tab,
+    Enter,
+    Back,
+    Wait,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]

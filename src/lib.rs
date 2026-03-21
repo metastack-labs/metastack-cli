@@ -3,6 +3,7 @@ mod agents;
 mod backlog;
 mod backlog_defaults;
 mod backlog_improve;
+mod backlog_spec;
 mod cli;
 mod config;
 mod config_command;
@@ -43,10 +44,11 @@ use clap::Parser;
 use clap::error::ErrorKind;
 
 use crate::backlog_improve::run_backlog_improve;
+use crate::backlog_spec::{BacklogSpecOutput, run_backlog_spec};
 use crate::cli::{
     AgentsCommands, BacklogCommands, Cli, Command, ConfigEventArg, DashboardCommands,
     DashboardEventArg, IssueCreateEventArg, IssueEditEventArg, LinearCommands,
-    ListenAssignmentScopeArg, MergeDashboardEventArg, RuntimeCommands, SyncCommands,
+    ListenAssignmentScopeArg, MergeDashboardEventArg, RuntimeCommands, SpecEventArg, SyncCommands,
     SyncDashboardEventArg,
 };
 use crate::config::ListenAssignmentScope;
@@ -147,6 +149,10 @@ async fn dispatch(cli: Cli) -> Result<()> {
 
     match cli.command {
         Command::Backlog(args) => match args.command {
+            BacklogCommands::Spec(args) => match run_backlog_spec(&args).await? {
+                BacklogSpecOutput::Report(report) => println!("{}", report.render()),
+                BacklogSpecOutput::Snapshot(snapshot) => println!("{snapshot}"),
+            },
             BacklogCommands::Plan(args) => {
                 let report = run_plan(&args).await?;
                 if args.no_interactive {
@@ -705,6 +711,19 @@ impl From<ConfigEventArg> for ConfigAction {
             ConfigEventArg::BackTab => ConfigAction::BackTab,
             ConfigEventArg::Enter => ConfigAction::Enter,
             ConfigEventArg::Esc => ConfigAction::Esc,
+        }
+    }
+}
+
+impl From<SpecEventArg> for crate::backlog_spec::SpecAction {
+    fn from(value: SpecEventArg) -> Self {
+        match value {
+            SpecEventArg::Up => crate::backlog_spec::SpecAction::Up,
+            SpecEventArg::Down => crate::backlog_spec::SpecAction::Down,
+            SpecEventArg::Tab => crate::backlog_spec::SpecAction::Tab,
+            SpecEventArg::Enter => crate::backlog_spec::SpecAction::Enter,
+            SpecEventArg::Back => crate::backlog_spec::SpecAction::Back,
+            SpecEventArg::Wait => crate::backlog_spec::SpecAction::Wait,
         }
     }
 }
