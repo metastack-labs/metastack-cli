@@ -3,10 +3,11 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap};
 
 use super::ReviewDashboardData;
+use super::state::ReviewSession;
 
 /// Browser state for the review dashboard TUI.
 #[derive(Debug, Clone)]
@@ -162,6 +163,20 @@ fn render_sessions(
     data: &ReviewDashboardData,
     state: &ReviewBrowserState,
 ) {
+    let sections = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
+        .split(area);
+    render_session_list(frame, sections[0], data, state);
+    render_session_details(frame, sections[1], data, state);
+}
+
+fn render_session_list(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    data: &ReviewDashboardData,
+    state: &ReviewBrowserState,
+) {
     let sessions = data.sessions_for_view(state.view);
     if sessions.is_empty() {
         let empty_text = match state.view {
@@ -226,6 +241,21 @@ fn render_sessions(
     frame.render_widget(table, area);
 }
 
+fn render_session_details(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    data: &ReviewDashboardData,
+    state: &ReviewBrowserState,
+) {
+    let sessions = data.sessions_for_view(state.view);
+    let selected = sessions.get(state.selected()).copied();
+    let block = Block::default().borders(Borders::LEFT).title("Details");
+    let paragraph = Paragraph::new(detail_text(data, selected))
+        .block(block)
+        .wrap(Wrap { trim: false });
+    frame.render_widget(paragraph, area);
+}
+
 fn render_footer(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -262,5 +292,100 @@ fn truncate(s: &str, max_len: usize) -> String {
         s.to_string()
     } else {
         format!("{}...", &s[..max_len.saturating_sub(3)])
+    }
+}
+
+fn detail_text(data: &ReviewDashboardData, session: Option<&ReviewSession>) -> Text<'static> {
+    let mut lines = Vec::new();
+    if let Some(session) = session {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("PR #{}", session.pr_number),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            Span::raw(session.stage_label()),
+        ]));
+        lines.push(Line::from(session.pr_title.clone()));
+        lines.push(Line::from(String::new()));
+        lines.push(Line::from(format!("Summary: {}", session.summary)));
+        if let Some(url) = &session.pr_url {
+            lines.push(Line::from(format!("URL: {url}")));
+        }
+        if let Some(author) = &session.pr_author {
+            lines.push(Line::from(format!("Author: {author}")));
+        }
+        if session.head_branch.is_some() || session.base_branch.is_some() {
+            lines.push(Line::from(format!(
+                "Branch: {} -> {}",
+                session.head_branch.as_deref().unwrap_or("?"),
+                session.base_branch.as_deref().unwrap_or("?")
+            )));
+        }
+        lines.push(Line::from(format!(
+            "Linear: {}",
+            session.linear_identifier.as_deref().unwrap_or("-")
+        )));
+        lines.push(Line::from(format!(
+            "Remediation: {}",
+            session.remediation_label()
+        )));
+    } else {
+        lines.push(Line::from("No session selected."));
+    }
+
+    if !data.notes.is_empty() {
+        lines.push(Line::from(String::new()));
+        lines.push(Line::from(Span::styled(
+            "Recent Notes",
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+        for note in data.notes.iter().take(4) {
+            lines.push(Line::from(format!("- {note}")));
+        }
+    }
+
+    Text::from(lines)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ReviewBrowserState, render_review_dashboard_snapshot};
+    use crate::review::ReviewDashboardData;
+    use crate::review::state::{ReviewPhase, ReviewSession};
+
+    #[test]
+    fn snapshot_shows_selected_session_summary_and_notes() {
+        let data = ReviewDashboardData {
+            scope: "origin/main".to_string(),
+            cycle_summary: "Reviewing PR #42".to_string(),
+            eligible_prs: 1,
+            sessions: vec![ReviewSession {
+                pr_number: 42,
+                pr_title: "MET-74 add review dashboard".to_string(),
+                pr_url: Some("https://example.test/pull/42".to_string()),
+                pr_author: Some("metasudo".to_string()),
+                head_branch: Some("met-74-review".to_string()),
+                base_branch: Some("main".to_string()),
+                linear_identifier: Some("MET-74".to_string()),
+                phase: ReviewPhase::Running,
+                summary: "Running agent review with codex".to_string(),
+                updated_at_epoch_seconds: 1,
+                remediation_required: None,
+                remediation_pr_number: None,
+                remediation_pr_url: None,
+            }],
+            now_epoch_seconds: 5,
+            notes: vec!["Starting dashboard before the first review poll completes.".to_string()],
+            state_file: "/tmp/review-session.json".to_string(),
+        };
+
+        let snapshot =
+            render_review_dashboard_snapshot(120, 32, &data, &ReviewBrowserState::default())
+                .expect("snapshot should render");
+
+        assert!(snapshot.contains("Running agent review with codex"));
+        assert!(snapshot.contains("Recent Notes"));
+        assert!(snapshot.contains("MET-74"));
     }
 }

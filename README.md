@@ -1083,8 +1083,8 @@ Required auth:
 
 Review open GitHub PRs with a holistic audit pipeline that gathers PR metadata, review state, changed files, diff scope, linked Linear ticket details, and repository context. Supports two modes:
 
-- **One-shot PR review**: `meta agents review <PR_NUMBER>` audits a single PR, produces structured output separating required fixes from optional recommendations, and optionally creates a remediation PR when required fixes are found.
-- **Listener/dashboard mode**: `meta agents review` (no PR number) discovers open PRs with the `metastack` label via `gh`, renders a live terminal dashboard, and reviews eligible PRs as they appear.
+- **One-shot PR review**: `meta agents review <PR_NUMBER>` audits a single PR, initializes the review dashboard immediately on interactive TTY runs, produces structured output separating required fixes from optional recommendations, and optionally creates a remediation PR when required fixes are found.
+- **Listener/dashboard mode**: `meta agents review` (no PR number) discovers open PRs with the `metastack` label via `gh`, initializes a live terminal dashboard before the first poll completes, and reviews eligible PRs as they appear.
 
 ```bash
 # One-shot review
