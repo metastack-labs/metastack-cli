@@ -1036,6 +1036,8 @@ meta listen sessions resume --project-key <PROJECT_KEY> --once
 fields when available, including PR URL/state, workspace/backlog/workpad references, recent
 milestones, prompt-context references, compact log excerpts, and a fallback `Detail PR Ref: #N`
 line when the detail artifact only carries a PR number.
+The interactive selected-session detail pane follows the same fallback contract and shows `PR Ref:
+#N` when the detail artifact has a PR number but no published PR URL yet.
 
 ### `workspace`
 

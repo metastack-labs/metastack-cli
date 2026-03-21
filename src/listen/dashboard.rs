@@ -1160,4 +1160,53 @@ mod tests {
             rendered.contains("PR URL: https://github.com/metastack-labs/metastack-cli/pull/321")
         );
     }
+
+    #[test]
+    fn selected_session_detail_text_shows_pull_request_ref_without_url() {
+        let mut cycle = demo_cycle();
+        let session = cycle
+            .sessions
+            .first_mut()
+            .expect("demo data should include a session");
+        session.pull_request.url = None;
+        let detail = cycle
+            .session_details
+            .get_mut(&session.issue_identifier)
+            .expect("demo data should include detail for the selected session");
+        detail.pull_request.url = None;
+
+        let data = build_dashboard_data(
+            &cycle,
+            &DashboardRuntimeContext {
+                started_at_epoch_seconds: 1_773_568_249,
+                now_epoch_seconds: 1_773_575_600,
+                poll_interval_seconds: 7,
+                dashboard_label: "terminal dashboard (TUI)",
+                dashboard_refresh_seconds: 1,
+                linear_refresh_seconds: 15,
+                vim_mode: false,
+            },
+        );
+
+        let state = SessionBrowserState {
+            detail_mode: true,
+            ..SessionBrowserState::default()
+        };
+        let session = state
+            .selected_session(&data)
+            .expect("demo data should include a selected session");
+        let detail = data
+            .detail_for_session(&session.issue_identifier)
+            .expect("demo data should include detail for the selected session");
+        let text = render_session_detail_text(session, detail);
+        let rendered = text
+            .lines
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("PR Ref: #321"));
+        assert!(!rendered.contains("PR URL:"));
+    }
 }
