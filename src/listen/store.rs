@@ -364,7 +364,7 @@ impl ListenProjectStore {
         &self,
         issue_identifier: &str,
     ) -> Result<Option<ListenSessionDetail>> {
-        read_optional_json(&self.detail_path(issue_identifier))
+        read_optional_json_lossy(&self.detail_path(issue_identifier))
     }
 
     pub(super) fn load_session_details(
@@ -815,6 +815,16 @@ where
             .with_context(|| format!("failed to decode `{}`", path.display())),
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error).with_context(|| format!("failed to read `{}`", path.display())),
+    }
+}
+
+fn read_optional_json_lossy<T>(path: &Path) -> Result<Option<T>>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    match read_optional_json(path) {
+        Ok(value) => Ok(value),
+        Err(_error) => Ok(None),
     }
 }
 
@@ -1310,6 +1320,33 @@ mod tests {
         assert!(store.load_state()?.sessions.is_empty());
         assert!(!store.detail_path(issue_identifier).exists());
         assert!(!store.log_path(issue_identifier).exists());
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_session_detail_is_treated_as_unavailable_and_rewritten() -> Result<()> {
+        let temp = tempdir()?;
+        let repo_root = temp.path().join("repo");
+        let data_root = temp.path().join("data");
+        fs::create_dir_all(repo_root.join(".metastack"))?;
+        let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
+        store.ensure_layout()?;
+
+        let issue_identifier = "ENG-10163";
+        fs::write(store.detail_path(issue_identifier), "{ not valid json")
+            .context("failed to seed invalid detail artifact for listen store test")?;
+
+        assert!(store.load_session_detail(issue_identifier)?.is_none());
+
+        let mut session = default_session(issue_identifier, SessionPhase::Running, 100);
+        session.log_path = Some(store.log_path(issue_identifier).display().to_string());
+        store.save_state(&ListenState::from_sessions(vec![session]))?;
+
+        let detail = store
+            .load_session_detail(issue_identifier)?
+            .context("expected save_state to rewrite the invalid detail artifact")?;
+        assert_eq!(detail.issue_identifier, issue_identifier);
+        assert_eq!(detail.summary, format!("{issue_identifier} summary"));
         Ok(())
     }
 
