@@ -99,6 +99,20 @@ fn review_check_conflicts_with_once() {
         .stderr(predicate::str::contains("cannot be used with"));
 }
 
+#[test]
+fn review_json_requires_once() {
+    let temp = tempdir().expect("tempdir should build");
+    let config_path = temp.path().join("meta.toml");
+    fs::write(&config_path, "[onboarding]\ncompleted = true\n").expect("config should be writable");
+
+    cli()
+        .args(["agents", "review", "--json", "--root", "."])
+        .env("METASTACK_CONFIG", config_path.to_str().unwrap())
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("requires `--once`"));
+}
+
 // ---------------------------------------------------------------------------
 // One-shot review: gh auth failure
 // ---------------------------------------------------------------------------
@@ -260,6 +274,12 @@ exit 1
             "review",
             "42",
             "--dry-run",
+            "--agent",
+            "claude",
+            "--model",
+            "haiku",
+            "--reasoning",
+            "high",
             "--root",
             repo.to_str().unwrap(),
         ])
@@ -270,6 +290,9 @@ exit 1
         .stdout(predicate::str::contains("dry-run"))
         .stdout(predicate::str::contains("PR: #42"))
         .stdout(predicate::str::contains("MET-99"))
+        .stdout(predicate::str::contains("Resolved provider: claude"))
+        .stdout(predicate::str::contains("Resolved model: haiku"))
+        .stdout(predicate::str::contains("Resolved reasoning: high"))
         .stdout(predicate::str::contains("No mutations"));
 
     Ok(())
