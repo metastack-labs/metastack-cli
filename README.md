@@ -28,7 +28,7 @@ Most planning tools split work across issue trackers, docs, scripts, and ad hoc 
 - `meta runtime config` saves install-scoped Linear and agent defaults.
 - `meta runtime setup` bootstraps the repo and saves repo-scoped defaults under `.metastack/`.
 - `meta context scan` turns the codebase into reusable planning context.
-- `meta backlog plan`, `meta backlog improve`, `meta backlog tech`, `meta linear issues refine`, and `meta agents workflows` generate structured backlog work.
+- `meta backlog spec`, `meta backlog plan`, `meta backlog improve`, `meta backlog tech`, `meta linear issues refine`, and `meta agents workflows` generate structured backlog work.
 - `meta merge` batches open GitHub PRs into one isolated aggregate merge run and publish step.
 - `meta linear ...` and `meta backlog sync` keep Linear and local files aligned.
 - `meta agents listen` runs unattended ticket execution in dedicated workspace clones instead of your source checkout.
@@ -113,6 +113,7 @@ Inside a repository you want metastack to manage:
 ```bash
 meta runtime config
 meta runtime setup
+meta backlog spec --root .
 meta context scan
 meta context show
 meta backlog plan --request "Break the next release into Linear-ready tickets"
@@ -144,6 +145,7 @@ sandbox_mode = "danger-full-access"
 
 ```text
 .metastack/
+  SPEC.md
   README.md
   meta.json
   agents/
@@ -194,7 +196,7 @@ The preferred public surface is domain-first. Legacy top-level commands such as 
 
 Long-form editors and preview panes in the terminal UI now share one scrolling model. When a multiline editor or preview has focus, `Up`, `Down`, `PgUp`, `PgDn`, `Home`, and `End` move within the wrapped content, and mouse-wheel scrolling applies to the focused pane instead of leaking into surrounding lists or forms.
 
-This applies to flows such as `meta backlog plan`, `meta linear issues create`, `meta linear issues edit`, `meta dashboard linear`, `meta backlog tech`, `meta merge`, and related preview-driven dashboards that render long descriptions or generated file content.
+This applies to flows such as `meta backlog spec`, `meta backlog plan`, `meta linear issues create`, `meta linear issues edit`, `meta dashboard linear`, `meta backlog tech`, `meta merge`, and related preview-driven dashboards that render long descriptions or generated file content.
 
 ## Build From Source
 
@@ -216,12 +218,13 @@ A typical end-to-end loop looks like this:
 
 1. Run `meta runtime config` once to save install-scoped Linear auth and agent defaults.
 2. Run `meta runtime setup` once per repository to scaffold `.metastack/` and save repo defaults.
-3. Run `meta context scan` to refresh the repo context under `.metastack/codebase/`.
-4. Use `meta backlog plan` or `meta backlog tech` to create structured backlog work.
-5. Use `meta linear ...`, `meta dashboard ...`, or `meta backlog sync` to coordinate with Linear.
-6. Use `meta merge` when you want to batch open GitHub PRs in one isolated aggregate merge run.
-7. Use `meta agents listen` when you want unattended ticket execution inside a dedicated workspace clone.
-8. Use `meta workspace` when you want to inspect or clean those listener-created clones later.
+3. Run `meta backlog spec` to create or refine the repo-local `.metastack/SPEC.md`.
+4. Run `meta context scan` to refresh the repo context under `.metastack/codebase/`.
+5. Use `meta backlog plan` or `meta backlog tech` to create structured backlog work.
+6. Use `meta linear ...`, `meta dashboard ...`, or `meta backlog sync` to coordinate with Linear.
+7. Use `meta merge` when you want to batch open GitHub PRs in one isolated aggregate merge run.
+8. Use `meta agents listen` when you want unattended ticket execution inside a dedicated workspace clone.
+9. Use `meta workspace` when you want to inspect or clean those listener-created clones later.
 
 ## Example Flows
 
@@ -229,6 +232,7 @@ Engineer:
 
 ```bash
 meta runtime setup --team MET --project "MetaStack CLI"
+meta backlog spec --root .
 meta context scan
 meta backlog plan --request "Break the next release into Linear-ready tickets"
 meta backlog tech MET-35
@@ -577,13 +581,43 @@ List, explain, and run reusable workflow playbooks. The CLI ships with built-in 
 ```bash
 meta agents workflows list
 meta agents workflows explain backlog-planning
-meta agents workflows run backlog-planning --param request="Plan a reusable workflow system"
-meta agents workflows run ticket-implementation --param issue=MET-93
+meta agents workflows run backlog-planning
+meta agents workflows run ticket-implementation
+meta agents workflows run ticket-implementation --no-interactive --param issue=MET-93
+meta agents workflows run ticket-implementation --render-once --param issue=MET-93
 ```
 
 Legacy alias: `meta workflows`
 
+Compatibility alias under `meta agents`: `meta agents workflow ...`
+
+```bash
+meta agents workflow run ticket-implementation --render-once
+```
+
 Playbooks use Markdown with YAML front matter. The front matter defines the workflow name, summary, default provider, parameter contract, validation steps, optional instructions, and optional Linear issue lookup parameter. See [`src/artifacts/workflows/README.md`](src/artifacts/workflows/README.md) for the shipped format and `.metastack/workflows/README.md` for the repo-local scaffold.
+
+Interactive terminal runs are TUI-first:
+
+- TTY runs open a guided wizard that collects required workflow inputs step by step.
+- After generation the command lands on a review dashboard instead of exiting immediately.
+- `e` opens multiline edit mode for the generated Markdown.
+- `s` opens a one-off save-path prompt whose default lives under `.metastack/workflows/generated/`.
+- Existing files require explicit overwrite confirmation in the TUI, or `--overwrite` in the headless fallback.
+
+Deterministic fallback rules:
+
+- Use `--no-interactive` for scripts, CI, and tests.
+- Runs without a TTY use the same fallback automatically unless `--render-once` is set.
+- The fallback path still requires explicit `--param key=value` pairs for all required inputs.
+- `--output <PATH>` saves the generated Markdown artifact directly.
+- `--render-once` prints a deterministic snapshot of the wizard for snapshot-style tests.
+- `--render-once --events ...` scripts wizard, review, edit, and save transitions for deterministic TUI proofs.
+- Use `accept-edit`, `discard-edit`, and `paste=TEXT` in `--events` to prove edited save/cancel behavior explicitly.
+
+Reference:
+
+- [`docs/workflows-run-tui.md`](docs/workflows-run-tui.md)
 
 ### `context`
 
@@ -617,6 +651,7 @@ Use these flags when an outer agent or shell wrapper needs deterministic non-int
 | `meta linear issues refine` | n/a | `--json` | success and failure emit JSON |
 | `meta context scan` | n/a | `--json` | success and failure emit JSON |
 | `meta agents listen --once` | headless | `--json` | emits one poll-cycle JSON payload |
+| `meta agents workflows run` | `--no-interactive` | n/a | human-readable output or `--render-once` snapshot |
 | `meta runtime cron init` | `--no-interactive` | `--json` or implicit in `--no-interactive` | success and failure emit JSON |
 
 Notes:
@@ -642,6 +677,7 @@ This matrix is the contract for agent callers deciding whether to drive a comman
 | `meta linear issues refine` | not needed; command is already headless | supported | not supported |
 | `meta context scan` | not needed; command is already headless | supported | not supported |
 | `meta agents listen --once` | not needed; `--once` is the headless poll mode | supported only with `--once`; returns one poll cycle | supported separately as a text dashboard snapshot |
+| `meta agents workflows run` | required for promptless scripted runs with explicit params | not supported | supported for the workflow wizard snapshot |
 | `meta runtime cron init` | required for promptless writes; implies JSON | supported | supported as a text dashboard snapshot |
 | `meta runtime config` | not needed | supported | supported |
 | `meta merge` | required for promptless execution with explicit PR selection | supported | supported |
@@ -759,6 +795,22 @@ Side effects:
 - writes each generated backlog item to `.metastack/backlog/<NEW_ISSUE_ID>/`
 - uses `.metastack/backlog/<NEW_ISSUE_ID>/index.md` as the initial Linear issue description
 - writes `.metastack/backlog/<NEW_ISSUE_ID>/.linear.json` to persist issue metadata
+
+### `backlog spec`
+
+Create or improve the repo-local `.metastack/SPEC.md` for the active repository:
+
+```bash
+meta backlog spec --root .
+meta backlog spec --root . --no-interactive --request "Add a repo-local SPEC workflow"
+meta backlog spec --root . --no-interactive --request "Improve the current SPEC" --answer "Clarify the non-goals"
+```
+
+In a TTY, `meta backlog spec` opens a staged ratatui interview. On first run it asks what the repository should build, asks concise follow-up questions, and drafts `.metastack/SPEC.md`. On later runs it loads the existing SPEC, asks what should change, and revises that same file in place.
+
+The command is repo-local by design: it targets only `.metastack/SPEC.md`, does not create Linear issues, and does not write `.metastack/backlog/<ISSUE>/` packets. Generated markdown must include uppercase `OVERVIEW`, `GOALS`, `FEATURES`, and `NON-GOALS` headings.
+
+For deterministic automation, pass `--no-interactive` with `--request` and optional repeated `--answer` values. Hidden `--render-once` hooks exist for snapshot testing of the major TUI states.
 
 ### `backlog tech`
 
@@ -1090,7 +1142,7 @@ Reference:
 Linear commands also read repo-scoped defaults from `.metastack/meta.json`, plus optional project-specific Linear auth stored in install-scoped CLI config for the current repo root. Repo defaults should store the canonical Linear project ID; `meta setup --project <NAME>` resolves names to IDs before saving, while older name-based values are still resolved at read time for compatibility. When repo values are absent, MetaStack falls back to install-scoped onboarding defaults for the default project, listen label, listen assignment scope, listen refresh policy, listen poll interval, interactive plan follow-up question limit, and plan/technical issue labels. `meta listen` also reads the optional `listen.required_labels` filter list, assignee filter, instructions file, and default poll interval from `.metastack/meta.json`; legacy `listen.required_label` values still load for compatibility, but new saves persist the list form and accept comma-separated labels in `meta runtime setup`. An issue is eligible when any configured listen label matches one of its Linear labels case-insensitively. Canonical assignee-scope values are `any`, `viewer_only`, and `viewer_or_unassigned`, while the legacy value `viewer` still loads as `viewer_or_unassigned` for compatibility. `--all-assignees` provides a run-scoped opt-out without changing repo config. Interactive `meta plan` reads the optional `plan.interactive_follow_up_questions` override there and `meta plan` / `meta backlog tech` resolve the repo-scoped issue-label defaults to real Linear label IDs before issue creation, falling back to `plan` / `technical` when unset. Backlog ticket creation also merges optional global and repo `[backlog]` defaults with the contract `CLI override > repo override > global override > built-in behavior`; zero-prompt runs additionally consult remembered project/team selections and `velocity_defaults` before the repo/global fallbacks. The optional `linear.ticket_context.discussion_prompt_chars` and `linear.ticket_context.discussion_persisted_chars` settings control the comment-character budgets used for agent-facing and persisted `context/ticket-discussion.md` output. During `meta setup` saves and onboarding saves, MetaStack checks that the effective listen, plan, technical, and required listen labels exist on the selected team and creates any missing team labels so later issue creation stays deterministic. When `meta linear issues list` returns no rows, it prints the applied filters so hidden defaults remain visible.
 ## Agent Configuration
 
-Agent-backed commands use stable route keys so different workflows can resolve different defaults from the same install-scoped config. `meta backlog plan`, `meta backlog improve`, `meta backlog split`, `meta context scan`, `meta context reload`, `meta linear issues refine`, `meta agents workflows run`, `meta runtime cron run`, `meta agents listen`, and `meta merge run` all resolve provider/model/reasoning in this order:
+Agent-backed commands use stable route keys so different workflows can resolve different defaults from the same install-scoped config. `meta backlog spec`, `meta backlog plan`, `meta backlog improve`, `meta backlog split`, `meta context scan`, `meta context reload`, `meta linear issues refine`, `meta agents workflows run`, `meta runtime cron run`, `meta agents listen`, and `meta merge run` all resolve provider/model/reasoning in this order:
 
 1. explicit CLI overrides such as `--agent`, `--provider`, `--model`, and `--reasoning`
 2. command route override
@@ -1108,7 +1160,7 @@ Sandbox and permission handling depends on the command path:
 
 - `meta agents listen` uses unrestricted execution for built-in providers so unattended workers can run validation, git/GitHub flows, and Linear updates. Codex uses `--dangerously-bypass-approvals-and-sandbox`; Claude uses `--permission-mode=bypassPermissions`.
 - `meta agents listen` also enables machine-readable provider output for built-in workers so the listener can capture the latest provider-native manual resume ID. Codex listen runs use `codex exec --json`, and Claude listen runs use `claude -p --verbose --output-format=stream-json`.
-- `meta context scan`, `meta backlog plan`, `meta backlog improve`, `meta backlog split`, `meta linear issues refine`, workflow runs, merge flows, and cron prompts keep the built-in Codex adapter on `--sandbox workspace-write --ask-for-approval never`.
+- `meta context scan`, `meta backlog spec`, `meta backlog plan`, `meta backlog improve`, `meta backlog split`, `meta linear issues refine`, workflow runs, merge flows, and cron prompts keep the built-in Codex adapter on `--sandbox workspace-write --ask-for-approval never`.
 
 Listen startup now runs a provider preflight before polling Linear, and worker pickup reruns it inside the workspace before the first agent turn. Codex checks require a readable `~/.codex/config.toml` with `approval_policy = "never"` and `sandbox_mode = "danger-full-access"` and warn when `[mcp_servers.linear]` is configured. Claude checks require `claude` on `PATH` and fail fast when `ANTHROPIC_API_KEY` is set. Both providers also validate that the resolved built-in launch command exposes the required unrestricted mode for unattended listen runs.
 

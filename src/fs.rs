@@ -101,6 +101,10 @@ impl PlanningPaths {
         self.metastack_dir.join("meta.json")
     }
 
+    pub fn spec_path(&self) -> PathBuf {
+        self.metastack_dir.join("SPEC.md")
+    }
+
     pub fn legacy_agent_dir(&self) -> PathBuf {
         self.metastack_dir.join("agent")
     }

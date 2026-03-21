@@ -138,6 +138,49 @@ fn agents_help_lists_listen_and_workflows() {
 }
 
 #[test]
+fn agents_workflows_run_help_describes_tui_first_and_fallback_flags() {
+    cli()
+        .args(["agents", "workflows", "run", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "TTY runs open a guided wizard, then land on a review/export dashboard.",
+        ))
+        .stdout(predicate::str::contains(
+            "Use --no-interactive with explicit --param key=value pairs for scripts and CI.",
+        ))
+        .stdout(predicate::str::contains(
+            "Runs without a TTY use the same fallback automatically unless --render-once is set.",
+        ))
+        .stdout(predicate::str::contains("--no-interactive"))
+        .stdout(predicate::str::contains("--render-once"))
+        .stdout(predicate::str::contains("--events"))
+        .stdout(predicate::str::contains("discard-edit"))
+        .stdout(predicate::str::contains("paste=TEXT"))
+        .stdout(predicate::str::contains("--output"))
+        .stdout(predicate::str::contains("--overwrite"));
+}
+
+#[test]
+fn agents_workflow_alias_run_help_routes_to_workflows_command() {
+    cli()
+        .args(["agents", "workflow", "run", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "TTY runs open a guided wizard, then land on a review/export dashboard.",
+        ))
+        .stdout(predicate::str::contains(
+            "Use --no-interactive with explicit --param key=value pairs for scripts and CI.",
+        ))
+        .stdout(predicate::str::contains("--render-once"))
+        .stdout(predicate::str::contains("--events"))
+        .stdout(predicate::str::contains("discard-edit"))
+        .stdout(predicate::str::contains("paste=TEXT"))
+        .stdout(predicate::str::contains("--output"));
+}
+
+#[test]
 fn agents_listen_help_describes_session_browser_navigation() {
     cli()
         .args(["agents", "listen", "--help"])
@@ -165,14 +208,16 @@ fn agents_listen_help_describes_session_browser_navigation() {
 }
 
 #[test]
-fn backlog_help_lists_tech_and_sync_commands() {
+fn meta_backlog_spec_help_exposes_new_subcommand() {
     cli()
         .args(["backlog", "--help"])
         .assert()
         .success()
+        .stdout(predicate::str::contains("\n  spec "))
         .stdout(predicate::str::contains("\n  plan "))
         .stdout(predicate::str::contains("\n  tech "))
         .stdout(predicate::str::contains("\n  sync "))
+        .stdout(predicate::str::contains("meta backlog spec --root ."))
         .stdout(predicate::str::contains("meta backlog tech MET-35"));
 }
 
