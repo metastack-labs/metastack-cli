@@ -376,9 +376,7 @@ fn spec_command_render_once_uses_improve_prompt_when_spec_exists() -> Result<(),
         .stdout(predicate::str::contains(
             "load the current `.metastack/SPEC.md` and revise it in place",
         ))
-        .stdout(predicate::str::contains(
-            "What should this repository build?",
-        ).not());
+        .stdout(predicate::str::contains("What should this repository build?").not());
 
     let spec = fs::read_to_string(&spec_path)?;
     assert!(spec.contains("Existing overview."));
