@@ -831,8 +831,12 @@ fn agents_listen_help_omits_browser_dashboard_flags() {
         .assert()
         .success()
         .stdout(predicate::str::contains("--all-assignees"))
+        .stdout(predicate::str::contains("interactive session browser"))
+        .stdout(predicate::str::contains(
+            "Press Enter on the selected session",
+        ))
         .stdout(predicate::str::contains("--dashboard-port").not())
-        .stdout(predicate::str::contains("browser").not());
+        .stdout(predicate::str::contains("http://").not());
 }
 
 #[test]
@@ -842,6 +846,10 @@ fn legacy_listen_help_omits_browser_dashboard_flags() {
         .args(["listen", "--help"])
         .assert()
         .success()
+        .stdout(predicate::str::contains("Interactive dashboard:"))
+        .stdout(predicate::str::contains(
+            "Press Enter on the selected session",
+        ))
         .stdout(predicate::str::contains("meta listen sessions list"))
         .stdout(predicate::str::contains(
             "meta listen sessions inspect --root . --project \"MetaStack API\"",
@@ -854,7 +862,7 @@ fn legacy_listen_help_omits_browser_dashboard_flags() {
         ))
         .stdout(predicate::str::contains("--all-assignees"))
         .stdout(predicate::str::contains("--dashboard-port").not())
-        .stdout(predicate::str::contains("browser").not());
+        .stdout(predicate::str::contains("http://").not());
 }
 
 #[cfg(unix)]
