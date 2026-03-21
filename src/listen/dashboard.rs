@@ -1163,6 +1163,62 @@ mod tests {
     }
 
     #[test]
+    fn render_once_detail_panel_surfaces_ready_pull_request_status() {
+        let mut cycle = demo_cycle();
+        let session = cycle
+            .sessions
+            .first_mut()
+            .expect("demo data should include a session");
+        session.pull_request.status = crate::listen::PullRequestStatus::Ready;
+        let detail = cycle
+            .session_details
+            .get_mut(&session.issue_identifier)
+            .expect("demo data should include detail for the selected session");
+        detail.pull_request.status = crate::listen::PullRequestStatus::Ready;
+        if let Some(milestone) = detail.milestones.last_mut() {
+            milestone.pull_request_status = crate::listen::PullRequestStatus::Ready;
+        }
+
+        let data = build_dashboard_data(
+            &cycle,
+            &DashboardRuntimeContext {
+                started_at_epoch_seconds: 1_773_568_249,
+                now_epoch_seconds: 1_773_575_600,
+                poll_interval_seconds: 7,
+                dashboard_label: "terminal dashboard (TUI)",
+                dashboard_refresh_seconds: 1,
+                linear_refresh_seconds: 15,
+                vim_mode: false,
+            },
+        );
+
+        let state = SessionBrowserState {
+            detail_mode: true,
+            ..SessionBrowserState::default()
+        };
+        let session = state
+            .selected_session(&data)
+            .expect("demo data should include a selected session");
+        let detail = data
+            .detail_for_session(&session.issue_identifier)
+            .expect("demo data should include detail for the selected session");
+        let text = render_session_detail_text(session, detail);
+        let rendered = text
+            .lines
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("PR: ready #321"));
+        assert!(
+            rendered.contains(
+                "Brief Ready · Brief ready | backlog MET-14 | worker active | ready #321"
+            )
+        );
+    }
+
+    #[test]
     fn render_once_detail_scroll_reveals_log_excerpts() {
         let cycle = demo_cycle();
         let data = build_dashboard_data(

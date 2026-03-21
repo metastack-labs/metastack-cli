@@ -168,6 +168,45 @@ impl GhCli {
         })
     }
 
+    /// Refresh the title/body for the existing open PR matching the provided head/base pair.
+    ///
+    /// Returns `Ok(None)` when no matching open PR exists, and an error when `gh` fails to inspect
+    /// or edit the existing pull request.
+    pub(crate) fn refresh_existing_branch_pull_request(
+        &self,
+        workspace_path: &Path,
+        request: PullRequestPublishRequest<'_>,
+    ) -> Result<Option<PullRequestLifecycleResult>> {
+        let Some(existing) = self.find_open_branch_pull_request_raw(
+            workspace_path,
+            request.head_branch,
+            request.base_branch,
+        )?
+        else {
+            return Ok(None);
+        };
+
+        self.run_plain(
+            workspace_path,
+            &[
+                "pr",
+                "edit",
+                &existing.number.to_string(),
+                "--title",
+                request.title,
+                "--body-file",
+                body_path_arg(request.body_path)?,
+            ],
+        )?;
+
+        Ok(Some(PullRequestLifecycleResult {
+            number: existing.number,
+            url: existing.url,
+            action: PullRequestLifecycleAction::UpdatedExisting,
+            is_draft: existing.is_draft,
+        }))
+    }
+
     /// Promote the open branch PR for the provided head/base pair to ready for review.
     ///
     /// Returns an error when no matching open PR exists or when `gh` fails to promote it.
