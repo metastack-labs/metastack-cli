@@ -99,6 +99,42 @@ fn issues_payload() -> serde_json::Value {
 
 #[cfg(unix)]
 #[test]
+fn release_reports_empty_backlog_with_clear_message() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    fs::create_dir_all(&repo_root)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+
+    cli()
+        .args([
+            "backlog",
+            "release",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--name",
+            "empty-sprint",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "no local backlog items were found under",
+        ));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn release_writes_local_packet_with_cut_line_and_ordering() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
@@ -383,6 +419,48 @@ api_url = "{api_url}"
 
 #[cfg(unix)]
 #[test]
+fn release_rejects_unknown_explicit_issue_selection() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    fs::create_dir_all(&repo_root)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+    write_backlog_issue(&repo_root, "MET-10", "Lay release foundations", None)?;
+    write_backlog_issue(&repo_root, "MET-11", "Ship release batching UX", None)?;
+
+    cli()
+        .args([
+            "backlog",
+            "release",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--name",
+            "selection-check",
+            "--issue",
+            "MET-10",
+            "--issue",
+            "MET-99",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "backlog items `MET-99` were not found under",
+        ));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn release_requires_at_least_two_backlog_items() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
@@ -422,6 +500,45 @@ api_url = "http://127.0.0.1:9/graphql"
         .failure()
         .stderr(predicate::str::contains(
             "not enough backlog items to build a release packet; found 1 item",
+        ));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn release_apply_requires_project_or_state() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    fs::create_dir_all(&repo_root)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+    write_backlog_issue(&repo_root, "MET-10", "Lay release foundations", None)?;
+    write_backlog_issue(&repo_root, "MET-11", "Ship release batching UX", None)?;
+
+    cli()
+        .args([
+            "backlog",
+            "release",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--name",
+            "bad-apply",
+            "--apply",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "`meta backlog release --apply` requires `--project`, `--state`, or both",
         ));
 
     Ok(())
