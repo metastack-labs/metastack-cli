@@ -1,11 +1,10 @@
 use std::env;
 use std::fs;
-use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow, bail};
-use reqwest::Url;
+use anyhow::{Context, Result, bail};
+use tokio::time::sleep;
 use toml::Value;
 
 use crate::agents::{
@@ -170,12 +169,11 @@ pub(super) async fn complete_listen_preflight<C>(
 where
     C: LinearClient,
 {
-    verify_network_connectivity(&linear_config.api_url)?;
+    report.viewer = Some(verify_linear_api_access(service).await?);
     report.push_check(format!(
         "Linear API endpoint is reachable at `{}`.",
         linear_config.api_url
     ));
-    report.viewer = Some(verify_linear_api_access(service).await?);
     report.push_check("Linear API authentication succeeded.");
     Ok(report)
 }
@@ -195,43 +193,31 @@ pub(super) fn verify_workspace_write_access(workspace_path: &Path) -> Result<()>
     Ok(())
 }
 
-pub(super) fn verify_network_connectivity(api_url: &str) -> Result<()> {
-    let url = Url::parse(api_url)
-        .with_context(|| format!("failed to parse Linear API URL `{api_url}` for preflight"))?;
-    let host = url
-        .host_str()
-        .ok_or_else(|| anyhow!("Linear API URL `{api_url}` does not include a hostname"))?;
-    let port = url
-        .port_or_known_default()
-        .ok_or_else(|| anyhow!("Linear API URL `{api_url}` does not include a known port"))?;
-    let mut last_error = None;
-    for address in (host, port)
-        .to_socket_addrs()
-        .with_context(|| format!("failed to resolve `{host}:{port}` during listen preflight"))?
-    {
-        match TcpStream::connect_timeout(&address, Duration::from_secs(2)) {
-            Ok(stream) => {
-                drop(stream);
-                return Ok(());
-            }
-            Err(error) => last_error = Some(error),
-        }
-    }
-
-    let detail = last_error
-        .map(|error| error.to_string())
-        .unwrap_or_else(|| "no addresses available".to_string());
-    bail!("failed to connect to `{host}:{port}` during listen preflight: {detail}");
-}
-
 pub(super) async fn verify_linear_api_access<C>(service: &LinearService<C>) -> Result<UserRef>
 where
     C: LinearClient,
 {
-    service
-        .viewer()
-        .await
-        .context("failed to access Linear API during listen preflight")
+    for attempt in 0..2 {
+        match service.viewer().await {
+            Ok(viewer) => return Ok(viewer),
+            Err(error) if attempt == 0 && is_transient_linear_read_failure(&error) => {
+                sleep(Duration::from_millis(100)).await;
+            }
+            Err(error) => {
+                return Err(error).context("failed to access Linear API during listen preflight");
+            }
+        }
+    }
+
+    bail!("failed to access Linear API during listen preflight")
+}
+
+fn is_transient_linear_read_failure(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .to_string()
+            .contains("failed to reach the Linear GraphQL endpoint")
+    })
 }
 
 fn verify_codex_listen_prerequisites(report: &mut ListenPreflightReport) -> Result<()> {

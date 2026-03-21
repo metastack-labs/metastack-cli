@@ -8,6 +8,20 @@ fn write_onboarded_config(config_path: &Path) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn assert_machine_parse_failure(args: &[&str], command: &str, expected_message: &str) {
+    cli()
+        .args(args)
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains("\"status\": \"error\""))
+        .stdout(predicate::str::contains(format!(
+            "\"command\": \"{command}\""
+        )))
+        .stdout(predicate::str::contains("\"code\": \"invalid_input\""))
+        .stdout(predicate::str::contains(expected_message))
+        .stderr(predicate::str::is_empty());
+}
+
 #[test]
 fn top_level_help_lists_primary_commands_and_examples() {
     cli()
@@ -252,6 +266,114 @@ fn merge_help_lists_discovery_and_execution_flags() {
             "meta merge --render-once --events",
         ))
         .stdout(predicate::str::contains("one-shot dashboard"));
+}
+
+#[test]
+fn agents_listen_machine_parse_failures_emit_json_errors() {
+    cli()
+        .args(["agents", "listen", "--json", "--render-once"])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains("\"status\": \"error\""))
+        .stdout(predicate::str::contains("\"command\": \"agents.listen\""))
+        .stdout(predicate::str::contains("\"code\": \"invalid_input\""))
+        .stdout(predicate::str::contains(
+            "the argument '--json' cannot be used with '--render-once'",
+        ))
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn agents_listen_once_and_render_once_conflict_emit_text_error() {
+    cli()
+        .args(["agents", "listen", "--once", "--render-once"])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains(
+            "the argument '--once' cannot be used with '--render-once'",
+        ));
+}
+
+#[test]
+fn backlog_sync_machine_parse_failures_emit_json_errors() {
+    cli()
+        .args(["backlog", "sync", "--json", "--render-once"])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains("\"status\": \"error\""))
+        .stdout(predicate::str::contains("\"command\": \"backlog.sync\""))
+        .stdout(predicate::str::contains("\"code\": \"invalid_input\""))
+        .stdout(predicate::str::contains(
+            "the argument '--json' cannot be used with '--render-once'",
+        ))
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn backlog_sync_non_interactive_and_render_once_conflict_emits_json_error() {
+    assert_machine_parse_failure(
+        &["backlog", "sync", "--no-interactive", "--render-once"],
+        "backlog.sync",
+        "the argument '--no-interactive' cannot be used with '--render-once'",
+    );
+}
+
+#[test]
+fn runtime_config_machine_parse_failures_emit_json_errors() {
+    assert_machine_parse_failure(
+        &["runtime", "config", "--json", "--render-once"],
+        "runtime.config",
+        "the argument '--json' cannot be used with '--render-once'",
+    );
+}
+
+#[test]
+fn runtime_setup_machine_parse_failures_emit_json_errors() {
+    assert_machine_parse_failure(
+        &["runtime", "setup", "--json", "--render-once"],
+        "runtime.setup",
+        "the argument '--json' cannot be used with '--render-once'",
+    );
+}
+
+#[test]
+fn linear_issues_list_machine_parse_failures_emit_json_errors() {
+    assert_machine_parse_failure(
+        &["linear", "issues", "list", "--json", "--render-once"],
+        "linear.issues.list",
+        "the argument '--json' cannot be used with '--render-once'",
+    );
+}
+
+#[test]
+fn linear_issues_create_machine_parse_failures_emit_json_errors() {
+    assert_machine_parse_failure(
+        &[
+            "linear",
+            "issues",
+            "create",
+            "--no-interactive",
+            "--render-once",
+        ],
+        "linear.issues.create",
+        "the argument '--no-interactive' cannot be used with '--render-once'",
+    );
+}
+
+#[test]
+fn runtime_cron_init_machine_parse_failures_emit_json_errors() {
+    assert_machine_parse_failure(
+        &[
+            "runtime",
+            "cron",
+            "init",
+            "--no-interactive",
+            "--render-once",
+        ],
+        "runtime.cron.init",
+        "the argument '--no-interactive' cannot be used with '--render-once'",
+    );
 }
 
 #[test]

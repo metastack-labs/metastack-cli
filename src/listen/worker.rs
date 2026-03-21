@@ -2,12 +2,16 @@ use std::cell::RefCell;
 use std::fs;
 use std::io::Write;
 use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use serde_json::json;
+use chrono::{DateTime, Utc};
+use serde::Deserialize;
+use serde_json::{Value, json};
+use tokio::time::sleep;
 
 use crate::agent_provider::builtin_provider_adapter;
 use crate::agents::{
@@ -34,11 +38,11 @@ use crate::repo_target::RepoTarget;
 use crate::workflow_contract::render_workflow_contract;
 
 use super::{
-    BACKLOG_STATE, MAX_STALLED_TURNS, SessionPhase, TokenUsage, agent_log_path,
-    backlog_progress_for_issue_dir, capture_workspace_snapshot, compact_blocked_summary,
-    compact_completed_summary, compact_running_summary, compare_workspace_snapshots,
-    current_workspace_branch, issue_state_label, issue_team_key, listen_issue_is_active,
-    now_epoch_seconds, now_timestamp, preflight, render_agent_prompt,
+    BACKLOG_STATE, LatestResumeHandle, MAX_STALLED_TURNS, ResumeProvider, SessionPhase, TokenUsage,
+    agent_log_path, backlog_progress_for_issue_dir, capture_workspace_snapshot,
+    compact_blocked_summary, compact_completed_summary, compact_running_summary,
+    compare_workspace_snapshots, current_workspace_branch, issue_state_label, issue_team_key,
+    listen_issue_is_active, now_epoch_seconds, now_timestamp, preflight, render_agent_prompt,
     try_transition_issue_to_review_state, workspace_has_meaningful_progress, write_listen_session,
 };
 
@@ -93,7 +97,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
         backlog_issue: backlog_issue.as_ref(),
         max_turns: args.max_turns,
     };
-    let session_context = WorkerSessionContext {
+    let mut session_context = WorkerSessionContext {
         source_root: &source_root,
         project_selector,
         workspace_path: &workspace_path,
@@ -101,6 +105,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
         workpad_comment_id: &args.workpad_comment_id,
         backlog_issue: backlog_issue.as_ref(),
         pid: Some(worker_pid),
+        latest_resume_handle: None,
     };
     let mut session_tokens =
         load_existing_session_tokens(&source_root, project_selector, &args.issue)?;
@@ -202,6 +207,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                 backlog_progress_for_issue_dir(&workspace_path, &backlog_issue.identifier)
             })
             .transpose()?;
+        session_context.latest_resume_handle = None;
         write_listen_session(
             &source_root,
             project_selector,
@@ -298,6 +304,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                 return Err(error);
             }
         };
+        session_context.latest_resume_handle = turn_result.latest_resume_handle;
         session_id = turn_result
             .session_id
             .or_else(|| session_id_state.into_inner());
@@ -515,29 +522,49 @@ struct WorkerSessionContext<'a> {
     workpad_comment_id: &'a str,
     backlog_issue: Option<&'a IssueSummary>,
     pid: Option<u32>,
+    latest_resume_handle: Option<LatestResumeHandle>,
 }
 
 #[derive(Debug, Default)]
 struct TurnExecutionResult {
     session_id: Option<String>,
     usage: Option<AgentTokenUsage>,
+    latest_resume_handle: Option<LatestResumeHandle>,
 }
 
 async fn load_worker_issue<C>(service: &LinearService<C>, identifier: &str) -> Result<IssueSummary>
 where
     C: LinearClient,
 {
-    service
-        .find_issue_by_identifier(
-            identifier,
-            IssueListFilters {
-                team: issue_team_key(identifier),
-                limit: 250,
-                ..IssueListFilters::default()
-            },
-        )
-        .await?
-        .ok_or_else(|| anyhow!("issue `{identifier}` was not found in Linear"))
+    let filters = IssueListFilters {
+        team: issue_team_key(identifier),
+        limit: 250,
+        ..IssueListFilters::default()
+    };
+
+    for attempt in 0..2 {
+        match service
+            .find_issue_by_identifier(identifier, filters.clone())
+            .await
+        {
+            Ok(Some(issue)) => return Ok(issue),
+            Ok(None) => return Err(anyhow!("issue `{identifier}` was not found in Linear")),
+            Err(error) if attempt == 0 && is_transient_linear_read_failure(&error) => {
+                sleep(Duration::from_millis(100)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    Err(anyhow!("issue `{identifier}` was not found in Linear"))
+}
+
+fn is_transient_linear_read_failure(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .to_string()
+            .contains("failed to reach the Linear GraphQL endpoint")
+    })
 }
 
 fn load_worker_backlog_issue(
@@ -958,6 +985,7 @@ fn execute_agent_turn(
             invocation.agent
         )
     })?;
+    let turn_started_at = now_epoch_seconds();
 
     if invocation.transport == PromptTransport::Stdin {
         let mut stdin = child
@@ -1006,6 +1034,7 @@ fn execute_agent_turn(
         let mut raw_stdout = String::new();
         let mut continuation = None;
         let mut usage = None;
+        let mut latest_resume_handle = None;
         for line in BufReader::new(stdout).lines() {
             let line = line
                 .with_context(|| format!("failed to read stdout for `{}`", log_path.display()))?;
@@ -1013,6 +1042,9 @@ fn execute_agent_turn(
                 .with_context(|| format!("failed to write `{}`", log_path.display()))?;
             raw_stdout.push_str(&line);
             raw_stdout.push('\n');
+            if latest_resume_handle.is_none() {
+                latest_resume_handle = parse_resume_handle_line(&invocation.agent, line.as_bytes());
+            }
             let parsed = provider.parse_capture_output(&line)?;
             if let Some(current_session_id) = parsed.continuation
                 && continuation.as_deref() != Some(current_session_id.as_str())
@@ -1045,9 +1077,22 @@ fn execute_agent_turn(
             );
         }
         let parsed = provider.parse_capture_output(&raw_stdout)?;
+        let turn_finished_at = now_epoch_seconds();
         return Ok(TurnExecutionResult {
             session_id: parsed.continuation.or(continuation),
             usage: parsed.usage.or(usage),
+            latest_resume_handle: latest_resume_handle.or_else(|| {
+                if invocation.agent == "codex" {
+                    resolve_codex_resume_handle(
+                        context.workspace_path,
+                        issue,
+                        turn_started_at,
+                        turn_finished_at,
+                    )
+                } else {
+                    None
+                }
+            }),
         });
     }
 
@@ -1066,6 +1111,193 @@ fn execute_agent_turn(
     }
 
     Ok(TurnExecutionResult::default())
+}
+
+fn parse_resume_handle_line(agent: &str, line: &[u8]) -> Option<LatestResumeHandle> {
+    let trimmed = std::str::from_utf8(line).ok()?.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let value: Value = serde_json::from_str(trimmed).ok()?;
+    match agent {
+        "claude" => parse_claude_resume_handle(&value),
+        "codex" => parse_codex_resume_handle(&value),
+        _ => None,
+    }
+}
+
+fn parse_claude_resume_handle(value: &Value) -> Option<LatestResumeHandle> {
+    Some(LatestResumeHandle {
+        provider: ResumeProvider::Claude,
+        id: value.get("session_id")?.as_str()?.to_string(),
+    })
+}
+
+fn parse_codex_resume_handle(value: &Value) -> Option<LatestResumeHandle> {
+    (value.get("type")?.as_str()? == "thread.started").then_some(LatestResumeHandle {
+        provider: ResumeProvider::Codex,
+        id: value.get("thread_id")?.as_str()?.to_string(),
+    })
+}
+
+fn resolve_codex_resume_handle(
+    workspace_path: &Path,
+    issue: &IssueSummary,
+    turn_started_at: u64,
+    turn_finished_at: u64,
+) -> Option<LatestResumeHandle> {
+    let codex_root = codex_root_dir()?;
+    let index_candidates =
+        read_codex_session_index(&codex_root, turn_started_at, turn_finished_at).ok()?;
+    let state_db = latest_codex_state_db(&codex_root)?;
+    let rows = query_codex_threads(
+        &state_db,
+        workspace_path,
+        issue,
+        turn_started_at,
+        turn_finished_at,
+        &index_candidates,
+    )
+    .ok()?;
+
+    (rows.len() == 1).then(|| LatestResumeHandle {
+        provider: ResumeProvider::Codex,
+        id: rows[0].id.clone(),
+    })
+}
+
+fn codex_root_dir() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    Some(PathBuf::from(home).join(".codex"))
+}
+
+fn latest_codex_state_db(codex_root: &Path) -> Option<PathBuf> {
+    let mut candidates = fs::read_dir(codex_root)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| value.starts_with("state_") && value.ends_with(".sqlite"))
+        })
+        .filter_map(|path| {
+            let modified = fs::metadata(&path).ok()?.modified().ok()?;
+            Some((modified, path))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| right.0.cmp(&left.0));
+    candidates.into_iter().next().map(|(_, path)| path)
+}
+
+fn read_codex_session_index(
+    codex_root: &Path,
+    turn_started_at: u64,
+    turn_finished_at: u64,
+) -> Result<Vec<String>> {
+    let index_path = codex_root.join("session_index.jsonl");
+    let contents = fs::read_to_string(&index_path)
+        .with_context(|| format!("failed to read `{}`", index_path.display()))?;
+    let lower_bound = turn_started_at.saturating_sub(30);
+    let upper_bound = turn_finished_at.saturating_add(30);
+    let mut ids = Vec::new();
+
+    for line in contents.lines() {
+        let entry: CodexSessionIndexEntry = serde_json::from_str(line)
+            .with_context(|| format!("failed to decode `{}`", index_path.display()))?;
+        let updated_at = DateTime::parse_from_rfc3339(&entry.updated_at)
+            .with_context(|| format!("failed to parse `{}` timestamp", entry.updated_at))?
+            .with_timezone(&Utc)
+            .timestamp();
+        if updated_at >= lower_bound as i64 && updated_at <= upper_bound as i64 {
+            ids.push(entry.id);
+        }
+    }
+
+    Ok(ids)
+}
+
+fn query_codex_threads(
+    state_db: &Path,
+    workspace_path: &Path,
+    issue: &IssueSummary,
+    turn_started_at: u64,
+    turn_finished_at: u64,
+    recent_ids: &[String],
+) -> Result<Vec<CodexThreadRow>> {
+    let lower_bound = turn_started_at.saturating_sub(30);
+    let upper_bound = turn_finished_at.saturating_add(30);
+    let workspace_literal = sqlite_string_literal(&workspace_path.display().to_string());
+    let issue_literal = sqlite_string_literal(&issue.identifier);
+    let mut clauses = vec![
+        "source = 'exec'".to_string(),
+        format!("cwd = '{workspace_literal}'"),
+        format!("title LIKE '%{issue_literal}%'"),
+        format!("created_at >= {lower_bound}"),
+        format!("created_at <= {upper_bound}"),
+    ];
+    if let Ok(branch) = current_workspace_branch(workspace_path)
+        && !branch.trim().is_empty()
+    {
+        clauses.push(format!(
+            "git_branch = '{}'",
+            sqlite_string_literal(branch.trim())
+        ));
+    }
+    if !recent_ids.is_empty() {
+        let ids = recent_ids
+            .iter()
+            .map(|id| format!("'{}'", sqlite_string_literal(id)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        clauses.push(format!("id IN ({ids})"));
+    }
+    let query = format!(
+        "SELECT id, created_at, updated_at FROM threads WHERE {} ORDER BY updated_at DESC;",
+        clauses.join(" AND ")
+    );
+    let output = Command::new("sqlite3")
+        .arg(state_db)
+        .arg(&query)
+        .output()
+        .with_context(|| format!("failed to run `sqlite3 {}`", state_db.display()))?;
+    if !output.status.success() {
+        bail!(
+            "sqlite3 query failed for `{}`: {}",
+            state_db.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(stdout
+        .lines()
+        .filter_map(CodexThreadRow::from_sqlite_row)
+        .collect())
+}
+
+fn sqlite_string_literal(value: &str) -> String {
+    value.replace('\'', "''")
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexSessionIndexEntry {
+    id: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CodexThreadRow {
+    id: String,
+}
+
+impl CodexThreadRow {
+    fn from_sqlite_row(row: &str) -> Option<Self> {
+        let mut parts = row.split('|');
+        Some(Self {
+            id: parts.next()?.trim().to_string(),
+        })
+    }
 }
 
 fn build_agent_instructions(
@@ -1186,6 +1418,7 @@ fn build_worker_session(
         session_id: session_id
             .map(str::to_string)
             .or_else(|| Some(issue.id.clone())),
+        latest_resume_handle: context.latest_resume_handle.clone(),
         turns: Some(turns),
         tokens: tokens.clone(),
         log_path: Some(
@@ -1231,10 +1464,16 @@ fn load_existing_session_id(
 
 #[cfg(test)]
 mod tests {
-    use super::{WorkerSessionContext, build_worker_session};
+    use super::{
+        LatestResumeHandle, Path, ResumeProvider, Value, WorkerSessionContext,
+        build_worker_session, parse_claude_resume_handle, parse_codex_resume_handle,
+        query_codex_threads, read_codex_session_index,
+    };
     use crate::linear::{IssueSummary, TeamRef};
     use crate::listen::{SessionPhase, TokenUsage};
-    use std::path::Path;
+    use std::fs;
+    use std::sync::{Mutex, OnceLock};
+    use tempfile::tempdir;
 
     fn issue() -> IssueSummary {
         IssueSummary {
@@ -1262,6 +1501,52 @@ mod tests {
         }
     }
 
+    fn test_issue(identifier: &str) -> IssueSummary {
+        IssueSummary {
+            id: format!("{identifier}-id"),
+            identifier: identifier.to_string(),
+            title: format!("{identifier} title"),
+            description: None,
+            url: format!("https://linear.app/issues/{identifier}"),
+            priority: None,
+            estimate: None,
+            updated_at: "2026-03-19T00:00:00Z".to_string(),
+            team: TeamRef {
+                id: "team-1".to_string(),
+                key: "ENG".to_string(),
+                name: "Engineering".to_string(),
+            },
+            project: None,
+            assignee: None,
+            labels: Vec::new(),
+            comments: Vec::new(),
+            state: None,
+            attachments: Vec::new(),
+            parent: None,
+            children: Vec::new(),
+        }
+    }
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn set_env_var(key: &str, value: &str) {
+        unsafe {
+            std::env::set_var(key, value);
+        }
+    }
+
+    fn restore_env_var(key: &str, value: Option<String>) {
+        unsafe {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+
     #[test]
     fn worker_session_updates_keep_cumulative_tokens() {
         let issue = issue();
@@ -1273,6 +1558,7 @@ mod tests {
             workpad_comment_id: "comment-1",
             backlog_issue: None,
             pid: Some(1234),
+            latest_resume_handle: None,
         };
         let mut tokens = TokenUsage::default();
 
@@ -1320,5 +1606,180 @@ mod tests {
         assert_eq!(third.tokens.input, Some(120));
         assert_eq!(third.tokens.output, Some(45));
         assert_eq!(third.tokens.total(), Some(165));
+    }
+
+    #[test]
+    fn parses_claude_resume_handle_from_stream_json() {
+        let value: Value = serde_json::from_str(
+            r#"{"type":"system","subtype":"init","session_id":"513d2595-0968-4357-9339-489f1d21c1cf"}"#,
+        )
+        .expect("valid json");
+
+        assert_eq!(
+            parse_claude_resume_handle(&value),
+            Some(LatestResumeHandle {
+                provider: ResumeProvider::Claude,
+                id: "513d2595-0968-4357-9339-489f1d21c1cf".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_codex_resume_handle_from_thread_started_event() {
+        let value: Value = serde_json::from_str(
+            r#"{"type":"thread.started","thread_id":"019d0766-1ca5-70c3-ae80-afafe1fb7bff"}"#,
+        )
+        .expect("valid json");
+
+        assert_eq!(
+            parse_codex_resume_handle(&value),
+            Some(LatestResumeHandle {
+                provider: ResumeProvider::Codex,
+                id: "019d0766-1ca5-70c3-ae80-afafe1fb7bff".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn read_codex_session_index_filters_recent_entries() {
+        let temp = tempdir().expect("tempdir should build");
+        let codex_root = temp.path().join(".codex");
+        fs::create_dir_all(&codex_root).expect("codex dir should exist");
+        fs::write(
+            codex_root.join("session_index.jsonl"),
+            concat!(
+                "{\"id\":\"recent\",\"updated_at\":\"2026-03-19T15:00:05Z\"}\n",
+                "{\"id\":\"old\",\"updated_at\":\"2026-03-19T14:58:00Z\"}\n"
+            ),
+        )
+        .expect("session index should write");
+
+        let ids =
+            read_codex_session_index(&codex_root, 1_773_932_400, 1_773_932_420).expect("index");
+
+        assert_eq!(ids, vec!["recent".to_string()]);
+    }
+
+    #[test]
+    fn query_codex_threads_returns_only_matching_rows() {
+        let _guard = env_lock().lock().expect("env mutex should lock");
+        let temp = tempdir().expect("tempdir should build");
+        let workspace = temp.path().join("workspace");
+        let bin_dir = temp.path().join("bin");
+        fs::create_dir_all(&workspace).expect("workspace dir should exist");
+        fs::create_dir_all(&bin_dir).expect("bin dir should exist");
+        let sqlite_path = bin_dir.join("sqlite3");
+        fs::write(&sqlite_path, "#!/bin/sh\nprintf '%s' \"$SQLITE3_ROWS\"\n")
+            .expect("sqlite stub should write");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&sqlite_path)
+                .expect("sqlite stub metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&sqlite_path, permissions).expect("sqlite stub permissions");
+        }
+
+        let original_path = std::env::var("PATH").ok();
+        set_env_var(
+            "PATH",
+            &format!(
+                "{}:{}",
+                bin_dir.display(),
+                original_path.clone().unwrap_or_default()
+            ),
+        );
+        set_env_var("SQLITE3_ROWS", "thread-1|1773945466|1773945607\n");
+
+        let init = std::process::Command::new("git")
+            .arg("init")
+            .arg("-q")
+            .arg(&workspace)
+            .status()
+            .expect("git init should run");
+        assert!(init.success());
+        let checkout = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&workspace)
+            .args(["checkout", "-b", "eng-10194"])
+            .status()
+            .expect("git checkout should run");
+        assert!(checkout.success());
+
+        let rows = query_codex_threads(
+            Path::new("/tmp/fake-state.sqlite"),
+            &workspace,
+            &test_issue("ENG-10194"),
+            1_773_945_460,
+            1_773_945_610,
+            &["thread-1".to_string()],
+        )
+        .expect("sqlite query should succeed");
+
+        restore_env_var("PATH", original_path);
+        restore_env_var("SQLITE3_ROWS", None);
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "thread-1");
+    }
+
+    #[test]
+    fn query_codex_threads_rejects_ambiguous_rows() {
+        let _guard = env_lock().lock().expect("env mutex should lock");
+        let temp = tempdir().expect("tempdir should build");
+        let workspace = temp.path().join("workspace");
+        let bin_dir = temp.path().join("bin");
+        fs::create_dir_all(&workspace).expect("workspace dir should exist");
+        fs::create_dir_all(&bin_dir).expect("bin dir should exist");
+        let sqlite_path = bin_dir.join("sqlite3");
+        fs::write(&sqlite_path, "#!/bin/sh\nprintf '%s' \"$SQLITE3_ROWS\"\n")
+            .expect("sqlite stub should write");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&sqlite_path)
+                .expect("sqlite stub metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&sqlite_path, permissions).expect("sqlite stub permissions");
+        }
+
+        let original_path = std::env::var("PATH").ok();
+        set_env_var(
+            "PATH",
+            &format!(
+                "{}:{}",
+                bin_dir.display(),
+                original_path.clone().unwrap_or_default()
+            ),
+        );
+        set_env_var(
+            "SQLITE3_ROWS",
+            "thread-1|1773945466|1773945607\nthread-2|1773945468|1773945608\n",
+        );
+
+        let init = std::process::Command::new("git")
+            .arg("init")
+            .arg("-q")
+            .arg(&workspace)
+            .status()
+            .expect("git init should run");
+        assert!(init.success());
+
+        let rows = query_codex_threads(
+            Path::new("/tmp/fake-state.sqlite"),
+            &workspace,
+            &test_issue("ENG-10194"),
+            1_773_945_460,
+            1_773_945_610,
+            &[],
+        )
+        .expect("sqlite query should succeed");
+
+        restore_env_var("PATH", original_path);
+        restore_env_var("SQLITE3_ROWS", None);
+
+        assert_eq!(rows.len(), 2);
     }
 }

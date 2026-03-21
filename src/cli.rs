@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
@@ -238,6 +239,9 @@ pub struct ScanArgs {
     /// Repository root to scan.
     #[arg(long, value_name = "PATH", default_value = ".")]
     pub root: PathBuf,
+    /// Emit the scan result as JSON.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -634,8 +638,11 @@ pub struct CronInitArgs {
     #[arg(long)]
     pub disabled: bool,
     /// Skip the dashboard flow and create directly from CLI flags.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "render_once")]
     pub no_interactive: bool,
+    /// Emit the cron-init result as JSON.
+    #[arg(long, conflicts_with = "render_once")]
+    pub json: bool,
     /// Render the cron init dashboard once to an in-memory buffer and print the snapshot.
     #[arg(long, hide = true)]
     pub render_once: bool,
@@ -846,7 +853,7 @@ pub struct ConfigArgs {
     #[arg(long)]
     pub replay_onboarding: bool,
     /// Emit the install-scoped config view as JSON instead of launching the dashboard.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "render_once")]
     pub json: bool,
     /// Render the config dashboard once to an in-memory buffer and print the snapshot.
     #[arg(long, hide = true)]
@@ -947,7 +954,7 @@ pub struct SetupArgs {
     #[arg(long)]
     pub velocity_auto_assign: Option<String>,
     /// Emit the repo-scoped setup view as JSON instead of launching the dashboard.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "render_once")]
     pub json: bool,
     /// Render the setup dashboard once to an in-memory buffer and print the snapshot.
     #[arg(long, hide = true)]
@@ -1090,8 +1097,11 @@ pub struct ListenRunArgs {
     #[arg(long, conflicts_with_all = ["once", "render_once", "demo"])]
     pub check: bool,
     /// Execute a single live poll cycle and print a textual summary.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "render_once")]
     pub once: bool,
+    /// Emit the single poll-cycle result as JSON. Requires `--once`.
+    #[arg(long, conflicts_with = "render_once")]
+    pub json: bool,
     /// Execute a single cycle and print a deterministic ratatui snapshot.
     #[arg(long)]
     pub render_once: bool,
@@ -1155,8 +1165,11 @@ pub struct SyncArgs {
     #[command(subcommand)]
     pub command: Option<SyncCommands>,
     /// Skip interactive sync pickers and require explicit command arguments.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "render_once")]
     pub no_interactive: bool,
+    /// Emit direct sync-command results as JSON.
+    #[arg(long, conflicts_with = "render_once")]
+    pub json: bool,
     /// Filter to a specific project name (overrides the repo default).
     #[arg(long)]
     pub project: Option<String>,
@@ -1397,7 +1410,7 @@ pub struct IssueListArgs {
     #[arg(long)]
     pub state: Option<String>,
     /// Emit raw JSON instead of a table.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "render_once")]
     pub json: bool,
     /// Render the issue browser once to an in-memory buffer and print the snapshot.
     #[arg(long, hide = true)]
@@ -1434,7 +1447,7 @@ pub struct IssueCreateArgs {
     #[arg(long, value_parser = clap::value_parser!(u8).range(0..=4))]
     pub priority: Option<u8>,
     /// Skip the ratatui workflow and create directly from CLI flags.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "render_once")]
     pub no_interactive: bool,
     /// Render the create form once to an in-memory buffer and print the snapshot.
     #[arg(long, hide = true)]
@@ -1471,7 +1484,7 @@ pub struct IssueEditArgs {
     #[arg(long, value_parser = clap::value_parser!(u8).range(0..=4))]
     pub priority: Option<u8>,
     /// Skip the ratatui workflow and update directly from CLI flags.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "render_once")]
     pub no_interactive: bool,
     /// Render the edit form once to an in-memory buffer and print the snapshot.
     #[arg(long, hide = true)]
@@ -1499,6 +1512,9 @@ pub struct IssueRefineArgs {
     /// Update the local backlog packet and push the final rewrite back to Linear.
     #[arg(long)]
     pub apply: bool,
+    /// Emit refinement results as JSON.
+    #[arg(long)]
+    pub json: bool,
     /// Override the configured default agent/provider for refinement.
     #[arg(long)]
     pub agent: Option<String>,
@@ -1682,4 +1698,200 @@ pub enum ConfigEventArg {
     BackTab,
     Enter,
     Esc,
+}
+
+impl Cli {
+    /// Infer the machine-output command from raw argv when clap parsing fails before dispatch.
+    pub(crate) fn machine_output_command_from_argv(args: &[OsString]) -> Option<&'static str> {
+        let tokens = args
+            .iter()
+            .skip(1)
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        infer_machine_output_command(&tokens)
+    }
+
+    pub(crate) fn machine_output_command(&self) -> Option<&'static str> {
+        match &self.command {
+            Command::Backlog(args) => match &args.command {
+                BacklogCommands::Plan(args) if args.no_interactive => Some("backlog.plan"),
+                BacklogCommands::Tech(args) if args.no_interactive => Some("backlog.tech"),
+                BacklogCommands::Sync(args) if args.no_interactive || args.json => {
+                    Some("backlog.sync")
+                }
+                _ => None,
+            },
+            Command::Agents(args) => match &args.command {
+                AgentsCommands::Listen(args) if args.run.json => Some("agents.listen"),
+                _ => None,
+            },
+            Command::Linear(args) => match &args.command {
+                LinearCommands::Projects(ProjectsCommands::List(args)) if args.json => {
+                    Some("linear.projects.list")
+                }
+                LinearCommands::Issues(command) => match command {
+                    IssueCommands::List(args) if args.json => Some("linear.issues.list"),
+                    IssueCommands::Create(args) if args.no_interactive => {
+                        Some("linear.issues.create")
+                    }
+                    IssueCommands::Edit(args) if args.no_interactive => Some("linear.issues.edit"),
+                    IssueCommands::Refine(args) if args.json => Some("linear.issues.refine"),
+                    _ => None,
+                },
+                _ => None,
+            },
+            Command::Context(args) => match &args.command {
+                ContextCommands::Scan(args) if args.json => Some("context.scan"),
+                _ => None,
+            },
+            Command::Runtime(args) => match &args.command {
+                RuntimeCommands::Config(args) if args.json => Some("runtime.config"),
+                RuntimeCommands::Setup(args) if args.json => Some("runtime.setup"),
+                RuntimeCommands::Cron(args) => match &args.command {
+                    CronCommands::Init(args) if args.no_interactive || args.json => {
+                        Some("runtime.cron.init")
+                    }
+                    _ => None,
+                },
+                _ => None,
+            },
+            Command::Merge(args) if args.json => Some("merge"),
+            Command::Plan(args) if args.no_interactive => Some("backlog.plan"),
+            Command::Technical(args) if args.no_interactive => Some("backlog.tech"),
+            Command::Listen(args) if args.run.json => Some("agents.listen"),
+            Command::Issues(args) => match &args.command {
+                IssueCommands::List(args) if args.json => Some("linear.issues.list"),
+                IssueCommands::Create(args) if args.no_interactive => Some("linear.issues.create"),
+                IssueCommands::Edit(args) if args.no_interactive => Some("linear.issues.edit"),
+                IssueCommands::Refine(args) if args.json => Some("linear.issues.refine"),
+                _ => None,
+            },
+            Command::Projects(args) => match &args.command {
+                ProjectsCommands::List(args) if args.json => Some("linear.projects.list"),
+                _ => None,
+            },
+            Command::Cron(args) => match &args.command {
+                CronCommands::Init(args) if args.no_interactive || args.json => {
+                    Some("runtime.cron.init")
+                }
+                _ => None,
+            },
+            Command::Scan(args) if args.json => Some("context.scan"),
+            Command::Config(args) if args.json => Some("runtime.config"),
+            Command::Setup(args) if args.json => Some("runtime.setup"),
+            Command::Sync(args) if args.no_interactive || args.json => Some("backlog.sync"),
+            _ => None,
+        }
+    }
+}
+
+fn infer_machine_output_command(tokens: &[String]) -> Option<&'static str> {
+    let (command, rest) = tokens.split_first()?;
+    match command.as_str() {
+        "backlog" => infer_backlog_machine_output(rest),
+        "agents" => infer_agents_machine_output(rest),
+        "linear" => infer_linear_machine_output(rest),
+        "context" => {
+            if matches_subcommand(rest, "scan") && has_flag(rest, "--json") {
+                Some("context.scan")
+            } else {
+                None
+            }
+        }
+        "runtime" => infer_runtime_machine_output(rest),
+        "merge" if has_flag(rest, "--json") => Some("merge"),
+        "plan" if has_flag(rest, "--no-interactive") => Some("backlog.plan"),
+        "technical" if has_flag(rest, "--no-interactive") => Some("backlog.tech"),
+        "listen" if has_flag(rest, "--json") => Some("agents.listen"),
+        "issues" => infer_issue_machine_output(rest),
+        "projects" => {
+            if matches_subcommand(rest, "list") && has_flag(rest, "--json") {
+                Some("linear.projects.list")
+            } else {
+                None
+            }
+        }
+        "cron" => infer_cron_init_machine_output(rest),
+        "scan" if has_flag(rest, "--json") => Some("context.scan"),
+        "config" if has_flag(rest, "--json") => Some("runtime.config"),
+        "setup" if has_flag(rest, "--json") => Some("runtime.setup"),
+        "sync" if has_flag(rest, "--json") || has_flag(rest, "--no-interactive") => {
+            Some("backlog.sync")
+        }
+        _ => None,
+    }
+}
+
+fn infer_backlog_machine_output(tokens: &[String]) -> Option<&'static str> {
+    let (command, rest) = tokens.split_first()?;
+    match command.as_str() {
+        "plan" if has_flag(rest, "--no-interactive") => Some("backlog.plan"),
+        "tech" | "split" | "derive" if has_flag(rest, "--no-interactive") => Some("backlog.tech"),
+        "sync" if has_flag(rest, "--json") || has_flag(rest, "--no-interactive") => {
+            Some("backlog.sync")
+        }
+        _ => None,
+    }
+}
+
+fn infer_agents_machine_output(tokens: &[String]) -> Option<&'static str> {
+    let (command, rest) = tokens.split_first()?;
+    match command.as_str() {
+        "listen" if has_flag(rest, "--json") => Some("agents.listen"),
+        _ => None,
+    }
+}
+
+fn infer_linear_machine_output(tokens: &[String]) -> Option<&'static str> {
+    let (command, rest) = tokens.split_first()?;
+    match command.as_str() {
+        "projects" => {
+            if matches_subcommand(rest, "list") && has_flag(rest, "--json") {
+                Some("linear.projects.list")
+            } else {
+                None
+            }
+        }
+        "issues" => infer_issue_machine_output(rest),
+        _ => None,
+    }
+}
+
+fn infer_issue_machine_output(tokens: &[String]) -> Option<&'static str> {
+    let (command, rest) = tokens.split_first()?;
+    match command.as_str() {
+        "list" if has_flag(rest, "--json") => Some("linear.issues.list"),
+        "create" if has_flag(rest, "--no-interactive") => Some("linear.issues.create"),
+        "edit" if has_flag(rest, "--no-interactive") => Some("linear.issues.edit"),
+        "refine" if has_flag(rest, "--json") => Some("linear.issues.refine"),
+        _ => None,
+    }
+}
+
+fn infer_runtime_machine_output(tokens: &[String]) -> Option<&'static str> {
+    let (command, rest) = tokens.split_first()?;
+    match command.as_str() {
+        "config" if has_flag(rest, "--json") => Some("runtime.config"),
+        "setup" if has_flag(rest, "--json") => Some("runtime.setup"),
+        "cron" => infer_cron_init_machine_output(rest),
+        _ => None,
+    }
+}
+
+fn infer_cron_init_machine_output(tokens: &[String]) -> Option<&'static str> {
+    if matches_subcommand(tokens, "init")
+        && (has_flag(tokens, "--json") || has_flag(tokens, "--no-interactive"))
+    {
+        Some("runtime.cron.init")
+    } else {
+        None
+    }
+}
+
+fn matches_subcommand(tokens: &[String], name: &str) -> bool {
+    matches!(tokens.first(), Some(token) if token == name)
+}
+
+fn has_flag(tokens: &[String], flag: &str) -> bool {
+    tokens.iter().any(|token| token == flag)
 }

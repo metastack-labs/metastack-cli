@@ -16,6 +16,30 @@ fn write_onboarded_config(
     Ok(())
 }
 
+fn assert_issue_mutation_output(
+    assert: &assert_cmd::assert::Assert,
+    expected_command: &str,
+    expected_identifier: &str,
+    expected_title: &str,
+    expected_state: &str,
+    expected_project: &str,
+    expected_team: &str,
+) {
+    let payload: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout)
+        .expect("issue mutation output should be valid JSON");
+
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["command"], expected_command);
+    assert_eq!(
+        payload["result"]["issue"]["identifier"],
+        expected_identifier
+    );
+    assert_eq!(payload["result"]["issue"]["title"], expected_title);
+    assert_eq!(payload["result"]["issue"]["state"], expected_state);
+    assert_eq!(payload["result"]["issue"]["project"], expected_project);
+    assert_eq!(payload["result"]["issue"]["team"], expected_team);
+}
+
 #[test]
 fn issues_commands_require_auth_when_not_in_demo_mode() {
     let temp = tempdir().expect("tempdir should build");
@@ -939,7 +963,7 @@ fn linear_issue_create_and_edit_work_against_a_mock_server() {
         }));
     });
 
-    cli()
+    let create_assert = cli()
         .current_dir(temp.path())
         .env("METASTACK_CONFIG", &config_path)
         .current_dir(temp.path())
@@ -966,10 +990,19 @@ fn linear_issue_create_and_edit_work_against_a_mock_server() {
             "1",
         ])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("Created issue: MET-13"));
+        .success();
 
-    cli()
+    assert_issue_mutation_output(
+        &create_assert,
+        "linear.issues.create",
+        "MET-13",
+        "Add docs",
+        "Todo",
+        "MetaStack CLI",
+        "MET",
+    );
+
+    let edit_assert = cli()
         .current_dir(temp.path())
         .env("METASTACK_CONFIG", &config_path)
         .current_dir(temp.path())
@@ -990,8 +1023,17 @@ fn linear_issue_create_and_edit_work_against_a_mock_server() {
             "In Progress",
         ])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("Updated issue: MET-11"));
+        .success();
+
+    assert_issue_mutation_output(
+        &edit_assert,
+        "linear.issues.edit",
+        "MET-11",
+        "CLI Foundation",
+        "In Progress",
+        "MetaStack CLI",
+        "MET",
+    );
 }
 
 #[test]
@@ -1177,13 +1219,24 @@ fn linear_issue_create_requires_title_for_non_interactive_mode() {
     let config_path = temp.path().join("metastack.toml");
     write_onboarded_config(&config_path, "").expect("config file should write");
 
-    cli()
+    let assert = cli()
         .current_dir(temp.path())
         .env("METASTACK_CONFIG", &config_path)
         .args(["issues", "--api-key", "token", "create", "--no-interactive"])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains("`--title` is required"));
+        .failure();
+
+    let payload: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout)
+        .expect("issue create failure should be valid JSON");
+    assert_eq!(payload["status"], "error");
+    assert_eq!(payload["command"], "linear.issues.create");
+    assert_eq!(payload["error"]["code"], "invalid_input");
+    assert!(
+        payload["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("`--title` is required")
+    );
 }
 
 #[test]
@@ -1371,7 +1424,7 @@ api_url = "{api_url}"
         }));
     });
 
-    cli()
+    let assert = cli()
         .current_dir(temp.path())
         .env_remove("LINEAR_API_KEY")
         .env("METASTACK_CONFIG", &config_path)
@@ -1388,8 +1441,17 @@ api_url = "{api_url}"
             "1",
         ])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("Created issue: MET-31"));
+        .success();
+
+    assert_issue_mutation_output(
+        &assert,
+        "linear.issues.create",
+        "MET-31",
+        "Use repo defaults",
+        "Todo",
+        "MetaStack CLI",
+        "MET",
+    );
 
     Ok(())
 }

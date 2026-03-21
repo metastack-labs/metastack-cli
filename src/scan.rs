@@ -7,6 +7,7 @@ use std::thread;
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, anyhow, bail};
+use serde::Serialize;
 use toml::Value;
 use walkdir::{DirEntry, WalkDir};
 
@@ -23,6 +24,7 @@ use crate::context::load_workflow_contract;
 use crate::fs::{
     FileWriteStatus, PlanningPaths, canonicalize_existing_dir, display_path, write_text_file,
 };
+use crate::output::render_json_success;
 use crate::repo_target::RepoTarget;
 use crate::scaffold::ensure_planning_layout;
 use crate::scan_dashboard::{ScanDashboard, ScanDashboardData, ScanDashboardRow, ScanItemState};
@@ -36,7 +38,7 @@ const STEP_WRITE_FACT_BASE: usize = 1;
 const STEP_REFRESH_DOCS: usize = 2;
 const STEP_VERIFY_OUTPUTS: usize = 3;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ScanReport {
     root: PathBuf,
     agent: String,
@@ -306,6 +308,11 @@ impl ScanReport {
         lines.push(format!("Agent log kept off-screen: {}", self.log_path));
 
         lines.join("\n")
+    }
+
+    /// Render the scan report in the standard machine-readable success envelope.
+    pub(crate) fn render_json(&self) -> Result<String> {
+        render_json_success("context.scan", self)
     }
 }
 

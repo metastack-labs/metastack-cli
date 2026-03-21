@@ -23,6 +23,7 @@ use crate::cron_dashboard::{
 use crate::fs::{
     PlanningPaths, canonicalize_existing_dir, display_path, ensure_dir, write_text_file,
 };
+use crate::output::render_json_success;
 
 const CRON_README: &str = r#"# Cron Jobs
 
@@ -170,7 +171,9 @@ fn run_init(root: &Path, args: &CronInitArgs) -> Result<String> {
         return match run_cron_init_form(CronInitFormContext { agent_options }, prefill, options)? {
             CronInitFormExit::Snapshot(snapshot) => Ok(snapshot),
             CronInitFormExit::Cancelled => Ok("Cancelled cron init.".to_string()),
-            CronInitFormExit::Submitted(values) => write_cron_job(root, values, args.force),
+            CronInitFormExit::Submitted(values) => {
+                write_cron_job(root, values, args.force, args.json)
+            }
         };
     }
 
@@ -186,7 +189,12 @@ fn run_init(root: &Path, args: &CronInitArgs) -> Result<String> {
         run_init_non_interactive(args, default_agent)?
     };
 
-    write_cron_job(root, values, interactive || args.force)
+    write_cron_job(
+        root,
+        values,
+        interactive || args.force,
+        args.no_interactive || args.json,
+    )
 }
 
 fn run_init_non_interactive(
@@ -253,7 +261,12 @@ fn run_init_non_interactive(
     })
 }
 
-fn write_cron_job(root: &Path, values: CronInitFormValues, force: bool) -> Result<String> {
+fn write_cron_job(
+    root: &Path,
+    values: CronInitFormValues,
+    force: bool,
+    json_output: bool,
+) -> Result<String> {
     let paths = PlanningPaths::new(root);
     let path = paths.cron_job_path(&values.name);
     let front_matter = CronJobFrontMatter {
@@ -269,13 +282,47 @@ fn write_cron_job(root: &Path, values: CronInitFormValues, force: bool) -> Resul
     let contents = render_job_markdown(&front_matter, values.prompt.as_deref())?;
     let status = write_text_file(&path, &contents, force)?;
 
+    let status_label = match status {
+        crate::fs::FileWriteStatus::Created => "created",
+        crate::fs::FileWriteStatus::Updated => "updated",
+        crate::fs::FileWriteStatus::Unchanged => "reused",
+    };
+
+    if json_output {
+        #[derive(Serialize)]
+        struct CronInitResult<'a> {
+            status: &'a str,
+            name: &'a str,
+            path: String,
+            schedule: &'a str,
+            enabled: bool,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            command: Option<String>,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            agent: Option<String>,
+        }
+
+        return render_json_success(
+            "runtime.cron.init",
+            &CronInitResult {
+                status: status_label,
+                name: &values.name,
+                path: display_path(&path, root),
+                schedule: &front_matter.schedule,
+                enabled: front_matter.enabled,
+                command: front_matter.command.clone(),
+                agent: front_matter.agent.clone(),
+            },
+        );
+    }
+
+    let prefix = match status_label {
+        "created" => "Created",
+        "updated" => "Updated",
+        _ => "Reused",
+    };
     Ok(format!(
-        "{} cron job template at {}",
-        match status {
-            crate::fs::FileWriteStatus::Created => "Created",
-            crate::fs::FileWriteStatus::Updated => "Updated",
-            crate::fs::FileWriteStatus::Unchanged => "Reused",
-        },
+        "{prefix} cron job template at {}",
         display_path(&path, root)
     ))
 }

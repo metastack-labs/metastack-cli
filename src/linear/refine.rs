@@ -16,6 +16,7 @@ use crate::config::AGENT_ROUTE_LINEAR_ISSUES_REFINE;
 use crate::fs::{
     PlanningPaths, canonicalize_existing_dir, display_path, ensure_dir, write_text_file,
 };
+use crate::output::render_json_success;
 use crate::repo_target::RepoTarget;
 use crate::scaffold::ensure_planning_layout;
 
@@ -120,7 +121,38 @@ pub(crate) async fn run_issue_refine_command(
         reports.push(report);
     }
 
-    println!("{}", render_refinement_reports(&root, &reports));
+    if args.json {
+        #[derive(Serialize)]
+        struct RefinementResult {
+            reports: Vec<RefinementJsonReport>,
+        }
+
+        #[derive(Serialize)]
+        struct RefinementJsonReport {
+            issue_identifier: String,
+            run_dir: String,
+            apply_requested: bool,
+        }
+
+        println!(
+            "{}",
+            render_json_success(
+                "linear.issues.refine",
+                &RefinementResult {
+                    reports: reports
+                        .iter()
+                        .map(|report| RefinementJsonReport {
+                            issue_identifier: report.issue_identifier.clone(),
+                            run_dir: display_path(&report.run_dir, &root),
+                            apply_requested: report.apply_requested,
+                        })
+                        .collect(),
+                },
+            )?
+        );
+    } else {
+        println!("{}", render_refinement_reports(&root, &reports));
+    }
     Ok(())
 }
 

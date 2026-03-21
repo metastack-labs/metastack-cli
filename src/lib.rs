@@ -16,6 +16,7 @@ mod listen;
 mod merge;
 mod merge_dashboard;
 mod onboarding;
+mod output;
 mod plan;
 mod progress;
 mod repo_target;
@@ -39,6 +40,7 @@ use std::ffi::OsString;
 
 use anyhow::{Result, bail};
 use clap::Parser;
+use clap::error::ErrorKind;
 
 use crate::backlog_improve::run_backlog_improve;
 use crate::cli::{
@@ -65,6 +67,7 @@ use crate::merge_dashboard::MergeDashboardAction;
 use crate::onboarding::{
     OnboardingLaunchMode, OnboardingOptions, OnboardingResult, run_onboarding,
 };
+use crate::output::{render_json_clap_error, render_json_error};
 use crate::plan::run_plan;
 use crate::scaffold::run_scaffold;
 use crate::scan::run_scan;
@@ -78,17 +81,54 @@ use crate::upgrade::run_upgrade;
 use crate::workflows::run_workflows;
 use crate::workspace::{run_workspace_clean, run_workspace_list, run_workspace_prune};
 
-pub async fn run() -> Result<()> {
+/// Run the MetaStack CLI with the current process arguments.
+///
+/// Returns the process exit code after rendering either human-readable output or structured
+/// machine-readable error payloads.
+pub async fn run() -> i32 {
     run_with_args(std::env::args_os()).await
 }
 
-pub async fn run_with_args<I, T>(args: I) -> Result<()>
+/// Run the MetaStack CLI with an explicit argument iterator.
+///
+/// Returns the process exit code after rendering either human-readable output or structured
+/// machine-readable error payloads.
+pub async fn run_with_args<I, T>(args: I) -> i32
 where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
-    let cli = Cli::parse_from(args);
-    dispatch(cli).await
+    let argv = args.into_iter().map(Into::into).collect::<Vec<OsString>>();
+    let inferred_machine_output_command = Cli::machine_output_command_from_argv(&argv);
+    let cli = match Cli::try_parse_from(&argv) {
+        Ok(cli) => cli,
+        Err(error) => {
+            if matches!(
+                error.kind(),
+                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
+            ) {
+                let _ = error.print();
+            } else if let Some(command) = inferred_machine_output_command {
+                println!("{}", render_json_clap_error(command, &error));
+            } else {
+                let _ = error.print();
+            }
+            return error.exit_code();
+        }
+    };
+    let machine_output_command = cli.machine_output_command();
+
+    match dispatch(cli).await {
+        Ok(()) => 0,
+        Err(error) => {
+            if let Some(command) = machine_output_command {
+                println!("{}", render_json_error(command, &error));
+            } else {
+                eprintln!("error: {error:#}");
+            }
+            1
+        }
+    }
 }
 
 async fn dispatch(cli: Cli) -> Result<()> {
@@ -109,13 +149,22 @@ async fn dispatch(cli: Cli) -> Result<()> {
         Command::Backlog(args) => match args.command {
             BacklogCommands::Plan(args) => {
                 let report = run_plan(&args).await?;
-                println!("{}", report.render());
+                if args.no_interactive {
+                    println!("{}", report.render_json()?);
+                } else {
+                    println!("{}", report.render());
+                }
             }
             BacklogCommands::Improve(args) => {
                 run_backlog_improve(&args).await?;
             }
             BacklogCommands::Tech(args) => {
-                run_technical(&args).await?;
+                let report = run_technical(&args).await?;
+                if args.no_interactive {
+                    println!("{}", report.render_json()?);
+                } else {
+                    println!("{}", report.render());
+                }
             }
             BacklogCommands::Sync(args) => match args.command {
                 Some(SyncCommands::Link(link_args)) => {
@@ -123,23 +172,27 @@ async fn dispatch(cli: Cli) -> Result<()> {
                         &args.client,
                         args.project.as_deref(),
                         args.no_interactive,
+                        args.json || args.no_interactive,
                         &link_args,
                     )
                     .await?;
                 }
                 Some(SyncCommands::Status(status_args)) => {
-                    run_sync_status(&args.client, &status_args).await?;
+                    run_sync_status(&args.client, args.json || args.no_interactive, &status_args)
+                        .await?;
                 }
                 Some(SyncCommands::Pull(issue_args)) => {
-                    run_sync_pull(&args.client, &issue_args).await?;
+                    run_sync_pull(&args.client, args.json || args.no_interactive, &issue_args)
+                        .await?;
                 }
                 Some(SyncCommands::Push(issue_args)) => {
-                    run_sync_push(&args.client, &issue_args).await?;
+                    run_sync_push(&args.client, args.json || args.no_interactive, &issue_args)
+                        .await?;
                 }
                 None => {
-                    if args.no_interactive {
+                    if args.no_interactive || args.json {
                         bail!(
-                            "`meta backlog sync --no-interactive` requires a subcommand such as `status`, `link`, `pull`, or `push`"
+                            "`meta backlog sync` requires a subcommand such as `status`, `link`, `pull`, or `push` when `--no-interactive` or `--json` is used"
                         );
                     }
                     run_sync_dashboard_command(
@@ -233,23 +286,39 @@ async fn dispatch(cli: Cli) -> Result<()> {
                         &args.sync.client,
                         args.sync.project.as_deref(),
                         args.sync.no_interactive,
+                        args.sync.json || args.sync.no_interactive,
                         &link_args,
                     )
                     .await?;
                 }
                 Some(SyncCommands::Status(status_args)) => {
-                    run_sync_status(&args.sync.client, &status_args).await?;
+                    run_sync_status(
+                        &args.sync.client,
+                        args.sync.json || args.sync.no_interactive,
+                        &status_args,
+                    )
+                    .await?;
                 }
                 Some(SyncCommands::Pull(issue_args)) => {
-                    run_sync_pull(&args.sync.client, &issue_args).await?;
+                    run_sync_pull(
+                        &args.sync.client,
+                        args.sync.json || args.sync.no_interactive,
+                        &issue_args,
+                    )
+                    .await?;
                 }
                 Some(SyncCommands::Push(issue_args)) => {
-                    run_sync_push(&args.sync.client, &issue_args).await?;
+                    run_sync_push(
+                        &args.sync.client,
+                        args.sync.json || args.sync.no_interactive,
+                        &issue_args,
+                    )
+                    .await?;
                 }
                 None => {
-                    if args.sync.no_interactive {
+                    if args.sync.no_interactive || args.sync.json {
                         bail!(
-                            "`meta dashboard ops --no-interactive` requires a subcommand such as `status`, `link`, `pull`, or `push`"
+                            "`meta dashboard ops` requires a subcommand such as `status`, `link`, `pull`, or `push` when `--no-interactive` or `--json` is used"
                         );
                     }
                     run_sync_dashboard_command(
@@ -306,7 +375,11 @@ async fn dispatch(cli: Cli) -> Result<()> {
         Command::Scan(args) => {
             print_compatibility_hint("meta scan", "meta context scan");
             let report = run_scan(&args)?;
-            println!("{}", report.render());
+            if args.json {
+                println!("{}", report.render_json()?);
+            } else {
+                println!("{}", report.render());
+            }
         }
         Command::Workflows(args) => {
             print_compatibility_hint("meta workflows", "meta agents workflows");
@@ -315,7 +388,11 @@ async fn dispatch(cli: Cli) -> Result<()> {
         Command::Plan(args) => {
             print_compatibility_hint("meta plan", "meta backlog plan");
             let report = run_plan(&args).await?;
-            println!("{}", report.render());
+            if args.no_interactive {
+                println!("{}", report.render_json()?);
+            } else {
+                println!("{}", report.render());
+            }
         }
         Command::Config(args) => {
             print_compatibility_hint("meta config", "meta runtime config");
@@ -354,7 +431,12 @@ async fn dispatch(cli: Cli) -> Result<()> {
         },
         Command::Technical(args) => {
             print_compatibility_hint("meta technical", "meta backlog tech");
-            run_technical(&args).await?;
+            let report = run_technical(&args).await?;
+            if args.no_interactive {
+                println!("{}", report.render_json()?);
+            } else {
+                println!("{}", report.render());
+            }
         }
         Command::Sync(args) => match args.command {
             Some(SyncCommands::Link(link_args)) => {
@@ -363,27 +445,29 @@ async fn dispatch(cli: Cli) -> Result<()> {
                     &args.client,
                     args.project.as_deref(),
                     args.no_interactive,
+                    args.json || args.no_interactive,
                     &link_args,
                 )
                 .await?;
             }
             Some(SyncCommands::Status(status_args)) => {
                 print_compatibility_hint("meta sync", "meta backlog sync");
-                run_sync_status(&args.client, &status_args).await?;
+                run_sync_status(&args.client, args.json || args.no_interactive, &status_args)
+                    .await?;
             }
             Some(SyncCommands::Pull(issue_args)) => {
                 print_compatibility_hint("meta sync", "meta backlog sync");
-                run_sync_pull(&args.client, &issue_args).await?;
+                run_sync_pull(&args.client, args.json || args.no_interactive, &issue_args).await?;
             }
             Some(SyncCommands::Push(issue_args)) => {
                 print_compatibility_hint("meta sync", "meta backlog sync");
-                run_sync_push(&args.client, &issue_args).await?;
+                run_sync_push(&args.client, args.json || args.no_interactive, &issue_args).await?;
             }
             None => {
                 print_compatibility_hint("meta sync", "meta backlog sync");
-                if args.no_interactive {
+                if args.no_interactive || args.json {
                     bail!(
-                        "`meta sync --no-interactive` requires a subcommand such as `status`, `link`, `pull`, or `push`"
+                        "`meta sync` requires a subcommand such as `status`, `link`, `pull`, or `push` when `--no-interactive` or `--json` is used"
                     );
                 }
                 run_sync_dashboard_command(

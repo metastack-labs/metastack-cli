@@ -65,6 +65,10 @@ Primary options:
   install-scoped listener store. Use `--project` with `inspect`, `clear`, or `resume` to target a
   non-default project from the same checkout, or `--project-key` when you already know the stored
   install-scoped key.
+- `listen sessions list` and `inspect` now show the latest tracked provider-native manual resume
+  metadata for built-in `codex` and `claude` workers. The dashboard keeps only the compact handle,
+  while these commands print the full latest resume ID and provider so operators can copy the
+  correct resume target directly.
 - `listen sessions clear` accepts an issue identifier, `--blocked`, `--completed`, `--stale`, or
   `--all`; it refuses to remove any targeted record whose stored PID is still alive.
 - Live dashboard keys: `Tab` toggles between active and completed sessions, `Left` selects active sessions, `Right` selects completed sessions, and `q` / `Ctrl-C` exits.
@@ -105,6 +109,10 @@ diagnostics and `METASTACK_AGENT_*` environment variables before the provider pr
 Structured built-in output is also parsed for token telemetry so persisted listen sessions and the
 dashboard can show cumulative `in`, `out`, and `total` counts when usage is available, while
 unsupported or missing counts still render as `n/a`.
+Listen-mode built-in launches also switch to machine-readable provider output so the worker can
+capture the latest provider-native resume target for the current turn. Codex uses
+`codex exec --json`, Claude uses `claude -p --verbose --output-format=stream-json`, and both
+capture paths are silent best effort with no backfill of older stored session records.
 
 ## Runtime Modules
 

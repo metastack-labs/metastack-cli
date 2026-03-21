@@ -765,6 +765,7 @@ mod tests {
             updated_at_epoch_seconds: updated_at,
             pid: None,
             session_id: Some(format!("session-{issue_identifier}")),
+            latest_resume_handle: None,
             turns: Some(1),
             tokens: TokenUsage::default(),
             log_path: Some(format!("logs/{issue_identifier}.log")),
@@ -906,7 +907,7 @@ mod tests {
             &store,
             vec![
                 default_session("ENG-10163", SessionPhase::Completed, now - ttl - 1),
-                default_session("ENG-10164", SessionPhase::Completed, now - ttl),
+                default_session("ENG-10164", SessionPhase::Completed, now - ttl + 5),
                 default_session("ENG-10165", SessionPhase::Blocked, now - ttl - 1),
             ],
         )?;

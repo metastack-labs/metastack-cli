@@ -624,7 +624,8 @@ fn listen_sessions_inspect_prunes_expired_completed_sessions_on_load() -> Result
 
 #[cfg(unix)]
 #[test]
-fn listen_sessions_inspect_reports_mixed_token_usage() -> Result<(), Box<dyn Error>> {
+fn listen_sessions_list_and_inspect_surface_resume_and_token_metadata() -> Result<(), Box<dyn Error>>
+{
     let _guard = listen_test_lock();
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
@@ -661,6 +662,10 @@ fn listen_sessions_inspect_reports_mixed_token_usage() -> Result<(), Box<dyn Err
                 "updated_at_epoch_seconds": 1_773_575_100u64,
                 "pid": 4242,
                 "session_id": "session-10181",
+                "latest_resume_handle": {
+                    "provider": "codex",
+                    "id": "019d0763-afc9-70d1-8022-51624918cf76"
+                },
                 "turns": 2,
                 "tokens": {
                     "input": 210,
@@ -693,6 +698,19 @@ fn listen_sessions_inspect_reports_mixed_token_usage() -> Result<(), Box<dyn Err
     meta()
         .current_dir(&repo_root)
         .env("METASTACK_CONFIG", &config_path)
+        .args(["listen", "sessions", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("PROVIDER"))
+        .stdout(predicate::str::contains("RESUME ID"))
+        .stdout(predicate::str::contains("codex"))
+        .stdout(predicate::str::contains(
+            "019d0763-afc9-70d1-8022-51624918cf76",
+        ));
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
         .args([
             "listen",
             "sessions",
@@ -704,6 +722,10 @@ fn listen_sessions_inspect_reports_mixed_token_usage() -> Result<(), Box<dyn Err
         .success()
         .stdout(predicate::str::contains("Latest session:"))
         .stdout(predicate::str::contains("  - Tokens: in 210 | out 34 | total 244"))
+        .stdout(predicate::str::contains("Resume provider: codex"))
+        .stdout(predicate::str::contains(
+            "Resume ID: 019d0763-afc9-70d1-8022-51624918cf76",
+        ))
         .stdout(predicate::str::contains(
             "  - ENG-10181 [Running] Token telemetry is flowing | tokens in 210 | out 34 | total 244",
         ))
@@ -903,6 +925,7 @@ if [ "$1" = "exec" ] && [ "$2" = "--help" ]; then
   cat <<'EOF'
 -m, --model <MODEL>
 -c, --config <key=value>
+    --json
 EOF
   exit 0
 fi
@@ -1127,6 +1150,7 @@ if [ "$1" = "exec" ] && [ "$2" = "--help" ]; then
   cat <<'EOF'
 -m, --model <MODEL>
 -c, --config <key=value>
+    --json
 EOF
   exit 0
 fi
@@ -1264,6 +1288,85 @@ fn agents_listen_matches_legacy_once_output() -> Result<(), Box<dyn Error>> {
         String::from_utf8(legacy.stdout)?,
         String::from_utf8(preferred.stdout)?
     );
+    Ok(())
+}
+
+#[test]
+fn listen_once_json_outputs_machine_readable_poll_result() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    write_onboarded_config(&config_path, "")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+
+    let assert = meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "agents",
+            "listen",
+            "--demo",
+            "--once",
+            "--json",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success();
+
+    let payload: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout)?;
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["command"], "agents.listen");
+    assert!(payload["result"]["title"].as_str().is_some());
+    assert!(payload["result"]["scope"].as_str().is_some());
+    assert!(payload["result"]["watch_scope"].as_str().is_some());
+    assert!(payload["result"]["cycle_summary"].as_str().is_some());
+    assert!(payload["result"]["sessions"].is_array());
+    assert!(payload["result"]["notes"].is_array());
+    assert!(payload["result"]["state_file"].as_str().is_some());
+    assert!(
+        payload["result"]["runtime"]["current_epoch_seconds"]
+            .as_u64()
+            .is_some()
+    );
+
+    Ok(())
+}
+
+#[test]
+fn listen_json_without_once_emits_structured_json_error() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let config_path = temp.path().join("metastack.toml");
+    write_onboarded_config(&config_path, "")?;
+
+    let assert = meta()
+        .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
+        .args(["agents", "listen", "--json"])
+        .assert()
+        .failure();
+
+    let payload: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout)?;
+    assert_eq!(payload["status"], "error");
+    assert_eq!(payload["command"], "agents.listen");
+    assert_eq!(payload["error"]["code"], "invalid_input");
+    assert_eq!(
+        payload["error"]["message"],
+        "`meta agents listen --json` requires `--once`"
+    );
+    assert!(assert.get_output().stderr.is_empty());
+
     Ok(())
 }
 
@@ -2037,7 +2140,11 @@ exit 0
                     "workpad_comment_id": "comment-40",
                     "updated_at_epoch_seconds": 1_773_575_000u64,
                     "pid": 4242,
-                    "session_id": "019cedb4-2293-7651-b0b4-dfac4af6a640-019cedb4-229b-7453-825e-3e3da4e1bf2a",
+                    "session_id": "issue-40",
+                    "latest_resume_handle": {
+                        "provider": "codex",
+                        "id": "019cedb4-2293-7651-b0b4-dfac4af6a640-019cedb4-229b-7453-825e-3e3da4e1bf2a"
+                    },
                     "turns": 3,
                     "tokens": {},
                     "log_path": ".metastack/agents/sessions/MET-40.log"
@@ -2060,7 +2167,11 @@ exit 0
                     "workpad_comment_id": "comment-41",
                     "updated_at_epoch_seconds": 1_773_574_900u64,
                     "pid": 4343,
-                    "session_id": "019ceda5-0a41-7ef1-bf96-4f26683c1570-019ceda5-0a57-7820-b050-c05e112d66dd",
+                    "session_id": "issue-41",
+                    "latest_resume_handle": {
+                        "provider": "claude",
+                        "id": "019ceda5-0a41-7ef1-bf96-4f26683c1570-019ceda5-0a57-7820-b050-c05e112d66dd"
+                    },
                     "turns": 4,
                     "tokens": {},
                     "log_path": ".metastack/agents/sessions/MET-41.log"
@@ -3952,6 +4063,7 @@ if [ "$1" = "-p" ] && [ "$2" = "--help" ]; then
 -p, --print
 --model <model>
 --effort <level>
+--verbose
 --output-format <format>
 --permission-mode <mode>
 EOF
@@ -3988,6 +4100,7 @@ if [ "$1" = "exec" ] && [ "$2" = "--help" ]; then
   cat <<'EOF'
 -m, --model <MODEL>
 -c, --config <key=value>
+    --json
 EOF
   exit 0
 fi
@@ -4228,6 +4341,8 @@ exit 99
 
     let args = fs::read_to_string(stub_dir.join("claude-args.txt"))?;
     assert!(args.contains("--permission-mode=bypassPermissions"));
+    assert!(args.contains("--verbose"));
+    assert!(args.contains("--output-format=stream-json"));
     assert!(args.contains("-p"));
     assert!(args.contains("--model=sonnet"));
     assert!(args.contains("--effort=high"));
@@ -4592,10 +4707,10 @@ printf '// turn %s\n' "$count" > "src/turn-$count.rs"
         .stdout(predicate::str::contains("1 claimed this cycle"))
         .stdout(predicate::str::contains("MET-32"));
 
-    wait_for_path_with_timeout(&stub_dir.join("payload-2.txt"), Duration::from_secs(120))?;
+    wait_for_path_with_timeout(&stub_dir.join("payload-2.txt"), Duration::from_secs(180))?;
     wait_for_path_with_timeout(
         &stub_dir.join("instructions-2.txt"),
-        Duration::from_secs(120),
+        Duration::from_secs(180),
     )?;
     let turn_count = fs::read_to_string(stub_dir.join("count.txt"))?
         .trim()

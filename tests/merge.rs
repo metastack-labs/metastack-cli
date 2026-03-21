@@ -411,15 +411,31 @@ fn merge_reports_repo_resolution_errors_from_gh() -> Result<(), Box<dyn Error>> 
     permissions.set_mode(0o755);
     fs::set_permissions(bin_dir.join("gh"), permissions)?;
 
-    cli()
+    let assert = cli()
         .current_dir(&repo_root)
         .env("METASTACK_CONFIG", &config_path)
         .env("PATH", prepend_path(&bin_dir)?)
         .args(["merge", "--json"])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains("gh repo view"))
-        .stderr(predicate::str::contains("gh auth missing"));
+        .failure();
+
+    let payload: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout)?;
+    assert_eq!(payload["status"], "error");
+    assert_eq!(payload["command"], "merge");
+    assert_eq!(payload["error"]["code"], "invalid_input");
+    assert!(
+        payload["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("gh repo view --json nameWithOwner,url,defaultBranchRef failed")
+    );
+    assert!(
+        payload["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("gh auth missing")
+    );
+    assert!(assert.get_output().stderr.is_empty());
 
     Ok(())
 }
@@ -443,18 +459,25 @@ fn merge_rejects_conflicting_execution_modes() -> Result<(), Box<dyn Error>> {
         "https://github.com/example/pull/999",
     )?;
 
-    cli()
+    let assert = cli()
         .current_dir(&repo_root)
         .env("METASTACK_CONFIG", &config_path)
         .env("PATH", prepend_path(&bin_dir)?)
         .args(["merge", "--json", "--render-once"])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "the argument '--json' cannot be used with '--render-once'",
-        ));
+        .failure();
 
-    cli()
+    let payload: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout)?;
+    assert_eq!(payload["status"], "error");
+    assert_eq!(payload["command"], "merge");
+    assert_eq!(payload["error"]["code"], "invalid_input");
+    assert_eq!(
+        payload["error"]["message"],
+        "the argument '--json' cannot be used with '--render-once'"
+    );
+    assert!(assert.get_output().stderr.is_empty());
+
+    let assert = cli()
         .current_dir(&repo_root)
         .env("METASTACK_CONFIG", &config_path)
         .env("PATH", prepend_path(&bin_dir)?)
@@ -466,10 +489,17 @@ fn merge_rejects_conflicting_execution_modes() -> Result<(), Box<dyn Error>> {
             "101",
         ])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "the argument '--json' cannot be used with '--no-interactive'",
-        ));
+        .failure();
+
+    let payload: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout)?;
+    assert_eq!(payload["status"], "error");
+    assert_eq!(payload["command"], "merge");
+    assert_eq!(payload["error"]["code"], "invalid_input");
+    assert_eq!(
+        payload["error"]["message"],
+        "the argument '--json' cannot be used with '--no-interactive'"
+    );
+    assert!(assert.get_output().stderr.is_empty());
 
     Ok(())
 }

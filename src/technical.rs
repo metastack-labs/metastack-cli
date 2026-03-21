@@ -23,7 +23,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use time::macros::format_description;
 use time::{OffsetDateTime, UtcOffset};
 
@@ -48,6 +48,7 @@ use crate::linear::{
     IssueCreateSpec, IssueListFilters, IssueSummary, PreparedIssueContext, TicketDiscussionBudgets,
     materialize_issue_context, prepare_issue_context, render_ticket_image_summary,
 };
+use crate::output::{MachineIssueSummary, render_json_success};
 use crate::progress::{LoadingPanelData, SPINNER_FRAMES, render_loading_panel};
 use crate::scaffold::{ensure_backlog_templates, ensure_planning_layout};
 use crate::sync_command::run_sync_push_for_issue;
@@ -170,12 +171,60 @@ enum InteractiveTechnicalExit {
     Confirmed(TechnicalGeneratedBacklog),
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct TechnicalReport {
+    child: Option<IssueSummary>,
+    parent: Option<IssueSummary>,
+    backlog_path: Option<String>,
+    cancelled: bool,
+}
+
+impl TechnicalReport {
+    pub(crate) fn render(&self) -> String {
+        if self.cancelled {
+            return "Technical generation cancelled.".to_string();
+        }
+
+        match (&self.child, &self.parent, self.backlog_path.as_deref()) {
+            (Some(child), Some(parent), Some(backlog_path)) => format!(
+                "Created technical sub-issue {} under {} at {}.",
+                child.identifier, parent.identifier, backlog_path,
+            ),
+            _ => "Technical generation completed.".to_string(),
+        }
+    }
+
+    /// Render the technical-generation result in the standard machine-readable success envelope.
+    pub(crate) fn render_json(&self) -> Result<String> {
+        #[derive(Serialize)]
+        struct TechnicalResult {
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            child_issue: Option<MachineIssueSummary>,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            parent_issue: Option<MachineIssueSummary>,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            backlog_path: Option<String>,
+            cancelled: bool,
+        }
+
+        render_json_success(
+            "backlog.tech",
+            &TechnicalResult {
+                child_issue: self.child.as_ref().map(MachineIssueSummary::from),
+                parent_issue: self.parent.as_ref().map(MachineIssueSummary::from),
+                backlog_path: self.backlog_path.clone(),
+                cancelled: self.cancelled,
+            },
+        )
+    }
+}
+
 /// Create a technical child issue, materialize its local backlog packet, and sync attachments.
 ///
 /// Returns an error when planning metadata is missing, the parent issue cannot be loaded,
 /// backlog generation fails, the Linear child issue cannot be created, or the initial child sync
 /// push cannot publish the generated managed files.
-pub async fn run_technical(args: &TechnicalArgs) -> Result<()> {
+pub async fn run_technical(args: &TechnicalArgs) -> Result<TechnicalReport> {
     let root = canonicalize_existing_dir(&args.client.root)?;
     let app_config = AppConfig::load()?;
     let planning_meta = load_required_planning_meta(&root, "technical")?;
@@ -220,8 +269,12 @@ pub async fn run_technical(args: &TechnicalArgs) -> Result<()> {
             discussion_budgets,
         )? {
             InteractiveTechnicalExit::Cancelled => {
-                println!("Technical generation cancelled.");
-                return Ok(());
+                return Ok(TechnicalReport {
+                    child: None,
+                    parent: None,
+                    backlog_path: None,
+                    cancelled: true,
+                });
             }
             InteractiveTechnicalExit::Confirmed(generated) => generated,
         }
@@ -301,16 +354,14 @@ pub async fn run_technical(args: &TechnicalArgs) -> Result<()> {
         },
     )?;
 
-    run_sync_push_for_issue(&root, &service, &child, &issue_dir).await?;
+    run_sync_push_for_issue(&root, &service, &child, &issue_dir, args.no_interactive).await?;
 
-    println!(
-        "Created technical sub-issue {} under {} at {}.",
-        child.identifier,
-        generated.parent.identifier,
-        display_path(&issue_dir, &root),
-    );
-
-    Ok(())
+    Ok(TechnicalReport {
+        child: Some(child),
+        parent: Some(generated.parent),
+        backlog_path: Some(display_path(&issue_dir, &root)),
+        cancelled: false,
+    })
 }
 
 fn run_interactive_technical_session(

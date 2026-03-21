@@ -19,6 +19,7 @@ use crate::linear::{
     IssueSummary, LinearService, ProjectListFilters, ReqwestLinearClient, render_issue_summary,
     render_issues_list_output, render_projects_table, run_issue_refine_command,
 };
+use crate::output::{MachineIssueSummary, render_json_success};
 
 pub(crate) async fn run_projects_command(
     client_args: &LinearClientArgs,
@@ -156,7 +157,20 @@ pub(crate) async fn run_issues_command(
                     })
                     .await?;
 
-                println!("{}", render_issue_summary("Created issue", &issue));
+                #[derive(serde::Serialize)]
+                struct IssueMutationResult {
+                    issue: MachineIssueSummary,
+                }
+
+                println!(
+                    "{}",
+                    render_json_success(
+                        "linear.issues.create",
+                        &IssueMutationResult {
+                            issue: MachineIssueSummary::from(&issue),
+                        },
+                    )?
+                );
             } else {
                 let selected_team = service
                     .load_issue_create_team(create_args.team.clone().or(default_team.clone()))
@@ -232,7 +246,20 @@ pub(crate) async fn run_issues_command(
                     })
                     .await?;
 
-                println!("{}", render_issue_summary("Updated issue", &issue));
+                #[derive(serde::Serialize)]
+                struct IssueMutationResult {
+                    issue: MachineIssueSummary,
+                }
+
+                println!(
+                    "{}",
+                    render_json_success(
+                        "linear.issues.edit",
+                        &IssueMutationResult {
+                            issue: MachineIssueSummary::from(&issue),
+                        },
+                    )?
+                );
             } else {
                 let edit_context = service.load_issue_edit_context(&edit_args.issue).await?;
                 let existing_issue = edit_context.issue;

@@ -265,6 +265,7 @@ fn render_sessions(
             Cell::from(session.pid_label()),
             Cell::from(session.age_label(data.runtime.current_epoch_seconds)),
             Cell::from(session.tokens_label()),
+            Cell::from(session.latest_resume_provider_label()),
             Cell::from(session.session_label()),
             Cell::from(session.summary.clone()),
         ])
@@ -275,6 +276,7 @@ fn render_sessions(
         Cell::from("PID"),
         Cell::from("AGE"),
         Cell::from("TOKENS"),
+        Cell::from("PROVIDER"),
         Cell::from("SESSION"),
         Cell::from("PROGRESS"),
     ])
@@ -284,20 +286,32 @@ fn render_sessions(
             .add_modifier(Modifier::BOLD),
     )
     .bottom_margin(1);
-    let table = Table::new(
-        rows,
-        [
+    let constraints = if inner.width >= 165 {
+        vec![
             Constraint::Length(10),
             Constraint::Length(13),
             Constraint::Length(8),
             Constraint::Length(10),
             Constraint::Length(44),
-            Constraint::Length(14),
-            Constraint::Min(8),
-        ],
-    )
-    .header(header)
-    .column_spacing(1);
+            Constraint::Length(8),
+            Constraint::Length(13),
+            Constraint::Min(24),
+        ]
+    } else {
+        vec![
+            Constraint::Length(9),
+            Constraint::Length(9),
+            Constraint::Length(8),
+            Constraint::Length(9),
+            Constraint::Length(16),
+            Constraint::Length(8),
+            Constraint::Length(13),
+            Constraint::Min(24),
+        ]
+    };
+    let table = Table::new(rows, constraints)
+        .header(header)
+        .column_spacing(1);
     frame.render_widget(table, sections[1]);
 }
 
@@ -465,6 +479,7 @@ mod tests {
         assert!(snapshot.contains("Agent Sessions"));
         assert!(snapshot.contains("Active (2)"));
         assert!(snapshot.contains("Completed (0)"));
+        assert!(snapshot.contains("PROVIDER"));
         assert!(snapshot.contains("SESSION"));
         assert!(snapshot.contains("PROGRESS"));
         assert!(snapshot.contains("MET-13"));

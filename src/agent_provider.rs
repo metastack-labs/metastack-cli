@@ -449,6 +449,8 @@ impl BuiltinProviderAdapter for ClaudeProviderAdapter {
         let mut args = Vec::new();
         if context == BuiltinInvocationContext::Listen {
             args.push("--permission-mode=bypassPermissions".to_string());
+            args.push("--verbose".to_string());
+            args.push("--output-format=stream-json".to_string());
         }
         let prompt_arg = if transport == PromptTransport::Arg {
             launch_args.last().cloned()
@@ -497,6 +499,11 @@ impl BuiltinProviderAdapter for ClaudeProviderAdapter {
                     command_args.iter().any(|arg| arg.starts_with("--effort=")),
                     "effort flags",
                     &[FlagSupport::new("--effort", &["--effort <level>"])][..],
+                ),
+                (
+                    command_args.iter().any(|arg| arg == "--verbose"),
+                    "verbose flags",
+                    &[FlagSupport::new("--verbose", &["--verbose"])][..],
                 ),
                 (
                     command_args

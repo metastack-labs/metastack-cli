@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::Utc;
+use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::backlog::{
@@ -23,6 +24,7 @@ use crate::linear::{
     ProjectRef, ReqwestLinearClient, TeamRef, TicketDiscussionBudgets, WorkflowState,
     materialize_issue_context, prepare_issue_context,
 };
+use crate::output::{MachineIssueSummary, render_json_success};
 use crate::scaffold::ensure_planning_layout;
 use crate::sync_dashboard::{
     SyncDashboardData, SyncDashboardExit, SyncDashboardIssue, SyncDashboardOptions,
@@ -47,6 +49,15 @@ struct BacklogSyncEntry {
 enum SyncExecutionOutcome {
     Synced,
     Skipped,
+}
+
+impl SyncExecutionOutcome {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Synced => "synced",
+            Self::Skipped => "skipped",
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -119,6 +130,7 @@ pub async fn run_sync_dashboard_command(
             SyncSelectionAction::Pull => {
                 run_sync_pull(
                     client_args,
+                    false,
                     &SyncPullArgs {
                         issue: Some(selection.issue_identifier),
                         all: false,
@@ -129,6 +141,7 @@ pub async fn run_sync_dashboard_command(
             SyncSelectionAction::Push => {
                 run_sync_push(
                     client_args,
+                    false,
                     &SyncPushArgs {
                         issue: Some(selection.issue_identifier),
                         all: false,
@@ -284,6 +297,7 @@ pub async fn run_sync_link(
     client_args: &LinearClientArgs,
     project_override: Option<&str>,
     no_interactive: bool,
+    json_output: bool,
     args: &SyncLinkArgs,
 ) -> Result<()> {
     let root = canonicalize_existing_dir(&client_args.root)?;
@@ -336,15 +350,20 @@ pub async fn run_sync_link(
                 &issue_dir,
                 discussion_budgets,
                 false,
+                json_output,
             )
             .await?;
+            if json_output {
+                emit_sync_link_result(true, &issue, display_path(&issue_dir, &root), true, true)?;
+            }
         } else {
-            println!(
-                "{} is already linked to {} at {}.",
+            emit_sync_link_result(
+                json_output,
+                &issue,
                 display_path(&issue_dir, &root),
-                issue.identifier,
-                display_path(&issue_dir, &root),
-            );
+                args.pull,
+                true,
+            )?;
         }
         return Ok(());
     }
@@ -362,14 +381,20 @@ pub async fn run_sync_link(
             &issue_dir,
             discussion_budgets,
             false,
+            json_output,
         )
         .await?;
+        if json_output {
+            emit_sync_link_result(true, &issue, display_path(&issue_dir, &root), true, false)?;
+        }
     } else {
-        println!(
-            "Linked {} to {}.",
+        emit_sync_link_result(
+            json_output,
+            &issue,
             display_path(&issue_dir, &root),
-            issue.identifier,
-        );
+            args.pull,
+            false,
+        )?;
     }
 
     Ok(())
@@ -379,13 +404,34 @@ pub async fn run_sync_link(
 ///
 /// Returns an error when planning metadata is missing, backlog entries cannot be scanned, or
 /// `--fetch` is used and Linear issue state cannot be loaded.
-pub async fn run_sync_status(client_args: &LinearClientArgs, args: &SyncStatusArgs) -> Result<()> {
+pub async fn run_sync_status(
+    client_args: &LinearClientArgs,
+    json_output: bool,
+    args: &SyncStatusArgs,
+) -> Result<()> {
     let root = canonicalize_existing_dir(&client_args.root)?;
     let _planning_meta = load_required_planning_meta(&root, "sync")?;
     let entries = discover_backlog_entries(&root)?;
 
     if entries.is_empty() {
-        println!("No backlog entries found under .metastack/backlog/.");
+        #[derive(Serialize)]
+        struct SyncStatusResult<T> {
+            entries: Vec<T>,
+        }
+
+        if json_output {
+            println!(
+                "{}",
+                render_json_success(
+                    "backlog.sync",
+                    &SyncStatusResult::<String> {
+                        entries: Vec::new()
+                    },
+                )?
+            );
+        } else {
+            println!("No backlog entries found under .metastack/backlog/.");
+        }
         return Ok(());
     }
 
@@ -395,7 +441,16 @@ pub async fn run_sync_status(client_args: &LinearClientArgs, args: &SyncStatusAr
         None
     };
 
+    #[derive(Serialize)]
+    struct SyncStatusRow {
+        identifier: String,
+        title: String,
+        status: String,
+        last_sync_at: String,
+    }
+
     let mut rows = Vec::new();
+    let mut json_rows = Vec::new();
     for entry in entries {
         let (identifier, title, status) = if let Some(metadata) = entry.metadata.as_ref() {
             if let Some(service) = maybe_service.as_ref() {
@@ -438,22 +493,42 @@ pub async fn run_sync_status(client_args: &LinearClientArgs, args: &SyncStatusAr
             )
         };
 
+        let last_sync_at = entry
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.last_sync_at.clone())
+            .unwrap_or_else(|| "-".to_string());
+
         rows.push(vec![
+            identifier.clone(),
+            title.clone(),
+            status.clone(),
+            last_sync_at.clone(),
+        ]);
+        json_rows.push(SyncStatusRow {
             identifier,
             title,
             status,
-            entry
-                .metadata
-                .as_ref()
-                .and_then(|metadata| metadata.last_sync_at.clone())
-                .unwrap_or_else(|| "-".to_string()),
-        ]);
+            last_sync_at,
+        });
     }
 
-    println!(
-        "{}",
-        render_table(&["Identifier", "Title", "Status", "Last Sync"], &rows)
-    );
+    if json_output {
+        #[derive(Serialize)]
+        struct SyncStatusResult {
+            entries: Vec<SyncStatusRow>,
+        }
+
+        println!(
+            "{}",
+            render_json_success("backlog.sync", &SyncStatusResult { entries: json_rows })?
+        );
+    } else {
+        println!(
+            "{}",
+            render_table(&["Identifier", "Title", "Status", "Last Sync"], &rows)
+        );
+    }
     Ok(())
 }
 
@@ -461,7 +536,11 @@ pub async fn run_sync_status(client_args: &LinearClientArgs, args: &SyncStatusAr
 ///
 /// Returns an error when planning metadata is missing, the requested issue cannot be resolved,
 /// local backlog paths cannot be prepared, or overwrite safeguards block the pull.
-pub async fn run_sync_pull(client_args: &LinearClientArgs, args: &SyncPullArgs) -> Result<()> {
+pub async fn run_sync_pull(
+    client_args: &LinearClientArgs,
+    json_output: bool,
+    args: &SyncPullArgs,
+) -> Result<()> {
     let root = canonicalize_existing_dir(&client_args.root)?;
     let planning_meta = load_required_planning_meta(&root, "sync")?;
     let discussion_budgets = resolve_ticket_discussion_budgets(&planning_meta);
@@ -469,7 +548,7 @@ pub async fn run_sync_pull(client_args: &LinearClientArgs, args: &SyncPullArgs) 
     let LinearCommandContext { service, .. } = load_linear_command_context(client_args, None)?;
 
     if args.all {
-        return run_sync_pull_all(&root, &service, discussion_budgets).await;
+        return run_sync_pull_all(&root, &service, discussion_budgets, json_output).await;
     }
 
     let issue_identifier = args
@@ -480,15 +559,23 @@ pub async fn run_sync_pull(client_args: &LinearClientArgs, args: &SyncPullArgs) 
     let entries = discover_backlog_entries(&root)?;
     let issue_dir = resolve_issue_dir_for_identifier(&root, &entries, &issue.identifier)?;
     ensure_dir(&issue_dir)?;
-    let _ = sync_pull_issue(
+    let outcome = sync_pull_issue(
         &root,
         &service,
         &issue,
         &issue_dir,
         discussion_budgets,
         false,
+        json_output,
     )
     .await?;
+    emit_sync_issue_result(
+        json_output,
+        "pull",
+        &issue,
+        display_path(&issue_dir, &root),
+        outcome,
+    )?;
     Ok(())
 }
 
@@ -496,14 +583,18 @@ pub async fn run_sync_pull(client_args: &LinearClientArgs, args: &SyncPullArgs) 
 ///
 /// Returns an error when planning metadata is missing, the requested issue cannot be resolved,
 /// required local files are missing, or the description overwrite safeguards reject the push.
-pub async fn run_sync_push(client_args: &LinearClientArgs, args: &SyncPushArgs) -> Result<()> {
+pub async fn run_sync_push(
+    client_args: &LinearClientArgs,
+    json_output: bool,
+    args: &SyncPushArgs,
+) -> Result<()> {
     let root = canonicalize_existing_dir(&client_args.root)?;
     let _planning_meta = load_required_planning_meta(&root, "sync")?;
     ensure_planning_layout(&root, false)?;
     let LinearCommandContext { service, .. } = load_linear_command_context(client_args, None)?;
 
     if args.all {
-        return run_sync_push_all(&root, &service, args.update_description).await;
+        return run_sync_push_all(&root, &service, args.update_description, json_output).await;
     }
 
     let issue_identifier = args
@@ -516,15 +607,23 @@ pub async fn run_sync_push(client_args: &LinearClientArgs, args: &SyncPushArgs) 
     let issue = service.load_issue(issue_identifier).await?;
     let entries = discover_backlog_entries(&root)?;
     let issue_dir = resolve_issue_dir_for_identifier(&root, &entries, &issue.identifier)?;
-    let _ = sync_push_issue(
+    let outcome = sync_push_issue(
         &root,
         &service,
         &issue,
         &issue_dir,
         args.update_description,
         false,
+        json_output,
     )
     .await?;
+    emit_sync_issue_result(
+        json_output,
+        "push",
+        &issue,
+        display_path(&issue_dir, &root),
+        outcome,
+    )?;
     Ok(())
 }
 
@@ -537,8 +636,18 @@ pub(crate) async fn run_sync_push_for_issue(
     service: &LinearService<ReqwestLinearClient>,
     issue: &IssueSummary,
     issue_dir: &Path,
+    machine_output: bool,
 ) -> Result<()> {
-    let _ = sync_push_issue(root, service, issue, issue_dir, false, false).await?;
+    let _ = sync_push_issue(
+        root,
+        service,
+        issue,
+        issue_dir,
+        false,
+        false,
+        machine_output,
+    )
+    .await?;
     Ok(())
 }
 
@@ -565,18 +674,23 @@ async fn run_sync_pull_all(
     root: &Path,
     service: &LinearService<ReqwestLinearClient>,
     discussion_budgets: TicketDiscussionBudgets,
+    json_output: bool,
 ) -> Result<()> {
     let entries = discover_backlog_entries(root)?;
     let linked_entries = entries
         .into_iter()
         .filter(|entry| entry.metadata.is_some())
         .collect::<Vec<_>>();
+    let mut summary = BatchSyncSummary::default();
     if linked_entries.is_empty() {
-        println!("No linked backlog entries found under .metastack/backlog/.");
+        if json_output {
+            emit_sync_batch_result(json_output, "pull", &summary)?;
+        } else {
+            println!("No linked backlog entries found under .metastack/backlog/.");
+        }
         return Ok(());
     }
 
-    let mut summary = BatchSyncSummary::default();
     for entry in linked_entries {
         let metadata = entry
             .metadata
@@ -590,6 +704,7 @@ async fn run_sync_pull_all(
                 &entry.issue_dir,
                 discussion_budgets,
                 true,
+                json_output,
             )
             .await
             {
@@ -615,18 +730,18 @@ async fn run_sync_pull_all(
         }
     }
 
-    println!(
-        "Pull summary: {} synced, {} skipped, {} errors.",
-        summary.synced, summary.skipped, summary.errors
-    );
-
     if summary.errors > 0 {
+        if !json_output {
+            emit_sync_batch_result(false, "pull", &summary)?;
+        }
         bail!(
             "`meta backlog sync pull --all` completed with {} error{}",
             summary.errors,
             plural_suffix(summary.errors),
         );
     }
+
+    emit_sync_batch_result(json_output, "pull", &summary)?;
 
     Ok(())
 }
@@ -635,18 +750,23 @@ async fn run_sync_push_all(
     root: &Path,
     service: &LinearService<ReqwestLinearClient>,
     update_description: bool,
+    json_output: bool,
 ) -> Result<()> {
     let entries = discover_backlog_entries(root)?;
     let linked_entries = entries
         .into_iter()
         .filter(|entry| entry.metadata.is_some())
         .collect::<Vec<_>>();
+    let mut summary = BatchSyncSummary::default();
     if linked_entries.is_empty() {
-        println!("No linked backlog entries found under .metastack/backlog/.");
+        if json_output {
+            emit_sync_batch_result(json_output, "push", &summary)?;
+        } else {
+            println!("No linked backlog entries found under .metastack/backlog/.");
+        }
         return Ok(());
     }
 
-    let mut summary = BatchSyncSummary::default();
     for entry in linked_entries {
         let metadata = entry
             .metadata
@@ -673,6 +793,7 @@ async fn run_sync_push_all(
                     &entry.issue_dir,
                     update_description,
                     true,
+                    json_output,
                 )
                 .await
                 {
@@ -699,18 +820,18 @@ async fn run_sync_push_all(
         }
     }
 
-    println!(
-        "Push summary: {} synced, {} skipped, {} errors.",
-        summary.synced, summary.skipped, summary.errors
-    );
-
     if summary.errors > 0 {
+        if !json_output {
+            emit_sync_batch_result(false, "push", &summary)?;
+        }
         bail!(
             "`meta backlog sync push --all` completed with {} error{}",
             summary.errors,
             plural_suffix(summary.errors),
         );
     }
+
+    emit_sync_batch_result(json_output, "push", &summary)?;
 
     Ok(())
 }
@@ -722,6 +843,7 @@ async fn sync_pull_issue(
     issue_dir: &Path,
     discussion_budgets: TicketDiscussionBudgets,
     skip_if_synced: bool,
+    machine_output: bool,
 ) -> Result<SyncExecutionOutcome> {
     ensure_dir(issue_dir)?;
     let issue_for_pull = issue_with_sync_visible_comments(issue);
@@ -762,10 +884,12 @@ async fn sync_pull_issue(
 
         if io::stdin().is_terminal() && io::stdout().is_terminal() {
             if !prompt_pull_overwrite(&issue.identifier, resolution.status, &diff)? {
-                println!(
-                    "Canceled pull for {}. Local backlog files and hash baselines were left unchanged.",
-                    issue.identifier
-                );
+                if !machine_output {
+                    println!(
+                        "Canceled pull for {}. Local backlog files and hash baselines were left unchanged.",
+                        issue.identifier
+                    );
+                }
                 return Ok(SyncExecutionOutcome::Skipped);
             }
         } else {
@@ -834,27 +958,29 @@ async fn sync_pull_issue(
         ),
     )?;
 
-    println!(
-        "Pulled {} into {} (restored {} managed attachment file{}; rebuilt discussion context with {} comment{} and {} image{}).",
-        issue.identifier,
-        display_path(issue_dir, root),
-        issue
-            .attachments
-            .iter()
-            .filter(|attachment| managed_attachment_path(&attachment.metadata).is_some())
-            .count(),
-        plural_suffix(
+    if !machine_output {
+        println!(
+            "Pulled {} into {} (restored {} managed attachment file{}; rebuilt discussion context with {} comment{} and {} image{}).",
+            issue.identifier,
+            display_path(issue_dir, root),
             issue
                 .attachments
                 .iter()
                 .filter(|attachment| managed_attachment_path(&attachment.metadata).is_some())
-                .count()
-        ),
-        issue_for_pull.comments.len(),
-        plural_suffix(issue_for_pull.comments.len()),
-        prepared_context.images.len(),
-        plural_suffix(prepared_context.images.len()),
-    );
+                .count(),
+            plural_suffix(
+                issue
+                    .attachments
+                    .iter()
+                    .filter(|attachment| managed_attachment_path(&attachment.metadata).is_some())
+                    .count()
+            ),
+            issue_for_pull.comments.len(),
+            plural_suffix(issue_for_pull.comments.len()),
+            prepared_context.images.len(),
+            plural_suffix(prepared_context.images.len()),
+        );
+    }
 
     Ok(SyncExecutionOutcome::Synced)
 }
@@ -866,6 +992,7 @@ async fn sync_push_issue(
     issue_dir: &Path,
     update_description: bool,
     skip_if_synced: bool,
+    machine_output: bool,
 ) -> Result<SyncExecutionOutcome> {
     if !issue_dir.is_dir() {
         bail!(
@@ -1029,20 +1156,23 @@ async fn sync_push_issue(
     }
     save_issue_metadata(issue_dir, &updated_metadata)?;
 
-    println!(
-        "Pushed {} from {} (synced {} managed attachment file{}; {}; {}).",
-        issue.identifier,
-        display_path(issue_dir, root),
-        local_path_count,
-        plural_suffix(local_path_count),
-        if update_description {
-            "updated Linear issue description from index.md"
-        } else {
-            "left the Linear issue description unchanged; pass --update-description to send index.md"
-        },
-        progress_comment_status
-            .unwrap_or("skipped [harness-sync] progress comment because checklist.md is missing"),
-    );
+    if !machine_output {
+        println!(
+            "Pushed {} from {} (synced {} managed attachment file{}; {}; {}).",
+            issue.identifier,
+            display_path(issue_dir, root),
+            local_path_count,
+            plural_suffix(local_path_count),
+            if update_description {
+                "updated Linear issue description from index.md"
+            } else {
+                "left the Linear issue description unchanged; pass --update-description to send index.md"
+            },
+            progress_comment_status.unwrap_or(
+                "skipped [harness-sync] progress comment because checklist.md is missing",
+            ),
+        );
+    }
 
     Ok(SyncExecutionOutcome::Synced)
 }
@@ -1496,6 +1626,115 @@ fn upload_name(relative_path: &str) -> String {
 
 fn plural_suffix(count: usize) -> &'static str {
     if count == 1 { "" } else { "s" }
+}
+
+fn emit_sync_link_result(
+    json_output: bool,
+    issue: &IssueSummary,
+    backlog_path: String,
+    pulled: bool,
+    already_linked: bool,
+) -> Result<()> {
+    if json_output {
+        #[derive(Serialize)]
+        struct SyncLinkResult {
+            issue: MachineIssueSummary,
+            backlog_path: String,
+            pulled: bool,
+            already_linked: bool,
+        }
+
+        println!(
+            "{}",
+            render_json_success(
+                "backlog.sync",
+                &SyncLinkResult {
+                    issue: MachineIssueSummary::from(issue),
+                    backlog_path,
+                    pulled,
+                    already_linked,
+                },
+            )?
+        );
+    } else if already_linked {
+        println!(
+            "{backlog_path} is already linked to {} at {backlog_path}.",
+            issue.identifier
+        );
+    } else {
+        println!("Linked {backlog_path} to {}.", issue.identifier);
+    }
+
+    Ok(())
+}
+
+fn emit_sync_issue_result(
+    json_output: bool,
+    action: &'static str,
+    issue: &IssueSummary,
+    backlog_path: String,
+    outcome: SyncExecutionOutcome,
+) -> Result<()> {
+    if json_output {
+        #[derive(Serialize)]
+        struct SyncIssueResult {
+            action: &'static str,
+            status: &'static str,
+            issue: MachineIssueSummary,
+            backlog_path: String,
+        }
+
+        println!(
+            "{}",
+            render_json_success(
+                "backlog.sync",
+                &SyncIssueResult {
+                    action,
+                    status: outcome.label(),
+                    issue: MachineIssueSummary::from(issue),
+                    backlog_path,
+                },
+            )?
+        );
+    }
+
+    Ok(())
+}
+
+fn emit_sync_batch_result(
+    json_output: bool,
+    action: &'static str,
+    summary: &BatchSyncSummary,
+) -> Result<()> {
+    if json_output {
+        #[derive(Serialize)]
+        struct SyncBatchResult {
+            action: &'static str,
+            synced: usize,
+            skipped: usize,
+            errors: usize,
+        }
+
+        println!(
+            "{}",
+            render_json_success(
+                "backlog.sync",
+                &SyncBatchResult {
+                    action,
+                    synced: summary.synced,
+                    skipped: summary.skipped,
+                    errors: summary.errors,
+                },
+            )?
+        );
+    } else {
+        println!(
+            "{} summary: {} synced, {} skipped, {} errors.",
+            action, summary.synced, summary.skipped, summary.errors
+        );
+    }
+
+    Ok(())
 }
 
 fn load_issue_metadata_if_present(issue_dir: &Path) -> Result<Option<BacklogIssueMetadata>> {

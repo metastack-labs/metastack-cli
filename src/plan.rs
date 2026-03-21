@@ -50,6 +50,7 @@ use crate::fs::{PlanningPaths, canonicalize_existing_dir};
 use crate::linear::{
     IssueCreateSpec, IssueEditSpec, IssueSummary, LinearService, ReqwestLinearClient,
 };
+use crate::output::{MachineIssueSummary, render_json_success};
 use crate::progress::{LoadingPanelData, SPINNER_FRAMES, render_loading_panel};
 use crate::scaffold::ensure_planning_layout;
 use crate::text_diff::render_text_diff;
@@ -480,7 +481,7 @@ pub async fn run_plan(args: &PlanArgs) -> Result<PlanReport> {
 }
 
 impl PlanReport {
-    pub fn render(&self) -> String {
+    pub(crate) fn render(&self) -> String {
         match self {
             Self::Cancelled => "Planning canceled.".to_string(),
             Self::Created { issues } => {
@@ -493,6 +494,53 @@ impl PlanReport {
             Self::Reshaped { identifier, url } => {
                 format!("Reshaped {identifier} in place: {url}")
             }
+        }
+    }
+
+    /// Render the planning result in the standard machine-readable success envelope.
+    pub(crate) fn render_json(&self) -> Result<String> {
+        #[derive(Serialize)]
+        struct PlanCreatedResult {
+            mode: &'static str,
+            issues: Vec<MachineIssueSummary>,
+        }
+
+        #[derive(Serialize)]
+        struct PlanReshapedResult<'a> {
+            mode: &'static str,
+            identifier: &'a str,
+            url: &'a str,
+        }
+
+        #[derive(Serialize)]
+        struct PlanCancelledResult {
+            mode: &'static str,
+            cancelled: bool,
+        }
+
+        match self {
+            Self::Cancelled => render_json_success(
+                "backlog.plan",
+                &PlanCancelledResult {
+                    mode: "cancelled",
+                    cancelled: true,
+                },
+            ),
+            Self::Created { issues } => render_json_success(
+                "backlog.plan",
+                &PlanCreatedResult {
+                    mode: "created",
+                    issues: issues.iter().map(MachineIssueSummary::from).collect(),
+                },
+            ),
+            Self::Reshaped { identifier, url } => render_json_success(
+                "backlog.plan",
+                &PlanReshapedResult {
+                    mode: "reshaped",
+                    identifier,
+                    url,
+                },
+            ),
         }
     }
 }

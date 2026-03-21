@@ -24,6 +24,7 @@ use crossterm::terminal::{
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use serde::Serialize;
 use serde_json::Value;
 use walkdir::WalkDir;
 
@@ -47,8 +48,11 @@ use crate::linear::{
 };
 use crate::listen::workpad::{extract_requirements, render_bootstrap_workpad};
 use crate::listen::workspace::{TicketWorkspace, ensure_ticket_workspace};
+use crate::output::render_json_success;
 use crate::scaffold::ensure_planning_layout;
-pub use state::{AgentSession, PendingIssue, SessionPhase, TokenUsage};
+pub use state::{
+    AgentSession, LatestResumeHandle, PendingIssue, ResumeProvider, SessionPhase, TokenUsage,
+};
 use state::{COMPLETED_SESSION_TTL_SECONDS, ListenState};
 use store::{
     ListenProjectStore, SessionSelector, StoredListenProjectSummary, pid_is_running,
@@ -67,7 +71,7 @@ const DEMO_NOW_EPOCH_SECONDS: u64 = 1_773_575_600;
 const DEMO_START_EPOCH_SECONDS: u64 = DEMO_NOW_EPOCH_SECONDS - 7_351;
 const REVIEW_STATE_CANDIDATES: &[&str] =
     &["Human Review", "In Review", "Review", "Ready for Review"];
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ListenDashboardData {
     pub title: String,
     pub scope: String,
@@ -136,7 +140,7 @@ impl ListenDashboardData {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ListenRuntimeSummary {
     pub agents: String,
     pub throughput: String,
@@ -259,10 +263,14 @@ impl ListenCycleData {
                     workpad_comment_id: Some("comment-met-13".to_string()),
                     updated_at_epoch_seconds: reference_now - 1_180,
                     pid: Some(95_388),
-                    session_id: Some(
-                        "019cedb4-2293-7651-b0b4-dfac4af6a640-019cedb4-229b-7453-825e-3e3da4e1bf2a"
+                    session_id: Some("019cedb422937651b0b4dfac4af6a640".to_string()),
+                    latest_resume_handle: Some(LatestResumeHandle {
+                        provider: ResumeProvider::Codex,
+                        id: (
+                            "019cedb4-2293-7651-b0b4-dfac4af6a640-019cedb4-229b-7453-825e-3e3da4e1bf2a"
+                        )
                             .to_string(),
-                    ),
+                    }),
                     turns: Some(1),
                     tokens: TokenUsage {
                         input: Some(9_614_112),
@@ -289,10 +297,14 @@ impl ListenCycleData {
                     workpad_comment_id: None,
                     updated_at_epoch_seconds: reference_now - 2_940,
                     pid: Some(96_104),
-                    session_id: Some(
-                        "019ceda5-0a41-7ef1-bf96-4f26683c1570-019ceda5-0a57-7820-b050-c05e112d66dd"
+                    session_id: Some("019ceda50a417ef1bf964f26683c1570".to_string()),
+                    latest_resume_handle: Some(LatestResumeHandle {
+                        provider: ResumeProvider::Claude,
+                        id: (
+                            "019ceda5-0a41-7ef1-bf96-4f26683c1570-019ceda5-0a57-7820-b050-c05e112d66dd"
+                        )
                             .to_string(),
-                    ),
+                    }),
                     turns: Some(1),
                     tokens: TokenUsage {
                         input: Some(8_380_959),
@@ -1520,6 +1532,7 @@ where
             updated_at_epoch_seconds,
             pid: artifacts.pid.filter(|pid| *pid > 0),
             session_id: Some(issue.id.clone()),
+            latest_resume_handle: None,
             turns: artifacts.turns.or(Some(0)),
             tokens: TokenUsage::default(),
             log_path: artifacts.log_path,
@@ -1954,7 +1967,7 @@ pub fn run_listen_session_list(_: &ListenSessionListArgs) -> Result<String> {
     let now = now_epoch_seconds();
     let mut lines = vec![
         "Stored MetaListen project sessions:".to_string(),
-        "KEY  PHASE  UPDATED  ISSUE  PROJECT  ROOT".to_string(),
+        "KEY  PHASE  UPDATED  ISSUE  PROVIDER  RESUME ID  PROJECT  ROOT".to_string(),
     ];
     for project in projects {
         let latest = project.latest_session.as_ref();
@@ -1967,12 +1980,20 @@ pub fn run_listen_session_list(_: &ListenSessionListArgs) -> Result<String> {
         let issue = latest
             .map(|session| session.issue_identifier.clone())
             .unwrap_or_else(|| "-".to_string());
+        let provider = latest
+            .map(AgentSession::latest_resume_provider_label)
+            .unwrap_or_else(|| "-".to_string());
+        let resume_id = latest
+            .map(AgentSession::latest_resume_id_label)
+            .unwrap_or_else(|| "-".to_string());
         lines.push(format!(
-            "{}  {}  {}  {}  {}  {}",
+            "{}  {}  {}  {}  {}  {}  {}  {}",
             compact_identifier(&project.metadata.project_key),
             phase,
             updated,
             issue,
+            provider,
+            resume_id,
             project.metadata.project_label,
             project.metadata.source_root
         ));
@@ -2019,6 +2040,14 @@ pub fn run_listen_session_inspect(args: &ListenSessionInspectArgs) -> Result<Str
         lines.push(format!(
             "  - Updated: {}",
             now_timestamp_for_epoch(session.updated_at_epoch_seconds)
+        ));
+        lines.push(format!(
+            "  - Resume provider: {}",
+            session.latest_resume_provider_label()
+        ));
+        lines.push(format!(
+            "  - Resume ID: {}",
+            session.latest_resume_id_label()
         ));
         if let Some(workspace_path) = session.workspace_path {
             lines.push(format!("  - Workspace: {workspace_path}"));
@@ -2093,6 +2122,10 @@ pub async fn run_listen_session_resume(args: &ListenSessionResumeArgs) -> Result
 }
 
 pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
+    if args.json && !args.once {
+        bail!("`meta agents listen --json` requires `--once`");
+    }
+
     let requested_root = canonicalize_existing_dir(&args.root)?;
     let root = resolve_source_project_root(&requested_root)?;
     let planning_meta = load_required_planning_meta(&root, "listen")?;
@@ -2158,7 +2191,11 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
                     vim_mode: app_config.vim_mode_enabled(),
                 },
             );
-            println!("{}", data.render_summary());
+            if args.json {
+                println!("{}", render_json_success("agents.listen", &data)?);
+            } else {
+                println!("{}", data.render_summary());
+            }
             return Ok(());
         }
 
@@ -2329,7 +2366,11 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
                 vim_mode: daemon.app_config.vim_mode_enabled(),
             },
         );
-        println!("{}", data.render_summary());
+        if args.json {
+            println!("{}", render_json_success("agents.listen", &data)?);
+        } else {
+            println!("{}", data.render_summary());
+        }
         return Ok(());
     }
 
@@ -3167,6 +3208,7 @@ mod tests {
                 updated_at_epoch_seconds: 1,
                 pid: None,
                 session_id: None,
+                latest_resume_handle: None,
                 turns: None,
                 tokens: TokenUsage {
                     input: Some(100),
@@ -3193,6 +3235,7 @@ mod tests {
                 updated_at_epoch_seconds: 2,
                 pid: None,
                 session_id: None,
+                latest_resume_handle: None,
                 turns: None,
                 tokens: TokenUsage {
                     input: None,
@@ -3229,6 +3272,7 @@ mod tests {
             updated_at_epoch_seconds: 1,
             pid: None,
             session_id: None,
+            latest_resume_handle: None,
             turns: None,
             tokens: TokenUsage {
                 input: Some(100),
@@ -3268,6 +3312,7 @@ mod tests {
                 updated_at_epoch_seconds: 1,
                 pid: None,
                 session_id: None,
+                latest_resume_handle: None,
                 turns: None,
                 tokens: TokenUsage {
                     input: Some(100),
@@ -3458,6 +3503,7 @@ mod tests {
             updated_at_epoch_seconds: 1,
             pid: Some(42_424),
             session_id: Some("session-1".to_string()),
+            latest_resume_handle: None,
             turns: Some(2),
             tokens: TokenUsage::default(),
             log_path: Some("logs/ENG-10163.log".to_string()),
@@ -3915,6 +3961,7 @@ mod tests {
             turns: Some(1),
             tokens: TokenUsage::default(),
             log_path: None,
+            latest_resume_handle: None,
         }]);
         let mut notes = Vec::new();
 

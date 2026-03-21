@@ -155,10 +155,11 @@ fn cron_init_no_interactive_writes_agent_prompt_fields() -> Result<(), Box<dyn E
     let config_path = temp.path().join("metastack.toml");
     write_onboarded_config(&config_path, "")?;
 
-    cli()
+    let assert = cli()
         .current_dir(temp.path())
         .env("METASTACK_CONFIG", &config_path)
         .args([
+            "runtime",
             "cron",
             "init",
             "nightly",
@@ -173,15 +174,59 @@ fn cron_init_no_interactive_writes_agent_prompt_fields() -> Result<(), Box<dyn E
             "Review the command output",
         ])
         .assert()
-        .success()
-        .stdout(predicate::str::contains(
-            "Created cron job template at .metastack/cron/nightly.md",
-        ));
+        .success();
+
+    let payload: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout)?;
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["command"], "runtime.cron.init");
+    assert_eq!(payload["result"]["status"], "created");
+    assert_eq!(payload["result"]["name"], "nightly");
+    assert_eq!(payload["result"]["path"], ".metastack/cron/nightly.md");
+    assert_eq!(payload["result"]["schedule"], "0 * * * *");
+    assert_eq!(payload["result"]["command"], "echo hello");
+    assert_eq!(payload["result"]["agent"], "codex");
 
     let contents = fs::read_to_string(temp.path().join(".metastack/cron/nightly.md"))?;
     assert!(contents.contains("agent: codex"));
     assert!(!contents.contains("prompt: Review the command output"));
     assert!(contents.contains("Review the command output"));
+
+    Ok(())
+}
+
+#[test]
+fn cron_init_no_interactive_missing_schedule_emits_structured_json_error()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let config_path = temp.path().join("metastack.toml");
+    write_onboarded_config(&config_path, "")?;
+
+    let assert = cli()
+        .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "runtime",
+            "cron",
+            "init",
+            "nightly",
+            "--no-interactive",
+            "--command",
+            "echo hello",
+        ])
+        .assert()
+        .failure();
+
+    let payload: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout)?;
+    assert_eq!(payload["status"], "error");
+    assert_eq!(payload["command"], "runtime.cron.init");
+    assert_eq!(payload["error"]["code"], "invalid_input");
+    assert!(
+        payload["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("`--schedule` is required")
+    );
+    assert!(assert.get_output().stderr.is_empty());
 
     Ok(())
 }

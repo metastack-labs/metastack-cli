@@ -93,13 +93,29 @@ done
         .stdout(predicate::str::contains("RAW AGENT LOG: starting scan").not())
         .stdout(predicate::str::contains("RAW AGENT STDERR: token-by-token noise").not());
 
-    cli()
+    let json_assert = cli()
         .current_dir(&repo_root)
         .env("METASTACK_CONFIG", &config_path)
         .env("TEST_OUTPUT_DIR", &output_dir)
-        .arg("scan")
+        .args(["scan", "--json"])
         .assert()
         .success();
+
+    let payload: serde_json::Value = serde_json::from_slice(&json_assert.get_output().stdout)?;
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["command"], "context.scan");
+    assert_eq!(payload["result"]["agent"], "scan-stub");
+    assert_eq!(
+        payload["result"]["log_path"],
+        ".metastack/agents/sessions/scan.log"
+    );
+    assert!(
+        payload["result"]["written_files"]
+            .as_array()
+            .is_some_and(|files| files
+                .iter()
+                .any(|path| path == ".metastack/codebase/SCAN.md"))
+    );
 
     let scan = fs::read_to_string(repo_root.join(".metastack/codebase/SCAN.md"))?;
     let architecture = fs::read_to_string(repo_root.join(".metastack/codebase/ARCHITECTURE.md"))?;

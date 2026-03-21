@@ -4,7 +4,7 @@ use std::hash::{Hash, Hasher};
 #[cfg(unix)]
 use std::io::{Read, Write};
 #[cfg(unix)]
-use std::net::{Shutdown, TcpListener, TcpStream};
+use std::net::{TcpListener, TcpStream};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 #[cfg(unix)]
@@ -58,18 +58,14 @@ const TEST_ENV_REMOVALS: &[&str] = &[
     "XDG_CONFIG_HOME",
 ];
 
-fn isolated_home_dir() -> &'static PathBuf {
-    static HOME_DIR: OnceLock<PathBuf> = OnceLock::new();
-    HOME_DIR.get_or_init(|| {
-        let path = std::env::temp_dir().join(format!(
-            "metastack-test-home-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("main")
-        ));
-        fs::create_dir_all(path.join(".config"))
-            .expect("test home directory should be creatable");
-        path
-    })
+fn isolated_home_dir() -> PathBuf {
+    let path = std::env::temp_dir().join(format!(
+        "metastack-test-home-{}-{}",
+        std::process::id(),
+        std::thread::current().name().unwrap_or("main")
+    ));
+    fs::create_dir_all(path.join(".config")).expect("test home directory should be creatable");
+    path
 }
 
 fn test_command() -> Command {
@@ -91,7 +87,7 @@ fn test_command() -> Command {
         command.env_remove(key);
     }
     let home_dir = isolated_home_dir();
-    command.env("HOME", home_dir);
+    command.env("HOME", &home_dir);
     command.env("XDG_CONFIG_HOME", home_dir.join(".config"));
     command
 }
@@ -681,7 +677,6 @@ impl DynamicLinearServer {
                     Ok((mut stream, _)) => {
                         let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
                         let _ = handle_dynamic_linear_connection(&mut stream, &state);
-                        let _ = stream.shutdown(Shutdown::Both);
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(25));
@@ -719,51 +714,58 @@ fn handle_dynamic_linear_connection(
     stream: &mut TcpStream,
     state: &Arc<Mutex<DynamicLinearState>>,
 ) -> Result<(), Box<dyn Error>> {
-    let request = read_http_request(stream)?;
-    if request.trim().is_empty() {
-        return Ok(());
-    }
-    let body = request
-        .split("\r\n\r\n")
-        .nth(1)
-        .unwrap_or_default()
-        .to_string();
-    match dynamic_linear_response(&body, state) {
-        Ok(response) => {
-            let encoded = serde_json::to_string(&response)?;
-            write!(
-                stream,
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                encoded.len(),
-                encoded
-            )?;
+    let mut pending = Vec::new();
+    loop {
+        let request = read_http_request(stream, &mut pending)?;
+        if request.trim().is_empty() {
+            return Ok(());
         }
-        Err(error) => {
-            let encoded = serde_json::to_string(&json!({
-                "errors": [{
-                    "message": error.to_string()
-                }]
-            }))?;
-            write!(
-                stream,
-                "HTTP/1.1 500 Internal Server Error\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                encoded.len(),
-                encoded
-            )?;
+        let body = request
+            .split("\r\n\r\n")
+            .nth(1)
+            .unwrap_or_default()
+            .to_string();
+        match dynamic_linear_response(&body, state) {
+            Ok(response) => {
+                let encoded = serde_json::to_string(&response)?;
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: keep-alive\r\n\r\n{}",
+                    encoded.len(),
+                    encoded
+                )?;
+                stream.flush()?;
+            }
+            Err(error) => {
+                let encoded = serde_json::to_string(&json!({
+                    "errors": [{
+                        "message": error.to_string()
+                    }]
+                }))?;
+                write!(
+                    stream,
+                    "HTTP/1.1 500 Internal Server Error\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: keep-alive\r\n\r\n{}",
+                    encoded.len(),
+                    encoded
+                )?;
+                stream.flush()?;
+            }
         }
     }
-    Ok(())
 }
 
 #[cfg(unix)]
-fn read_http_request(stream: &mut TcpStream) -> Result<String, Box<dyn Error>> {
-    let mut buffer = Vec::new();
+fn read_http_request(stream: &mut TcpStream, pending: &mut Vec<u8>) -> Result<String, Box<dyn Error>> {
     let mut chunk = [0u8; 4096];
-    let mut header_end = None;
-    let mut content_length = 0usize;
     let mut idle_reads_after_data = 0usize;
 
     loop {
+        if let Some(request_len) = complete_http_request_len(pending) {
+            let remainder = pending.split_off(request_len);
+            let request = std::mem::replace(pending, remainder);
+            return Ok(String::from_utf8(request)?);
+        }
+
         let read = match stream.read(&mut chunk) {
             Ok(read) => {
                 idle_reads_after_data = 0;
@@ -775,14 +777,14 @@ fn read_http_request(stream: &mut TcpStream) -> Result<String, Box<dyn Error>> {
                     std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
                 ) =>
             {
-                if buffer.is_empty() {
+                if pending.is_empty() {
                     return Ok(String::new());
                 }
                 idle_reads_after_data += 1;
                 if idle_reads_after_data >= 20 {
                     return Err(format!(
                         "timed out waiting for a complete HTTP request after receiving {} bytes",
-                        buffer.len()
+                        pending.len()
                     )
                     .into());
                 }
@@ -791,45 +793,42 @@ fn read_http_request(stream: &mut TcpStream) -> Result<String, Box<dyn Error>> {
             Err(error) => return Err(error.into()),
         };
         if read == 0 {
-            if buffer.is_empty() {
+            if pending.is_empty() {
                 return Ok(String::new());
             }
-            if let Some(end) = header_end
-                && buffer.len() >= end + content_length
+            if let Some(request_len) = complete_http_request_len(pending)
             {
-                break;
+                let remainder = pending.split_off(request_len);
+                let request = std::mem::replace(pending, remainder);
+                return Ok(String::from_utf8(request)?);
             }
             return Err(format!(
                 "peer closed the HTTP request before the body completed (received {} bytes)",
-                buffer.len()
+                pending.len()
             )
             .into());
         }
-        buffer.extend_from_slice(&chunk[..read]);
+        pending.extend_from_slice(&chunk[..read]);
+    }
+}
 
-        if header_end.is_none()
-            && let Some(index) = buffer.windows(4).position(|window| window == b"\r\n\r\n")
+#[cfg(unix)]
+fn complete_http_request_len(buffer: &[u8]) -> Option<usize> {
+    let header_end = buffer
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|index| index + 4)?;
+    let headers = String::from_utf8_lossy(&buffer[..header_end]);
+    let mut content_length = 0usize;
+    for line in headers.lines() {
+        if let Some((name, value)) = line.split_once(':')
+            && name.eq_ignore_ascii_case("content-length")
         {
-            header_end = Some(index + 4);
-            let headers = String::from_utf8_lossy(&buffer[..index + 4]);
-            for line in headers.lines() {
-                if let Some((name, value)) = line.split_once(':')
-                    && name.eq_ignore_ascii_case("content-length")
-                {
-                    content_length = value.trim().parse::<usize>().unwrap_or(0);
-                    break;
-                }
-            }
-        }
-
-        if let Some(end) = header_end
-            && buffer.len() >= end + content_length
-        {
+            content_length = value.trim().parse::<usize>().unwrap_or(0);
             break;
         }
     }
-
-    Ok(String::from_utf8(buffer)?)
+    (buffer.len() >= header_end + content_length).then_some(header_end + content_length)
 }
 
 #[cfg(unix)]

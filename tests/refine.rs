@@ -72,7 +72,7 @@ JSON
         }));
     });
 
-    meta()
+    let assert = meta()
         .current_dir(&repo_root)
         .env("METASTACK_CONFIG", &config_path)
         .env("TEST_OUTPUT_DIR", &output_dir)
@@ -84,11 +84,19 @@ JSON
             &api_url,
             "refine",
             "MET-148",
+            "--json",
         ])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("critique-only"))
-        .stdout(predicate::str::contains("MET-148"));
+        .success();
+
+    let payload: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout)?;
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["command"], "linear.issues.refine");
+    assert_eq!(
+        payload["result"]["reports"][0]["issue_identifier"],
+        "MET-148"
+    );
+    assert_eq!(payload["result"]["reports"][0]["apply_requested"], false);
 
     let run_dir = latest_refinement_dir(&repo_root.join(".metastack/backlog/MET-148"))?;
     let original = fs::read_to_string(run_dir.join("original.md"))?;

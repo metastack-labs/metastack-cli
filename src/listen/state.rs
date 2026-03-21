@@ -6,6 +6,28 @@ use super::{compact_identifier, format_duration, format_number};
 
 pub(super) const COMPLETED_SESSION_TTL_SECONDS: u64 = 24 * 60 * 60;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResumeProvider {
+    Claude,
+    Codex,
+}
+
+impl ResumeProvider {
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LatestResumeHandle {
+    pub provider: ResumeProvider,
+    pub id: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingIssue {
     pub identifier: String,
@@ -98,6 +120,8 @@ pub struct AgentSession {
     #[serde(default)]
     pub session_id: Option<String>,
     #[serde(default)]
+    pub latest_resume_handle: Option<LatestResumeHandle>,
+    #[serde(default)]
     pub turns: Option<u32>,
     #[serde(default)]
     pub tokens: TokenUsage,
@@ -129,10 +153,23 @@ impl AgentSession {
     }
 
     pub(super) fn session_label(&self) -> String {
-        self.session_id
-            .as_deref()
-            .map(compact_identifier)
-            .or_else(|| self.issue_id.as_deref().map(compact_identifier))
+        self.latest_resume_handle
+            .as_ref()
+            .map(|resume| compact_identifier(&resume.id))
+            .unwrap_or_else(|| "-".to_string())
+    }
+
+    pub(super) fn latest_resume_provider_label(&self) -> String {
+        self.latest_resume_handle
+            .as_ref()
+            .map(|resume| resume.provider.label().to_string())
+            .unwrap_or_else(|| "-".to_string())
+    }
+
+    pub(super) fn latest_resume_id_label(&self) -> String {
+        self.latest_resume_handle
+            .as_ref()
+            .map(|resume| resume.id.clone())
             .unwrap_or_else(|| "-".to_string())
     }
 }
@@ -277,5 +314,55 @@ impl ListenState {
 
     pub(super) fn latest_session(&self) -> Option<AgentSession> {
         self.sorted_sessions().into_iter().next()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AgentSession, LatestResumeHandle, ResumeProvider, SessionPhase, TokenUsage};
+
+    fn session() -> AgentSession {
+        AgentSession {
+            issue_id: Some("issue-1".to_string()),
+            issue_identifier: "ENG-10194".to_string(),
+            issue_title: "Capture listen resume IDs".to_string(),
+            project_name: Some("MetaStack CLI".to_string()),
+            team_key: "ENG".to_string(),
+            issue_url: "https://linear.app/issues/ENG-10194".to_string(),
+            phase: SessionPhase::Running,
+            summary: "Running".to_string(),
+            brief_path: None,
+            backlog_issue_identifier: None,
+            backlog_issue_title: None,
+            backlog_path: None,
+            workspace_path: None,
+            branch: None,
+            workpad_comment_id: None,
+            updated_at_epoch_seconds: 1,
+            pid: None,
+            session_id: Some("issue-1".to_string()),
+            latest_resume_handle: None,
+            turns: Some(1),
+            tokens: TokenUsage::default(),
+            log_path: None,
+        }
+    }
+
+    #[test]
+    fn session_label_uses_latest_resume_handle_only() {
+        let mut session = session();
+        assert_eq!(session.session_label(), "-");
+
+        session.latest_resume_handle = Some(LatestResumeHandle {
+            provider: ResumeProvider::Codex,
+            id: "019cedb4-2293-7651-b0b4-dfac4af6a640".to_string(),
+        });
+
+        assert_eq!(session.session_label(), "019c...f6a640");
+        assert_eq!(session.latest_resume_provider_label(), "codex");
+        assert_eq!(
+            session.latest_resume_id_label(),
+            "019cedb4-2293-7651-b0b4-dfac4af6a640"
+        );
     }
 }

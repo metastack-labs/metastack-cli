@@ -590,6 +590,7 @@ Inspect and refresh the effective context that agent-backed runs consume:
 meta context show
 meta context map
 meta context doctor
+meta context scan --json
 meta context reload
 ```
 
@@ -597,6 +598,57 @@ meta context reload
 - `map` prints a repo-map style summary derived from the live repository tree
 - `doctor` reports missing or stale inputs such as `.metastack/meta.json`, repo rules, instructions files, and generated codebase docs
 - `reload` re-runs the context refresh path used by `meta scan`
+- `scan --json` runs the scan pipeline without a terminal snapshot and emits a JSON report describing the refreshed codebase context plus the written and removed files
+
+### Machine-readable Command Contract
+
+Use these flags when an outer agent or shell wrapper needs deterministic non-interactive behavior:
+
+| Command | Promptless mode | JSON selector | Machine output behavior |
+| --- | --- | --- | --- |
+| `meta backlog plan` | `--no-interactive` | implicit in `--no-interactive` | success and failure emit JSON |
+| `meta backlog tech` | `--no-interactive` | implicit in `--no-interactive` | success and failure emit JSON |
+| `meta backlog sync <subcommand>` | `--no-interactive` | `--json` or implicit in `--no-interactive` | direct subcommands emit JSON |
+| `meta linear issues create` | `--no-interactive` | implicit in `--no-interactive` | success and failure emit JSON |
+| `meta linear issues edit` | `--no-interactive` | implicit in `--no-interactive` | success and failure emit JSON |
+| `meta linear issues refine` | n/a | `--json` | success and failure emit JSON |
+| `meta context scan` | n/a | `--json` | success and failure emit JSON |
+| `meta agents listen --once` | headless | `--json` | emits one poll-cycle JSON payload |
+| `meta runtime cron init` | `--no-interactive` | `--json` or implicit in `--no-interactive` | success and failure emit JSON |
+
+Notes:
+
+- Mutation commands default to structured JSON when `--no-interactive` is active.
+- `--render-once` remains a terminal snapshot mode, not a machine-output mode, and conflicts with `--json`, `--no-interactive`, or `--once` where those modes overlap.
+- Machine-readable failures use one stable top-level shape: `status`, `command`, and `error { code, message, context? }`.
+
+### `--json` / `--no-interactive` / `--render-once` Matrix
+
+This matrix is the contract for agent callers deciding whether to drive a command as JSON, as a promptless mutation, or as a text snapshot:
+
+| Command | `--no-interactive` | `--json` | `--render-once` |
+| --- | --- | --- | --- |
+| `meta backlog plan` | required for promptless runs; implies JSON | n/a | not supported |
+| `meta backlog tech` | required for promptless runs; implies JSON | n/a | not supported |
+| `meta backlog sync status` | optional | supported | supported on dashboard form (`meta backlog sync --render-once`) |
+| `meta backlog sync link` | optional for scripting; requires explicit selectors | supported and implied by `--no-interactive` | not supported |
+| `meta backlog sync pull` | optional for scripting; requires explicit selectors | supported and implied by `--no-interactive` | not supported |
+| `meta backlog sync push` | optional for scripting; requires explicit selectors | supported and implied by `--no-interactive` | not supported |
+| `meta linear issues create` | required for promptless runs; implies JSON | n/a | supported for the create form |
+| `meta linear issues edit` | required for promptless runs; implies JSON | n/a | supported for the edit form |
+| `meta linear issues refine` | not needed; command is already headless | supported | not supported |
+| `meta context scan` | not needed; command is already headless | supported | not supported |
+| `meta agents listen --once` | not needed; `--once` is the headless poll mode | supported only with `--once`; returns one poll cycle | supported separately as a text dashboard snapshot |
+| `meta runtime cron init` | required for promptless writes; implies JSON | supported | supported as a text dashboard snapshot |
+| `meta runtime config` | not needed | supported | supported |
+| `meta merge` | required for promptless execution with explicit PR selection | supported | supported |
+
+Rules:
+
+- Prefer `--no-interactive` for any mutation command that would otherwise prompt for missing input.
+- Prefer `--json` for read-only or already-headless flows such as `meta context scan`, `meta linear issues refine`, and `meta agents listen --once`.
+- Use `--render-once` only when a text snapshot of the TUI is useful for humans or snapshot-style tests; it is not part of the machine JSON contract.
+- Where both modes exist, `--render-once` is mutually exclusive with `--json`, `--no-interactive`, and `--once` because snapshot output is a separate text contract.
 
 ### `runtime cron`
 
@@ -605,6 +657,7 @@ Create repository-local cron jobs as Markdown plus YAML front matter, then super
 ```bash
 meta runtime cron init
 meta runtime cron init nightly --no-interactive --schedule "0 * * * *" --command "cargo test" --prompt "Review the latest test output and fix any failures"
+meta runtime cron --root target/cli-proof/cron init nightly --no-interactive --schedule "0 * * * *" --command "cargo test"
 meta runtime cron status
 meta runtime cron start
 meta runtime cron stop
@@ -612,6 +665,12 @@ meta runtime cron run nightly
 ```
 
 Legacy alias: `meta cron`
+
+Machine mode:
+
+- `meta runtime cron init --no-interactive ...` now emits structured JSON by default
+- `meta runtime cron init --json ...` forces JSON without changing the rest of the command contract
+- `--render-once` stays a text snapshot path for the dashboard and is separate from machine JSON output
 
 Side effects:
 
@@ -672,6 +731,13 @@ Fast planning adds three mode-specific controls:
 
 Fast mode defaults to a single ticket unless you pass `--multi` or disable that preference through repo/install config with `plan.fast_single_ticket = false`. The follow-up cap resolves in the same precedence order as other plan defaults: explicit CLI flag, repo config, install config, then built-in default. Fast non-interactive runs do not accept `--answer`; they go straight from `--request` to generation so the flow stays single-pass.
 
+Machine mode:
+
+- `meta backlog plan --no-interactive ...` emits created or reshaped issue data as JSON instead of text
+- missing-input and other machine-mode failures also emit JSON with `error.code`, `error.message`, and optional `error.context`
+- the old harness `intuition product "desc" --velocity` maps to `meta backlog plan --no-interactive --request "desc" --answer "..."`
+- the old harness `intuition product "desc" --velocity --dry-run` maps to `meta backlog plan --no-interactive --request "desc" --answer "..." --dry-run`
+
 `meta backlog plan` also accepts `--state`, `--priority`, repeated `--label`, and `--assignee`. Built-in `plan` labeling remains mandatory and additive, so config labels and explicit labels are appended rather than replacing it.
 
 `meta backlog plan <IDENTIFIER>` reshapes an existing Linear issue in place instead of creating a new one. The command loads the current issue context, asks the configured planning agent for a stronger rewrite, and then updates the same ticket through `issueUpdate`.
@@ -708,6 +774,8 @@ The command requires a configured local agent, or one of the built-in supported 
 `meta backlog tech` uses the same repo-root scope contract as `meta backlog plan`: the agent sees the active repository identity derived from the resolved root, defaults work to the top-level repository directory, and should only produce a narrower technical backlog item when the user explicitly requested a subproject.
 
 `meta backlog tech` also accepts `--no-interactive`, `--state`, `--priority`, repeated `--label`, and `--assignee`. The command now defaults child ticket state to `Backlog` when no override is configured, preserves the parent issue's project and priority over config defaults unless an explicit CLI override is passed, and persists the final project/team selection for later zero-prompt runs in the install-scoped data directory.
+
+In machine mode, `meta backlog tech --no-interactive <ISSUE>` emits the created child issue, parent issue, and local backlog path as JSON. Missing-input failures also emit structured JSON.
 
 In a TTY, the parent-issue picker now uses the shared Linear issue browser:
 
@@ -763,6 +831,11 @@ meta issues refine MET-35 --apply
 `meta issues refine` is the quality-improvement step after `meta plan` or `meta backlog tech`. It reuses the configured local agent to critique the current Linear description, persist each refinement pass under `.metastack/backlog/<ISSUE>/artifacts/refinement/<RUN_ID>/`, and generate a proposed rewrite. By default the command is critique-only.
 
 Pass `--apply` only when you want to promote the final rewrite into `.metastack/backlog/<ISSUE>/index.md` and then push that rewritten description back to Linear. The command always writes the local before/after snapshots first so the refinement run stays auditable even if the remote mutation fails.
+
+Machine mode:
+
+- `meta linear issues refine --json ...` emits structured findings, artifact paths, and apply-state details
+- failure paths also use the same structured JSON envelope as the other machine-facing commands
 
 Side effects:
 
@@ -822,6 +895,7 @@ Side effects:
 - `push --all` walks every linked backlog entry sequentially, respects `--update-description`, and exits non-zero when any entry fails
 - during `meta listen`, `push --update-description` is blocked for the active ticket so the primary issue description stays untouched
 - pass `--no-interactive` with `link`, `pull`, or `push` when scripting; in that mode every required selector must be explicit
+- direct subcommands emit JSON when `--no-interactive` is active; `status` also supports explicit `--json`
 - `.metastack/meta.json` optionally accepts `sync.discussion_file_char_limit` and `sync.discussion_prompt_char_limit` to tune the persisted discussion file budget and the `meta listen` prompt excerpt budget
 
 The sync dashboard and render-once snapshot now include a shared issue search bar plus each issue's local sync state:
@@ -866,8 +940,9 @@ Notes:
 - `meta linear issues list`, `meta dashboard linear`, and `meta dashboard team` share the same free-text search behavior when the issue list is focused: type to search by identifier, title, state, project, or description, with exact identifiers ranked ahead of broader matches
 - the shared Linear dashboards keep their existing filters, and the search query narrows the visible issue set after those filters are applied
 - `meta linear issues create` and `meta linear issues edit` open ratatui workflows when stdin/stdout are attached to a TTY
+- `meta linear issues create --no-interactive ...` and `meta linear issues edit --no-interactive ...` emit structured JSON instead of text
 - In the interactive create/edit forms, multiline descriptions advance on `Enter`, insert a newline on `Shift+Enter`, and support `Up`/`Down`, `PgUp`/`PgDn`, `Home`/`End`, plus mouse-wheel scrolling while the description pane is focused; the summary/review sidebar also scrolls with the mouse wheel when long descriptions overflow
-- `meta linear issues refine` is non-interactive, uses the configured local agent, and defaults to critique-only unless you pass `--apply`
+- `meta linear issues refine` is non-interactive, uses the configured local agent, defaults to critique-only unless you pass `--apply`, and emits machine-readable results when `--json` is set
 - `meta dashboard linear` is the preferred Linear dashboard path; bare `meta dashboard` remains a compatibility alias during migration
 
 Required auth:
@@ -886,7 +961,7 @@ Legacy alias: `meta listen`
 
 `meta agents listen` keeps the same repository identity as the source checkout, but the worker prompt is anchored to the provided workspace checkout as the only local write scope. Implementation, validation, and local backlog updates must stay inside that workspace for the active repository unless the issue explicitly asks for a narrower subproject.
 
-The live terminal dashboard refreshes locally every second so session-state changes stay visible, while the configured listen poll interval continues to control how often Linear is queried. Steady-state listen runs stay entirely in the terminal TUI, and `--once` / `--render-once` emit terminal-only summary output.
+The live terminal dashboard refreshes locally every second so session-state changes stay visible, while the configured listen poll interval continues to control how often Linear is queried. Steady-state listen runs stay entirely in the terminal TUI, `--render-once` emits a terminal snapshot, and `--once --json` emits one machine-readable poll-cycle payload without going through the ratatui snapshot path.
 
 When built-in `codex` or `claude` workers emit structured usage telemetry, `meta agents listen` accumulates session-level input and output tokens across repeated turns and renders both per-session and runtime rollups as `in`, `out`, and `total`. When exact counts are unavailable, the dashboard and textual summaries continue to show `n/a`.
 When install-scoped `vim_mode` is enabled, the listen dashboard also accepts `h` / `l` as aliases
@@ -977,12 +1052,19 @@ Behavior:
 - `meta workspace prune` removes clones whose Linear tickets are Done or Cancelled, keeps clones with open PRs when PR data is available, skips clones with unpushed commits, and prints a final `Removed N clones, freed X GB. Kept M clones.` summary.
 - Clone deletion also removes only the matching ticket-scoped MetaListen session entry and per-ticket log artifact from the install-scoped project store, leaving unrelated sessions for the same repository intact.
 
+For built-in `codex` and `claude` listen workers, the install-scoped `session.json` state now keeps
+the latest provider-native manual resume target separately from the Linear issue identity. The
+dashboard `SESSION` column renders only the compact provider-native handle, while
+`meta listen sessions list` and `meta listen sessions inspect` surface the latest provider plus the
+full resume ID so operators can copy the correct `codex` or `claude` resume target directly.
+Capture is latest-only and silent best effort: new listen turns overwrite the stored provider/ID
+when capture succeeds, and leave those fields empty when it does not. Older stored records are not
+backfilled.
+
 Reference:
 
 - [`docs/agent-daemon.md`](docs/agent-daemon.md)
 
-Linear commands also read repo-scoped defaults from `.metastack/meta.json`, plus optional project-specific Linear auth stored in install-scoped CLI config for the current repo root. Repo defaults should store the canonical Linear project ID; `meta setup --project <NAME>` resolves names to IDs before saving, while older name-based values are still resolved at read time for compatibility. `meta listen` also reads the optional `listen.required_labels` filter list, assignee filter, instructions file, and default poll interval from `.metastack/meta.json`; legacy `listen.required_label` values still load for compatibility, but new saves persist the list form and accept comma-separated labels in `meta runtime setup`. An issue is eligible when any configured listen label matches one of its Linear labels case-insensitively. Canonical assignee-scope values are `any`, `viewer_only`, and `viewer_or_unassigned`, while the legacy value `viewer` still loads as `viewer_or_unassigned` for compatibility. `--all-assignees` provides a run-scoped opt-out without changing repo config. Interactive `meta plan` reads the optional `plan.interactive_follow_up_questions` override there and `meta plan` / `meta backlog tech` resolve the repo-scoped issue-label defaults to real Linear label IDs before issue creation, falling back to `plan` / `technical` when unset. Backlog ticket creation also merges optional global and repo `[backlog]` defaults with the contract `CLI override > repo override > global override > built-in behavior`; zero-prompt runs additionally consult remembered project/team selections and `velocity_defaults` before the repo/global fallbacks. The optional `linear.ticket_context.discussion_prompt_chars` and `linear.ticket_context.discussion_persisted_chars` settings control the comment-character budgets used for agent-facing and persisted `context/ticket-discussion.md` output. During `meta setup` saves, metastack checks that the effective listen, plan, technical, and required listen labels exist on the selected team and creates any missing team labels so later issue creation stays deterministic. When `meta linear issues list` returns no rows, it prints the applied filters so hidden repo defaults are visible.
-Linear commands also read repo-scoped defaults from `.metastack/meta.json`, plus optional project-specific Linear auth stored in install-scoped CLI config for the current repo root. Repo defaults should store the canonical Linear project ID; `meta setup --project <NAME>` resolves names to IDs before saving, while older name-based values are still resolved at read time for compatibility. When repo values are absent, MetaStack now falls back to install-scoped onboarding defaults for the default project, listen label, listen assignment scope, listen refresh policy, listen poll interval, interactive plan follow-up question limit, and plan/technical issue labels. During `meta setup` saves and onboarding saves, MetaStack checks that the effective listen, plan, and technical labels exist on the selected team and creates any missing team labels so later issue creation stays deterministic. When `meta linear issues list` returns no rows, it prints the applied filters so hidden defaults remain visible.
 Linear commands also read repo-scoped defaults from `.metastack/meta.json`, plus optional project-specific Linear auth stored in install-scoped CLI config for the current repo root. Repo defaults should store the canonical Linear project ID; `meta setup --project <NAME>` resolves names to IDs before saving, while older name-based values are still resolved at read time for compatibility. When repo values are absent, MetaStack falls back to install-scoped onboarding defaults for the default project, listen label, listen assignment scope, listen refresh policy, listen poll interval, interactive plan follow-up question limit, and plan/technical issue labels. `meta listen` also reads the optional `listen.required_labels` filter list, assignee filter, instructions file, and default poll interval from `.metastack/meta.json`; legacy `listen.required_label` values still load for compatibility, but new saves persist the list form and accept comma-separated labels in `meta runtime setup`. An issue is eligible when any configured listen label matches one of its Linear labels case-insensitively. Canonical assignee-scope values are `any`, `viewer_only`, and `viewer_or_unassigned`, while the legacy value `viewer` still loads as `viewer_or_unassigned` for compatibility. `--all-assignees` provides a run-scoped opt-out without changing repo config. Interactive `meta plan` reads the optional `plan.interactive_follow_up_questions` override there and `meta plan` / `meta backlog tech` resolve the repo-scoped issue-label defaults to real Linear label IDs before issue creation, falling back to `plan` / `technical` when unset. Backlog ticket creation also merges optional global and repo `[backlog]` defaults with the contract `CLI override > repo override > global override > built-in behavior`; zero-prompt runs additionally consult remembered project/team selections and `velocity_defaults` before the repo/global fallbacks. The optional `linear.ticket_context.discussion_prompt_chars` and `linear.ticket_context.discussion_persisted_chars` settings control the comment-character budgets used for agent-facing and persisted `context/ticket-discussion.md` output. During `meta setup` saves and onboarding saves, MetaStack checks that the effective listen, plan, technical, and required listen labels exist on the selected team and creates any missing team labels so later issue creation stays deterministic. When `meta linear issues list` returns no rows, it prints the applied filters so hidden defaults remain visible.
 ## Agent Configuration
 
@@ -1003,6 +1085,7 @@ For capture-oriented non-interactive runs such as `meta backlog plan`, the runti
 Sandbox and permission handling depends on the command path:
 
 - `meta agents listen` uses unrestricted execution for built-in providers so unattended workers can run validation, git/GitHub flows, and Linear updates. Codex uses `--dangerously-bypass-approvals-and-sandbox`; Claude uses `--permission-mode=bypassPermissions`.
+- `meta agents listen` also enables machine-readable provider output for built-in workers so the listener can capture the latest provider-native manual resume ID. Codex listen runs use `codex exec --json`, and Claude listen runs use `claude -p --verbose --output-format=stream-json`.
 - `meta context scan`, `meta backlog plan`, `meta backlog improve`, `meta backlog split`, `meta linear issues refine`, workflow runs, merge flows, and cron prompts keep the built-in Codex adapter on `--sandbox workspace-write --ask-for-approval never`.
 
 Listen startup now runs a provider preflight before polling Linear, and worker pickup reruns it inside the workspace before the first agent turn. Codex checks require a readable `~/.codex/config.toml` with `approval_policy = "never"` and `sandbox_mode = "danger-full-access"` and warn when `[mcp_servers.linear]` is configured. Claude checks require `claude` on `PATH` and fail fast when `ANTHROPIC_API_KEY` is set. Both providers also validate that the resolved built-in launch command exposes the required unrestricted mode for unattended listen runs.

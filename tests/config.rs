@@ -180,23 +180,42 @@ fn setup_json_fails_when_backlog_template_conflicts_exist() -> Result<(), Box<dy
     fs::write(&conflicting_index, "# Local template change\n")?;
     write_onboarded_config(&config_path, "")?;
 
-    cli()
+    let assert = cli()
         .env("METASTACK_CONFIG", &config_path)
         .args([
+            "runtime",
             "setup",
             "--root",
             repo_root.to_string_lossy().as_ref(),
             "--json",
         ])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "repo setup found existing canonical backlog template files with local changes",
-        ))
-        .stderr(predicate::str::contains(
-            ".metastack/backlog/_TEMPLATE/index.md",
-        ))
-        .stderr(predicate::str::contains("rerun `meta setup --root"));
+        .failure();
+
+    let payload: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout)?;
+    assert_eq!(payload["status"], "error");
+    assert_eq!(payload["command"], "runtime.setup");
+    assert_eq!(payload["error"]["code"], "invalid_input");
+    assert!(
+        payload["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains(
+                "repo setup found existing canonical backlog template files with local changes"
+            )
+    );
+    assert!(
+        payload["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains(".metastack/backlog/_TEMPLATE/index.md")
+    );
+    assert!(
+        payload["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("rerun `meta setup --root")
+    );
 
     assert_eq!(
         fs::read_to_string(conflicting_index)?,
@@ -1353,20 +1372,32 @@ provider = "claude"
 "#,
     )?;
 
-    cli()
+    let assert = cli()
         .env("METASTACK_CONFIG", &config_path)
         .args([
+            "runtime",
             "config",
             "--root",
             repo_root.to_string_lossy().as_ref(),
             "--json",
         ])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains("invalid"))
-        .stderr(predicate::str::contains(
-            "unknown agent command route key `backlogoops`",
-        ));
+        .failure();
+
+    let payload: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout)?;
+    assert_eq!(payload["status"], "error");
+    assert_eq!(payload["command"], "runtime.config");
+    assert_eq!(payload["error"]["code"], "configuration_error");
+    assert!(
+        payload["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("invalid")
+    );
+    assert_eq!(
+        payload["error"]["context"][0],
+        "unknown agent command route key `backlogoops`; supported keys: backlog.plan, backlog.improve, backlog.split, context.scan, context.reload, linear.issues.refine, agents.listen, agents.workflows.run, runtime.cron.prompt, merge.run"
+    );
 
     Ok(())
 }

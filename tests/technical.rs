@@ -440,12 +440,13 @@ JSON
         });
     }
 
-    cli()
+    let assert = cli()
         .current_dir(&repo_root)
         .env("METASTACK_CONFIG", &config_path)
         .env("TEST_OUTPUT_DIR", &output_dir)
         .args([
             "technical",
+            "--no-interactive",
             "--api-key",
             "token",
             "--api-url",
@@ -453,11 +454,18 @@ JSON
             "MET-35",
         ])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("Pushed MET-36"))
-        .stdout(predicate::str::contains(
-            "Created technical sub-issue MET-36 under MET-35",
-        ));
+        .success();
+
+    let payload: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout)?;
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["command"], "backlog.tech");
+    assert_eq!(payload["result"]["child_issue"]["identifier"], "MET-36");
+    assert_eq!(payload["result"]["parent_issue"]["identifier"], "MET-35");
+    assert_eq!(
+        payload["result"]["backlog_path"],
+        ".metastack/backlog/MET-36"
+    );
+    assert_eq!(payload["result"]["cancelled"], false);
 
     let issue_dir = repo_root.join(".metastack/backlog/MET-36");
     let index = fs::read_to_string(issue_dir.join("index.md"))?;
