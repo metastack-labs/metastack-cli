@@ -218,8 +218,9 @@ where
         state: Option<String>,
         labels_to_add: &[String],
     ) -> Result<IssueSummary> {
-        let IssueEditContext { issue, team }: IssueEditContext =
-            self.load_issue_edit_context(identifier).await?;
+        let issue = self.load_issue(identifier).await?;
+        let teams = self.client.list_teams().await?;
+        let team = self.resolve_team(Some(&issue.team.key), &teams)?.clone();
         let state_id = resolve_state_id(state.as_deref(), &team)?;
         let label_ids = if labels_to_add.is_empty() {
             None

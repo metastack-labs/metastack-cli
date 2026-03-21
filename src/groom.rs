@@ -142,7 +142,10 @@ pub async fn run_backlog_groom(args: &GroomArgs) -> Result<()> {
         }
     }
 
-    println!("{}", render_report(&project_id, args.apply, &reports, &applied_mutations));
+    println!(
+        "{}",
+        render_report(&project_id, args.apply, &reports, &applied_mutations)
+    );
     Ok(())
 }
 
@@ -275,7 +278,8 @@ fn analyze_issue(
         if local_changed_since_sync && remote_changed_since_sync {
             findings.push(GroomFinding {
                 category: GroomCategory::RescanRequired,
-                detail: "local packet and Linear issue both changed since the last sync".to_string(),
+                detail: "local packet and Linear issue both changed since the last sync"
+                    .to_string(),
             });
         }
     }
@@ -306,7 +310,8 @@ fn analyze_issue(
         });
     }
 
-    if acceptance_count >= SPLIT_ACCEPTANCE_LIMIT || should_split(issue, description, acceptance_count)
+    if acceptance_count >= SPLIT_ACCEPTANCE_LIMIT
+        || should_split(issue, description, acceptance_count)
     {
         findings.push(GroomFinding {
             category: GroomCategory::Split,
@@ -317,7 +322,9 @@ fn analyze_issue(
         });
     }
 
-    if let Some(group) = duplicate_group && group.len() > 1 {
+    if let Some(group) = duplicate_group
+        && group.len() > 1
+    {
         findings.push(GroomFinding {
             category: GroomCategory::Merge,
             detail: format!("duplicate theme overlaps {}", group.join(", ")),
@@ -383,8 +390,7 @@ fn refined_description(report: &GroomIssueReport) -> Option<String> {
             .push_str("## Acceptance Criteria\n- [ ] Add explicit, testable acceptance criteria for this ticket.");
         changed = true;
     }
-    if description_is_weak(&description)
-        && !description.to_ascii_lowercase().contains("## context")
+    if description_is_weak(&description) && !description.to_ascii_lowercase().contains("## context")
     {
         if !description.is_empty() {
             description.push_str("\n\n");
@@ -456,7 +462,10 @@ fn issue_metadata(issue: &IssueSummary) -> BacklogIssueMetadata {
         project_id: issue.project.as_ref().map(|project| project.id.clone()),
         project_name: issue.project.as_ref().map(|project| project.name.clone()),
         parent_id: issue.parent.as_ref().map(|parent| parent.id.clone()),
-        parent_identifier: issue.parent.as_ref().map(|parent| parent.identifier.clone()),
+        parent_identifier: issue
+            .parent
+            .as_ref()
+            .map(|parent| parent.identifier.clone()),
         local_hash: None,
         remote_hash: None,
         last_sync_at: None,
@@ -471,7 +480,8 @@ fn latest_packet_update(issue_dir: &Path) -> Result<Option<DateTime<Utc>>> {
 
     let mut latest = None;
     for entry in WalkDir::new(issue_dir) {
-        let entry = entry.with_context(|| format!("failed to traverse `{}`", issue_dir.display()))?;
+        let entry =
+            entry.with_context(|| format!("failed to traverse `{}`", issue_dir.display()))?;
         if !entry.file_type().is_file() {
             continue;
         }
@@ -502,7 +512,10 @@ fn duplicate_groups(issues: &[IssueSummary]) -> BTreeMap<String, Vec<String>> {
         if key.is_empty() {
             continue;
         }
-        groups.entry(key).or_default().push(issue.identifier.clone());
+        groups
+            .entry(key)
+            .or_default()
+            .push(issue.identifier.clone());
     }
 
     let mut duplicates = BTreeMap::new();
@@ -575,7 +588,10 @@ fn description_is_weak(description: &str) -> bool {
         return true;
     }
 
-    let nonempty_lines = trimmed.lines().filter(|line| !line.trim().is_empty()).count();
+    let nonempty_lines = trimmed
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count();
     trimmed.len() < WEAK_DESCRIPTION_MIN_LENGTH || nonempty_lines < 3
 }
 
@@ -608,7 +624,9 @@ fn render_report(
             created_packets += 1;
         }
         for finding in &report.findings {
-            *category_counts.entry(finding.category.as_str()).or_default() += 1;
+            *category_counts
+                .entry(finding.category.as_str())
+                .or_default() += 1;
         }
     }
 
@@ -634,7 +652,10 @@ fn render_report(
     lines.push(String::new());
 
     for report in reports {
-        lines.push(format!("{}  {}", report.issue.identifier, report.issue.title));
+        lines.push(format!(
+            "{}  {}",
+            report.issue.identifier, report.issue.title
+        ));
         lines.push(format!(
             "  packet: {}",
             display_packet_path(&report.local.issue_dir)
@@ -644,7 +665,11 @@ fn render_report(
             continue;
         }
         for finding in &report.findings {
-            lines.push(format!("  - {}: {}", finding.category.as_str(), finding.detail));
+            lines.push(format!(
+                "  - {}: {}",
+                finding.category.as_str(),
+                finding.detail
+            ));
         }
     }
 
@@ -681,7 +706,9 @@ fn display_packet_path(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{GroomCategory, acceptance_criteria_count, description_is_weak, duplicate_theme_key};
+    use super::{
+        GroomCategory, acceptance_criteria_count, description_is_weak, duplicate_theme_key,
+    };
 
     #[test]
     fn acceptance_criteria_counter_tracks_markdown_items() {
@@ -709,7 +736,7 @@ Implement the workflow.
     fn weak_description_requires_more_than_a_stub() {
         assert!(description_is_weak("short stub"));
         assert!(!description_is_weak(
-            "## Summary\nDetailed repository context.\n\n## Acceptance Criteria\n- one\n- two\n",
+            "## Summary\nDetailed repository context with enough implementation detail to make the ticket executable without guessing, including the affected command path, the expected repository-scoped behavior, the drift signals that must be surfaced, and the exact validation proof that reviewers should expect.\n\n## Acceptance Criteria\n- one\n- two\n",
         ));
     }
 

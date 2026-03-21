@@ -88,16 +88,24 @@ team = "MET"
         .args(["backlog", "groom"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Backlog groom report for `project-1`"))
+        .stdout(predicate::str::contains(
+            "Backlog groom report for `project-1`",
+        ))
         .stdout(predicate::str::contains("Mode: report"))
-        .stdout(predicate::str::contains("MET-11  Tighten backlog ticket quality"))
+        .stdout(predicate::str::contains(
+            "MET-11  Tighten backlog ticket quality",
+        ))
         .stdout(predicate::str::contains("refine:"))
         .stdout(predicate::str::contains("rescan-required:"))
         .stdout(predicate::str::contains("Local packets created: 1"));
 
     issues_mock.assert_calls(1);
     assert!(repo_root.join(".metastack/backlog/MET-11").is_dir());
-    assert!(repo_root.join(".metastack/backlog/MET-11/.linear.json").is_file());
+    assert!(
+        repo_root
+            .join(".metastack/backlog/MET-11/.linear.json")
+            .is_file()
+    );
     assert_eq!(
         fs::read_to_string(repo_root.join(".metastack/backlog/MET-11/index.md"))?,
         "Short stub."
