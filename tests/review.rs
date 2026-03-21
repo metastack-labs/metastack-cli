@@ -207,3 +207,296 @@ fn review_route_key_appears_in_agents_examples() {
         .success()
         .stdout(predicate::str::contains("meta agents review"));
 }
+
+// ---------------------------------------------------------------------------
+// Dry-run output
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+#[test]
+fn review_dry_run_shows_pr_metadata_and_diagnostics() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo = temp.path().join("repo");
+    let config_path = temp.path().join("meta.toml");
+    fs::write(
+        &config_path,
+        "[onboarding]\ncompleted = true\n\n[agents]\ndefault_agent = \"codex\"\ndefault_model = \"gpt-5.4\"\n",
+    )?;
+
+    let meta_dir = repo.join(".metastack");
+    fs::create_dir_all(&meta_dir)?;
+    fs::write(
+        meta_dir.join("meta.json"),
+        r#"{"version":1,"project":{"name":"test"}}"#,
+    )?;
+    init_repo_with_origin(&repo)?;
+
+    let bin_dir = temp.path().join("bin");
+    fs::create_dir_all(&bin_dir)?;
+    let gh_stub = bin_dir.join("gh");
+    // gh stub: auth succeeds, pr view returns JSON
+    fs::write(
+        &gh_stub,
+        r#"#!/bin/sh
+if [ "$1" = "auth" ]; then echo 'Logged in'; exit 0; fi
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  cat <<'JSON'
+{"number":42,"title":"MET-99: Test PR","url":"https://github.com/test/repo/pull/42","body":"MET-99 body","author":{"login":"dev"},"headRefName":"met-99-feature","baseRefName":"main","changedFiles":3,"additions":50,"deletions":10,"state":"OPEN","labels":[{"name":"metastack"}],"reviewDecision":"REVIEW_REQUIRED"}
+JSON
+  exit 0
+fi
+exit 1
+"#,
+    )?;
+    fs::set_permissions(&gh_stub, fs::Permissions::from_mode(0o755))?;
+
+    let codex_stub = bin_dir.join("codex");
+    fs::write(&codex_stub, "#!/bin/sh\nexit 0\n")?;
+    fs::set_permissions(&codex_stub, fs::Permissions::from_mode(0o755))?;
+
+    meta()
+        .args([
+            "agents",
+            "review",
+            "42",
+            "--dry-run",
+            "--root",
+            repo.to_str().unwrap(),
+        ])
+        .env("METASTACK_CONFIG", config_path.to_str().unwrap())
+        .env("PATH", format!("{}:/usr/bin:/bin", bin_dir.display()))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("dry-run"))
+        .stdout(predicate::str::contains("PR: #42"))
+        .stdout(predicate::str::contains("MET-99"))
+        .stdout(predicate::str::contains("No mutations"));
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Listener: --once with no eligible PRs (no-remediation path)
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+#[test]
+fn review_once_reports_zero_eligible_prs() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo = temp.path().join("repo");
+    let config_path = temp.path().join("meta.toml");
+    fs::write(
+        &config_path,
+        "[onboarding]\ncompleted = true\n\n[agents]\ndefault_agent = \"codex\"\ndefault_model = \"gpt-5.4\"\n",
+    )?;
+
+    let meta_dir = repo.join(".metastack");
+    fs::create_dir_all(&meta_dir)?;
+    fs::write(
+        meta_dir.join("meta.json"),
+        r#"{"version":1,"project":{"name":"test"}}"#,
+    )?;
+    init_repo_with_origin(&repo)?;
+
+    let bin_dir = temp.path().join("bin");
+    fs::create_dir_all(&bin_dir)?;
+    let gh_stub = bin_dir.join("gh");
+    fs::write(
+        &gh_stub,
+        r#"#!/bin/sh
+if [ "$1" = "auth" ]; then echo 'Logged in'; exit 0; fi
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then echo '[]'; exit 0; fi
+exit 1
+"#,
+    )?;
+    fs::set_permissions(&gh_stub, fs::Permissions::from_mode(0o755))?;
+
+    meta()
+        .args([
+            "agents",
+            "review",
+            "--once",
+            "--root",
+            repo.to_str().unwrap(),
+        ])
+        .env("METASTACK_CONFIG", config_path.to_str().unwrap())
+        .env("PATH", format!("{}:/usr/bin:/bin", bin_dir.display()))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Eligible PRs: 0"))
+        .stdout(predicate::str::contains("0 sessions"));
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Listener: --once --json emits valid JSON
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+#[test]
+fn review_once_json_emits_valid_json() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo = temp.path().join("repo");
+    let config_path = temp.path().join("meta.toml");
+    fs::write(
+        &config_path,
+        "[onboarding]\ncompleted = true\n\n[agents]\ndefault_agent = \"codex\"\ndefault_model = \"gpt-5.4\"\n",
+    )?;
+
+    let meta_dir = repo.join(".metastack");
+    fs::create_dir_all(&meta_dir)?;
+    fs::write(
+        meta_dir.join("meta.json"),
+        r#"{"version":1,"project":{"name":"test"}}"#,
+    )?;
+    init_repo_with_origin(&repo)?;
+
+    let bin_dir = temp.path().join("bin");
+    fs::create_dir_all(&bin_dir)?;
+    let gh_stub = bin_dir.join("gh");
+    fs::write(
+        &gh_stub,
+        r#"#!/bin/sh
+if [ "$1" = "auth" ]; then echo 'Logged in'; exit 0; fi
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then echo '[]'; exit 0; fi
+exit 1
+"#,
+    )?;
+    fs::set_permissions(&gh_stub, fs::Permissions::from_mode(0o755))?;
+
+    let output = meta()
+        .args([
+            "agents",
+            "review",
+            "--once",
+            "--json",
+            "--root",
+            repo.to_str().unwrap(),
+        ])
+        .env("METASTACK_CONFIG", config_path.to_str().unwrap())
+        .env("PATH", format!("{}:/usr/bin:/bin", bin_dir.display()))
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let payload: serde_json::Value = serde_json::from_slice(&output)?;
+    assert_eq!(payload["eligible_prs"], 0);
+    assert!(payload["scope"].is_string());
+    assert!(payload["sessions"].is_array());
+    assert!(payload["state_file"].is_string());
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Dashboard snapshot rendering
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+#[test]
+fn review_render_once_produces_dashboard_snapshot() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo = temp.path().join("repo");
+    let config_path = temp.path().join("meta.toml");
+    fs::write(
+        &config_path,
+        "[onboarding]\ncompleted = true\n\n[agents]\ndefault_agent = \"codex\"\ndefault_model = \"gpt-5.4\"\n",
+    )?;
+
+    let meta_dir = repo.join(".metastack");
+    fs::create_dir_all(&meta_dir)?;
+    fs::write(
+        meta_dir.join("meta.json"),
+        r#"{"version":1,"project":{"name":"test"}}"#,
+    )?;
+    init_repo_with_origin(&repo)?;
+
+    let bin_dir = temp.path().join("bin");
+    fs::create_dir_all(&bin_dir)?;
+    let gh_stub = bin_dir.join("gh");
+    fs::write(
+        &gh_stub,
+        r#"#!/bin/sh
+if [ "$1" = "auth" ]; then echo 'Logged in'; exit 0; fi
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then echo '[]'; exit 0; fi
+exit 1
+"#,
+    )?;
+    fs::set_permissions(&gh_stub, fs::Permissions::from_mode(0o755))?;
+
+    meta()
+        .args([
+            "agents",
+            "review",
+            "--render-once",
+            "--root",
+            repo.to_str().unwrap(),
+        ])
+        .env("METASTACK_CONFIG", config_path.to_str().unwrap())
+        .env("PATH", format!("{}:/usr/bin:/bin", bin_dir.display()))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Review Dashboard"))
+        .stdout(predicate::str::contains("metastack"));
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Dashboard snapshot with tab navigation
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+#[test]
+fn review_render_once_tab_switches_view() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo = temp.path().join("repo");
+    let config_path = temp.path().join("meta.toml");
+    fs::write(
+        &config_path,
+        "[onboarding]\ncompleted = true\n\n[agents]\ndefault_agent = \"codex\"\ndefault_model = \"gpt-5.4\"\n",
+    )?;
+
+    let meta_dir = repo.join(".metastack");
+    fs::create_dir_all(&meta_dir)?;
+    fs::write(
+        meta_dir.join("meta.json"),
+        r#"{"version":1,"project":{"name":"test"}}"#,
+    )?;
+    init_repo_with_origin(&repo)?;
+
+    let bin_dir = temp.path().join("bin");
+    fs::create_dir_all(&bin_dir)?;
+    let gh_stub = bin_dir.join("gh");
+    fs::write(
+        &gh_stub,
+        r#"#!/bin/sh
+if [ "$1" = "auth" ]; then echo 'Logged in'; exit 0; fi
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then echo '[]'; exit 0; fi
+exit 1
+"#,
+    )?;
+    fs::set_permissions(&gh_stub, fs::Permissions::from_mode(0o755))?;
+
+    // Use --events to switch to Completed tab
+    meta()
+        .args([
+            "agents",
+            "review",
+            "--render-once",
+            "--events",
+            "tab",
+            "--root",
+            repo.to_str().unwrap(),
+        ])
+        .env("METASTACK_CONFIG", config_path.to_str().unwrap())
+        .env("PATH", format!("{}:/usr/bin:/bin", bin_dir.display()))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Completed"));
+
+    Ok(())
+}
