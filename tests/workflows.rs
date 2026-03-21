@@ -1439,6 +1439,106 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"#
 
 #[cfg(unix)]
 #[test]
+fn workflows_run_render_once_events_can_confirm_overwrite_and_save() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    fs::create_dir_all(repo_root.join(".metastack/workflows"))?;
+    fs::create_dir_all(&bin_dir)?;
+
+    fs::write(
+        repo_root.join(".metastack/workflows/render-once-proof.md"),
+        r#"---
+name: render-once-proof
+summary: Verify scripted workflow snapshots.
+provider: codex
+parameters:
+  - name: request
+    description: Prompt text.
+    required: true
+---
+# Generated
+
+{{request}}
+"#,
+    )?;
+    fs::write(
+        &config_path,
+        r#"[agents]
+default_agent = "codex"
+default_model = "gpt-5.4"
+default_reasoning = "medium"
+"#,
+    )?;
+
+    let stub_path = bin_dir.join("codex");
+    fs::write(
+        &stub_path,
+        r##"#!/bin/sh
+if [ "$1" = "--help" ]; then
+  cat <<'EOF'
+-a, --ask-for-approval <APPROVAL_POLICY>
+-s, --sandbox <SANDBOX_MODE>
+-C, --cd <DIR>
+    --add-dir <DIR>
+    --dangerously-bypass-approvals-and-sandbox
+EOF
+  exit 0
+fi
+if [ "$1" = "exec" ] && [ "$2" = "--help" ]; then
+  cat <<'EOF'
+-j, --json
+-m, --model <MODEL>
+-c, --config <key=value>
+EOF
+  exit 0
+fi
+printf '%s\n' '{"type":"thread.started","thread_id":"workflow-thread"}'
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"# Snapshot\n\nrender-once ok"}}'
+"##,
+    )?;
+    let mut permissions = fs::metadata(&stub_path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&stub_path, permissions)?;
+
+    let output_path = repo_root.join("custom-output.md");
+    fs::write(&output_path, "# Existing\n")?;
+
+    let current_path = std::env::var("PATH")?;
+    meta()
+        .workflow_repo(&repo_root, &config_path)?
+        .env("METASTACK_CONFIG", &config_path)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "workflows",
+            "run",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+            "render-once-proof",
+            "--render-once",
+            "--param",
+            "request=Review the generated text",
+            "--output",
+            "custom-output.md",
+            "--events",
+            "enter,save,enter,enter",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Status: Workflow `render-once-proof` artifact updated at `custom-output.md`.",
+        ));
+
+    assert_eq!(
+        fs::read_to_string(output_path)?,
+        "# Snapshot\n\nrender-once ok"
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn workflows_run_no_interactive_can_save_generated_output() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
