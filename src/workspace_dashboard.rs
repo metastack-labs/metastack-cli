@@ -16,7 +16,7 @@ use ratatui::widgets::{Block, Borders, ListItem, ListState, Wrap};
 use ratatui::{Frame, Terminal};
 
 use crate::tui::fields::InputFieldState;
-use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph, wrapped_rows};
+use crate::tui::scroll::{ScrollState, plain_text, scrollable_content_paragraph, wrapped_rows};
 use crate::tui::theme::{
     Tone, badge, empty_state, key_hints, label_style, list, muted_style, panel_title, paragraph,
     tone_style,
@@ -454,7 +454,7 @@ fn render_workspace_preview(frame: &mut Frame<'_>, area: Rect, app: &WorkspaceDa
         Text::from("No workspace selected.")
     };
 
-    let preview = scrollable_paragraph(
+    let preview = scrollable_content_paragraph(
         text,
         panel_title("Workspace Details", app.focus == Focus::Preview),
         &app.preview_scroll,

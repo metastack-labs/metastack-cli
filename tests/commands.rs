@@ -138,6 +138,33 @@ fn agents_help_lists_listen_and_workflows() {
 }
 
 #[test]
+fn agents_listen_help_describes_session_browser_navigation() {
+    cli()
+        .args(["agents", "listen", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("interactive session browser"))
+        .stdout(predicate::str::contains(
+            "include PR visibility as `none`, `draft #N`, or `ready #N`",
+        ))
+        .stdout(predicate::str::contains(
+            "Press Enter on the selected session to open the detail pane for milestones, references, prompt context, log excerpts, and any available PR URL or `#N` ref",
+        ))
+        .stdout(predicate::str::contains(
+            "Use Up/Down (or j/k when vim mode is enabled)",
+        ))
+        .stdout(predicate::str::contains(
+            "Press P to pause the selected running session, and R to resume a paused session or retry a blocked one",
+        ))
+        .stdout(predicate::str::contains(
+            "Esc or Backspace to close detail mode",
+        ))
+        .stdout(predicate::str::contains(
+            "Missing or malformed session detail artifacts do not block the list view",
+        ));
+}
+
+#[test]
 fn backlog_help_lists_tech_and_sync_commands() {
     cli()
         .args(["backlog", "--help"])

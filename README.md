@@ -961,11 +961,18 @@ Legacy alias: `meta listen`
 
 `meta agents listen` keeps the same repository identity as the source checkout, but the worker prompt is anchored to the provided workspace checkout as the only local write scope. Implementation, validation, and local backlog updates must stay inside that workspace for the active repository unless the issue explicitly asks for a narrower subproject.
 
-The live terminal dashboard refreshes locally every second so session-state changes stay visible, while the configured listen poll interval continues to control how often Linear is queried. Steady-state listen runs stay entirely in the terminal TUI, `--render-once` emits a terminal snapshot, and `--once --json` emits one machine-readable poll-cycle payload without going through the ratatui snapshot path.
+The live terminal dashboard refreshes locally every second so session-state changes stay visible, while the configured listen poll interval continues to control how often Linear is queried. Steady-state listen runs stay entirely in the terminal TUI as an interactive session browser, `--render-once` emits a terminal snapshot, and `--once --json` emits one machine-readable poll-cycle payload without going through the ratatui snapshot path.
 
-When built-in `codex` or `claude` workers emit structured usage telemetry, `meta agents listen` accumulates session-level input and output tokens across repeated turns and renders both per-session and runtime rollups as `in`, `out`, and `total`. When exact counts are unavailable, the dashboard and textual summaries continue to show `n/a`.
+When built-in `codex` or `claude` workers emit structured usage telemetry, `meta agents listen` accumulates session-level input and output tokens across repeated turns. Runtime summaries, detail panes, and textual inspection output render `in`, `out`, and `total`, while the session table keeps a compact total-only token column. When exact counts are unavailable, the dashboard and textual summaries continue to show `n/a`.
 When install-scoped `vim_mode` is enabled, the listen dashboard also accepts `h` / `l` as aliases
-for the existing left/right view-switching controls.
+for the existing left/right view-switching controls. The session table keeps an active row
+selection, renders a compact `PR` badge (`none`, `draft #N`, `ready #N`), and opens a structured
+detail pane with `Enter`. That drill-down shows the selected session's milestones, workspace and
+backlog references, prompt-context references, PR publication state, any available PR URL or bare
+`#N` reference, and short log excerpts from the install-scoped session detail artifact. Use `Up` /
+`Down` or `j` / `k` to move between
+sessions, `Esc` or `Backspace` to close detail mode, and `PgUp` / `PgDn` to scroll the focused
+detail pane.
 Examples:
 
 ```bash
@@ -1008,8 +1015,12 @@ Outputs:
 When `$METASTACK_CONFIG` points to a custom config file, the listener store lives under that
 config file's parent `data/` directory. Otherwise the default install-scoped root is derived from
 the existing config path rules, for example `~/.config/metastack/data/`. Each project is stored in
-`listen/projects/<PROJECT_KEY>/` with `project.json`, `session.json`, an active-listener lock, and
-per-issue logs.
+`listen/projects/<PROJECT_KEY>/` with `project.json`, `session.json`, an active-listener lock,
+`session-details/<ISSUE>.json`, and per-issue logs. `session.json` stays compact and list-oriented;
+the per-session detail files hold session milestones, workspace/backlog/workpad references,
+prompt-context references, PR publication state, and short log excerpts for the drill-down pane.
+Missing or malformed detail files are treated as temporarily unavailable detail, not as a fatal
+dashboard or reload error; the next successful listener refresh rewrites them.
 
 Stored-session management commands:
 
@@ -1021,6 +1032,14 @@ meta listen sessions resume --project-key <PROJECT_KEY> --once
 ```
 
 `meta listen sessions ...` manages the install-scoped listener store only. It does not inventory or delete the sibling workspace clones themselves.
+`meta listen sessions inspect` now expands the latest stored session with structured detail-artifact
+fields when available, including PR URL/state, workspace/backlog/workpad references, recent
+milestones, prompt-context references, compact log excerpts, and a fallback `Detail PR Ref: #N`
+line when the detail artifact only carries a PR number.
+The interactive selected-session detail pane follows the same fallback contract and shows `PR Ref:
+#N` when the detail artifact has a PR number but no published PR URL yet.
+Within the live dashboard, `P` pauses the selected running worker, and `R` either resumes a paused
+worker or retries a blocked session from its existing workspace state.
 
 ### `workspace`
 

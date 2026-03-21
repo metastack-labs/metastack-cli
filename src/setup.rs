@@ -38,6 +38,7 @@ use crate::scaffold::{ensure_backlog_templates, ensure_planning_layout};
 use crate::tui::fields::{InputFieldState, SelectFieldState};
 use crate::tui::keybindings::KeybindingPolicy;
 use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph_with_block, wrapped_rows};
+use crate::tui::theme::content_panel;
 
 #[derive(Debug, Clone)]
 struct SetupViewData {
@@ -1765,18 +1766,16 @@ fn render_summary_panel(frame: &mut Frame<'_>, app: &SetupApp, area: Rect) {
     let active = app.step == SetupStep::Save;
     let paragraph = scrollable_paragraph_with_block(
         app.summary_text(area.width.saturating_sub(2)),
-        Block::default()
-            .borders(Borders::ALL)
-            .title(if active {
-                "Summary [scroll]"
-            } else {
-                "Summary"
-            })
-            .border_style(if active {
-                Style::default().add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            }),
+        content_panel(if active {
+            "Summary [scroll]"
+        } else {
+            "Summary"
+        })
+        .border_style(if active {
+            Style::default().add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        }),
         &app.summary_scroll,
     )
     .wrap(Wrap { trim: false });

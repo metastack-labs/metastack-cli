@@ -56,7 +56,8 @@ use crate::scaffold::ensure_planning_layout;
 use crate::text_diff::render_text_diff;
 use crate::tui::fields::InputFieldState;
 use crate::tui::prompt_images::PromptImageAttachment;
-use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph, wrapped_rows};
+use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph_with_block, wrapped_rows};
+use crate::tui::theme::content_panel;
 
 const NON_INTERACTIVE_MAX_FOLLOW_UP_QUESTIONS: usize = 3;
 const SKIPPED_FOLLOW_UP_LABEL: &str = "Skipped intentionally.";
@@ -3370,85 +3371,55 @@ fn render_review_form_frame(frame: &mut Frame<'_>, app: &ReviewApp) {
         .highlight_symbol("> ");
     frame.render_stateful_widget(issue_list, review_layout.issue_list, &mut issue_state);
 
-    let detail = scrollable_paragraph(
+    let detail = scrollable_paragraph_with_block(
         app.selected_ticket_text(),
-        if app.focus == ReviewFocus::SelectedTicket {
+        content_panel(if app.focus == ReviewFocus::SelectedTicket {
             "Selected Ticket [scroll]"
         } else {
             "Selected Ticket"
-        },
+        })
+        .border_style(if app.focus == ReviewFocus::SelectedTicket {
+            Style::default().add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        }),
         &app.selected_ticket_scroll,
     )
-    .wrap(Wrap { trim: false })
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(if app.focus == ReviewFocus::SelectedTicket {
-                "Selected Ticket [scroll]"
-            } else {
-                "Selected Ticket"
-            })
-            .border_style(if app.focus == ReviewFocus::SelectedTicket {
-                Style::default().add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            }),
-    )
-    .scroll((app.selected_ticket_scroll.offset(), 0));
+    .wrap(Wrap { trim: false });
     frame.render_widget(detail, review_layout.selected_ticket);
 
-    let overview = scrollable_paragraph(
+    let overview = scrollable_paragraph_with_block(
         app.overview_text(),
-        if app.focus == ReviewFocus::Overview {
+        content_panel(if app.focus == ReviewFocus::Overview {
             "Overview [scroll]"
         } else {
             "Overview"
-        },
+        })
+        .border_style(if app.focus == ReviewFocus::Overview {
+            Style::default().add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        }),
         &app.overview_scroll,
     )
-    .wrap(Wrap { trim: false })
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(if app.focus == ReviewFocus::Overview {
-                "Overview [scroll]"
-            } else {
-                "Overview"
-            })
-            .border_style(if app.focus == ReviewFocus::Overview {
-                Style::default().add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            }),
-    )
-    .scroll((app.overview_scroll.offset(), 0));
+    .wrap(Wrap { trim: false });
     frame.render_widget(overview, review_layout.overview);
 
-    let merge = scrollable_paragraph(
+    let merge = scrollable_paragraph_with_block(
         app.combination_plan_text(),
-        if app.focus == ReviewFocus::CombinationPlan {
+        content_panel(if app.focus == ReviewFocus::CombinationPlan {
             "Combination Plan [scroll]"
         } else {
             "Combination Plan"
-        },
+        })
+        .border_style(if app.focus == ReviewFocus::CombinationPlan {
+            Style::default().add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        }),
         &app.combination_scroll,
     )
-    .wrap(Wrap { trim: false })
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(if app.focus == ReviewFocus::CombinationPlan {
-                "Combination Plan [scroll]"
-            } else {
-                "Combination Plan"
-            })
-            .border_style(if app.focus == ReviewFocus::CombinationPlan {
-                Style::default().add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            }),
-    )
-    .scroll((app.combination_scroll.offset(), 0));
+    .wrap(Wrap { trim: false });
     frame.render_widget(merge, review_layout.combination_plan);
 
     render_footer(

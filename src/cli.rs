@@ -56,6 +56,13 @@ Examples:
   meta agents workflows run ticket-implementation --root . --dry-run";
 
 const LISTEN_HELP_EXAMPLES: &str = "\
+Interactive dashboard:
+  - Session rows stay compact and include PR visibility as `none`, `draft #N`, or `ready #N`
+  - Press Enter on the selected session to open the detail pane for milestones, references, prompt context, log excerpts, and any available PR URL or `#N` ref
+  - Use Up/Down (or j/k when vim mode is enabled) to change the selected session, Esc or Backspace to close detail mode, and PgUp/PgDn to scroll detail content
+  - Press P to pause the selected running session, and R to resume a paused session or retry a blocked one
+  - Missing or malformed session detail artifacts do not block the list view; the next refresh rewrites them and restores drill-down data
+
 Terminal-only examples:
   meta agents listen --check --root .
   meta agents listen --team MET --once
@@ -402,7 +409,7 @@ pub struct UpgradeArgs {
 
 #[derive(Debug, Clone, Subcommand)]
 pub enum AgentsCommands {
-    /// Listen to Linear for new backlog requests and run agents.
+    /// Listen for eligible Linear issues and supervise them through the interactive session browser.
     Listen(ListenArgs),
     /// List, explain, and run reusable workflow playbooks.
     Workflows(WorkflowsArgs),
@@ -971,7 +978,10 @@ pub struct SetupArgs {
 }
 
 #[derive(Debug, Clone, Args)]
-#[command(after_help = LISTEN_HELP_EXAMPLES)]
+#[command(
+    about = "Listen for eligible Linear issues and supervise them through the interactive session browser",
+    after_help = LISTEN_HELP_EXAMPLES
+)]
 pub struct ListenArgs {
     #[command(subcommand)]
     pub command: Option<ListenCommands>,
@@ -1105,6 +1115,9 @@ pub struct ListenRunArgs {
     /// Execute a single cycle and print a deterministic ratatui snapshot.
     #[arg(long)]
     pub render_once: bool,
+    /// Apply listen-browser actions before a render-once snapshot.
+    #[arg(long, hide = true, value_enum, value_delimiter = ',')]
+    pub events: Vec<ListenDashboardEventArg>,
     /// Use built-in sample data instead of calling Linear.
     #[arg(long)]
     pub demo: bool,
@@ -1605,6 +1618,20 @@ pub enum DashboardEventArg {
     Down,
     Tab,
     Enter,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ListenDashboardEventArg {
+    Up,
+    Down,
+    Tab,
+    Left,
+    Right,
+    Enter,
+    Back,
+    Esc,
+    PageUp,
+    PageDown,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]

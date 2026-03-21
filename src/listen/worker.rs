@@ -38,12 +38,13 @@ use crate::repo_target::RepoTarget;
 use crate::workflow_contract::render_workflow_contract;
 
 use super::{
-    BACKLOG_STATE, LatestResumeHandle, MAX_STALLED_TURNS, ResumeProvider, SessionPhase, TokenUsage,
-    agent_log_path, backlog_progress_for_issue_dir, capture_workspace_snapshot,
-    compact_blocked_summary, compact_completed_summary, compact_running_summary,
-    compare_workspace_snapshots, current_workspace_branch, issue_state_label, issue_team_key,
-    listen_issue_is_active, now_epoch_seconds, now_timestamp, preflight, render_agent_prompt,
-    try_transition_issue_to_review_state, workspace_has_meaningful_progress, write_listen_session,
+    BACKLOG_STATE, LatestResumeHandle, MAX_STALLED_TURNS, PullRequestStatus, PullRequestSummary,
+    ResumeProvider, SessionPhase, TokenUsage, agent_log_path, backlog_progress_for_issue_dir,
+    capture_workspace_snapshot, compact_blocked_summary, compact_completed_summary,
+    compact_running_summary, compare_workspace_snapshots, current_workspace_branch,
+    issue_state_label, issue_team_key, listen_issue_is_active, now_epoch_seconds, now_timestamp,
+    preflight, render_agent_prompt, try_transition_issue_to_review_state,
+    workspace_has_meaningful_progress, write_listen_session,
 };
 
 const REQUIRED_LISTEN_PR_LABEL: &str = "metastack";
@@ -106,6 +107,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
         backlog_issue: backlog_issue.as_ref(),
         pid: Some(worker_pid),
         latest_resume_handle: None,
+        pull_request: load_existing_pull_request(&source_root, project_selector, &args.issue)?,
     };
     let mut session_tokens =
         load_existing_session_tokens(&source_root, project_selector, &args.issue)?;
@@ -364,13 +366,14 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                 let branch = branch.as_deref().ok_or_else(|| {
                     anyhow!("failed to inspect the workspace branch before promoting the review PR")
                 })?;
-                let _ = prepare_listener_pull_request_for_review(
+                let pull_request = prepare_listener_pull_request_for_review(
                     &service,
                     &issue,
                     &workspace_path,
                     branch,
                 )
                 .await?;
+                session_context.pull_request = PullRequestSummary::from(pull_request);
                 let transitioned_issue =
                     try_transition_issue_to_review_state(&service, &issue).await?;
                 if let Some(backlog_issue) = backlog_issue.as_ref()
@@ -435,14 +438,18 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
             }
 
             if let Some(branch) = branch.as_deref() {
-                let _ = publish_listener_pull_request(
+                if let Some(pull_request) = publish_listener_pull_request(
                     &service,
                     &issue,
                     &workspace_path,
                     branch,
                     PullRequestPublishMode::Draft,
                 )
-                .await?;
+                .await?
+                .map(PullRequestSummary::from)
+                {
+                    session_context.pull_request = pull_request;
+                }
             }
 
             if stalled_turns >= MAX_STALLED_TURNS {
@@ -523,6 +530,7 @@ struct WorkerSessionContext<'a> {
     backlog_issue: Option<&'a IssueSummary>,
     pid: Option<u32>,
     latest_resume_handle: Option<LatestResumeHandle>,
+    pull_request: PullRequestSummary,
 }
 
 #[derive(Debug, Default)]
@@ -530,6 +538,20 @@ struct TurnExecutionResult {
     session_id: Option<String>,
     usage: Option<AgentTokenUsage>,
     latest_resume_handle: Option<LatestResumeHandle>,
+}
+
+impl From<PullRequestLifecycleResult> for PullRequestSummary {
+    fn from(value: PullRequestLifecycleResult) -> Self {
+        Self {
+            number: Some(value.number),
+            url: Some(value.url),
+            status: if value.is_draft {
+                PullRequestStatus::Draft
+            } else {
+                PullRequestStatus::Ready
+            },
+        }
+    }
 }
 
 async fn load_worker_issue<C>(service: &LinearService<C>, identifier: &str) -> Result<IssueSummary>
@@ -1412,6 +1434,7 @@ fn build_worker_session(
         }),
         workspace_path: Some(context.workspace_path.display().to_string()),
         branch: context.branch.map(str::to_string),
+        pull_request: context.pull_request.clone(),
         workpad_comment_id: Some(context.workpad_comment_id.to_string()),
         updated_at_epoch_seconds: now_epoch_seconds(),
         pid: context.pid.filter(|value| *value > 0),
@@ -1462,6 +1485,21 @@ fn load_existing_session_id(
         .and_then(|session| session.session_id))
 }
 
+fn load_existing_pull_request(
+    root: &Path,
+    project_selector: Option<&str>,
+    issue_identifier: &str,
+) -> Result<PullRequestSummary> {
+    let store = super::store::ListenProjectStore::resolve(root, project_selector)?;
+    let state = store.load_state()?;
+    Ok(state
+        .sessions
+        .into_iter()
+        .find(|session| session.issue_matches(issue_identifier))
+        .map(|session| session.pull_request)
+        .unwrap_or_default())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1470,7 +1508,7 @@ mod tests {
         query_codex_threads, read_codex_session_index,
     };
     use crate::linear::{IssueSummary, TeamRef};
-    use crate::listen::{SessionPhase, TokenUsage};
+    use crate::listen::{PullRequestSummary, SessionPhase, TokenUsage};
     use std::fs;
     use std::sync::{Mutex, OnceLock};
     use tempfile::tempdir;
@@ -1559,6 +1597,7 @@ mod tests {
             backlog_issue: None,
             pid: Some(1234),
             latest_resume_handle: None,
+            pull_request: PullRequestSummary::default(),
         };
         let mut tokens = TokenUsage::default();
 

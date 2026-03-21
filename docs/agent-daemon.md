@@ -23,24 +23,26 @@ The initial implementation delivered in `MET-13` focuses on the smallest end-to-
 7. The daemon writes an agent brief inside the workspace at `.metastack/agents/briefs/<TICKET>.md`.
 8. The configured local agent is launched in the workspace with the issue context, attachment-context path, workpad comment id, and optional repo instructions file injected into its prompt/instructions.
 9. Session state is persisted to the install-scoped MetaStack data root under
-   `listen/projects/<PROJECT_KEY>/session.json`, and agent stdout/stderr are appended to
-   `listen/projects/<PROJECT_KEY>/logs/<TICKET>.log`.
+   `listen/projects/<PROJECT_KEY>/session.json`, per-session drill-down data is persisted under
+   `listen/projects/<PROJECT_KEY>/session-details/<TICKET>.json`, and agent stdout/stderr are
+   appended to `listen/projects/<PROJECT_KEY>/logs/<TICKET>.log`.
 10. Session cleanup is record-only: targeted session records are removed or rewritten inside
     `session.json` without deleting `project.json`, `active-listener.lock.json`, or unrelated
     per-issue logs, and live worker PIDs are never cleared automatically.
 11. A full-screen ratatui dashboard renders runtime summary rows, a colorized agent table, the pending queue, daemon notes, and an active/completed session toggle.
-12. The hidden listen worker keeps refreshing the Linear issue and re-running the agent with first-turn and continuation prompts while the issue remains active.
-13. The hidden listen worker keeps looping while the issue remains active, but it treats repeated planning-only or no-op turns as a local stall instead of silently spinning.
-14. Once the ticket branch is pushed, the worker creates or updates the matching branch PR as a draft, keeps the `metastack` label attached, and reuses the same PR on continuation instead of replacing it.
-15. When the technical backlog is complete and meaningful non-`.metastack/` workspace progress was observed, the worker promotes that same branch PR to ready for review and then attempts to move both the parent issue and backlog child into a review-style state.
-16. The worker records `completed` or `blocked` state locally, including stall summaries and recent agent log output for unattended failures.
-17. During reconciliation, a stored `running` session with a dead worker PID is marked `blocked`
+12. The session table keeps a focused row selection, shows compact PR state (`none`, `draft #N`, `ready #N`), and opens a structured selected-session detail pane with `Enter`.
+13. The hidden listen worker keeps refreshing the Linear issue and re-running the agent with first-turn and continuation prompts while the issue remains active.
+14. The hidden listen worker keeps looping while the issue remains active, but it treats repeated planning-only or no-op turns as a local stall instead of silently spinning.
+15. Once the ticket branch is pushed, the worker creates or updates the matching branch PR as a draft, keeps the `metastack` label attached, and reuses the same PR on continuation instead of replacing it.
+16. When the technical backlog is complete and meaningful non-`.metastack/` workspace progress was observed, the worker promotes that same branch PR to ready for review and then attempts to move both the parent issue and backlog child into a review-style state.
+17. The worker records `completed` or `blocked` state locally, including stall summaries and recent agent log output for unattended failures.
+18. During reconciliation, a stored `running` session with a dead worker PID is marked `blocked`
     with stale/worker-died context preserved in its summary and log references instead of being
     auto-resumed.
-18. Completed sessions older than the default 24-hour TTL are pruned automatically during store
+19. Completed sessions older than the default 24-hour TTL are pruned automatically during store
     loads and reconciliation, while blocked sessions are retained until explicit cleanup.
-19. Live mode keeps the ratatui dashboard open in the terminal and uses the same shared listen snapshot for deterministic `--render-once` output.
-20. Built-in `codex` and `claude` worker runs opportunistically capture structured input/output token usage when the provider surfaces it, accumulate those counts in the persisted session record across turns, and leave token fields blank instead of failing when providers omit exact usage data.
+20. Live mode keeps the ratatui dashboard open in the terminal and uses the same shared listen snapshot for deterministic `--render-once` output.
+21. Built-in `codex` and `claude` worker runs opportunistically capture structured input/output token usage when the provider surfaces it, accumulate those counts in the persisted session record across turns, and leave token fields blank instead of failing when providers omit exact usage data.
 
 This mirrors the scheduler + status-surface split in Symphony while using one clear workspace
 contract: each claimed ticket gets its own standalone clone and ticket branch under the configured
@@ -71,7 +73,7 @@ Primary options:
   correct resume target directly.
 - `listen sessions clear` accepts an issue identifier, `--blocked`, `--completed`, `--stale`, or
   `--all`; it refuses to remove any targeted record whose stored PID is still alive.
-- Live dashboard keys: `Tab` toggles between active and completed sessions, `Left` selects active sessions, `Right` selects completed sessions, and `q` / `Ctrl-C` exits.
+- Live dashboard keys: `Tab` toggles between active and completed sessions, `Left` selects active sessions, `Right` selects completed sessions, `Up` / `Down` move the selected row, `Enter` toggles the selected-session detail pane, `Esc` / `Backspace` close detail mode, `PgUp` / `PgDn` scroll the detail pane, `P` pauses the selected running worker, `R` resumes a paused worker or retries a blocked session, and `q` / `Ctrl-C` exits.
 
 Examples:
 
@@ -113,6 +115,9 @@ Listen-mode built-in launches also switch to machine-readable provider output so
 capture the latest provider-native resume target for the current turn. Codex uses
 `codex exec --json`, Claude uses `claude -p --verbose --output-format=stream-json`, and both
 capture paths are silent best effort with no backfill of older stored session records.
+Structured session detail artifacts are best-effort companion state: malformed or missing
+`session-details/<TICKET>.json` files do not break the list view or reload path, and the next
+successful session refresh rewrites them.
 
 ## Runtime Modules
 
@@ -123,15 +128,19 @@ capture paths are silent best effort with no backfill of older stored session re
 - `src/agents.rs`: reusable brief-generation and agent-launch helpers shared by `meta listen`, `meta scan`, and the planning flows.
 - `src/agent_provider.rs`: built-in provider adapter catalog and launch behavior for `codex` and `claude`.
 - `src/workflow_contract.rs`: shared injected workflow contract composition plus optional repo overlay loading.
-- `src/listen/store.rs`: install-scoped project identity, metadata, lock, and session-store
-  helpers.
+- `src/listen/store.rs`: install-scoped project identity, metadata, lock, session-store helpers,
+  and per-session detail artifacts.
 
 ## Current Limitations
 
-- Live mode runs in an alternate terminal screen, exposes active/completed session toggles, and exits on `q` or `Ctrl-C` without binding a local TCP port.
+- Live mode runs in an alternate terminal screen, keeps list/detail navigation terminal-local, and exits on `q` or `Ctrl-C` without binding a local TCP port.
 - Session persistence is install-scoped and local-file based; there is no remote coordination
   beyond the per-project active-listener lock yet.
 - The supervised worker can mark a ticket `blocked` if it exhausts the configured turn cap, or if repeated turns fail to produce meaningful implementation updates while the issue stays active.
-- Agent rows already expose stage, age, local session handle, and PID, but real token/rate-limit telemetry is still limited until richer executor telemetry lands.
+- Detail artifacts intentionally store only bounded milestones, references, PR metadata, and short
+  log excerpts; raw log files remain the source of truth for full history.
+- Agent rows already expose stage, age, local session handle, PID, PR state, and compact token
+  totals, but real token/rate-limit telemetry is still limited until richer executor telemetry
+  lands.
 
 These are deliberate boundaries for the first slice. Future tickets can add agent executors, richer claim policies, and multi-agent coordination without replacing the command surface introduced here.

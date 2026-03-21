@@ -34,8 +34,8 @@ use crate::backlog::{
     TemplateContext, render_template_files, save_issue_metadata, write_issue_description,
 };
 use crate::cli::{
-    ListenRunArgs, ListenSessionClearArgs, ListenSessionInspectArgs, ListenSessionListArgs,
-    ListenSessionResumeArgs, ListenWorkerArgs,
+    ListenDashboardEventArg, ListenRunArgs, ListenSessionClearArgs, ListenSessionInspectArgs,
+    ListenSessionListArgs, ListenSessionResumeArgs, ListenWorkerArgs,
 };
 use crate::config::{
     AppConfig, DEFAULT_SYNC_DISCUSSION_PROMPT_CHAR_LIMIT, LinearConfig, LinearConfigOverrides,
@@ -51,12 +51,13 @@ use crate::listen::workspace::{TicketWorkspace, ensure_ticket_workspace};
 use crate::output::render_json_success;
 use crate::scaffold::ensure_planning_layout;
 pub use state::{
-    AgentSession, LatestResumeHandle, PendingIssue, ResumeProvider, SessionPhase, TokenUsage,
+    AgentSession, LatestResumeHandle, PendingIssue, PullRequestStatus, PullRequestSummary,
+    ResumeProvider, SessionPhase, TokenUsage,
 };
 use state::{COMPLETED_SESSION_TTL_SECONDS, ListenState};
 use store::{
-    ListenProjectStore, SessionSelector, StoredListenProjectSummary, pid_is_running,
-    resolve_source_project_root,
+    ListenProjectStore, ListenSessionDetail, SessionSelector, StoredListenProjectSummary,
+    pid_is_running, resolve_source_project_root,
 };
 
 const TODO_STATE: &str = "Todo";
@@ -81,6 +82,7 @@ pub struct ListenDashboardData {
     pub runtime: ListenRuntimeSummary,
     pub pending_issues: Vec<PendingIssue>,
     pub sessions: Vec<AgentSession>,
+    pub session_details: HashMap<String, ListenSessionDetail>,
     pub notes: Vec<String>,
     pub state_file: String,
 }
@@ -137,6 +139,13 @@ impl ListenDashboardData {
                 SessionListView::Completed => session.phase.is_completed(),
             })
             .collect()
+    }
+
+    pub(crate) fn detail_for_session(
+        &self,
+        issue_identifier: &str,
+    ) -> Option<&ListenSessionDetail> {
+        self.session_details.get(issue_identifier)
     }
 }
 
@@ -205,6 +214,7 @@ struct ListenCycleData {
     claimed_this_cycle: usize,
     pending_issues: Vec<PendingIssue>,
     sessions: Vec<AgentSession>,
+    session_details: HashMap<String, ListenSessionDetail>,
     notes: Vec<String>,
     state_file: String,
     rate_limits: Option<String>,
@@ -218,6 +228,7 @@ impl ListenCycleData {
             claimed_this_cycle: 0,
             pending_issues: Vec::new(),
             sessions: Vec::new(),
+            session_details: HashMap::new(),
             notes: vec![
                 "Starting dashboard before the first Linear refresh completes.".to_string(),
                 "Refreshing current Todo issues, listener sessions, and workspace state now."
@@ -260,6 +271,13 @@ impl ListenCycleData {
                     backlog_path: Some(".metastack/backlog/MET-14".to_string()),
                     workspace_path: Some("/tmp/metastack-cli-workspace/MET-13".to_string()),
                     branch: Some("met-13-agent-daemon".to_string()),
+                    pull_request: PullRequestSummary {
+                        number: Some(321),
+                        url: Some(
+                            "https://github.com/metastack-labs/metastack-cli/pull/321".to_string(),
+                        ),
+                        status: PullRequestStatus::Draft,
+                    },
                     workpad_comment_id: Some("comment-met-13".to_string()),
                     updated_at_epoch_seconds: reference_now - 1_180,
                     pid: Some(95_388),
@@ -294,6 +312,7 @@ impl ListenCycleData {
                     backlog_path: None,
                     workspace_path: Some("/tmp/metastack-cli-workspace/MET-17".to_string()),
                     branch: Some("met-17-branch-pr-reconciliation".to_string()),
+                    pull_request: PullRequestSummary::default(),
                     workpad_comment_id: None,
                     updated_at_epoch_seconds: reference_now - 2_940,
                     pid: Some(96_104),
@@ -313,6 +332,7 @@ impl ListenCycleData {
                     log_path: Some(".metastack/agents/sessions/MET-17.log".to_string()),
                 },
             ],
+            session_details: demo_session_details(reference_now),
             notes: vec![
                 "Demo mode: no Linear requests were made.".to_string(),
                 "The live terminal dashboard adapts to the full viewport.".to_string(),
@@ -325,9 +345,137 @@ impl ListenCycleData {
         }
     }
 
-    fn apply_state_snapshot(&mut self, state: ListenState) {
+    fn apply_state_snapshot(
+        &mut self,
+        state: ListenState,
+        session_details: HashMap<String, ListenSessionDetail>,
+    ) {
         self.sessions = state.sorted_sessions();
+        self.session_details = session_details;
     }
+}
+
+fn demo_session_details(reference_now: u64) -> HashMap<String, ListenSessionDetail> {
+    HashMap::from([
+        (
+            "MET-13".to_string(),
+            ListenSessionDetail {
+                version: 1,
+                issue_identifier: "MET-13".to_string(),
+                issue_title: "Agent Daemon".to_string(),
+                updated_at_epoch_seconds: reference_now - 120,
+                session_updated_at_epoch_seconds: reference_now - 1_180,
+                phase: SessionPhase::BriefReady,
+                summary: "Brief ready | backlog MET-14 | worker active".to_string(),
+                turns: Some(1),
+                tokens: TokenUsage {
+                    input: Some(9_614_112),
+                    output: Some(8_120),
+                },
+                pull_request: PullRequestSummary {
+                    number: Some(321),
+                    url: Some("https://github.com/metastack-labs/metastack-cli/pull/321".to_string()),
+                    status: PullRequestStatus::Draft,
+                },
+                references: store::SessionDetailReferences {
+                    workspace_path: Some("/tmp/metastack-cli-workspace/MET-13".to_string()),
+                    backlog_path: Some(".metastack/backlog/MET-14".to_string()),
+                    brief_path: Some(".metastack/agents/briefs/MET-13.md".to_string()),
+                    workpad_comment_id: Some("comment-met-13".to_string()),
+                    log_path: Some(".metastack/agents/sessions/MET-13.log".to_string()),
+                    branch: Some("met-13-agent-daemon".to_string()),
+                },
+                prompt_context: vec![
+                    store::SessionContextReference {
+                        label: "Brief".to_string(),
+                        value: ".metastack/agents/briefs/MET-13.md".to_string(),
+                    },
+                    store::SessionContextReference {
+                        label: "Backlog index".to_string(),
+                        value: ".metastack/backlog/MET-14/index.md".to_string(),
+                    },
+                    store::SessionContextReference {
+                        label: "Attachment context manifest".to_string(),
+                        value: ".metastack/agents/issue-context/MET-13/README.md".to_string(),
+                    },
+                ],
+                milestones: vec![
+                    store::SessionMilestone {
+                        at_epoch_seconds: reference_now - 2_940,
+                        phase: SessionPhase::Claimed,
+                        summary: "Picked up from Todo | local backlog ready | workpad created | worker pid 95388".to_string(),
+                        turns: Some(0),
+                        pull_request_status: PullRequestStatus::Unpublished,
+                        pull_request_number: None,
+                    },
+                    store::SessionMilestone {
+                        at_epoch_seconds: reference_now - 1_180,
+                        phase: SessionPhase::BriefReady,
+                        summary: "Brief ready | backlog MET-14 | worker active".to_string(),
+                        turns: Some(1),
+                        pull_request_status: PullRequestStatus::Draft,
+                        pull_request_number: Some(321),
+                    },
+                ],
+                log_excerpts: vec![
+                    store::SessionLogExcerpt {
+                        line_number: 18,
+                        text: "thread.started: 019cedb4-2293-7651-b0b4-dfac4af6a640".to_string(),
+                    },
+                    store::SessionLogExcerpt {
+                        line_number: 31,
+                        text: "Updated local backlog files for MET-14".to_string(),
+                    },
+                    store::SessionLogExcerpt {
+                        line_number: 44,
+                        text: "Published draft PR #321 for review visibility".to_string(),
+                    },
+                ],
+            },
+        ),
+        (
+            "MET-17".to_string(),
+            ListenSessionDetail {
+                version: 1,
+                issue_identifier: "MET-17".to_string(),
+                issue_title: "Branch PR reconciliation".to_string(),
+                updated_at_epoch_seconds: reference_now - 120,
+                session_updated_at_epoch_seconds: reference_now - 2_940,
+                phase: SessionPhase::Claimed,
+                summary: "Claimed | preparing workspace".to_string(),
+                turns: Some(1),
+                tokens: TokenUsage {
+                    input: Some(8_380_959),
+                    output: Some(49_960),
+                },
+                pull_request: PullRequestSummary::default(),
+                references: store::SessionDetailReferences {
+                    workspace_path: Some("/tmp/metastack-cli-workspace/MET-17".to_string()),
+                    backlog_path: None,
+                    brief_path: None,
+                    workpad_comment_id: None,
+                    log_path: Some(".metastack/agents/sessions/MET-17.log".to_string()),
+                    branch: Some("met-17-branch-pr-reconciliation".to_string()),
+                },
+                prompt_context: vec![store::SessionContextReference {
+                    label: "Attachment context manifest".to_string(),
+                    value: ".metastack/agents/issue-context/MET-17/README.md".to_string(),
+                }],
+                milestones: vec![store::SessionMilestone {
+                    at_epoch_seconds: reference_now - 2_940,
+                    phase: SessionPhase::Claimed,
+                    summary: "Claimed | preparing workspace".to_string(),
+                    turns: Some(1),
+                    pull_request_status: PullRequestStatus::Unpublished,
+                    pull_request_number: None,
+                }],
+                log_excerpts: vec![store::SessionLogExcerpt {
+                    line_number: 6,
+                    text: "Preparing workspace clone and workpad bootstrap".to_string(),
+                }],
+            },
+        ),
+    ])
 }
 
 #[derive(Debug, Clone)]
@@ -939,6 +1087,12 @@ where
             .collect::<Vec<_>>();
         let sessions = state.sorted_sessions();
         self.store.save_state(&state)?;
+        let session_details = self
+            .store
+            .load_session_details(&sessions)?
+            .into_iter()
+            .map(|detail| (detail.issue_identifier.clone(), detail))
+            .collect();
 
         let scope = match (&self.filters.team, &self.filters.project) {
             (Some(team), Some(project)) => format!("{team} / {project}"),
@@ -955,6 +1109,7 @@ where
             claimed_this_cycle,
             pending_issues,
             sessions,
+            session_details,
             notes,
             state_file,
             rate_limits: None,
@@ -1017,7 +1172,7 @@ where
                 continue;
             }
 
-            if matches!(session.phase, SessionPhase::Running)
+            if matches!(session.phase, SessionPhase::Running | SessionPhase::Paused)
                 && session.pid.is_some_and(pid_is_running)
             {
                 reconciled.push(session);
@@ -1026,7 +1181,7 @@ where
 
             if !matches!(
                 session.phase,
-                SessionPhase::Completed | SessionPhase::Blocked
+                SessionPhase::Completed | SessionPhase::Blocked | SessionPhase::Paused
             ) && let Some(reason) = self.session_drop_reason(&issue)
             {
                 session.phase = SessionPhase::Completed;
@@ -1039,7 +1194,7 @@ where
 
             if matches!(
                 session.phase,
-                SessionPhase::Completed | SessionPhase::Blocked
+                SessionPhase::Completed | SessionPhase::Blocked | SessionPhase::Paused
             ) {
                 if normalize_issue_state_name(issue_state_label(&issue).as_str()) == "todo" {
                     notes.push(format!(
@@ -1054,7 +1209,7 @@ where
                 continue;
             }
 
-            if matches!(session.phase, SessionPhase::Running)
+            if matches!(session.phase, SessionPhase::Running | SessionPhase::Paused)
                 && let Some(pid) = session.pid
             {
                 mark_running_session_stale(
@@ -1528,6 +1683,7 @@ where
                 .workspace
                 .map(|entry| entry.workspace_path.display().to_string()),
             branch: artifacts.workspace.map(|entry| entry.branch.clone()),
+            pull_request: PullRequestSummary::default(),
             workpad_comment_id: artifacts.workpad_comment.map(|comment| comment.id.clone()),
             updated_at_epoch_seconds,
             pid: artifacts.pid.filter(|pid| *pid > 0),
@@ -2030,12 +2186,15 @@ pub fn run_listen_session_inspect(args: &ListenSessionInspectArgs) -> Result<Str
     }
 
     if let Some(session) = metadata.latest_session {
+        let detail_path = store.detail_path(&session.issue_identifier);
+        let detail = store.load_session_detail(&session.issue_identifier)?;
         lines.push(String::new());
         lines.push("Latest session:".to_string());
         lines.push(format!("  - Issue: {}", session.issue_identifier));
         lines.push(format!("  - Title: {}", session.issue_title));
         lines.push(format!("  - Phase: {}", session.phase.display_label()));
         lines.push(format!("  - Summary: {}", session.summary));
+        lines.push(format!("  - PR: {}", session.pull_request_label()));
         lines.push(format!("  - Tokens: {}", session.tokens.display_compact()));
         lines.push(format!(
             "  - Updated: {}",
@@ -2055,6 +2214,12 @@ pub fn run_listen_session_inspect(args: &ListenSessionInspectArgs) -> Result<Str
         if let Some(log_path) = session.log_path {
             lines.push(format!("  - Log: {log_path}"));
         }
+        lines.push(format!("  - Detail file: {}", detail_path.display()));
+        if let Some(detail) = detail {
+            append_session_inspect_detail_lines(&mut lines, &detail);
+        } else {
+            lines.push("  - Detail status: unavailable".to_string());
+        }
     }
 
     let state = store.load_state()?;
@@ -2073,6 +2238,88 @@ pub fn run_listen_session_inspect(args: &ListenSessionInspectArgs) -> Result<Str
     }
 
     Ok(lines.join("\n"))
+}
+
+fn append_session_inspect_detail_lines(lines: &mut Vec<String>, detail: &ListenSessionDetail) {
+    lines.push("  - Detail status: available".to_string());
+    lines.push(format!(
+        "  - Detail milestones: {}",
+        detail.milestones.len()
+    ));
+    lines.push(format!(
+        "  - Detail excerpts: {}",
+        detail.log_excerpts.len()
+    ));
+    lines.push(format!(
+        "  - Detail PR: {}",
+        detail.pull_request.compact_label()
+    ));
+
+    if let Some(url) = detail.pull_request.url.as_deref() {
+        lines.push(format!("  - Detail PR URL: {url}"));
+    } else if let Some(number) = detail.pull_request.number {
+        lines.push(format!("  - Detail PR Ref: #{number}"));
+    }
+    if let Some(branch) = detail.references.branch.as_deref() {
+        lines.push(format!("  - Detail branch: {branch}"));
+    }
+    if let Some(workspace_path) = detail.references.workspace_path.as_deref() {
+        lines.push(format!("  - Detail workspace: {workspace_path}"));
+    }
+    if let Some(backlog_path) = detail.references.backlog_path.as_deref() {
+        lines.push(format!("  - Detail backlog: {backlog_path}"));
+    }
+    if let Some(brief_path) = detail.references.brief_path.as_deref() {
+        lines.push(format!("  - Detail brief: {brief_path}"));
+    }
+    if let Some(workpad_comment_id) = detail.references.workpad_comment_id.as_deref() {
+        lines.push(format!("  - Detail workpad: {workpad_comment_id}"));
+    }
+    if let Some(log_path) = detail.references.log_path.as_deref() {
+        lines.push(format!("  - Detail log: {log_path}"));
+    }
+
+    if !detail.prompt_context.is_empty() {
+        lines.push("  - Prompt context:".to_string());
+        for reference in detail.prompt_context.iter().take(4) {
+            lines.push(format!("    - {}: {}", reference.label, reference.value));
+        }
+    }
+
+    if !detail.milestones.is_empty() {
+        lines.push("  - Recent milestones:".to_string());
+        for milestone in detail.milestones.iter().rev().take(3).rev() {
+            let turns = milestone
+                .turns
+                .map(|turns| format!(" | turns {turns}"))
+                .unwrap_or_default();
+            let pull_request = match milestone.pull_request_number {
+                Some(number) => format!(" | {} #{number}", milestone.pull_request_status.label()),
+                None if milestone.pull_request_status != PullRequestStatus::Unpublished => {
+                    format!(" | {}", milestone.pull_request_status.label())
+                }
+                None => String::new(),
+            };
+            lines.push(format!(
+                "    - {}: {}{}{}",
+                milestone.phase.display_label(),
+                milestone.summary,
+                turns,
+                pull_request
+            ));
+        }
+    }
+
+    if !detail.log_excerpts.is_empty() {
+        lines.push("  - Recent log excerpts:".to_string());
+        for excerpt in detail.log_excerpts.iter().take(3) {
+            lines.push(format!(
+                "    - L{} {}",
+                excerpt.line_number,
+                truncate_summary(&excerpt.text, 120)
+            ));
+        }
+    }
 }
 
 pub fn run_listen_session_clear(args: &ListenSessionClearArgs) -> Result<String> {
@@ -2173,7 +2420,7 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
             );
             println!(
                 "{}",
-                dashboard::render_dashboard(&data, args.width, args.height)?
+                render_listen_snapshot(&data, args.width, args.height, &args.events)?
             );
             return Ok(());
         }
@@ -2214,6 +2461,9 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
                 async move { Ok(cycle) }
             },
             |_| Ok(()),
+            |_: &str| Ok(false),
+            |_: &str| Ok(false),
+            |_: &str| Ok(false),
         )
         .await?;
         return Ok(());
@@ -2346,7 +2596,7 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
         );
         println!(
             "{}",
-            dashboard::render_dashboard(&data, args.width, args.height)?
+            render_listen_snapshot(&data, args.width, args.height, &args.events)?
         );
         return Ok(());
     }
@@ -2396,10 +2646,20 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
         initial_cycle,
         || daemon.run_cycle(),
         |cycle| {
-            cycle.apply_state_snapshot(daemon.store.load_state()?);
+            let state = daemon.store.load_state()?;
+            let session_details = daemon
+                .store
+                .load_session_details(&state.sorted_sessions())?
+                .into_iter()
+                .map(|detail| (detail.issue_identifier.clone(), detail))
+                .collect();
+            cycle.apply_state_snapshot(state, session_details);
             codex_live_tokens.refresh_sessions(&mut cycle.sessions)?;
             Ok(())
         },
+        |identifier: &str| daemon.store.resume_paused_session(identifier),
+        |identifier: &str| daemon.store.pause_running_session(identifier),
+        |identifier: &str| daemon.store.retry_blocked_session(identifier),
     )
     .await
 }
@@ -2475,17 +2735,76 @@ fn clear_selector(args: &ListenSessionClearArgs) -> SessionSelector {
     }
 }
 
-async fn run_live_loop<F, Fut, S>(
+fn render_listen_snapshot(
+    data: &ListenDashboardData,
+    width: u16,
+    height: u16,
+    events: &[ListenDashboardEventArg],
+) -> Result<String> {
+    if events.is_empty() {
+        return dashboard::render_dashboard(data, width, height);
+    }
+    let mut browser_state = dashboard::SessionBrowserState::default();
+    browser_state.normalize(data);
+    for event in events {
+        browser_state.apply_action(data, listen_dashboard_action(*event));
+    }
+    dashboard::render_dashboard_with_state(data, width, height, browser_state)
+}
+
+fn listen_dashboard_action(event: ListenDashboardEventArg) -> dashboard::SessionBrowserAction {
+    match event {
+        ListenDashboardEventArg::Up => dashboard::SessionBrowserAction::Up,
+        ListenDashboardEventArg::Down => dashboard::SessionBrowserAction::Down,
+        ListenDashboardEventArg::Tab => dashboard::SessionBrowserAction::Tab,
+        ListenDashboardEventArg::Left => dashboard::SessionBrowserAction::Left,
+        ListenDashboardEventArg::Right => dashboard::SessionBrowserAction::Right,
+        ListenDashboardEventArg::Enter => dashboard::SessionBrowserAction::Enter,
+        ListenDashboardEventArg::Back | ListenDashboardEventArg::Esc => {
+            dashboard::SessionBrowserAction::Back
+        }
+        ListenDashboardEventArg::PageUp => dashboard::SessionBrowserAction::PageUp,
+        ListenDashboardEventArg::PageDown => dashboard::SessionBrowserAction::PageDown,
+    }
+}
+
+fn listen_browser_action(code: KeyCode, vim_mode: bool) -> Option<dashboard::SessionBrowserAction> {
+    match code {
+        KeyCode::Up => Some(dashboard::SessionBrowserAction::Up),
+        KeyCode::Down => Some(dashboard::SessionBrowserAction::Down),
+        KeyCode::Tab => Some(dashboard::SessionBrowserAction::Tab),
+        KeyCode::Left => Some(dashboard::SessionBrowserAction::Left),
+        KeyCode::Right => Some(dashboard::SessionBrowserAction::Right),
+        KeyCode::Enter => Some(dashboard::SessionBrowserAction::Enter),
+        KeyCode::Char('p' | 'P') => Some(dashboard::SessionBrowserAction::Pause),
+        KeyCode::Esc | KeyCode::Backspace => Some(dashboard::SessionBrowserAction::Back),
+        KeyCode::PageUp => Some(dashboard::SessionBrowserAction::PageUp),
+        KeyCode::PageDown => Some(dashboard::SessionBrowserAction::PageDown),
+        KeyCode::Char('h') if vim_mode => Some(dashboard::SessionBrowserAction::Left),
+        KeyCode::Char('j') if vim_mode => Some(dashboard::SessionBrowserAction::Down),
+        KeyCode::Char('k') if vim_mode => Some(dashboard::SessionBrowserAction::Up),
+        KeyCode::Char('l') if vim_mode => Some(dashboard::SessionBrowserAction::Right),
+        _ => None,
+    }
+}
+
+async fn run_live_loop<F, Fut, S, RP, PP, R>(
     _args: &ListenRunArgs,
     loop_config: ListenLoopConfig,
     initial_cycle: ListenCycleData,
     mut next_cycle: F,
     mut refresh_dashboard_state: S,
+    mut resume_paused: RP,
+    mut pause_running: PP,
+    mut retry_blocked: R,
 ) -> Result<()>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<ListenCycleData>>,
     S: FnMut(&mut ListenCycleData) -> Result<()>,
+    RP: FnMut(&str) -> Result<bool>,
+    PP: FnMut(&str) -> Result<bool>,
+    R: FnMut(&str) -> Result<bool>,
 {
     let _initial_data = build_dashboard_data(
         &initial_cycle,
@@ -2514,7 +2833,7 @@ where
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     let mut cycle = initial_cycle;
-    let mut session_view = SessionListView::Active;
+    let mut browser_state = dashboard::SessionBrowserState::default();
     let mut next_linear_refresh_at = if loop_config.refresh_immediately {
         Instant::now()
     } else {
@@ -2540,7 +2859,8 @@ where
                 vim_mode: loop_config.vim_mode,
             },
         );
-        terminal.draw(|frame| dashboard::render(frame, &data, session_view))?;
+        browser_state.normalize(&data);
+        terminal.draw(|frame| dashboard::render(frame, &data, &browser_state))?;
 
         let wait_for_input = next_linear_refresh_at
             .saturating_duration_since(Instant::now())
@@ -2558,16 +2878,31 @@ where
                 key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
             if ctrl_c || matches!(key.code, KeyCode::Char('q')) {
                 break;
-            } else if matches!(key.code, KeyCode::Tab) {
-                session_view = session_view.toggle();
-            } else if matches!(key.code, KeyCode::Left)
-                || (loop_config.vim_mode && matches!(key.code, KeyCode::Char('h')))
-            {
-                session_view = SessionListView::Active;
-            } else if matches!(key.code, KeyCode::Right)
-                || (loop_config.vim_mode && matches!(key.code, KeyCode::Char('l')))
-            {
-                session_view = SessionListView::Completed;
+            } else if matches!(key.code, KeyCode::Char('r' | 'R')) {
+                if let Some(session) = browser_state.selected_session(&data) {
+                    let handled = if session.phase == SessionPhase::Paused {
+                        resume_paused(&session.issue_identifier)?
+                    } else if session.phase == SessionPhase::Blocked {
+                        retry_blocked(&session.issue_identifier)?
+                    } else {
+                        false
+                    };
+                    if handled {
+                        refresh_dashboard_state(&mut cycle)?;
+                        next_terminal_refresh_at = Instant::now();
+                    }
+                }
+            } else if matches!(key.code, KeyCode::Char('p' | 'P')) {
+                if let Some(session) = browser_state.selected_session(&data) {
+                    if session.phase == SessionPhase::Running
+                        && pause_running(&session.issue_identifier)?
+                    {
+                        refresh_dashboard_state(&mut cycle)?;
+                        next_terminal_refresh_at = Instant::now();
+                    }
+                }
+            } else if let Some(action) = listen_browser_action(key.code, loop_config.vim_mode) {
+                browser_state.apply_action(&data, action);
             }
         }
 
@@ -2671,6 +3006,7 @@ fn build_dashboard_data(
         },
         pending_issues: cycle.pending_issues.clone(),
         sessions: cycle.sessions.clone(),
+        session_details: cycle.session_details.clone(),
         notes: cycle.notes.clone(),
         state_file: cycle.state_file.clone(),
     }
@@ -3103,9 +3439,10 @@ impl Drop for TerminalCleanup {
 mod tests {
     use super::{
         AgentDaemon, AgentSession, DashboardRuntimeContext, ListenCycleData, ListenState,
-        SessionPhase, TODO_STATE, TokenUsage, capture_workspace_snapshot, compact_identifier,
-        format_duration, format_number, listen_scope_label, mark_running_session_stale,
-        render_agent_prompt, required_label_skip_reason,
+        PullRequestSummary, SessionPhase, TODO_STATE, TokenUsage, capture_workspace_snapshot,
+        compact_identifier, format_duration, format_number, listen_browser_action,
+        listen_scope_label, mark_running_session_stale, render_agent_prompt,
+        required_label_skip_reason,
     };
     use crate::config::{
         AppConfig, LinearConfig, ListenAssignmentScope, ListenRefreshPolicy,
@@ -3116,9 +3453,12 @@ mod tests {
         IssueLabelCreateRequest, IssueListFilters, IssueSummary, IssueUpdateRequest, LabelRef,
         LinearClient, LinearService, ProjectSummary, TeamRef, TeamSummary, UserRef,
     };
+    use crate::listen::dashboard::SessionBrowserAction;
     use crate::listen::store::ListenProjectStore;
     use anyhow::Result;
     use async_trait::async_trait;
+    use crossterm::event::KeyCode;
+    use std::collections::HashMap;
     use std::fs;
     use std::path::Path;
     use std::process::Command;
@@ -3204,6 +3544,7 @@ mod tests {
                 backlog_path: None,
                 workspace_path: None,
                 branch: None,
+                pull_request: PullRequestSummary::default(),
                 workpad_comment_id: None,
                 updated_at_epoch_seconds: 1,
                 pid: None,
@@ -3231,6 +3572,7 @@ mod tests {
                 backlog_path: None,
                 workspace_path: None,
                 branch: None,
+                pull_request: PullRequestSummary::default(),
                 workpad_comment_id: None,
                 updated_at_epoch_seconds: 2,
                 pid: None,
@@ -3268,6 +3610,7 @@ mod tests {
             backlog_path: None,
             workspace_path: None,
             branch: None,
+            pull_request: PullRequestSummary::default(),
             workpad_comment_id: None,
             updated_at_epoch_seconds: 1,
             pid: None,
@@ -3293,6 +3636,7 @@ mod tests {
             scope: "MET".to_string(),
             watch_scope: "all assignees".to_string(),
             pending_issues: Vec::new(),
+            session_details: HashMap::new(),
             sessions: vec![AgentSession {
                 issue_id: Some("issue-1".to_string()),
                 issue_identifier: "ENG-1".to_string(),
@@ -3308,6 +3652,7 @@ mod tests {
                 backlog_path: None,
                 workspace_path: None,
                 branch: None,
+                pull_request: PullRequestSummary::default(),
                 workpad_comment_id: None,
                 updated_at_epoch_seconds: 1,
                 pid: None,
@@ -3499,6 +3844,7 @@ mod tests {
             backlog_path: Some(".metastack/backlog/TECH-1".to_string()),
             workspace_path: Some("/tmp/ENG-10163".to_string()),
             branch: Some("eng-10163".to_string()),
+            pull_request: PullRequestSummary::default(),
             workpad_comment_id: Some("comment-1".to_string()),
             updated_at_epoch_seconds: 1,
             pid: Some(42_424),
@@ -3517,6 +3863,14 @@ mod tests {
         assert!(session.summary.contains("Blocked | worker died"));
         assert!(session.summary.contains("stale pid 42424"));
         assert!(session.summary.contains("see logs/ENG-10163.log"));
+    }
+
+    #[test]
+    fn listen_browser_action_accepts_uppercase_pause_key() {
+        assert_eq!(
+            listen_browser_action(KeyCode::Char('P'), false),
+            Some(SessionBrowserAction::Pause)
+        );
     }
 
     #[test]
@@ -3573,7 +3927,10 @@ mod tests {
         completed.summary = "Complete | moved to `Human Review`".to_string();
         completed.updated_at_epoch_seconds += 60;
 
-        cycle.apply_state_snapshot(ListenState::from_sessions(vec![completed.clone()]));
+        cycle.apply_state_snapshot(
+            ListenState::from_sessions(vec![completed.clone()]),
+            HashMap::new(),
+        );
 
         assert_eq!(cycle.sessions.len(), 1);
         assert_eq!(
@@ -3954,6 +4311,7 @@ mod tests {
             backlog_path: None,
             workspace_path: Some(workspace.display().to_string()),
             branch: Some("met-88-reassigned".to_string()),
+            pull_request: PullRequestSummary::default(),
             workpad_comment_id: Some("comment-88".to_string()),
             updated_at_epoch_seconds: 1_773_575_000,
             pid: None,

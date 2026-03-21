@@ -88,6 +88,53 @@ impl TokenUsage {
             (_, _, None) => "n/a".to_string(),
         }
     }
+
+    pub(super) fn display_table_compact(&self) -> String {
+        self.total()
+            .map(format_number)
+            .unwrap_or_else(|| "n/a".to_string())
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PullRequestStatus {
+    #[default]
+    Unpublished,
+    Draft,
+    Ready,
+}
+
+impl PullRequestStatus {
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Unpublished => "none",
+            Self::Draft => "draft",
+            Self::Ready => "ready",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullRequestSummary {
+    #[serde(default)]
+    pub number: Option<u64>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub status: PullRequestStatus,
+}
+
+impl PullRequestSummary {
+    pub(super) fn compact_label(&self) -> String {
+        match (self.status, self.number) {
+            (PullRequestStatus::Unpublished, _) => "none".to_string(),
+            (PullRequestStatus::Draft, Some(number)) => format!("draft #{number}"),
+            (PullRequestStatus::Ready, Some(number)) => format!("ready #{number}"),
+            (PullRequestStatus::Draft, None) => "draft".to_string(),
+            (PullRequestStatus::Ready, None) => "ready".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,6 +159,8 @@ pub struct AgentSession {
     pub workspace_path: Option<String>,
     #[serde(default)]
     pub branch: Option<String>,
+    #[serde(default)]
+    pub pull_request: PullRequestSummary,
     #[serde(default)]
     pub workpad_comment_id: Option<String>,
     pub updated_at_epoch_seconds: u64,
@@ -148,8 +197,8 @@ impl AgentSession {
         format_duration(now_epoch_seconds.saturating_sub(self.updated_at_epoch_seconds))
     }
 
-    pub(super) fn tokens_label(&self) -> String {
-        self.tokens.display_compact()
+    pub(super) fn table_tokens_label(&self) -> String {
+        self.tokens.display_table_compact()
     }
 
     pub(super) fn session_label(&self) -> String {
@@ -172,6 +221,10 @@ impl AgentSession {
             .map(|resume| resume.id.clone())
             .unwrap_or_else(|| "-".to_string())
     }
+
+    pub(super) fn pull_request_label(&self) -> String {
+        self.pull_request.compact_label()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -180,6 +233,7 @@ pub enum SessionPhase {
     Claimed,
     BriefReady,
     Running,
+    Paused,
     Completed,
     Blocked,
 }
@@ -190,6 +244,7 @@ impl SessionPhase {
             Self::Claimed => "claimed",
             Self::BriefReady => "brief-ready",
             Self::Running => "running",
+            Self::Paused => "paused",
             Self::Completed => "completed",
             Self::Blocked => "blocked",
         }
@@ -200,6 +255,7 @@ impl SessionPhase {
             Self::Claimed => "Claimed",
             Self::BriefReady => "Brief Ready",
             Self::Running => "Running",
+            Self::Paused => "Paused",
             Self::Completed => "Completed",
             Self::Blocked => "Blocked",
         }
@@ -211,6 +267,7 @@ impl SessionPhase {
             Self::Claimed => "warning",
             Self::BriefReady => "active",
             Self::Running => "active",
+            Self::Paused => "warning",
             Self::Completed => "success",
             Self::Blocked => "danger",
         }
@@ -250,7 +307,10 @@ impl ListenState {
             session.issue_matches(identifier)
                 && matches!(
                     session.phase,
-                    SessionPhase::Claimed | SessionPhase::BriefReady | SessionPhase::Running
+                    SessionPhase::Claimed
+                        | SessionPhase::BriefReady
+                        | SessionPhase::Running
+                        | SessionPhase::Paused
                 )
         })
     }
@@ -319,7 +379,10 @@ impl ListenState {
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentSession, LatestResumeHandle, ResumeProvider, SessionPhase, TokenUsage};
+    use super::{
+        AgentSession, LatestResumeHandle, PullRequestStatus, PullRequestSummary, ResumeProvider,
+        SessionPhase, TokenUsage,
+    };
 
     fn session() -> AgentSession {
         AgentSession {
@@ -337,6 +400,7 @@ mod tests {
             backlog_path: None,
             workspace_path: None,
             branch: None,
+            pull_request: PullRequestSummary::default(),
             workpad_comment_id: None,
             updated_at_epoch_seconds: 1,
             pid: None,
@@ -364,5 +428,33 @@ mod tests {
             session.latest_resume_id_label(),
             "019cedb4-2293-7651-b0b4-dfac4af6a640"
         );
+    }
+
+    #[test]
+    fn session_pull_request_label_stays_compact() {
+        let mut session = session();
+        assert_eq!(session.pull_request_label(), "none");
+
+        session.pull_request = PullRequestSummary {
+            number: Some(321),
+            url: Some("https://github.com/metastack-labs/metastack-cli/pull/321".to_string()),
+            status: PullRequestStatus::Draft,
+        };
+        assert_eq!(session.pull_request_label(), "draft #321");
+
+        session.pull_request.status = PullRequestStatus::Ready;
+        assert_eq!(session.pull_request_label(), "ready #321");
+    }
+
+    #[test]
+    fn session_table_tokens_label_prefers_total_only() {
+        let mut session = session();
+        assert_eq!(session.table_tokens_label(), "n/a");
+
+        session.tokens = TokenUsage {
+            input: Some(12_300),
+            output: Some(40),
+        };
+        assert_eq!(session.table_tokens_label(), "12,340");
     }
 }

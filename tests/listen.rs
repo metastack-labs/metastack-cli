@@ -113,6 +113,17 @@ fn write_listen_store_session(
 }
 
 #[cfg(unix)]
+fn listen_detail_path(
+    config_path: &Path,
+    repo_root: &Path,
+    issue_identifier: &str,
+) -> Result<PathBuf, Box<dyn Error>> {
+    Ok(listen_project_store_dir(config_path, repo_root, None)?
+        .join("session-details")
+        .join(format!("{issue_identifier}.json")))
+}
+
+#[cfg(unix)]
 fn listen_session_json(
     issue_identifier: &str,
     phase: &str,
@@ -721,6 +732,7 @@ fn listen_sessions_list_and_inspect_surface_resume_and_token_metadata() -> Resul
         .assert()
         .success()
         .stdout(predicate::str::contains("Latest session:"))
+        .stdout(predicate::str::contains("Detail file:"))
         .stdout(predicate::str::contains("  - Tokens: in 210 | out 34 | total 244"))
         .stdout(predicate::str::contains("Resume provider: codex"))
         .stdout(predicate::str::contains(
@@ -732,6 +744,168 @@ fn listen_sessions_list_and_inspect_surface_resume_and_token_metadata() -> Resul
         .stdout(predicate::str::contains(
             "  - ENG-10182 [Blocked] Provider did not emit exact counts | tokens n/a",
         ));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_sessions_inspect_surfaces_structured_detail_fields() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    write_onboarded_config(&config_path, "")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+    init_repo_with_origin(&repo_root)?;
+
+    write_listen_store_session(
+        &config_path,
+        &repo_root,
+        vec![json!({
+            "issue_id": "ENG-10181-id",
+            "issue_identifier": "ENG-10181",
+            "issue_title": "ENG-10181 title",
+            "project_name": "MetaStack CLI",
+            "team_key": "MET",
+            "issue_url": "https://linear.app/issues/ENG-10181",
+            "phase": "running",
+            "summary": "Token telemetry is flowing",
+            "brief_path": ".metastack/agents/briefs/ENG-10181.md",
+            "backlog_path": ".metastack/backlog/ENG-10181",
+            "workspace_path": "/tmp/ENG-10181",
+            "branch": "met-27-detail",
+            "pull_request": {
+                "number": 321,
+                "url": "https://github.com/metastack-labs/metastack-cli/pull/321",
+                "status": "draft"
+            },
+            "workpad_comment_id": "comment-10181",
+            "updated_at_epoch_seconds": 1_773_575_100u64,
+            "pid": null,
+            "session_id": "session-10181",
+            "turns": 4,
+            "tokens": {
+                "input": 210,
+                "output": 34
+            },
+            "log_path": "logs/ENG-10181.log"
+        })],
+    )?;
+
+    let detail_path = listen_detail_path(&config_path, &repo_root, "ENG-10181")?;
+    fs::create_dir_all(
+        detail_path
+            .parent()
+            .expect("detail path should have a parent"),
+    )?;
+    fs::write(
+        &detail_path,
+        serde_json::to_vec_pretty(&json!({
+            "version": 1,
+            "issue_identifier": "ENG-10181",
+            "issue_title": "ENG-10181 title",
+            "updated_at_epoch_seconds": 1_773_575_120u64,
+            "session_updated_at_epoch_seconds": 1_773_575_100u64,
+            "phase": "running",
+            "summary": "Token telemetry is flowing",
+            "turns": 4,
+            "tokens": {
+                "input": 210,
+                "output": 34
+            },
+            "pull_request": {
+                "number": 321,
+                "url": "https://github.com/metastack-labs/metastack-cli/pull/321",
+                "status": "draft"
+            },
+            "references": {
+                "workspace_path": "/tmp/ENG-10181",
+                "backlog_path": ".metastack/backlog/ENG-10181",
+                "brief_path": ".metastack/agents/briefs/ENG-10181.md",
+                "workpad_comment_id": "comment-10181",
+                "log_path": "logs/ENG-10181.log",
+                "branch": "met-27-detail"
+            },
+            "prompt_context": [
+                {
+                    "label": "Brief",
+                    "value": ".metastack/agents/briefs/ENG-10181.md"
+                },
+                {
+                    "label": "Backlog index",
+                    "value": ".metastack/backlog/ENG-10181/index.md"
+                }
+            ],
+            "milestones": [
+                {
+                    "at_epoch_seconds": 1_773_575_000u64,
+                    "phase": "claimed",
+                    "summary": "Claimed ticket",
+                    "turns": 1,
+                    "pull_request_status": "unpublished",
+                    "pull_request_number": null
+                },
+                {
+                    "at_epoch_seconds": 1_773_575_050u64,
+                    "phase": "running",
+                    "summary": "Opened draft PR",
+                    "turns": 3,
+                    "pull_request_status": "draft",
+                    "pull_request_number": 321
+                }
+            ],
+            "log_excerpts": [
+                {
+                    "line_number": 19,
+                    "text": "worker boot complete"
+                },
+                {
+                    "line_number": 27,
+                    "text": "published draft PR"
+                }
+            ]
+        }))?,
+    )?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "inspect",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Detail status: available"))
+        .stdout(predicate::str::contains("Detail PR: draft #321"))
+        .stdout(predicate::str::contains(
+            "Detail PR URL: https://github.com/metastack-labs/metastack-cli/pull/321",
+        ))
+        .stdout(predicate::str::contains("Detail branch: met-27-detail"))
+        .stdout(predicate::str::contains("Detail workpad: comment-10181"))
+        .stdout(predicate::str::contains("Prompt context:"))
+        .stdout(predicate::str::contains(
+            "Brief: .metastack/agents/briefs/ENG-10181.md",
+        ))
+        .stdout(predicate::str::contains("Recent milestones:"))
+        .stdout(predicate::str::contains(
+            "Running: Opened draft PR | turns 3 | draft #321",
+        ))
+        .stdout(predicate::str::contains("Recent log excerpts:"))
+        .stdout(predicate::str::contains("L27 published draft PR"));
 
     Ok(())
 }
@@ -778,6 +952,111 @@ fn listen_once_demo_outputs_terminal_summary_without_browser_endpoints()
 }
 
 #[test]
+fn listen_sessions_inspect_surfaces_detail_pr_ref_without_url() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    write_onboarded_config(&config_path, "")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+    init_repo_with_origin(&repo_root)?;
+
+    let issue_identifier = "ENG-10182";
+    write_listen_store_session(
+        &config_path,
+        &repo_root,
+        vec![json!({
+            "issue_id": format!("{issue_identifier}-id"),
+            "issue_identifier": issue_identifier,
+            "issue_title": "Investigate session detail PR ref",
+            "project_name": "MetaStack CLI",
+            "team_key": "ENG",
+            "issue_url": "https://linear.app/metastack-labs/issue/ENG-10182",
+            "phase": "running",
+            "summary": "Structured detail keeps PR number only",
+            "brief_path": format!(".metastack/agents/briefs/{issue_identifier}.md"),
+            "backlog_issue_identifier": issue_identifier,
+            "workspace_path": format!("/tmp/{issue_identifier}"),
+            "workpad_comment_id": format!("comment-{issue_identifier}"),
+            "updated_at_epoch_seconds": 1_773_575_100u64,
+            "session_id": "codex-session-10182",
+            "started_at_epoch_seconds": 1_773_575_000u64,
+            "turns": 2,
+            "tokens": {
+                "input": 55,
+                "output": 13
+            },
+            "pull_request": {
+                "number": 482,
+                "status": "draft"
+            },
+            "log_path": format!("logs/{issue_identifier}.log")
+        })],
+    )?;
+
+    let detail_path = listen_detail_path(&config_path, &repo_root, issue_identifier)?;
+    fs::create_dir_all(
+        detail_path
+            .parent()
+            .expect("detail path should have a parent"),
+    )?;
+    fs::write(
+        &detail_path,
+        serde_json::to_vec_pretty(&json!({
+            "version": 1,
+            "issue_identifier": issue_identifier,
+            "issue_title": "Investigate session detail PR ref",
+            "updated_at_epoch_seconds": 1_773_575_180u64,
+            "session_updated_at_epoch_seconds": 1_773_575_100u64,
+            "phase": "running",
+            "summary": "Structured detail keeps PR number only",
+            "turns": 2,
+            "tokens": {
+                "input": 55,
+                "output": 13
+            },
+            "pull_request": {
+                "number": 482,
+                "status": "draft"
+            },
+            "references": {
+                "branch": "met-27-pr-ref"
+            },
+            "milestones": [],
+            "log_excerpts": []
+        }))?,
+    )?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "inspect",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Detail status: available"))
+        .stdout(predicate::str::contains("Detail PR: draft #482"))
+        .stdout(predicate::str::contains("Detail PR Ref: #482"))
+        .stdout(predicate::str::contains("Detail PR URL").not());
+
+    Ok(())
+}
+
+#[test]
 fn listen_render_once_demo_outputs_dashboard_snapshot() -> Result<(), Box<dyn Error>> {
     let _guard = listen_test_lock();
     let temp = tempdir()?;
@@ -816,6 +1095,97 @@ fn listen_render_once_demo_outputs_dashboard_snapshot() -> Result<(), Box<dyn Er
         .stdout(predicate::str::contains("localhost").not())
         .stdout(predicate::str::contains("SESSION"))
         .stdout(predicate::str::contains("PROGRESS"))
+        .stdout(predicate::str::contains("draft #321"))
+        .stdout(predicate::str::contains("MET-13"));
+
+    Ok(())
+}
+
+#[test]
+fn listen_render_once_demo_can_snapshot_selected_session_detail() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    write_onboarded_config(&config_path, "")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "agents",
+            "listen",
+            "--demo",
+            "--render-once",
+            "--events",
+            "enter",
+            "--width",
+            "200",
+            "--height",
+            "44",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Selected Session"))
+        .stdout(predicate::str::contains("PR: draft #321"))
+        .stdout(predicate::str::contains("Prompt Context"))
+        .stdout(predicate::str::contains("Workpad: comment-met-13"));
+
+    Ok(())
+}
+
+#[test]
+fn listen_render_once_demo_events_accept_esc_to_close_selected_session_detail()
+-> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    write_onboarded_config(&config_path, "")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "agents",
+            "listen",
+            "--demo",
+            "--render-once",
+            "--events",
+            "enter,esc",
+            "--width",
+            "200",
+            "--height",
+            "44",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Agent Sessions"))
+        .stdout(predicate::str::contains("Selected Session").not())
         .stdout(predicate::str::contains("MET-13"));
 
     Ok(())
@@ -829,8 +1199,15 @@ fn agents_listen_help_omits_browser_dashboard_flags() {
         .assert()
         .success()
         .stdout(predicate::str::contains("--all-assignees"))
+        .stdout(predicate::str::contains("interactive session browser"))
+        .stdout(predicate::str::contains(
+            "Press Enter on the selected session",
+        ))
+        .stdout(predicate::str::contains(
+            "Press P to pause the selected running session",
+        ))
         .stdout(predicate::str::contains("--dashboard-port").not())
-        .stdout(predicate::str::contains("browser").not());
+        .stdout(predicate::str::contains("http://").not());
 }
 
 #[test]
@@ -840,6 +1217,10 @@ fn legacy_listen_help_omits_browser_dashboard_flags() {
         .args(["listen", "--help"])
         .assert()
         .success()
+        .stdout(predicate::str::contains("Interactive dashboard:"))
+        .stdout(predicate::str::contains(
+            "Press Enter on the selected session",
+        ))
         .stdout(predicate::str::contains("meta listen sessions list"))
         .stdout(predicate::str::contains(
             "meta listen sessions inspect --root . --project \"MetaStack API\"",
@@ -852,7 +1233,7 @@ fn legacy_listen_help_omits_browser_dashboard_flags() {
         ))
         .stdout(predicate::str::contains("--all-assignees"))
         .stdout(predicate::str::contains("--dashboard-port").not())
-        .stdout(predicate::str::contains("browser").not());
+        .stdout(predicate::str::contains("http://").not());
 }
 
 #[cfg(unix)]

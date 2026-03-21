@@ -15,7 +15,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{ListItem, ListState};
 use ratatui::{Frame, Terminal};
 
-use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph, wrapped_rows};
+use crate::tui::scroll::{ScrollState, plain_text, scrollable_content_paragraph, wrapped_rows};
 use crate::tui::theme::{
     Tone, badge, emphasis_style, empty_state, key_hints, label_style, list, muted_style,
     panel_title, paragraph,
@@ -277,7 +277,7 @@ fn render_selection_summary(frame: &mut Frame<'_>, area: Rect, app: &MergeDashbo
 }
 
 fn render_details(frame: &mut Frame<'_>, area: Rect, app: &MergeDashboardApp) {
-    let details = scrollable_paragraph(
+    let details = scrollable_content_paragraph(
         app.detail_text(),
         panel_title("Focused PR Preview", app.focus == Focus::Preview),
         &app.preview_scroll,
