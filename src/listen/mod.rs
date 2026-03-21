@@ -2253,6 +2253,8 @@ fn append_session_inspect_detail_lines(lines: &mut Vec<String>, detail: &ListenS
 
     if let Some(url) = detail.pull_request.url.as_deref() {
         lines.push(format!("  - Detail PR URL: {url}"));
+    } else if let Some(number) = detail.pull_request.number {
+        lines.push(format!("  - Detail PR Ref: #{number}"));
     }
     if let Some(branch) = detail.references.branch.as_deref() {
         lines.push(format!("  - Detail branch: {branch}"));

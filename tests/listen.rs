@@ -951,6 +951,110 @@ fn listen_once_demo_outputs_terminal_summary_without_browser_endpoints()
 }
 
 #[test]
+fn listen_sessions_inspect_surfaces_detail_pr_ref_without_url() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    write_onboarded_config(&config_path, "")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+    init_repo_with_origin(&repo_root)?;
+
+    let issue_identifier = "ENG-10182";
+    write_listen_store_session(
+        &config_path,
+        &repo_root,
+        vec![json!({
+            "issue_id": format!("{issue_identifier}-id"),
+            "issue_identifier": issue_identifier,
+            "issue_title": "Investigate session detail PR ref",
+            "project_name": "MetaStack CLI",
+            "team_key": "ENG",
+            "issue_url": "https://linear.app/metastack-labs/issue/ENG-10182",
+            "phase": "running",
+            "summary": "Structured detail keeps PR number only",
+            "brief_path": format!(".metastack/agents/briefs/{issue_identifier}.md"),
+            "backlog_issue_identifier": issue_identifier,
+            "workspace_path": format!("/tmp/{issue_identifier}"),
+            "workpad_comment_id": format!("comment-{issue_identifier}"),
+            "updated_at_epoch_seconds": 1_773_575_100u64,
+            "session_id": "codex-session-10182",
+            "started_at_epoch_seconds": 1_773_575_000u64,
+            "turns": 2,
+            "tokens": {
+                "input": 55,
+                "output": 13
+            },
+            "pull_request": {
+                "number": 482,
+                "status": "draft"
+            },
+            "log_path": format!("logs/{issue_identifier}.log")
+        })],
+    )?;
+
+    let detail_path = listen_detail_path(&config_path, &repo_root, issue_identifier)?;
+    fs::create_dir_all(
+        detail_path
+            .parent()
+            .expect("detail path should have a parent"),
+    )?;
+    fs::write(
+        &detail_path,
+        serde_json::to_vec_pretty(&json!({
+            "version": 1,
+            "issue_identifier": issue_identifier,
+            "issue_title": "Investigate session detail PR ref",
+            "updated_at_epoch_seconds": 1_773_575_180u64,
+            "session_updated_at_epoch_seconds": 1_773_575_100u64,
+            "phase": "running",
+            "summary": "Structured detail keeps PR number only",
+            "turns": 2,
+            "tokens": {
+                "input": 55,
+                "output": 13
+            },
+            "pull_request": {
+                "number": 482,
+                "status": "draft"
+            },
+            "references": {
+                "branch": "met-27-pr-ref"
+            },
+            "milestones": [],
+            "log_excerpts": []
+        }))?,
+    )?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "inspect",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Detail status: available"))
+        .stdout(predicate::str::contains("Detail PR Ref: #482"))
+        .stdout(predicate::str::contains("Detail PR URL").not());
+
+    Ok(())
+}
+
+#[test]
 fn listen_render_once_demo_outputs_dashboard_snapshot() -> Result<(), Box<dyn Error>> {
     let _guard = listen_test_lock();
     let temp = tempdir()?;
