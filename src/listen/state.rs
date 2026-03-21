@@ -233,6 +233,7 @@ pub enum SessionPhase {
     Claimed,
     BriefReady,
     Running,
+    Paused,
     Completed,
     Blocked,
 }
@@ -243,6 +244,7 @@ impl SessionPhase {
             Self::Claimed => "claimed",
             Self::BriefReady => "brief-ready",
             Self::Running => "running",
+            Self::Paused => "paused",
             Self::Completed => "completed",
             Self::Blocked => "blocked",
         }
@@ -253,6 +255,7 @@ impl SessionPhase {
             Self::Claimed => "Claimed",
             Self::BriefReady => "Brief Ready",
             Self::Running => "Running",
+            Self::Paused => "Paused",
             Self::Completed => "Completed",
             Self::Blocked => "Blocked",
         }
@@ -264,6 +267,7 @@ impl SessionPhase {
             Self::Claimed => "warning",
             Self::BriefReady => "active",
             Self::Running => "active",
+            Self::Paused => "warning",
             Self::Completed => "success",
             Self::Blocked => "danger",
         }
@@ -303,7 +307,10 @@ impl ListenState {
             session.issue_matches(identifier)
                 && matches!(
                     session.phase,
-                    SessionPhase::Claimed | SessionPhase::BriefReady | SessionPhase::Running
+                    SessionPhase::Claimed
+                        | SessionPhase::BriefReady
+                        | SessionPhase::Running
+                        | SessionPhase::Paused
                 )
         })
     }

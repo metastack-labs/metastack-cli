@@ -154,6 +154,9 @@ fn agents_listen_help_describes_session_browser_navigation() {
             "Use Up/Down (or j/k when vim mode is enabled)",
         ))
         .stdout(predicate::str::contains(
+            "Press P to pause the selected running session, and R to resume a paused session or retry a blocked one",
+        ))
+        .stdout(predicate::str::contains(
             "Esc or Backspace to close detail mode",
         ))
         .stdout(predicate::str::contains(

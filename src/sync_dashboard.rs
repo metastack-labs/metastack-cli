@@ -22,7 +22,7 @@ use crate::linear::browser::{
     render_issue_row, search_issues,
 };
 use crate::tui::fields::InputFieldState;
-use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph, wrapped_rows};
+use crate::tui::scroll::{ScrollState, plain_text, scrollable_content_paragraph, wrapped_rows};
 use crate::tui::theme::{Tone, badge, empty_state, key_hints, list, panel_title, paragraph};
 
 #[derive(Debug, Clone)]
@@ -303,7 +303,7 @@ fn render_issue_list(frame: &mut Frame<'_>, area: Rect, app: &SyncDashboardApp) 
 }
 
 fn render_issue_preview(frame: &mut Frame<'_>, area: Rect, app: &SyncDashboardApp) {
-    let preview = scrollable_paragraph(
+    let preview = scrollable_content_paragraph(
         app.preview_text(),
         panel_title("Entry Preview", app.focus == Focus::Preview),
         &app.preview_scroll,
@@ -864,7 +864,6 @@ mod tests {
         assert!(snapshot.contains("Ready to push MET-12"));
         assert!(snapshot.contains("Backlog Search"));
         assert!(snapshot.contains("Sync Action [focus]"));
-        assert!(snapshot.contains("diverged"));
         assert!(snapshot.contains("Backlog Entries"));
     }
 

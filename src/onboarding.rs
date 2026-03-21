@@ -32,7 +32,7 @@ use crate::tui::fields::{
     FilterableSelectFieldState, InputFieldRender, InputFieldState, SelectFieldState,
 };
 use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph_with_block, wrapped_rows};
-use crate::tui::theme::{Tone, badge, emphasis_style, label_style, tone_style};
+use crate::tui::theme::{Tone, badge, content_panel, emphasis_style, label_style, tone_style};
 
 const PROJECT_FETCH_LIMIT: usize = 100;
 
@@ -923,11 +923,8 @@ fn render_right_panel(frame: &mut Frame<'_>, app: &OnboardingApp, area: Rect) {
         OnboardingStep::Review => {
             let summary = scrollable_paragraph_with_block(
                 app.review_text(),
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Review [scroll]")
-                    .border_style(Style::default().add_modifier(Modifier::BOLD))
-                    .padding(Padding::new(1, 1, 1, 0)),
+                content_panel("Review [scroll]")
+                    .border_style(Style::default().add_modifier(Modifier::BOLD)),
                 &app.review_scroll,
             )
             .wrap(Wrap { trim: false });

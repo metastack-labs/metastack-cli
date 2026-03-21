@@ -1038,6 +1038,8 @@ milestones, prompt-context references, compact log excerpts, and a fallback `Det
 line when the detail artifact only carries a PR number.
 The interactive selected-session detail pane follows the same fallback contract and shows `PR Ref:
 #N` when the detail artifact has a PR number but no published PR URL yet.
+Within the live dashboard, `P` pauses the selected running worker, and `R` either resumes a paused
+worker or retries a blocked session from its existing workspace state.
 
 ### `workspace`
 

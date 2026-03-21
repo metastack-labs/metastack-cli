@@ -2,7 +2,7 @@ use std::env;
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, List, ListItem, Padding, Paragraph, Wrap};
 
 /// Semantic terminal tones shared across MetaStack dashboards.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +39,11 @@ pub(crate) fn panel(title: impl Into<Line<'static>>) -> Block<'static> {
         .borders(Borders::ALL)
         .border_style(border_style())
         .title(title.into())
+}
+
+/// Shared panel block for content-heavy views that should keep a small inner gutter.
+pub(crate) fn content_panel(title: impl Into<Line<'static>>) -> Block<'static> {
+    panel(title).padding(Padding::new(1, 1, 1, 0))
 }
 
 /// Shared title builder with an optional focus indicator.

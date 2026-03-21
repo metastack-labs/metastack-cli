@@ -1172,7 +1172,7 @@ where
                 continue;
             }
 
-            if matches!(session.phase, SessionPhase::Running)
+            if matches!(session.phase, SessionPhase::Running | SessionPhase::Paused)
                 && session.pid.is_some_and(pid_is_running)
             {
                 reconciled.push(session);
@@ -1181,7 +1181,7 @@ where
 
             if !matches!(
                 session.phase,
-                SessionPhase::Completed | SessionPhase::Blocked
+                SessionPhase::Completed | SessionPhase::Blocked | SessionPhase::Paused
             ) && let Some(reason) = self.session_drop_reason(&issue)
             {
                 session.phase = SessionPhase::Completed;
@@ -1194,7 +1194,7 @@ where
 
             if matches!(
                 session.phase,
-                SessionPhase::Completed | SessionPhase::Blocked
+                SessionPhase::Completed | SessionPhase::Blocked | SessionPhase::Paused
             ) {
                 if normalize_issue_state_name(issue_state_label(&issue).as_str()) == "todo" {
                     notes.push(format!(
@@ -1209,7 +1209,7 @@ where
                 continue;
             }
 
-            if matches!(session.phase, SessionPhase::Running)
+            if matches!(session.phase, SessionPhase::Running | SessionPhase::Paused)
                 && let Some(pid) = session.pid
             {
                 mark_running_session_stale(
@@ -2461,6 +2461,9 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
                 async move { Ok(cycle) }
             },
             |_| Ok(()),
+            |_: &str| Ok(false),
+            |_: &str| Ok(false),
+            |_: &str| Ok(false),
         )
         .await?;
         return Ok(());
@@ -2654,6 +2657,9 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
             codex_live_tokens.refresh_sessions(&mut cycle.sessions)?;
             Ok(())
         },
+        |identifier: &str| daemon.store.resume_paused_session(identifier),
+        |identifier: &str| daemon.store.pause_running_session(identifier),
+        |identifier: &str| daemon.store.retry_blocked_session(identifier),
     )
     .await
 }
@@ -2770,6 +2776,7 @@ fn listen_browser_action(code: KeyCode, vim_mode: bool) -> Option<dashboard::Ses
         KeyCode::Left => Some(dashboard::SessionBrowserAction::Left),
         KeyCode::Right => Some(dashboard::SessionBrowserAction::Right),
         KeyCode::Enter => Some(dashboard::SessionBrowserAction::Enter),
+        KeyCode::Char('p' | 'P') => Some(dashboard::SessionBrowserAction::Pause),
         KeyCode::Esc | KeyCode::Backspace => Some(dashboard::SessionBrowserAction::Back),
         KeyCode::PageUp => Some(dashboard::SessionBrowserAction::PageUp),
         KeyCode::PageDown => Some(dashboard::SessionBrowserAction::PageDown),
@@ -2781,17 +2788,23 @@ fn listen_browser_action(code: KeyCode, vim_mode: bool) -> Option<dashboard::Ses
     }
 }
 
-async fn run_live_loop<F, Fut, S>(
+async fn run_live_loop<F, Fut, S, RP, PP, R>(
     _args: &ListenRunArgs,
     loop_config: ListenLoopConfig,
     initial_cycle: ListenCycleData,
     mut next_cycle: F,
     mut refresh_dashboard_state: S,
+    mut resume_paused: RP,
+    mut pause_running: PP,
+    mut retry_blocked: R,
 ) -> Result<()>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<ListenCycleData>>,
     S: FnMut(&mut ListenCycleData) -> Result<()>,
+    RP: FnMut(&str) -> Result<bool>,
+    PP: FnMut(&str) -> Result<bool>,
+    R: FnMut(&str) -> Result<bool>,
 {
     let _initial_data = build_dashboard_data(
         &initial_cycle,
@@ -2865,6 +2878,29 @@ where
                 key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
             if ctrl_c || matches!(key.code, KeyCode::Char('q')) {
                 break;
+            } else if matches!(key.code, KeyCode::Char('r' | 'R')) {
+                if let Some(session) = browser_state.selected_session(&data) {
+                    let handled = if session.phase == SessionPhase::Paused {
+                        resume_paused(&session.issue_identifier)?
+                    } else if session.phase == SessionPhase::Blocked {
+                        retry_blocked(&session.issue_identifier)?
+                    } else {
+                        false
+                    };
+                    if handled {
+                        refresh_dashboard_state(&mut cycle)?;
+                        next_terminal_refresh_at = Instant::now();
+                    }
+                }
+            } else if matches!(key.code, KeyCode::Char('p' | 'P')) {
+                if let Some(session) = browser_state.selected_session(&data) {
+                    if session.phase == SessionPhase::Running
+                        && pause_running(&session.issue_identifier)?
+                    {
+                        refresh_dashboard_state(&mut cycle)?;
+                        next_terminal_refresh_at = Instant::now();
+                    }
+                }
             } else if let Some(action) = listen_browser_action(key.code, loop_config.vim_mode) {
                 browser_state.apply_action(&data, action);
             }
@@ -3404,8 +3440,9 @@ mod tests {
     use super::{
         AgentDaemon, AgentSession, DashboardRuntimeContext, ListenCycleData, ListenState,
         PullRequestSummary, SessionPhase, TODO_STATE, TokenUsage, capture_workspace_snapshot,
-        compact_identifier, format_duration, format_number, listen_scope_label,
-        mark_running_session_stale, render_agent_prompt, required_label_skip_reason,
+        compact_identifier, format_duration, format_number, listen_browser_action,
+        listen_scope_label, mark_running_session_stale, render_agent_prompt,
+        required_label_skip_reason,
     };
     use crate::config::{
         AppConfig, LinearConfig, ListenAssignmentScope, ListenRefreshPolicy,
@@ -3416,9 +3453,11 @@ mod tests {
         IssueLabelCreateRequest, IssueListFilters, IssueSummary, IssueUpdateRequest, LabelRef,
         LinearClient, LinearService, ProjectSummary, TeamRef, TeamSummary, UserRef,
     };
+    use crate::listen::dashboard::SessionBrowserAction;
     use crate::listen::store::ListenProjectStore;
     use anyhow::Result;
     use async_trait::async_trait;
+    use crossterm::event::KeyCode;
     use std::collections::HashMap;
     use std::fs;
     use std::path::Path;
@@ -3824,6 +3863,14 @@ mod tests {
         assert!(session.summary.contains("Blocked | worker died"));
         assert!(session.summary.contains("stale pid 42424"));
         assert!(session.summary.contains("see logs/ENG-10163.log"));
+    }
+
+    #[test]
+    fn listen_browser_action_accepts_uppercase_pause_key() {
+        assert_eq!(
+            listen_browser_action(KeyCode::Char('P'), false),
+            Some(SessionBrowserAction::Pause)
+        );
     }
 
     #[test]

@@ -1203,6 +1203,9 @@ fn agents_listen_help_omits_browser_dashboard_flags() {
         .stdout(predicate::str::contains(
             "Press Enter on the selected session",
         ))
+        .stdout(predicate::str::contains(
+            "Press P to pause the selected running session",
+        ))
         .stdout(predicate::str::contains("--dashboard-port").not())
         .stdout(predicate::str::contains("http://").not());
 }

@@ -53,7 +53,7 @@ use crate::progress::{LoadingPanelData, SPINNER_FRAMES, render_loading_panel};
 use crate::scaffold::{ensure_backlog_templates, ensure_planning_layout};
 use crate::sync_command::run_sync_push_for_issue;
 use crate::tui::fields::{InputFieldState, MultiSelectFieldState};
-use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph, wrapped_rows};
+use crate::tui::scroll::{ScrollState, plain_text, scrollable_content_paragraph, wrapped_rows};
 use crate::{LinearCommandContext, load_linear_command_context};
 
 const ISSUE_PICKER_LIMIT: usize = 250;
@@ -1254,7 +1254,7 @@ fn render_issue_picker_frame(frame: &mut Frame<'_>, app: &IssuePickerApp) {
                 ),
             ])
         });
-    let preview = scrollable_paragraph(
+    let preview = scrollable_content_paragraph(
         preview,
         if app.focus == IssuePickerFocus::Preview {
             "Issue Preview [focus]"
@@ -1422,7 +1422,7 @@ fn render_review_frame(frame: &mut Frame<'_>, app: &TechnicalReviewApp) {
     frame.render_stateful_widget(file_list, sidebar[1], &mut file_state);
 
     let selected_file = &app.generated.files[app.selected_file];
-    let preview = scrollable_paragraph(
+    let preview = scrollable_content_paragraph(
         selected_file.contents.clone(),
         if app.focus == TechnicalReviewFocus::Preview {
             format!("Preview: {} [focus]", selected_file.relative_path)

@@ -11,6 +11,7 @@ use serde_json::Value;
 
 use crate::config::resolve_data_root;
 use crate::fs::{PlanningPaths, canonicalize_existing_dir, ensure_dir};
+use crate::listen::compact_session_summary;
 
 use super::state::{
     AgentSession, COMPLETED_SESSION_TTL_SECONDS, ListenState, PullRequestStatus,
@@ -311,6 +312,83 @@ impl ListenProjectStore {
         let mut state = self.load_state()?;
         state.upsert(session);
         self.save_state(&state)
+    }
+
+    pub(super) fn retry_blocked_session(&self, identifier: &str) -> Result<bool> {
+        let mut state = self.load_state()?;
+        let session = state
+            .sessions
+            .iter_mut()
+            .find(|s| s.issue_matches(identifier) && s.phase == SessionPhase::Blocked);
+        let Some(session) = session else {
+            return Ok(false);
+        };
+        session.phase = SessionPhase::BriefReady;
+        session.pid = None;
+        session.summary = "Retrying from previous workspace state".to_string();
+        session.updated_at_epoch_seconds = now_epoch_seconds();
+        self.save_state(&state)?;
+        Ok(true)
+    }
+
+    pub(super) fn pause_running_session(&self, identifier: &str) -> Result<bool> {
+        let mut state = self.load_state()?;
+        let session = state
+            .sessions
+            .iter_mut()
+            .find(|s| s.issue_matches(identifier) && s.phase == SessionPhase::Running);
+        let Some(session) = session else {
+            return Ok(false);
+        };
+        let Some(pid) = session.pid else {
+            return Ok(false);
+        };
+        if !pid_is_running(pid) {
+            return Ok(false);
+        }
+        send_process_signal(pid, ProcessSignal::Pause)?;
+        session.phase = SessionPhase::Paused;
+        session.summary = compact_session_summary([
+            Some("Paused by operator".to_string()),
+            Some(format!("pid {pid}")),
+            session
+                .backlog_issue_identifier
+                .as_ref()
+                .map(|identifier| format!("backlog {identifier}")),
+        ]);
+        session.updated_at_epoch_seconds = now_epoch_seconds();
+        self.save_state(&state)?;
+        Ok(true)
+    }
+
+    pub(super) fn resume_paused_session(&self, identifier: &str) -> Result<bool> {
+        let mut state = self.load_state()?;
+        let session = state
+            .sessions
+            .iter_mut()
+            .find(|s| s.issue_matches(identifier) && s.phase == SessionPhase::Paused);
+        let Some(session) = session else {
+            return Ok(false);
+        };
+        let Some(pid) = session.pid else {
+            return Ok(false);
+        };
+        if !pid_is_running(pid) {
+            return Ok(false);
+        }
+        send_process_signal(pid, ProcessSignal::Resume)?;
+        session.phase = SessionPhase::Running;
+        session.summary = compact_session_summary([
+            Some("Resumed by operator".to_string()),
+            Some(format!("pid {pid}")),
+            session
+                .backlog_issue_identifier
+                .as_ref()
+                .map(|identifier| format!("backlog {identifier}")),
+        ]);
+        session.updated_at_epoch_seconds = now_epoch_seconds();
+        self.save_state(&state)?;
+        Ok(true)
     }
 
     pub(super) fn clear_sessions(&self, selector: &SessionSelector) -> Result<SessionClearOutcome> {
@@ -989,6 +1067,37 @@ pub(super) fn pid_is_running(pid: u32) -> bool {
         .unwrap_or(true)
 }
 
+#[derive(Debug, Clone, Copy)]
+enum ProcessSignal {
+    Pause,
+    Resume,
+}
+
+#[cfg(unix)]
+fn send_process_signal(pid: u32, signal: ProcessSignal) -> Result<()> {
+    let signal_arg = match signal {
+        ProcessSignal::Pause => "-STOP",
+        ProcessSignal::Resume => "-CONT",
+    };
+    let status = Command::new("kill")
+        .arg(signal_arg)
+        .arg(pid.to_string())
+        .status()
+        .with_context(|| format!("failed to run `kill {signal_arg} {pid}`"))?;
+    if !status.success() {
+        bail!("`kill {signal_arg} {pid}` exited with status {status}");
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn send_process_signal(_pid: u32, signal: ProcessSignal) -> Result<()> {
+    match signal {
+        ProcessSignal::Pause => bail!("listen pause is only supported on Unix hosts"),
+        ProcessSignal::Resume => bail!("listen resume is only supported on Unix hosts"),
+    }
+}
+
 fn now_epoch_seconds() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1441,6 +1550,162 @@ mod tests {
                 .map(|session| session.issue_identifier.as_str()),
             Some("ENG-10164")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn retry_blocked_session_resets_to_brief_ready() -> Result<()> {
+        let temp = tempdir()?;
+        let repo_root = temp.path().join("repo");
+        let data_root = temp.path().join("data");
+        fs::create_dir_all(repo_root.join(".metastack"))?;
+        let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
+        let now = super::now_epoch_seconds();
+
+        seed_state(
+            &store,
+            vec![
+                default_session("ENG-100", SessionPhase::Blocked, now),
+                default_session("ENG-200", SessionPhase::Running, now),
+            ],
+        )?;
+
+        assert!(store.retry_blocked_session("ENG-100")?);
+
+        let state = store.load_state()?;
+        let retried = state
+            .sessions
+            .iter()
+            .find(|s| s.issue_identifier == "ENG-100")
+            .expect("session should exist");
+        assert_eq!(retried.phase, SessionPhase::BriefReady);
+        assert!(retried.pid.is_none());
+        assert_eq!(retried.summary, "Retrying from previous workspace state");
+
+        let other = state
+            .sessions
+            .iter()
+            .find(|s| s.issue_identifier == "ENG-200")
+            .expect("other session should be untouched");
+        assert_eq!(other.phase, SessionPhase::Running);
+
+        Ok(())
+    }
+
+    #[test]
+    fn retry_blocked_session_returns_false_for_non_blocked() -> Result<()> {
+        let temp = tempdir()?;
+        let repo_root = temp.path().join("repo");
+        let data_root = temp.path().join("data");
+        fs::create_dir_all(repo_root.join(".metastack"))?;
+        let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
+        let now = super::now_epoch_seconds();
+
+        seed_state(
+            &store,
+            vec![default_session("ENG-300", SessionPhase::Running, now)],
+        )?;
+
+        assert!(!store.retry_blocked_session("ENG-300")?);
+        assert!(!store.retry_blocked_session("ENG-999")?);
+
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pause_running_session_marks_session_paused_and_keeps_pid() -> Result<()> {
+        let temp = tempdir()?;
+        let repo_root = temp.path().join("repo");
+        let data_root = temp.path().join("data");
+        fs::create_dir_all(repo_root.join(".metastack"))?;
+        let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
+        let now = super::now_epoch_seconds();
+        let mut child = spawn_sleep_process()?;
+        let pid = child.id();
+
+        let mut session = default_session("ENG-400", SessionPhase::Running, now);
+        session.pid = Some(pid);
+        seed_state(&store, vec![session])?;
+
+        assert!(store.pause_running_session("ENG-400")?);
+
+        let state = store.load_state()?;
+        let paused = state
+            .sessions
+            .iter()
+            .find(|s| s.issue_identifier == "ENG-400")
+            .expect("session should exist");
+        assert_eq!(paused.phase, SessionPhase::Paused);
+        assert_eq!(paused.pid, Some(pid));
+        assert!(paused.summary.contains("Paused by operator"));
+        assert!(super::pid_is_running(pid));
+
+        let _ = child.kill();
+        let _ = child.wait();
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resume_paused_session_marks_session_running_without_changing_pid() -> Result<()> {
+        let temp = tempdir()?;
+        let repo_root = temp.path().join("repo");
+        let data_root = temp.path().join("data");
+        fs::create_dir_all(repo_root.join(".metastack"))?;
+        let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
+        let now = super::now_epoch_seconds();
+        let mut child = spawn_sleep_process()?;
+        let pid = child.id();
+
+        let mut session = default_session("ENG-401", SessionPhase::Running, now);
+        session.pid = Some(pid);
+        seed_state(&store, vec![session])?;
+        assert!(store.pause_running_session("ENG-401")?);
+
+        assert!(store.resume_paused_session("ENG-401")?);
+
+        let state = store.load_state()?;
+        let resumed = state
+            .sessions
+            .iter()
+            .find(|s| s.issue_identifier == "ENG-401")
+            .expect("session should exist");
+        assert_eq!(resumed.phase, SessionPhase::Running);
+        assert_eq!(resumed.pid, Some(pid));
+        assert!(resumed.summary.contains("Resumed by operator"));
+        assert!(super::pid_is_running(pid));
+
+        let _ = child.kill();
+        let _ = child.wait();
+        Ok(())
+    }
+
+    #[test]
+    fn pause_and_resume_return_false_when_session_cannot_transition() -> Result<()> {
+        let temp = tempdir()?;
+        let repo_root = temp.path().join("repo");
+        let data_root = temp.path().join("data");
+        fs::create_dir_all(repo_root.join(".metastack"))?;
+        let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
+        let now = super::now_epoch_seconds();
+
+        seed_state(
+            &store,
+            vec![
+                default_session("ENG-500", SessionPhase::Blocked, now),
+                default_session("ENG-501", SessionPhase::Paused, now),
+                default_session("ENG-502", SessionPhase::Running, now),
+            ],
+        )?;
+
+        assert!(!store.pause_running_session("ENG-500")?);
+        assert!(!store.pause_running_session("ENG-502")?);
+        assert!(!store.resume_paused_session("ENG-500")?);
+        assert!(!store.resume_paused_session("ENG-501")?);
+        assert!(!store.pause_running_session("ENG-999")?);
+        assert!(!store.resume_paused_session("ENG-999")?);
+
         Ok(())
     }
 }

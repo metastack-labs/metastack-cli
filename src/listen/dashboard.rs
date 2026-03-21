@@ -7,7 +7,8 @@ use ratatui::widgets::{Cell, List, ListItem, Paragraph, Row, Table, Wrap};
 use ratatui::{Frame, Terminal};
 
 use super::{ListenDashboardData, ListenSessionDetail, SessionListView, SessionPhase};
-use crate::tui::theme::{Tone, badge, empty_state, key_hints, panel, panel_title};
+use crate::tui::scroll::{clamp_offset, plain_text, wrapped_rows};
+use crate::tui::theme::{Tone, badge, content_panel, empty_state, key_hints, panel, panel_title};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SessionBrowserState {
@@ -26,6 +27,7 @@ pub(crate) enum SessionBrowserAction {
     Left,
     Right,
     Enter,
+    Pause,
     Back,
     PageUp,
     PageDown,
@@ -53,6 +55,21 @@ impl SessionBrowserState {
             self.detail_mode = false;
             self.detail_scroll = 0;
         }
+    }
+
+    pub(crate) fn clamp_detail_scroll(
+        &mut self,
+        data: &ListenDashboardData,
+        width: u16,
+        height: u16,
+    ) {
+        let Some((viewport_height, content_rows)) =
+            detail_scroll_metrics(data, self, width, height)
+        else {
+            self.detail_scroll = 0;
+            return;
+        };
+        self.detail_scroll = clamp_offset(self.detail_scroll, viewport_height, content_rows);
     }
 
     pub(crate) fn select_previous(&mut self, data: &ListenDashboardData) {
@@ -129,6 +146,7 @@ impl SessionBrowserState {
                 self.detail_mode = !self.detail_mode;
                 self.detail_scroll = 0;
             }
+            SessionBrowserAction::Pause => {}
             SessionBrowserAction::Back => {
                 self.detail_mode = false;
                 self.detail_scroll = 0;
@@ -171,6 +189,7 @@ pub(crate) fn render_dashboard_with_state(
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend)?;
     state.normalize(data);
+    state.clamp_detail_scroll(data, width, height);
     terminal.draw(|frame| render(frame, data, &state))?;
     Ok(snapshot(terminal.backend()))
 }
@@ -257,6 +276,8 @@ fn render_header(frame: &mut Frame<'_>, data: &ListenDashboardData, area: Rect) 
                     },
                     "switch tabs",
                 ),
+                ("p", "pause running"),
+                ("r", "resume paused / retry blocked"),
                 ("q", "exit"),
             ]),
         ]))
@@ -313,6 +334,8 @@ fn render_header(frame: &mut Frame<'_>, data: &ListenDashboardData, area: Rect) 
                 },
                 "switch tabs",
             ),
+            ("p", "pause running"),
+            ("r", "resume paused / retry blocked"),
             ("q", "exit"),
         ]),
     ]))
@@ -375,9 +398,9 @@ fn render_sessions(
         session_view_badge(SessionListView::Completed, view, counts.completed),
         Span::styled(
             if data.vim_mode {
-                "  Tab/←/→/h/l tabs  ↑/↓/j/k select  Enter detail"
+                "  Tab/←/→/h/l tabs  ↑/↓/j/k select  Enter detail  p pause  r resume/retry"
             } else {
-                "  Tab/←/→ tabs  ↑/↓ select  Enter detail"
+                "  Tab/←/→ tabs  ↑/↓ select  Enter detail  p pause  r resume/retry"
             },
             Style::default().fg(Color::DarkGray),
         ),
@@ -429,7 +452,12 @@ fn render_sessions(
                 session,
                 data.detail_for_session(&session.issue_identifier),
                 layout[1],
-                state.detail_scroll,
+                clamp_detail_scroll_for_area(
+                    session,
+                    data.detail_for_session(&session.issue_identifier),
+                    layout[1],
+                    state.detail_scroll,
+                ),
             );
         }
     }
@@ -541,8 +569,97 @@ fn render_session_detail(
     let detail = Paragraph::new(content)
         .wrap(Wrap { trim: true })
         .scroll((scroll, 0))
-        .block(panel(panel_title("Selected Session", false)));
+        .block(content_panel(panel_title("Selected Session", false)));
     frame.render_widget(detail, area);
+}
+
+fn detail_scroll_metrics(
+    data: &ListenDashboardData,
+    state: &SessionBrowserState,
+    width: u16,
+    height: u16,
+) -> Option<(u16, usize)> {
+    if !state.detail_mode {
+        return None;
+    }
+    let session = state.selected_session(data)?;
+    let area = Rect::new(0, 0, width, height);
+    let footer_height = if area.width >= 110 && area.height >= 30 {
+        8
+    } else {
+        0
+    };
+    let header_height = if area.width >= 120 { 10 } else { 12 };
+    let constraints = if footer_height > 0 {
+        vec![
+            Constraint::Length(header_height),
+            Constraint::Min(8),
+            Constraint::Length(footer_height),
+        ]
+    } else {
+        vec![Constraint::Length(header_height), Constraint::Min(8)]
+    };
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(area);
+    let sessions_block = panel(panel_title("Agent Sessions", false));
+    let sessions_inner = sessions_block.inner(sections[1]);
+    if sessions_inner.width == 0 || sessions_inner.height == 0 {
+        return None;
+    }
+    let sessions_sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Min(0)])
+        .split(sessions_inner);
+    let detail_area = detail_panel_area(sessions_sections[1], state.detail_mode)?;
+    let detail = data.detail_for_session(&session.issue_identifier);
+    Some(detail_content_metrics(session, detail, detail_area))
+}
+
+fn detail_panel_area(area: Rect, detail_mode: bool) -> Option<Rect> {
+    if !detail_mode {
+        return None;
+    }
+    let layout = if area.width >= 150 {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
+            .split(area)
+    } else {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(10), Constraint::Min(0)])
+            .split(area)
+    };
+    (layout.len() > 1).then_some(layout[1])
+}
+
+fn clamp_detail_scroll_for_area(
+    session: &super::AgentSession,
+    detail: Option<&ListenSessionDetail>,
+    area: Rect,
+    scroll: u16,
+) -> u16 {
+    let (viewport_height, content_rows) = detail_content_metrics(session, detail, area);
+    clamp_offset(scroll, viewport_height, content_rows)
+}
+
+fn detail_content_metrics(
+    session: &super::AgentSession,
+    detail: Option<&ListenSessionDetail>,
+    area: Rect,
+) -> (u16, usize) {
+    let inner = content_panel(panel_title("Selected Session", false)).inner(area);
+    let content = match detail {
+        Some(detail) => render_session_detail_text(session, detail),
+        None => empty_state(
+            "No structured detail artifact is available yet.",
+            "The worker will populate session detail as soon as it refreshes this session.",
+        ),
+    };
+    let content_rows = wrapped_rows(&plain_text(&content), inner.width.max(1));
+    (inner.height.max(1), content_rows)
 }
 
 fn render_session_detail_text(
@@ -779,6 +896,9 @@ fn phase_style(phase: SessionPhase) -> Style {
         SessionPhase::Running => Style::default()
             .fg(Color::Green)
             .add_modifier(Modifier::BOLD),
+        SessionPhase::Paused => Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
         SessionPhase::Completed => Style::default()
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD),
@@ -808,13 +928,14 @@ mod tests {
     use ratatui::text::Line;
 
     use super::{
-        SessionBrowserState, render_dashboard, render_dashboard_with_state,
+        SessionBrowserState, detail_scroll_metrics, render_dashboard, render_dashboard_with_state,
         render_dashboard_with_view, render_session_detail_text,
     };
     use crate::listen::{
         DashboardRuntimeContext, ListenCycleData, SessionListView, SessionPhase,
         build_dashboard_data,
     };
+    use crate::tui::scroll::clamp_offset;
 
     fn demo_cycle() -> ListenCycleData {
         ListenCycleData::demo(
@@ -1070,6 +1191,38 @@ mod tests {
         .expect("detail snapshot should render");
 
         assert!(snapshot.contains("Recent Log Excerpts"));
+    }
+
+    #[test]
+    fn detail_scroll_is_clamped_to_visible_content() {
+        let cycle = demo_cycle();
+        let data = build_dashboard_data(
+            &cycle,
+            &DashboardRuntimeContext {
+                started_at_epoch_seconds: 1_773_568_249,
+                now_epoch_seconds: 1_773_575_600,
+                poll_interval_seconds: 7,
+                dashboard_label: "terminal dashboard (TUI)",
+                dashboard_refresh_seconds: 1,
+                linear_refresh_seconds: 15,
+                vim_mode: false,
+            },
+        );
+        let mut state = SessionBrowserState {
+            detail_mode: true,
+            detail_scroll: u16::MAX,
+            ..SessionBrowserState::default()
+        };
+
+        state.normalize(&data);
+        state.clamp_detail_scroll(&data, 200, 44);
+
+        let (viewport_height, content_rows) =
+            detail_scroll_metrics(&data, &state, 200, 44).expect("detail metrics should exist");
+        assert_eq!(
+            state.detail_scroll,
+            clamp_offset(u16::MAX, viewport_height, content_rows)
+        );
     }
 
     #[test]

@@ -4,7 +4,7 @@ use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Paragraph};
 use unicode_width::UnicodeWidthChar;
 
-use crate::tui::theme::panel;
+use crate::tui::theme::{content_panel, panel};
 
 /// Shared vertical scroll state for wrapped TUI panes.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -169,6 +169,15 @@ pub(crate) fn scrollable_paragraph(
     scroll: &ScrollState,
 ) -> Paragraph<'static> {
     scrollable_paragraph_with_block(text, panel(title), scroll)
+}
+
+/// Shared scrollable paragraph builder for content-heavy wrapped text panels with inner padding.
+pub(crate) fn scrollable_content_paragraph(
+    text: impl Into<Text<'static>>,
+    title: impl Into<Line<'static>>,
+    scroll: &ScrollState,
+) -> Paragraph<'static> {
+    scrollable_paragraph_with_block(text, content_panel(title), scroll)
 }
 
 /// Shared scrollable paragraph builder that preserves a caller-provided block.
