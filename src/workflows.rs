@@ -912,7 +912,13 @@ impl WorkflowRunApp {
             self.set_error("save path cannot be empty".to_string());
             return Ok(None);
         }
-        resolve_output_path(root, Path::new(raw)).map(Some)
+        match resolve_output_path(root, Path::new(raw)) {
+            Ok(path) => Ok(Some(path)),
+            Err(error) => {
+                self.set_error(error.to_string());
+                Ok(None)
+            }
+        }
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Result<WorkflowUiCommand> {
@@ -2040,6 +2046,59 @@ mod tests {
         assert_eq!(
             app.artifact_markdown().expect("artifact markdown"),
             "initial!"
+        );
+    }
+
+    #[test]
+    fn requested_output_path_keeps_invalid_save_path_inside_tui() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("repo");
+        fs::create_dir_all(&root).expect("repo root");
+        let workflow = WorkflowPlaybook {
+            name: "ticket-implementation".to_string(),
+            summary: "summary".to_string(),
+            provider: "codex".to_string(),
+            parameters: vec![WorkflowParameter {
+                name: "issue".to_string(),
+                description: "Issue".to_string(),
+                required: true,
+                default: None,
+            }],
+            validation: Vec::new(),
+            instructions_template: None,
+            prompt_template: "Prompt".to_string(),
+            linear_issue_parameter: Some("issue".to_string()),
+            source: WorkflowSource::Builtin("builtin/test.md"),
+        };
+        let mut app = WorkflowRunApp::new(
+            &root,
+            workflow,
+            BTreeMap::from([(String::from("issue"), String::from("MET-50"))]),
+            None,
+            false,
+            false,
+        );
+        app.enter_review(WorkflowArtifact {
+            markdown: "initial".to_string(),
+            provider: "codex".to_string(),
+            diagnostics: Vec::new(),
+            default_output: root
+                .join(".metastack/workflows/generated/ticket-implementation-met-50.md"),
+        });
+        app.screen = WorkflowRunScreen::SavePath;
+        app.save_path_input = InputFieldState::new("../outside.md");
+
+        let resolved = app
+            .requested_output_path(&root)
+            .expect("save prompt should handle invalid paths inline");
+
+        assert!(resolved.is_none());
+        assert_eq!(app.screen, WorkflowRunScreen::SavePath);
+        assert!(
+            app.error
+                .as_deref()
+                .expect("inline save-path error")
+                .contains("refusing to write outside the repository root")
         );
     }
 }
