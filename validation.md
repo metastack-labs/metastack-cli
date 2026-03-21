@@ -19,6 +19,7 @@
   - proved first-run creation writes only `.metastack/SPEC.md`
   - proved repeat-run improvement revises the existing SPEC in place and includes prior SPEC content in the generation prompt
   - proved render-once coverage for the request, follow-up, loading, and review states without writing `.metastack/SPEC.md`
+  - proved the render-once command path skips the follow-up interview screen when the agent returns zero questions and transitions directly into SPEC generation loading
   - proved malformed generated output missing required uppercase headings is rejected
 - `cargo test --lib backlog_spec::tests::zero_follow_up_questions_skip_to_generation_loading`
   - passed

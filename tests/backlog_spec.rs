@@ -34,7 +34,14 @@ printf '%s' "$METASTACK_AGENT_INSTRUCTIONS" > "$TEST_OUTPUT_DIR/instructions-$co
 
 case "$METASTACK_AGENT_PROMPT" in
   *"Return JSON only using this exact shape"*)
-    printf '%s' '{"questions":["Who is the primary user for this workflow?","What should stay explicitly out of scope?"]}'
+    case "$METASTACK_AGENT_PROMPT" in
+      *"Skip follow-up questions entirely"*)
+        printf '%s' '{"questions":[]}'
+        ;;
+      *)
+        printf '%s' '{"questions":["Who is the primary user for this workflow?","What should stay explicitly out of scope?"]}'
+        ;;
+    esac
     ;;
   *"Return an invalid SPEC missing required headings"*)
     printf '%s' '# OVERVIEW
@@ -292,6 +299,28 @@ fn spec_command_render_once_covers_major_tui_states() -> Result<(), Box<dyn Erro
         .stdout(predicate::str::contains(
             "Who is the primary user for this workflow?",
         ));
+
+    cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &output_dir)
+        .args([
+            "backlog",
+            "spec",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--render-once",
+            "--request",
+            "Skip follow-up questions entirely",
+            "--events",
+            "enter,wait",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Drafting repo-local SPEC"))
+        .stdout(predicate::str::contains(
+            "without touching Linear or backlog packets.",
+        ))
+        .stdout(predicate::str::contains("Create SPEC follow-up interview").not());
 
     cli()
         .env("METASTACK_CONFIG", &config_path)
