@@ -948,6 +948,15 @@ impl WorkflowRunApp {
                 }
                 Ok(WorkflowUiCommand::None)
             }
+            KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                if self
+                    .current_input_mut()
+                    .handle_key_with_viewport(key, width, height)
+                {
+                    self.clear_status();
+                }
+                Ok(WorkflowUiCommand::None)
+            }
             KeyCode::Tab | KeyCode::Enter => {
                 self.clear_status();
                 self.validate_current_step()?;
@@ -2047,6 +2056,51 @@ mod tests {
             app.artifact_markdown().expect("artifact markdown"),
             "initial!"
         );
+    }
+
+    #[test]
+    fn wizard_shift_enter_inserts_newline_without_advancing() {
+        let root = PathBuf::from("/tmp/repo");
+        let workflow = WorkflowPlaybook {
+            name: "ticket-implementation".to_string(),
+            summary: "summary".to_string(),
+            provider: "codex".to_string(),
+            parameters: vec![
+                WorkflowParameter {
+                    name: "issue".to_string(),
+                    description: "Issue".to_string(),
+                    required: true,
+                    default: None,
+                },
+                WorkflowParameter {
+                    name: "notes".to_string(),
+                    description: "Notes".to_string(),
+                    required: false,
+                    default: None,
+                },
+            ],
+            validation: Vec::new(),
+            instructions_template: None,
+            prompt_template: "Prompt".to_string(),
+            linear_issue_parameter: Some("issue".to_string()),
+            source: WorkflowSource::Builtin("builtin/test.md"),
+        };
+        let mut app = WorkflowRunApp::new(
+            &root,
+            workflow,
+            BTreeMap::from([(String::from("issue"), String::from("MET-50"))]),
+            None,
+            false,
+            false,
+        );
+
+        let command = app
+            .handle_wizard_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT))
+            .expect("shift+enter should stay inside the current input");
+
+        assert_eq!(command, WorkflowUiCommand::None);
+        assert_eq!(app.step_index, 0);
+        assert_eq!(app.fields[0].input.value(), "MET-50\n");
     }
 
     #[test]
