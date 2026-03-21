@@ -165,14 +165,16 @@ fn agents_listen_help_describes_session_browser_navigation() {
 }
 
 #[test]
-fn backlog_help_lists_tech_and_sync_commands() {
+fn meta_backlog_spec_help_exposes_new_subcommand() {
     cli()
         .args(["backlog", "--help"])
         .assert()
         .success()
+        .stdout(predicate::str::contains("\n  spec "))
         .stdout(predicate::str::contains("\n  plan "))
         .stdout(predicate::str::contains("\n  tech "))
         .stdout(predicate::str::contains("\n  sync "))
+        .stdout(predicate::str::contains("meta backlog spec --root ."))
         .stdout(predicate::str::contains("meta backlog tech MET-35"));
 }
 
