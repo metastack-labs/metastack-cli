@@ -1017,6 +1017,8 @@ the existing config path rules, for example `~/.config/metastack/data/`. Each pr
 `session-details/<ISSUE>.json`, and per-issue logs. `session.json` stays compact and list-oriented;
 the per-session detail files hold session milestones, workspace/backlog/workpad references,
 prompt-context references, PR publication state, and short log excerpts for the drill-down pane.
+Missing or malformed detail files are treated as temporarily unavailable detail, not as a fatal
+dashboard or reload error; the next successful listener refresh rewrites them.
 
 Stored-session management commands:
 

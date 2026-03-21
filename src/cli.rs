@@ -60,6 +60,7 @@ Interactive dashboard:
   - Session rows stay compact and include PR visibility as `none`, `draft #N`, or `ready #N`
   - Press Enter on the selected session to open the detail pane for milestones, references, prompt context, and log excerpts
   - Use Up/Down (or j/k when vim mode is enabled) to change the selected session, Esc to close detail mode, and PgUp/PgDn to scroll detail content
+  - Missing or malformed session detail artifacts do not block the list view; the next refresh rewrites them and restores drill-down data
 
 Terminal-only examples:
   meta agents listen --check --root .
