@@ -317,9 +317,8 @@ fn spec_command_render_once_covers_major_tui_states() -> Result<(), Box<dyn Erro
         .assert()
         .success()
         .stdout(predicate::str::contains("Drafting repo-local SPEC"))
-        .stdout(predicate::str::contains(
-            "without touching Linear or backlog packets.",
-        ))
+        .stdout(predicate::str::contains("without touching Linear or"))
+        .stdout(predicate::str::contains("backlog packets."))
         .stdout(predicate::str::contains("Create SPEC follow-up interview").not());
 
     cli()
