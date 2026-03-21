@@ -7,13 +7,20 @@ use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::config::resolve_data_root;
-use crate::fs::{canonicalize_existing_dir, ensure_dir};
+use crate::fs::{PlanningPaths, canonicalize_existing_dir, ensure_dir};
 
-use super::state::{AgentSession, COMPLETED_SESSION_TTL_SECONDS, ListenState, SessionPhase};
+use super::state::{
+    AgentSession, COMPLETED_SESSION_TTL_SECONDS, ListenState, PullRequestStatus,
+    PullRequestSummary, SessionPhase, TokenUsage,
+};
 
 const LISTEN_STORE_VERSION: u8 = 1;
+const LISTEN_SESSION_DETAIL_VERSION: u8 = 1;
+const LOG_EXCERPT_LIMIT: usize = 6;
+const LOG_EXCERPT_MAX_CHARS: usize = 120;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ListenProjectStore {
@@ -39,6 +46,7 @@ pub(super) struct ListenProjectPaths {
     pub(super) state_path: PathBuf,
     pub(super) lock_path: PathBuf,
     pub(super) logs_dir: PathBuf,
+    pub(super) details_dir: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,6 +78,72 @@ pub(super) struct StoredListenProjectSummary {
     pub(super) logs_dir: PathBuf,
     pub(super) latest_session: Option<AgentSession>,
     pub(super) active_lock: Option<ActiveListenerLock>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct SessionDetailReferences {
+    #[serde(default)]
+    pub workspace_path: Option<String>,
+    #[serde(default)]
+    pub backlog_path: Option<String>,
+    #[serde(default)]
+    pub brief_path: Option<String>,
+    #[serde(default)]
+    pub workpad_comment_id: Option<String>,
+    #[serde(default)]
+    pub log_path: Option<String>,
+    #[serde(default)]
+    pub branch: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct SessionContextReference {
+    pub label: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct SessionMilestone {
+    pub at_epoch_seconds: u64,
+    pub phase: SessionPhase,
+    pub summary: String,
+    #[serde(default)]
+    pub turns: Option<u32>,
+    #[serde(default)]
+    pub pull_request_status: PullRequestStatus,
+    #[serde(default)]
+    pub pull_request_number: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct SessionLogExcerpt {
+    pub line_number: usize,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ListenSessionDetail {
+    pub(super) version: u8,
+    pub(super) issue_identifier: String,
+    pub(super) issue_title: String,
+    pub(super) updated_at_epoch_seconds: u64,
+    pub(super) session_updated_at_epoch_seconds: u64,
+    pub(super) phase: SessionPhase,
+    pub(super) summary: String,
+    #[serde(default)]
+    pub turns: Option<u32>,
+    #[serde(default)]
+    pub tokens: TokenUsage,
+    #[serde(default)]
+    pub pull_request: PullRequestSummary,
+    #[serde(default)]
+    pub references: SessionDetailReferences,
+    #[serde(default)]
+    pub prompt_context: Vec<SessionContextReference>,
+    #[serde(default)]
+    pub milestones: Vec<SessionMilestone>,
+    #[serde(default)]
+    pub log_excerpts: Vec<SessionLogExcerpt>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,6 +213,7 @@ impl ListenProjectStore {
             state_path: project_dir.join("session.json"),
             lock_path: project_dir.join("active-listener.lock.json"),
             logs_dir: project_dir.join("logs"),
+            details_dir: project_dir.join("session-details"),
         };
 
         Ok(Self { identity, paths })
@@ -174,6 +249,7 @@ impl ListenProjectStore {
             state_path: project_dir.join("session.json"),
             lock_path: project_dir.join("active-listener.lock.json"),
             logs_dir: project_dir.join("logs"),
+            details_dir: project_dir.join("session-details"),
         };
         Ok(Self { identity, paths })
     }
@@ -190,6 +266,7 @@ impl ListenProjectStore {
         ensure_dir(&self.paths.projects_root)?;
         ensure_dir(&self.paths.project_dir)?;
         ensure_dir(&self.paths.logs_dir)?;
+        ensure_dir(&self.paths.details_dir)?;
         self.save_metadata()
     }
 
@@ -222,7 +299,12 @@ impl ListenProjectStore {
 
     pub(super) fn save_state(&self, state: &ListenState) -> Result<()> {
         self.ensure_layout()?;
-        write_json(&self.paths.state_path, state)
+        write_json(&self.paths.state_path, state)?;
+        self.remove_orphaned_session_details(state)?;
+        for session in &state.sessions {
+            self.refresh_session_detail(session)?;
+        }
+        Ok(())
     }
 
     pub(super) fn upsert_session(&self, session: AgentSession) -> Result<()> {
@@ -270,6 +352,32 @@ impl ListenProjectStore {
 
     pub(super) fn log_path(&self, issue_identifier: &str) -> PathBuf {
         self.paths.logs_dir.join(format!("{issue_identifier}.log"))
+    }
+
+    pub(super) fn detail_path(&self, issue_identifier: &str) -> PathBuf {
+        self.paths
+            .details_dir
+            .join(format!("{issue_identifier}.json"))
+    }
+
+    pub(super) fn load_session_detail(
+        &self,
+        issue_identifier: &str,
+    ) -> Result<Option<ListenSessionDetail>> {
+        read_optional_json(&self.detail_path(issue_identifier))
+    }
+
+    pub(super) fn load_session_details(
+        &self,
+        sessions: &[AgentSession],
+    ) -> Result<Vec<ListenSessionDetail>> {
+        let mut details = Vec::new();
+        for session in sessions {
+            if let Some(detail) = self.load_session_detail(&session.issue_identifier)? {
+                details.push(detail);
+            }
+        }
+        Ok(details)
     }
 
     pub(super) fn acquire_listener_lock(&self, pid: u32) -> Result<ListenerLockGuard> {
@@ -402,6 +510,7 @@ impl ListenProjectStore {
             let state_path = project_dir.join("session.json");
             let lock_path = project_dir.join("active-listener.lock.json");
             let logs_dir = project_dir.join("logs");
+            let details_dir = project_dir.join("session-details");
             let metadata = match read_json::<ListenProjectMetadata>(&metadata_path) {
                 Ok(metadata) => metadata,
                 Err(_) => continue,
@@ -422,6 +531,7 @@ impl ListenProjectStore {
                     state_path: state_path.clone(),
                     lock_path: lock_path.clone(),
                     logs_dir: logs_dir.clone(),
+                    details_dir,
                 },
             };
             let latest_session = match store.load_state() {
@@ -473,6 +583,93 @@ impl ListenProjectStore {
             Err(error) => Err(error)
                 .with_context(|| format!("failed to read `{}`", self.paths.state_path.display())),
         }
+    }
+
+    fn refresh_session_detail(&self, session: &AgentSession) -> Result<()> {
+        let path = self.detail_path(&session.issue_identifier);
+        let mut detail = self
+            .load_session_detail(&session.issue_identifier)?
+            .unwrap_or_else(|| ListenSessionDetail {
+                version: LISTEN_SESSION_DETAIL_VERSION,
+                issue_identifier: session.issue_identifier.clone(),
+                issue_title: session.issue_title.clone(),
+                updated_at_epoch_seconds: session.updated_at_epoch_seconds,
+                session_updated_at_epoch_seconds: session.updated_at_epoch_seconds,
+                phase: session.phase,
+                summary: session.summary.clone(),
+                turns: session.turns,
+                tokens: session.tokens.clone(),
+                pull_request: session.pull_request.clone(),
+                references: SessionDetailReferences::default(),
+                prompt_context: Vec::new(),
+                milestones: Vec::new(),
+                log_excerpts: Vec::new(),
+            });
+
+        detail.version = LISTEN_SESSION_DETAIL_VERSION;
+        detail.issue_identifier = session.issue_identifier.clone();
+        detail.issue_title = session.issue_title.clone();
+        detail.updated_at_epoch_seconds = now_epoch_seconds();
+        detail.session_updated_at_epoch_seconds = session.updated_at_epoch_seconds;
+        detail.phase = session.phase;
+        detail.summary = session.summary.clone();
+        detail.turns = session.turns;
+        detail.tokens = session.tokens.clone();
+        detail.pull_request = session.pull_request.clone();
+        detail.references = SessionDetailReferences {
+            workspace_path: session.workspace_path.clone(),
+            backlog_path: session.backlog_path.clone(),
+            brief_path: session.brief_path.clone(),
+            workpad_comment_id: session.workpad_comment_id.clone(),
+            log_path: session.log_path.clone(),
+            branch: session.branch.clone(),
+        };
+        detail.prompt_context = build_prompt_context_references(session);
+        detail.log_excerpts = read_log_excerpts(session.log_path.as_deref())?;
+        append_milestone(&mut detail.milestones, session);
+
+        write_json(&path, &detail)
+    }
+
+    fn remove_orphaned_session_details(&self, state: &ListenState) -> Result<()> {
+        let valid = state
+            .sessions
+            .iter()
+            .map(|session| session.issue_identifier.to_ascii_lowercase())
+            .collect::<std::collections::BTreeSet<_>>();
+        let entries = match fs::read_dir(&self.paths.details_dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("failed to read `{}`", self.paths.details_dir.display())
+                });
+            }
+        };
+
+        for entry in entries {
+            let entry = entry.with_context(|| {
+                format!("failed to read `{}`", self.paths.details_dir.display())
+            })?;
+            if !entry
+                .file_type()
+                .with_context(|| format!("failed to inspect `{}`", entry.path().display()))?
+                .is_file()
+            {
+                continue;
+            }
+            let path = entry.path();
+            let Some(stem) = path.file_stem().and_then(OsStr::to_str) else {
+                continue;
+            };
+            if valid.contains(&stem.to_ascii_lowercase()) {
+                continue;
+            }
+            fs::remove_file(&path)
+                .with_context(|| format!("failed to remove `{}`", path.display()))?;
+        }
+
+        Ok(())
     }
 }
 
@@ -606,6 +803,158 @@ where
         fs::read_to_string(path).with_context(|| format!("failed to read `{}`", path.display()))?;
     serde_json::from_str(&contents)
         .with_context(|| format!("failed to decode `{}`", path.display()))
+}
+
+fn read_optional_json<T>(path: &Path) -> Result<Option<T>>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    match fs::read_to_string(path) {
+        Ok(contents) => serde_json::from_str(&contents)
+            .map(Some)
+            .with_context(|| format!("failed to decode `{}`", path.display())),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("failed to read `{}`", path.display())),
+    }
+}
+
+fn append_milestone(milestones: &mut Vec<SessionMilestone>, session: &AgentSession) {
+    let candidate = SessionMilestone {
+        at_epoch_seconds: session.updated_at_epoch_seconds,
+        phase: session.phase,
+        summary: session.summary.clone(),
+        turns: session.turns,
+        pull_request_status: session.pull_request.status,
+        pull_request_number: session.pull_request.number,
+    };
+    if milestones.last().is_some_and(|last| {
+        last.phase == candidate.phase
+            && last.summary == candidate.summary
+            && last.turns == candidate.turns
+            && last.pull_request_status == candidate.pull_request_status
+            && last.pull_request_number == candidate.pull_request_number
+    }) {
+        return;
+    }
+    milestones.push(candidate);
+}
+
+fn build_prompt_context_references(session: &AgentSession) -> Vec<SessionContextReference> {
+    let mut references = Vec::new();
+
+    if let Some(path) = session.brief_path.as_ref() {
+        references.push(SessionContextReference {
+            label: "Brief".to_string(),
+            value: path.clone(),
+        });
+    }
+    if let Some(path) = session.backlog_path.as_ref() {
+        references.push(SessionContextReference {
+            label: "Backlog".to_string(),
+            value: path.clone(),
+        });
+    }
+    if let Some(workspace_path) = session.workspace_path.as_deref() {
+        let paths = PlanningPaths::new(Path::new(workspace_path));
+        let issue_identifier = session
+            .backlog_issue_identifier
+            .as_deref()
+            .unwrap_or(&session.issue_identifier);
+        let backlog_index = paths.backlog_issue_dir(issue_identifier).join("index.md");
+        if backlog_index.is_file() {
+            references.push(SessionContextReference {
+                label: "Backlog index".to_string(),
+                value: backlog_index.display().to_string(),
+            });
+        }
+
+        let manifest_path = paths.agent_issue_context_manifest_path(&session.issue_identifier);
+        if manifest_path.is_file() {
+            references.push(SessionContextReference {
+                label: "Attachment context manifest".to_string(),
+                value: manifest_path.display().to_string(),
+            });
+        }
+    }
+
+    references
+}
+
+fn read_log_excerpts(log_path: Option<&str>) -> Result<Vec<SessionLogExcerpt>> {
+    let Some(log_path) = log_path else {
+        return Ok(Vec::new());
+    };
+    let path = Path::new(log_path);
+    let contents = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to read `{}`", path.display()));
+        }
+    };
+
+    let lines = contents
+        .lines()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            summarize_log_line(line).map(|text| SessionLogExcerpt {
+                line_number: index + 1,
+                text,
+            })
+        })
+        .collect::<Vec<_>>();
+    let start = lines.len().saturating_sub(LOG_EXCERPT_LIMIT);
+    Ok(lines.into_iter().skip(start).collect())
+}
+
+fn summarize_log_line(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+        if let Some(message) = value.get("message").and_then(Value::as_str) {
+            return Some(truncate_log_excerpt(message));
+        }
+        if let Some(message) = value.get("msg").and_then(Value::as_str) {
+            return Some(truncate_log_excerpt(message));
+        }
+        if let Some(error) = value.get("error").and_then(Value::as_str) {
+            return Some(truncate_log_excerpt(&format!("error: {error}")));
+        }
+        if let Some(kind) = value.get("type").and_then(Value::as_str) {
+            let detail = value
+                .get("subtype")
+                .and_then(Value::as_str)
+                .or_else(|| value.get("event").and_then(Value::as_str))
+                .or_else(|| value.get("thread_id").and_then(Value::as_str))
+                .or_else(|| value.get("session_id").and_then(Value::as_str))
+                .unwrap_or_default();
+            let summary = if detail.is_empty() {
+                kind.to_string()
+            } else {
+                format!("{kind}: {detail}")
+            };
+            return Some(truncate_log_excerpt(&summary));
+        }
+    }
+
+    Some(truncate_log_excerpt(trimmed))
+}
+
+fn truncate_log_excerpt(value: &str) -> String {
+    let collapsed = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = collapsed.chars();
+    let truncated = chars
+        .by_ref()
+        .take(LOG_EXCERPT_MAX_CHARS)
+        .collect::<String>();
+    if chars.next().is_some() {
+        format!("{}...", truncated.trim_end())
+    } else {
+        collapsed
+    }
 }
 
 pub(super) fn pid_is_running(pid: u32) -> bool {
@@ -761,6 +1110,7 @@ mod tests {
             backlog_path: Some(format!(".metastack/backlog/{issue_identifier}")),
             workspace_path: Some(format!("/tmp/{issue_identifier}")),
             branch: Some(format!("branch-{issue_identifier}")),
+            pull_request: Default::default(),
             workpad_comment_id: Some(format!("workpad-{issue_identifier}")),
             updated_at_epoch_seconds: updated_at,
             pid: None,

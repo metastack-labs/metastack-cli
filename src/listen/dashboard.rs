@@ -6,26 +6,117 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Cell, List, ListItem, Paragraph, Row, Table, Wrap};
 use ratatui::{Frame, Terminal};
 
-use super::{ListenDashboardData, SessionListView, SessionPhase};
+use super::{ListenDashboardData, ListenSessionDetail, SessionListView, SessionPhase};
 use crate::tui::theme::{Tone, badge, empty_state, key_hints, panel, panel_title};
 
-pub fn render_dashboard(data: &ListenDashboardData, width: u16, height: u16) -> Result<String> {
-    render_dashboard_with_view(data, width, height, SessionListView::Active)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SessionBrowserState {
+    pub(crate) view: SessionListView,
+    pub(crate) selected_active: usize,
+    pub(crate) selected_completed: usize,
+    pub(crate) detail_mode: bool,
+    pub(crate) detail_scroll: u16,
 }
 
+impl Default for SessionBrowserState {
+    fn default() -> Self {
+        Self {
+            view: SessionListView::Active,
+            selected_active: 0,
+            selected_completed: 0,
+            detail_mode: false,
+            detail_scroll: 0,
+        }
+    }
+}
+
+impl SessionBrowserState {
+    pub(crate) fn normalize(&mut self, data: &ListenDashboardData) {
+        let active_len = data.sessions_for_view(SessionListView::Active).len();
+        let completed_len = data.sessions_for_view(SessionListView::Completed).len();
+        self.selected_active = clamp_index(self.selected_active, active_len);
+        self.selected_completed = clamp_index(self.selected_completed, completed_len);
+        if self.selected_session(data).is_none() {
+            self.detail_mode = false;
+            self.detail_scroll = 0;
+        }
+    }
+
+    pub(crate) fn select_previous(&mut self, data: &ListenDashboardData) {
+        match self.view {
+            SessionListView::Active => {
+                self.selected_active = self.selected_active.saturating_sub(1);
+            }
+            SessionListView::Completed => {
+                self.selected_completed = self.selected_completed.saturating_sub(1);
+            }
+        }
+        self.detail_scroll = 0;
+        self.normalize(data);
+    }
+
+    pub(crate) fn select_next(&mut self, data: &ListenDashboardData) {
+        match self.view {
+            SessionListView::Active => {
+                self.selected_active = self.selected_active.saturating_add(1);
+            }
+            SessionListView::Completed => {
+                self.selected_completed = self.selected_completed.saturating_add(1);
+            }
+        }
+        self.detail_scroll = 0;
+        self.normalize(data);
+    }
+
+    pub(crate) fn selected_session<'a>(
+        &self,
+        data: &'a ListenDashboardData,
+    ) -> Option<&'a super::AgentSession> {
+        let sessions = data.sessions_for_view(self.view);
+        let index = match self.view {
+            SessionListView::Active => self.selected_active,
+            SessionListView::Completed => self.selected_completed,
+        };
+        sessions.get(index).copied()
+    }
+}
+
+pub fn render_dashboard(data: &ListenDashboardData, width: u16, height: u16) -> Result<String> {
+    render_dashboard_with_state(data, width, height, SessionBrowserState::default())
+}
+
+#[cfg(test)]
 fn render_dashboard_with_view(
     data: &ListenDashboardData,
     width: u16,
     height: u16,
     view: SessionListView,
 ) -> Result<String> {
+    let state = SessionBrowserState {
+        view,
+        ..SessionBrowserState::default()
+    };
+    render_dashboard_with_state(data, width, height, state)
+}
+
+fn render_dashboard_with_state(
+    data: &ListenDashboardData,
+    width: u16,
+    height: u16,
+    mut state: SessionBrowserState,
+) -> Result<String> {
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend)?;
-    terminal.draw(|frame| render(frame, data, view))?;
+    state.normalize(data);
+    terminal.draw(|frame| render(frame, data, &state))?;
     Ok(snapshot(terminal.backend()))
 }
 
-pub(crate) fn render(frame: &mut Frame<'_>, data: &ListenDashboardData, view: SessionListView) {
+pub(crate) fn render(
+    frame: &mut Frame<'_>,
+    data: &ListenDashboardData,
+    state: &SessionBrowserState,
+) {
     let area = frame.area();
     let footer_height = if area.width >= 110 && area.height >= 30 {
         8
@@ -48,7 +139,7 @@ pub(crate) fn render(frame: &mut Frame<'_>, data: &ListenDashboardData, view: Se
         .split(area);
 
     render_header(frame, data, sections[0]);
-    render_sessions(frame, data, sections[1], view);
+    render_sessions(frame, data, sections[1], state);
 
     if footer_height > 0 {
         render_footer(frame, data, sections[2]);
@@ -196,8 +287,9 @@ fn render_sessions(
     frame: &mut Frame<'_>,
     data: &ListenDashboardData,
     area: Rect,
-    view: SessionListView,
+    state: &SessionBrowserState,
 ) {
+    let view = state.view;
     let counts = data.session_counts();
     let sessions = data.sessions_for_view(view);
     let block = panel(panel_title("Agent Sessions", false));
@@ -220,9 +312,9 @@ fn render_sessions(
         session_view_badge(SessionListView::Completed, view, counts.completed),
         Span::styled(
             if data.vim_mode {
-                "  Tab/←/→/h/l toggles"
+                "  Tab/←/→/h/l tabs  ↑/↓/j/k select  Enter detail"
             } else {
-                "  Tab/←/→ toggles"
+                "  Tab/←/→ tabs  ↑/↓ select  Enter detail"
             },
             Style::default().fg(Color::DarkGray),
         ),
@@ -246,7 +338,53 @@ fn render_sessions(
         return;
     }
 
-    let rows = sessions.into_iter().map(|session| {
+    let layout = if state.detail_mode {
+        if sections[1].width >= 150 {
+            Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
+                .split(sections[1])
+        } else {
+            Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(10), Constraint::Min(0)])
+                .split(sections[1])
+        }
+    } else {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(0)])
+            .split(sections[1])
+    };
+
+    render_session_table(frame, data, layout[0], view, sessions, state);
+
+    if state.detail_mode && layout.len() > 1 {
+        if let Some(session) = state.selected_session(data) {
+            render_session_detail(
+                frame,
+                session,
+                data.detail_for_session(&session.issue_identifier),
+                layout[1],
+                state.detail_scroll,
+            );
+        }
+    }
+}
+
+fn render_session_table(
+    frame: &mut Frame<'_>,
+    data: &ListenDashboardData,
+    area: Rect,
+    view: SessionListView,
+    sessions: Vec<&super::AgentSession>,
+    state: &SessionBrowserState,
+) {
+    let selected_index = match view {
+        SessionListView::Active => state.selected_active,
+        SessionListView::Completed => state.selected_completed,
+    };
+    let rows = sessions.into_iter().enumerate().map(|(index, session)| {
         let mut issue_lines = vec![Line::from(session.issue_identifier.clone())];
         if let Some(backlog_issue_identifier) = session.backlog_issue_identifier.as_deref()
             && !backlog_issue_identifier.eq_ignore_ascii_case(&session.issue_identifier)
@@ -257,6 +395,7 @@ fn render_sessions(
             )));
         }
         Row::new(vec![
+            Cell::from(if index == selected_index { ">" } else { " " }),
             Cell::from(Text::from(issue_lines)),
             Cell::from(Span::styled(
                 session.stage_label(),
@@ -264,6 +403,7 @@ fn render_sessions(
             )),
             Cell::from(session.pid_label()),
             Cell::from(session.age_label(data.runtime.current_epoch_seconds)),
+            Cell::from(session.pull_request_label()),
             Cell::from(session.tokens_label()),
             Cell::from(session.latest_resume_provider_label()),
             Cell::from(session.session_label()),
@@ -271,10 +411,12 @@ fn render_sessions(
         ])
     });
     let header = Row::new(vec![
+        Cell::from(""),
         Cell::from("ID"),
         Cell::from("STAGE"),
         Cell::from("PID"),
         Cell::from("AGE"),
+        Cell::from("PR"),
         Cell::from("TOKENS"),
         Cell::from("PROVIDER"),
         Cell::from("SESSION"),
@@ -286,12 +428,14 @@ fn render_sessions(
             .add_modifier(Modifier::BOLD),
     )
     .bottom_margin(1);
-    let constraints = if inner.width >= 165 {
+    let constraints = if area.width >= 175 {
         vec![
+            Constraint::Length(2),
             Constraint::Length(10),
             Constraint::Length(13),
             Constraint::Length(8),
             Constraint::Length(10),
+            Constraint::Length(12),
             Constraint::Length(44),
             Constraint::Length(8),
             Constraint::Length(13),
@@ -299,10 +443,12 @@ fn render_sessions(
         ]
     } else {
         vec![
+            Constraint::Length(2),
             Constraint::Length(9),
             Constraint::Length(9),
             Constraint::Length(8),
             Constraint::Length(9),
+            Constraint::Length(10),
             Constraint::Length(16),
             Constraint::Length(8),
             Constraint::Length(13),
@@ -312,7 +458,131 @@ fn render_sessions(
     let table = Table::new(rows, constraints)
         .header(header)
         .column_spacing(1);
-    frame.render_widget(table, sections[1]);
+    frame.render_widget(table, area);
+}
+
+fn render_session_detail(
+    frame: &mut Frame<'_>,
+    session: &super::AgentSession,
+    detail: Option<&ListenSessionDetail>,
+    area: Rect,
+    scroll: u16,
+) {
+    let content = match detail {
+        Some(detail) => render_session_detail_text(session, detail),
+        None => empty_state(
+            "No structured detail artifact is available yet.",
+            "The worker will populate session detail as soon as it refreshes this session.",
+        ),
+    };
+    let detail = Paragraph::new(content)
+        .wrap(Wrap { trim: true })
+        .scroll((scroll, 0))
+        .block(panel(panel_title("Selected Session", false)));
+    frame.render_widget(detail, area);
+}
+
+fn render_session_detail_text(
+    session: &super::AgentSession,
+    detail: &ListenSessionDetail,
+) -> Text<'static> {
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(
+                format!("{} ", session.issue_identifier),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(session.stage_label(), phase_style(session.phase)),
+        ]),
+        Line::from(Span::styled(
+            session.issue_title.clone(),
+            Style::default().fg(Color::Gray),
+        )),
+        Line::from(""),
+        detail_line("Summary", &detail.summary),
+        detail_line("Turns", &detail.turns.unwrap_or(0).to_string()),
+        detail_line("Tokens", &detail.tokens.display_compact()),
+        detail_line("PR", &detail.pull_request.compact_label()),
+    ];
+
+    if let Some(number) = detail.pull_request.number {
+        let pr_reference = detail
+            .pull_request
+            .url
+            .clone()
+            .unwrap_or_else(|| format!("#{number}"));
+        lines.push(detail_line("PR URL", &pr_reference));
+    }
+    if let Some(branch) = detail.references.branch.as_deref() {
+        lines.push(detail_line("Branch", branch));
+    }
+    if let Some(workspace) = detail.references.workspace_path.as_deref() {
+        lines.push(detail_line("Workspace", workspace));
+    }
+    if let Some(backlog) = detail.references.backlog_path.as_deref() {
+        lines.push(detail_line("Backlog", backlog));
+    }
+    if let Some(brief) = detail.references.brief_path.as_deref() {
+        lines.push(detail_line("Brief", brief));
+    }
+    if let Some(workpad_comment_id) = detail.references.workpad_comment_id.as_deref() {
+        lines.push(detail_line("Workpad", workpad_comment_id));
+    }
+    if let Some(log_path) = detail.references.log_path.as_deref() {
+        lines.push(detail_line("Log", log_path));
+    }
+
+    if !detail.prompt_context.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(section_header("Prompt Context"));
+        for reference in &detail.prompt_context {
+            lines.push(detail_bullet(&format!(
+                "{}: {}",
+                reference.label, reference.value
+            )));
+        }
+    }
+
+    if !detail.milestones.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(section_header("Milestones"));
+        for milestone in detail.milestones.iter().rev().take(5).rev() {
+            let pr_suffix = match milestone.pull_request_number {
+                Some(number) => format!(" | {} #{number}", milestone.pull_request_status.label()),
+                None if milestone.pull_request_status != super::PullRequestStatus::Unpublished => {
+                    format!(" | {}", milestone.pull_request_status.label())
+                }
+                None => String::new(),
+            };
+            lines.push(detail_bullet(&format!(
+                "{} · {}{}",
+                milestone.phase.display_label(),
+                milestone.summary,
+                pr_suffix
+            )));
+        }
+    }
+
+    if !detail.log_excerpts.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(section_header("Recent Log Excerpts"));
+        for excerpt in &detail.log_excerpts {
+            lines.push(detail_bullet(&format!(
+                "L{} {}",
+                excerpt.line_number, excerpt.text
+            )));
+        }
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Esc closes detail. PgUp/PgDn scroll.",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    Text::from(lines)
 }
 
 fn render_footer(frame: &mut Frame<'_>, data: &ListenDashboardData, area: Rect) {
@@ -391,6 +661,37 @@ fn value_style(color: Color) -> Style {
     Style::default().fg(color)
 }
 
+fn clamp_index(index: usize, len: usize) -> usize {
+    if len == 0 {
+        0
+    } else {
+        index.min(len.saturating_sub(1))
+    }
+}
+
+fn detail_line(label: &str, value: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!("{label}: "), label_style()),
+        Span::styled(value.to_string(), Style::default().fg(Color::White)),
+    ])
+}
+
+fn detail_bullet(value: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled("- ", Style::default().fg(Color::DarkGray)),
+        Span::styled(value.to_string(), Style::default().fg(Color::White)),
+    ])
+}
+
+fn section_header(label: &str) -> Line<'static> {
+    Line::from(Span::styled(
+        label.to_string(),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    ))
+}
+
 fn session_view_badge(
     candidate: SessionListView,
     active_view: SessionListView,
@@ -444,7 +745,10 @@ fn snapshot(backend: &TestBackend) -> String {
 mod tests {
     use std::path::Path;
 
-    use super::{render_dashboard, render_dashboard_with_view};
+    use super::{
+        SessionBrowserState, render_dashboard, render_dashboard_with_state,
+        render_dashboard_with_view,
+    };
     use crate::listen::{
         DashboardRuntimeContext, ListenCycleData, SessionListView, SessionPhase,
         build_dashboard_data,
@@ -571,6 +875,7 @@ mod tests {
         assert!(snapshot.contains("Tokens"));
         assert!(snapshot.contains("in 17,995,071 | out 58,080 | total 18,053,151"));
         assert!(snapshot.contains("in 9,614,112 | out 8,120 | total 9,622,232"));
+        assert!(snapshot.contains("draft #321"));
     }
 
     #[test]
@@ -614,5 +919,68 @@ mod tests {
         let snapshot = render_dashboard(&data, 140, 36).expect("snapshot should render");
 
         assert!(snapshot.contains("←/→/h/l"));
+    }
+
+    #[test]
+    fn render_once_surfaces_selected_session_detail_panel() {
+        let cycle = demo_cycle();
+        let data = build_dashboard_data(
+            &cycle,
+            &DashboardRuntimeContext {
+                started_at_epoch_seconds: 1_773_568_249,
+                now_epoch_seconds: 1_773_575_600,
+                poll_interval_seconds: 7,
+                dashboard_label: "terminal dashboard (TUI)",
+                dashboard_refresh_seconds: 1,
+                linear_refresh_seconds: 15,
+                vim_mode: false,
+            },
+        );
+
+        let snapshot = render_dashboard_with_state(
+            &data,
+            200,
+            44,
+            SessionBrowserState {
+                detail_mode: true,
+                ..SessionBrowserState::default()
+            },
+        )
+        .expect("detail snapshot should render");
+
+        assert!(snapshot.contains("Selected Session"));
+        assert!(snapshot.contains("PR: draft #321"));
+        assert!(snapshot.contains("Prompt Context"));
+    }
+
+    #[test]
+    fn render_once_detail_scroll_reveals_log_excerpts() {
+        let cycle = demo_cycle();
+        let data = build_dashboard_data(
+            &cycle,
+            &DashboardRuntimeContext {
+                started_at_epoch_seconds: 1_773_568_249,
+                now_epoch_seconds: 1_773_575_600,
+                poll_interval_seconds: 7,
+                dashboard_label: "terminal dashboard (TUI)",
+                dashboard_refresh_seconds: 1,
+                linear_refresh_seconds: 15,
+                vim_mode: false,
+            },
+        );
+
+        let snapshot = render_dashboard_with_state(
+            &data,
+            200,
+            44,
+            SessionBrowserState {
+                detail_mode: true,
+                detail_scroll: 8,
+                ..SessionBrowserState::default()
+            },
+        )
+        .expect("detail snapshot should render");
+
+        assert!(snapshot.contains("Recent Log Excerpts"));
     }
 }

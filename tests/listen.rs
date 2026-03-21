@@ -721,6 +721,7 @@ fn listen_sessions_list_and_inspect_surface_resume_and_token_metadata() -> Resul
         .assert()
         .success()
         .stdout(predicate::str::contains("Latest session:"))
+        .stdout(predicate::str::contains("Detail file:"))
         .stdout(predicate::str::contains("  - Tokens: in 210 | out 34 | total 244"))
         .stdout(predicate::str::contains("Resume provider: codex"))
         .stdout(predicate::str::contains(
@@ -816,6 +817,7 @@ fn listen_render_once_demo_outputs_dashboard_snapshot() -> Result<(), Box<dyn Er
         .stdout(predicate::str::contains("localhost").not())
         .stdout(predicate::str::contains("SESSION"))
         .stdout(predicate::str::contains("PROGRESS"))
+        .stdout(predicate::str::contains("draft #321"))
         .stdout(predicate::str::contains("MET-13"));
 
     Ok(())

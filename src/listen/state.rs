@@ -90,6 +90,47 @@ impl TokenUsage {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PullRequestStatus {
+    #[default]
+    Unpublished,
+    Draft,
+    Ready,
+}
+
+impl PullRequestStatus {
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Unpublished => "none",
+            Self::Draft => "draft",
+            Self::Ready => "ready",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullRequestSummary {
+    #[serde(default)]
+    pub number: Option<u64>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub status: PullRequestStatus,
+}
+
+impl PullRequestSummary {
+    pub(super) fn compact_label(&self) -> String {
+        match (self.status, self.number) {
+            (PullRequestStatus::Unpublished, _) => "none".to_string(),
+            (PullRequestStatus::Draft, Some(number)) => format!("draft #{number}"),
+            (PullRequestStatus::Ready, Some(number)) => format!("ready #{number}"),
+            (PullRequestStatus::Draft, None) => "draft".to_string(),
+            (PullRequestStatus::Ready, None) => "ready".to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentSession {
     #[serde(default)]
@@ -112,6 +153,8 @@ pub struct AgentSession {
     pub workspace_path: Option<String>,
     #[serde(default)]
     pub branch: Option<String>,
+    #[serde(default)]
+    pub pull_request: PullRequestSummary,
     #[serde(default)]
     pub workpad_comment_id: Option<String>,
     pub updated_at_epoch_seconds: u64,
@@ -171,6 +214,10 @@ impl AgentSession {
             .as_ref()
             .map(|resume| resume.id.clone())
             .unwrap_or_else(|| "-".to_string())
+    }
+
+    pub(super) fn pull_request_label(&self) -> String {
+        self.pull_request.compact_label()
     }
 }
 
@@ -319,7 +366,10 @@ impl ListenState {
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentSession, LatestResumeHandle, ResumeProvider, SessionPhase, TokenUsage};
+    use super::{
+        AgentSession, LatestResumeHandle, PullRequestStatus, PullRequestSummary, ResumeProvider,
+        SessionPhase, TokenUsage,
+    };
 
     fn session() -> AgentSession {
         AgentSession {
@@ -337,6 +387,7 @@ mod tests {
             backlog_path: None,
             workspace_path: None,
             branch: None,
+            pull_request: PullRequestSummary::default(),
             workpad_comment_id: None,
             updated_at_epoch_seconds: 1,
             pid: None,
@@ -364,5 +415,21 @@ mod tests {
             session.latest_resume_id_label(),
             "019cedb4-2293-7651-b0b4-dfac4af6a640"
         );
+    }
+
+    #[test]
+    fn session_pull_request_label_stays_compact() {
+        let mut session = session();
+        assert_eq!(session.pull_request_label(), "none");
+
+        session.pull_request = PullRequestSummary {
+            number: Some(321),
+            url: Some("https://github.com/metastack-labs/metastack-cli/pull/321".to_string()),
+            status: PullRequestStatus::Draft,
+        };
+        assert_eq!(session.pull_request_label(), "draft #321");
+
+        session.pull_request.status = PullRequestStatus::Ready;
+        assert_eq!(session.pull_request_label(), "ready #321");
     }
 }

@@ -965,7 +965,10 @@ The live terminal dashboard refreshes locally every second so session-state chan
 
 When built-in `codex` or `claude` workers emit structured usage telemetry, `meta agents listen` accumulates session-level input and output tokens across repeated turns and renders both per-session and runtime rollups as `in`, `out`, and `total`. When exact counts are unavailable, the dashboard and textual summaries continue to show `n/a`.
 When install-scoped `vim_mode` is enabled, the listen dashboard also accepts `h` / `l` as aliases
-for the existing left/right view-switching controls.
+for the existing left/right view-switching controls. The session table now keeps an active row
+selection, renders a compact `PR` badge (`none`, `draft #N`, `ready #N`), and opens a structured
+detail pane with `Enter`. Use `Up` / `Down` or `j` / `k` to move between sessions, `Esc` to close
+detail mode, and `PgUp` / `PgDn` to scroll the focused detail pane.
 Examples:
 
 ```bash
@@ -1008,8 +1011,10 @@ Outputs:
 When `$METASTACK_CONFIG` points to a custom config file, the listener store lives under that
 config file's parent `data/` directory. Otherwise the default install-scoped root is derived from
 the existing config path rules, for example `~/.config/metastack/data/`. Each project is stored in
-`listen/projects/<PROJECT_KEY>/` with `project.json`, `session.json`, an active-listener lock, and
-per-issue logs.
+`listen/projects/<PROJECT_KEY>/` with `project.json`, `session.json`, an active-listener lock,
+`session-details/<ISSUE>.json`, and per-issue logs. `session.json` stays compact and list-oriented;
+the per-session detail files hold session milestones, workspace/backlog/workpad references,
+prompt-context references, PR publication state, and short log excerpts for the drill-down pane.
 
 Stored-session management commands:
 
