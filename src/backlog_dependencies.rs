@@ -136,6 +136,10 @@ pub async fn run_backlog_dependencies(args: &BacklogDependenciesArgs) -> Result<
             }
             return Ok(());
         }
+        if args.yes && !args.json {
+            println!("{preview}");
+            println!("Applying relationship changes because `--yes` was provided.");
+        }
         if !args.yes && (!io::stdin().is_terminal() || !io::stdout().is_terminal()) {
             bail!("`meta backlog dependencies --apply` requires confirmation in a TTY or `--yes`");
         }

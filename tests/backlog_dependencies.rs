@@ -487,3 +487,200 @@ fn backlog_dependencies_apply_creates_blocker_relation_in_linear() -> Result<(),
 
     Ok(())
 }
+
+#[test]
+fn backlog_dependencies_apply_yes_prints_preview_before_mutating() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    write_onboarded_config(&config_path)?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+    write_backlog_item(
+        &repo_root,
+        "met-40",
+        "MET-40",
+        "Dependency: core",
+        "Ready first.",
+    )?;
+    write_backlog_item(
+        &repo_root,
+        "met-41",
+        "MET-41",
+        "Dependency: command",
+        "Blocked by MET-40",
+    )?;
+
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    let issue_40 = issue_node(
+        "issue-40",
+        "MET-40",
+        "Dependency: core",
+        "Ready first.",
+        "state-1",
+        "Todo",
+    );
+    let issue_41 = issue_node(
+        "issue-41",
+        "MET-41",
+        "Dependency: command",
+        "Blocked by MET-40",
+        "state-1",
+        "Todo",
+    );
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issues")
+            .body_includes("MET");
+        then.status(200).json_body(json!({
+            "data": {
+                "issues": {
+                    "nodes": [issue_41.clone(), issue_40.clone()],
+                    "pageInfo": {
+                        "hasNextPage": false,
+                        "endCursor": null
+                    }
+                }
+            }
+        }));
+    });
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query IssueDependencies")
+            .body_includes("\"id\":\"issue-40\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "issue": {
+                    "id": "issue-40",
+                    "identifier": "MET-40",
+                    "title": "Dependency: core",
+                    "description": "Ready first.",
+                    "url": "https://linear.app/issues/MET-40",
+                    "priority": 2,
+                    "estimate": null,
+                    "updatedAt": "2026-03-21T10:00:00Z",
+                    "team": { "id": "team-1", "key": "MET", "name": "Metastack" },
+                    "project": { "id": "project-1", "name": "MetaStack CLI" },
+                    "assignee": null,
+                    "labels": { "nodes": [] },
+                    "comments": { "nodes": [] },
+                    "state": { "id": "state-1", "name": "Todo", "type": "unstarted" },
+                    "attachments": { "nodes": [] },
+                    "parent": null,
+                    "children": { "nodes": [] },
+                    "relations": { "nodes": [] },
+                    "inverseRelations": { "nodes": [] }
+                }
+            }
+        }));
+    });
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query IssueDependencies")
+            .body_includes("\"id\":\"issue-41\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "issue": {
+                    "id": "issue-41",
+                    "identifier": "MET-41",
+                    "title": "Dependency: command",
+                    "description": "Blocked by MET-40",
+                    "url": "https://linear.app/issues/MET-41",
+                    "priority": 2,
+                    "estimate": null,
+                    "updatedAt": "2026-03-21T10:00:00Z",
+                    "team": { "id": "team-1", "key": "MET", "name": "Metastack" },
+                    "project": { "id": "project-1", "name": "MetaStack CLI" },
+                    "assignee": null,
+                    "labels": { "nodes": [] },
+                    "comments": { "nodes": [] },
+                    "state": { "id": "state-1", "name": "Todo", "type": "unstarted" },
+                    "attachments": { "nodes": [] },
+                    "parent": null,
+                    "children": { "nodes": [] },
+                    "relations": { "nodes": [] },
+                    "inverseRelations": { "nodes": [] }
+                }
+            }
+        }));
+    });
+
+    let relation_create = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation CreateIssueRelation")
+            .body_includes("\"type\":\"blocks\"")
+            .body_includes("\"issueId\":\"issue-40\"")
+            .body_includes("\"relatedIssueId\":\"issue-41\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "issueRelationCreate": {
+                    "success": true,
+                    "issueRelation": {
+                        "id": "relation-1",
+                        "type": "blocks",
+                        "issue": {
+                            "id": "issue-40",
+                            "identifier": "MET-40",
+                            "title": "Dependency: core",
+                            "url": "https://linear.app/issues/MET-40",
+                            "description": "Ready first."
+                        },
+                        "relatedIssue": {
+                            "id": "issue-41",
+                            "identifier": "MET-41",
+                            "title": "Dependency: command",
+                            "url": "https://linear.app/issues/MET-41",
+                            "description": "Blocked by MET-40"
+                        }
+                    }
+                }
+            }
+        }));
+    });
+
+    cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "backlog",
+            "dependencies",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--api-key",
+            "test-token",
+            "--api-url",
+            api_url.as_str(),
+            "--fetch",
+            "--apply",
+            "--yes",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "meta backlog dependencies apply preview",
+        ))
+        .stdout(predicate::str::contains(
+            "Applying relationship changes because `--yes` was provided.",
+        ))
+        .stdout(predicate::str::contains("Applied relationship changes:"));
+
+    relation_create.assert();
+
+    Ok(())
+}
