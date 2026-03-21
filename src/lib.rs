@@ -21,6 +21,7 @@ mod output;
 mod plan;
 mod progress;
 mod repo_target;
+mod review;
 mod scaffold;
 mod scan;
 mod scan_dashboard;
@@ -71,6 +72,7 @@ use crate::onboarding::{
 };
 use crate::output::{render_json_clap_error, render_json_error};
 use crate::plan::run_plan;
+use crate::review::run_review;
 use crate::scaffold::run_scaffold;
 use crate::scan::run_scan;
 use crate::setup::run_setup;
@@ -242,6 +244,9 @@ async fn dispatch(cli: Cli) -> Result<()> {
                     run_listen(&args.run).await?;
                 }
             },
+            AgentsCommands::Review(args) => {
+                run_review(&args).await?;
+            }
             AgentsCommands::Workflows(args) => {
                 println!("{}", run_workflows(&args).await?);
             }

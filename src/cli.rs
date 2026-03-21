@@ -56,6 +56,11 @@ acceptance criteria, priority/estimate, and parent-child structure opportunities
 const AGENTS_HELP_EXAMPLES: &str = "\
 Examples:
   meta agents listen --team MET --project \"MetaStack CLI\"
+  meta agents review 42 --root .
+  meta agents review 42 --root . --dry-run
+  meta agents review --root .
+  meta agents review --root . --check
+  meta agents review --root . --once
   meta agents workflows list --root .
   meta agents workflows run ticket-implementation --root .
   meta agents workflows run ticket-implementation --root . --no-interactive --param issue=MET-93
@@ -431,6 +436,8 @@ pub struct UpgradeArgs {
 pub enum AgentsCommands {
     /// Listen for eligible Linear issues and supervise them through the interactive session browser.
     Listen(ListenArgs),
+    /// Review open GitHub PRs: one-shot audit with remediation, or listener/dashboard mode.
+    Review(ReviewArgs),
     /// List, explain, and run reusable workflow playbooks.
     #[command(alias = "workflow")]
     Workflows(WorkflowsArgs),
@@ -1440,6 +1447,67 @@ pub struct ListenWorkerArgs {
     pub reasoning: Option<String>,
 }
 
+#[derive(Debug, Clone, Args)]
+pub struct ReviewArgs {
+    /// GitHub PR number for one-shot review. Omit for listener/dashboard mode.
+    #[arg(value_name = "PR_NUMBER")]
+    pub pr_number: Option<u64>,
+    #[command(flatten)]
+    pub run: ReviewRunArgs,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ReviewRunArgs {
+    /// Repository root containing the `.metastack` workspace.
+    #[arg(long, value_name = "PATH", default_value = ".")]
+    pub root: PathBuf,
+    /// Show planned execution and resolved provider/model/reasoning without mutating GitHub or Linear.
+    #[arg(long, conflicts_with_all = ["once", "render_once", "check"])]
+    pub dry_run: bool,
+    /// Run review prerequisite checks and exit without reviewing or polling.
+    #[arg(long, conflicts_with_all = ["once", "render_once"])]
+    pub check: bool,
+    /// Execute a single listener poll cycle and print a textual summary.
+    #[arg(long, conflicts_with = "render_once")]
+    pub once: bool,
+    /// Emit the single poll-cycle result as JSON. Requires `--once`.
+    #[arg(long, conflicts_with = "render_once")]
+    pub json: bool,
+    /// Execute a single cycle and print a deterministic ratatui snapshot.
+    #[arg(long)]
+    pub render_once: bool,
+    /// Apply review-dashboard actions before a render-once snapshot.
+    #[arg(long, hide = true, value_enum, value_delimiter = ',')]
+    pub events: Vec<ReviewDashboardEventArg>,
+    /// Snapshot width when --render-once is set.
+    #[arg(long, default_value_t = 120)]
+    pub width: u16,
+    /// Snapshot height when --render-once is set.
+    #[arg(long, default_value_t = 32)]
+    pub height: u16,
+    /// Override the configured default agent/provider for review.
+    #[arg(long)]
+    pub agent: Option<String>,
+    /// Override the configured default model for review.
+    #[arg(long)]
+    pub model: Option<String>,
+    /// Override the resolved built-in reasoning option for review.
+    #[arg(long)]
+    pub reasoning: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ReviewDashboardEventArg {
+    Up,
+    Down,
+    Tab,
+    Enter,
+    Back,
+    Esc,
+    PageUp,
+    PageDown,
+}
+
 #[derive(Debug, Clone)]
 pub struct RunAgentArgs {
     pub root: Option<PathBuf>,
@@ -1899,6 +1967,7 @@ impl Cli {
             },
             Command::Agents(args) => match &args.command {
                 AgentsCommands::Listen(args) if args.run.json => Some("agents.listen"),
+                AgentsCommands::Review(args) if args.run.json => Some("agents.review"),
                 _ => None,
             },
             Command::Linear(args) => match &args.command {
@@ -2014,6 +2083,7 @@ fn infer_agents_machine_output(tokens: &[String]) -> Option<&'static str> {
     let (command, rest) = tokens.split_first()?;
     match command.as_str() {
         "listen" if has_flag(rest, "--json") => Some("agents.listen"),
+        "review" if has_flag(rest, "--json") => Some("agents.review"),
         _ => None,
     }
 }

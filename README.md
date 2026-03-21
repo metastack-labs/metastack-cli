@@ -31,6 +31,7 @@ Most planning tools split work across issue trackers, docs, scripts, and ad hoc 
 - `meta backlog spec`, `meta backlog plan`, `meta backlog improve`, `meta backlog tech`, `meta linear issues refine`, and `meta agents workflows` generate structured backlog work.
 - `meta merge` batches open GitHub PRs into one isolated aggregate merge run and publish step.
 - `meta linear ...` and `meta backlog sync` keep Linear and local files aligned.
+- `meta agents review` audits GitHub PRs with one-shot review or a listener/dashboard for `metastack`-labeled PRs, with optional remediation PR creation.
 - `meta agents listen` runs unattended ticket execution in dedicated workspace clones instead of your source checkout.
 - `meta workspace` inventories and cleans those sibling listener workspace clones after the listener finishes.
 
@@ -1005,6 +1006,38 @@ Required auth:
 - `LINEAR_API_KEY`
 - optional: `LINEAR_API_URL`
 - optional: `LINEAR_TEAM`
+
+### `agents review`
+
+Review open GitHub PRs with a holistic audit pipeline that gathers PR metadata, review state, changed files, diff scope, linked Linear ticket details, and repository context. Supports two modes:
+
+- **One-shot PR review**: `meta agents review <PR_NUMBER>` audits a single PR, produces structured output separating required fixes from optional recommendations, and optionally creates a remediation PR when required fixes are found.
+- **Listener/dashboard mode**: `meta agents review` (no PR number) discovers open PRs with the `metastack` label via `gh`, renders a live terminal dashboard, and reviews eligible PRs as they appear.
+
+```bash
+# One-shot review
+meta agents review 42 --root .
+meta agents review 42 --root . --dry-run
+meta agents review 42 --root . --agent claude --model opus
+
+# Prerequisite check
+meta agents review --check --root .
+
+# Listener mode
+meta agents review --root .
+meta agents review --root . --once
+meta agents review --root . --once --json
+meta agents review --root . --render-once
+```
+
+The review instructions are stored as a source-controlled artifact at `src/artifacts/REVIEW.md` and loaded at compile time via `include_str!`.
+
+When required fixes are found, the command creates a workspace-safe follow-up branch from the original PR context, applies agent-authored fixes, commits and pushes them, opens a remediation PR, and posts a Linear comment describing why the remediation PR was opened. When no remediation is required, the command exits cleanly without creating a branch, PR, or Linear comment.
+
+Prerequisites:
+- `gh` CLI installed and authenticated (`gh auth login`)
+- Repository with a configured `.metastack/meta.json`
+- For listener mode: open PRs must carry the `metastack` label
 
 ### `agents listen`
 
