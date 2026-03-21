@@ -2216,14 +2216,9 @@ pub fn run_listen_session_inspect(args: &ListenSessionInspectArgs) -> Result<Str
         }
         lines.push(format!("  - Detail file: {}", detail_path.display()));
         if let Some(detail) = detail {
-            lines.push(format!(
-                "  - Detail milestones: {}",
-                detail.milestones.len()
-            ));
-            lines.push(format!(
-                "  - Detail excerpts: {}",
-                detail.log_excerpts.len()
-            ));
+            append_session_inspect_detail_lines(&mut lines, &detail);
+        } else {
+            lines.push("  - Detail status: unavailable".to_string());
         }
     }
 
@@ -2243,6 +2238,82 @@ pub fn run_listen_session_inspect(args: &ListenSessionInspectArgs) -> Result<Str
     }
 
     Ok(lines.join("\n"))
+}
+
+fn append_session_inspect_detail_lines(lines: &mut Vec<String>, detail: &ListenSessionDetail) {
+    lines.push("  - Detail status: available".to_string());
+    lines.push(format!(
+        "  - Detail milestones: {}",
+        detail.milestones.len()
+    ));
+    lines.push(format!(
+        "  - Detail excerpts: {}",
+        detail.log_excerpts.len()
+    ));
+
+    if let Some(url) = detail.pull_request.url.as_deref() {
+        lines.push(format!("  - Detail PR URL: {url}"));
+    }
+    if let Some(branch) = detail.references.branch.as_deref() {
+        lines.push(format!("  - Detail branch: {branch}"));
+    }
+    if let Some(workspace_path) = detail.references.workspace_path.as_deref() {
+        lines.push(format!("  - Detail workspace: {workspace_path}"));
+    }
+    if let Some(backlog_path) = detail.references.backlog_path.as_deref() {
+        lines.push(format!("  - Detail backlog: {backlog_path}"));
+    }
+    if let Some(brief_path) = detail.references.brief_path.as_deref() {
+        lines.push(format!("  - Detail brief: {brief_path}"));
+    }
+    if let Some(workpad_comment_id) = detail.references.workpad_comment_id.as_deref() {
+        lines.push(format!("  - Detail workpad: {workpad_comment_id}"));
+    }
+    if let Some(log_path) = detail.references.log_path.as_deref() {
+        lines.push(format!("  - Detail log: {log_path}"));
+    }
+
+    if !detail.prompt_context.is_empty() {
+        lines.push("  - Prompt context:".to_string());
+        for reference in detail.prompt_context.iter().take(4) {
+            lines.push(format!("    - {}: {}", reference.label, reference.value));
+        }
+    }
+
+    if !detail.milestones.is_empty() {
+        lines.push("  - Recent milestones:".to_string());
+        for milestone in detail.milestones.iter().rev().take(3).rev() {
+            let turns = milestone
+                .turns
+                .map(|turns| format!(" | turns {turns}"))
+                .unwrap_or_default();
+            let pull_request = match milestone.pull_request_number {
+                Some(number) => format!(" | {} #{number}", milestone.pull_request_status.label()),
+                None if milestone.pull_request_status != PullRequestStatus::Unpublished => {
+                    format!(" | {}", milestone.pull_request_status.label())
+                }
+                None => String::new(),
+            };
+            lines.push(format!(
+                "    - {}: {}{}{}",
+                milestone.phase.display_label(),
+                milestone.summary,
+                turns,
+                pull_request
+            ));
+        }
+    }
+
+    if !detail.log_excerpts.is_empty() {
+        lines.push("  - Recent log excerpts:".to_string());
+        for excerpt in detail.log_excerpts.iter().take(3) {
+            lines.push(format!(
+                "    - L{} {}",
+                excerpt.line_number,
+                truncate_summary(&excerpt.text, 120)
+            ));
+        }
+    }
 }
 
 pub fn run_listen_session_clear(args: &ListenSessionClearArgs) -> Result<String> {

@@ -1030,6 +1030,9 @@ meta listen sessions resume --project-key <PROJECT_KEY> --once
 ```
 
 `meta listen sessions ...` manages the install-scoped listener store only. It does not inventory or delete the sibling workspace clones themselves.
+`meta listen sessions inspect` now expands the latest stored session with structured detail-artifact
+fields when available, including PR URL/state, workspace/backlog/workpad references, recent
+milestones, prompt-context references, and compact log excerpts.
 
 ### `workspace`
 

@@ -113,6 +113,17 @@ fn write_listen_store_session(
 }
 
 #[cfg(unix)]
+fn listen_detail_path(
+    config_path: &Path,
+    repo_root: &Path,
+    issue_identifier: &str,
+) -> Result<PathBuf, Box<dyn Error>> {
+    Ok(listen_project_store_dir(config_path, repo_root, None)?
+        .join("session-details")
+        .join(format!("{issue_identifier}.json")))
+}
+
+#[cfg(unix)]
 fn listen_session_json(
     issue_identifier: &str,
     phase: &str,
@@ -733,6 +744,167 @@ fn listen_sessions_list_and_inspect_surface_resume_and_token_metadata() -> Resul
         .stdout(predicate::str::contains(
             "  - ENG-10182 [Blocked] Provider did not emit exact counts | tokens n/a",
         ));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_sessions_inspect_surfaces_structured_detail_fields() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    write_onboarded_config(&config_path, "")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+    init_repo_with_origin(&repo_root)?;
+
+    write_listen_store_session(
+        &config_path,
+        &repo_root,
+        vec![json!({
+            "issue_id": "ENG-10181-id",
+            "issue_identifier": "ENG-10181",
+            "issue_title": "ENG-10181 title",
+            "project_name": "MetaStack CLI",
+            "team_key": "MET",
+            "issue_url": "https://linear.app/issues/ENG-10181",
+            "phase": "running",
+            "summary": "Token telemetry is flowing",
+            "brief_path": ".metastack/agents/briefs/ENG-10181.md",
+            "backlog_path": ".metastack/backlog/ENG-10181",
+            "workspace_path": "/tmp/ENG-10181",
+            "branch": "met-27-detail",
+            "pull_request": {
+                "number": 321,
+                "url": "https://github.com/metastack-labs/metastack-cli/pull/321",
+                "status": "draft"
+            },
+            "workpad_comment_id": "comment-10181",
+            "updated_at_epoch_seconds": 1_773_575_100u64,
+            "pid": null,
+            "session_id": "session-10181",
+            "turns": 4,
+            "tokens": {
+                "input": 210,
+                "output": 34
+            },
+            "log_path": "logs/ENG-10181.log"
+        })],
+    )?;
+
+    let detail_path = listen_detail_path(&config_path, &repo_root, "ENG-10181")?;
+    fs::create_dir_all(
+        detail_path
+            .parent()
+            .expect("detail path should have a parent"),
+    )?;
+    fs::write(
+        &detail_path,
+        serde_json::to_vec_pretty(&json!({
+            "version": 1,
+            "issue_identifier": "ENG-10181",
+            "issue_title": "ENG-10181 title",
+            "updated_at_epoch_seconds": 1_773_575_120u64,
+            "session_updated_at_epoch_seconds": 1_773_575_100u64,
+            "phase": "running",
+            "summary": "Token telemetry is flowing",
+            "turns": 4,
+            "tokens": {
+                "input": 210,
+                "output": 34
+            },
+            "pull_request": {
+                "number": 321,
+                "url": "https://github.com/metastack-labs/metastack-cli/pull/321",
+                "status": "draft"
+            },
+            "references": {
+                "workspace_path": "/tmp/ENG-10181",
+                "backlog_path": ".metastack/backlog/ENG-10181",
+                "brief_path": ".metastack/agents/briefs/ENG-10181.md",
+                "workpad_comment_id": "comment-10181",
+                "log_path": "logs/ENG-10181.log",
+                "branch": "met-27-detail"
+            },
+            "prompt_context": [
+                {
+                    "label": "Brief",
+                    "value": ".metastack/agents/briefs/ENG-10181.md"
+                },
+                {
+                    "label": "Backlog index",
+                    "value": ".metastack/backlog/ENG-10181/index.md"
+                }
+            ],
+            "milestones": [
+                {
+                    "at_epoch_seconds": 1_773_575_000u64,
+                    "phase": "claimed",
+                    "summary": "Claimed ticket",
+                    "turns": 1,
+                    "pull_request_status": "unpublished",
+                    "pull_request_number": null
+                },
+                {
+                    "at_epoch_seconds": 1_773_575_050u64,
+                    "phase": "running",
+                    "summary": "Opened draft PR",
+                    "turns": 3,
+                    "pull_request_status": "draft",
+                    "pull_request_number": 321
+                }
+            ],
+            "log_excerpts": [
+                {
+                    "line_number": 19,
+                    "text": "worker boot complete"
+                },
+                {
+                    "line_number": 27,
+                    "text": "published draft PR"
+                }
+            ]
+        }))?,
+    )?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "inspect",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Detail status: available"))
+        .stdout(predicate::str::contains(
+            "Detail PR URL: https://github.com/metastack-labs/metastack-cli/pull/321",
+        ))
+        .stdout(predicate::str::contains("Detail branch: met-27-detail"))
+        .stdout(predicate::str::contains("Detail workpad: comment-10181"))
+        .stdout(predicate::str::contains("Prompt context:"))
+        .stdout(predicate::str::contains(
+            "Brief: .metastack/agents/briefs/ENG-10181.md",
+        ))
+        .stdout(predicate::str::contains("Recent milestones:"))
+        .stdout(predicate::str::contains(
+            "Running: Opened draft PR | turns 3 | draft #321",
+        ))
+        .stdout(predicate::str::contains("Recent log excerpts:"))
+        .stdout(predicate::str::contains("L27 published draft PR"));
 
     Ok(())
 }
