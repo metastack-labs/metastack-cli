@@ -40,6 +40,8 @@ pub const AGENT_ROUTE_AGENTS_LISTEN: &str = "agents.listen";
 pub const AGENT_ROUTE_AGENTS_WORKFLOWS_RUN: &str = "agents.workflows.run";
 pub const AGENT_ROUTE_RUNTIME_CRON_PROMPT: &str = "runtime.cron.prompt";
 pub const AGENT_ROUTE_MERGE: &str = "merge.run";
+#[allow(dead_code)]
+pub const AGENT_ROUTE_AGENTS_ORCHESTRATE: &str = "agents.orchestrate";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {
