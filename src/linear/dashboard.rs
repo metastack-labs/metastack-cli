@@ -2,7 +2,9 @@ use std::io::{self, IsTerminal};
 use std::time::Duration;
 
 use anyhow::{Result, bail};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -10,7 +12,7 @@ use crossterm::terminal::{
 use ratatui::backend::{CrosstermBackend, TestBackend};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, ListItem, ListState, Wrap};
 use ratatui::{Frame, Terminal};
 
 use super::browser::{
@@ -19,6 +21,7 @@ use super::browser::{
 };
 use super::{DashboardData, IssueSummary};
 use crate::tui::fields::InputFieldState;
+use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph, wrapped_rows};
 use crate::tui::theme::{Tone, badge, empty_state, key_hints, list, panel_title, paragraph};
 
 #[derive(Debug, Clone)]
@@ -34,6 +37,10 @@ pub struct DashboardOptions {
 pub enum DashboardAction {
     Up,
     Down,
+    PageUp,
+    PageDown,
+    Home,
+    End,
     Tab,
     Enter,
 }
@@ -43,6 +50,7 @@ enum Focus {
     Status,
     Estimate,
     Issues,
+    Preview,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,6 +79,7 @@ struct DashboardApp {
     issue_index: usize,
     active_status: Option<String>,
     active_estimate: EstimateFilter,
+    preview_scroll: ScrollState,
 }
 
 pub fn run_dashboard(data: DashboardData, options: DashboardOptions) -> Result<Option<String>> {
@@ -86,7 +95,7 @@ pub fn run_dashboard(data: DashboardData, options: DashboardOptions) -> Result<O
 
     let mut stdout = io::stdout();
     enable_raw_mode()?;
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let _cleanup = TerminalCleanup;
 
     let backend = CrosstermBackend::new(stdout);
@@ -96,19 +105,57 @@ pub fn run_dashboard(data: DashboardData, options: DashboardOptions) -> Result<O
     loop {
         terminal.draw(|frame| render_dashboard(frame, &app))?;
 
-        if event::poll(Duration::from_millis(250))?
-            && let Event::Key(key) = event::read()?
-            && key.kind == KeyEventKind::Press
-        {
-            match key.code {
-                KeyCode::Char('q') => break,
-                KeyCode::Up => app.apply(DashboardAction::Up),
-                KeyCode::Down => app.apply(DashboardAction::Down),
-                KeyCode::Tab => app.apply(DashboardAction::Tab),
-                KeyCode::Enter => app.apply(DashboardAction::Enter),
-                _ => {
-                    let _ = app.handle_query_key(key);
+        if event::poll(Duration::from_millis(250))? {
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
+                    KeyCode::Char('q') => break,
+                    KeyCode::Up => app.apply_in_viewport(
+                        DashboardAction::Up,
+                        preview_viewport(terminal.size()?.into()),
+                    ),
+                    KeyCode::Down => app.apply_in_viewport(
+                        DashboardAction::Down,
+                        preview_viewport(terminal.size()?.into()),
+                    ),
+                    KeyCode::PageUp => app.apply_in_viewport(
+                        DashboardAction::PageUp,
+                        preview_viewport(terminal.size()?.into()),
+                    ),
+                    KeyCode::PageDown => app.apply_in_viewport(
+                        DashboardAction::PageDown,
+                        preview_viewport(terminal.size()?.into()),
+                    ),
+                    KeyCode::Home => app.apply_in_viewport(
+                        DashboardAction::Home,
+                        preview_viewport(terminal.size()?.into()),
+                    ),
+                    KeyCode::End => app.apply_in_viewport(
+                        DashboardAction::End,
+                        preview_viewport(terminal.size()?.into()),
+                    ),
+                    KeyCode::Tab => app.apply_in_viewport(
+                        DashboardAction::Tab,
+                        preview_viewport(terminal.size()?.into()),
+                    ),
+                    KeyCode::Enter => app.apply_in_viewport(
+                        DashboardAction::Enter,
+                        preview_viewport(terminal.size()?.into()),
+                    ),
+                    _ => {
+                        let _ = app.handle_query_key(key);
+                    }
+                },
+                Event::Mouse(mouse)
+                    if app.focus == Focus::Preview
+                        && matches!(
+                            mouse.kind,
+                            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                        ) =>
+                {
+                    let viewport = preview_viewport(terminal.size()?.into());
+                    let _ = app.handle_preview_mouse(mouse, viewport);
                 }
+                _ => {}
             }
         }
     }
@@ -121,7 +168,10 @@ fn render_once(data: DashboardData, options: DashboardOptions) -> Result<String>
     let mut terminal = Terminal::new(backend)?;
     let mut app = DashboardApp::new(data, options.initial_state_filter);
     for action in options.actions {
-        app.apply(action);
+        app.apply_in_viewport(
+            action,
+            preview_viewport(Rect::new(0, 0, options.width, options.height)),
+        );
     }
 
     terminal.draw(|frame| render_dashboard(frame, &app))?;
@@ -133,7 +183,7 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &DashboardApp) {
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(if narrow { 5 } else { 4 }),
+            Constraint::Length(5),
             Constraint::Length(3),
             Constraint::Min(0),
         ])
@@ -175,6 +225,8 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &DashboardApp) {
                 ("Type", "search"),
                 ("Tab", "focus"),
                 ("Up/Down", "move"),
+                ("PgUp/PgDn", "scroll preview"),
+                ("Wheel", "scroll preview"),
                 ("Enter", "apply"),
                 ("q", "exit"),
             ]),
@@ -195,9 +247,7 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &DashboardApp) {
             "Issue Search"
         });
     let query_inner = query_block.inner(outer[1]);
-    let query = Paragraph::new(rendered_query.text.clone())
-        .block(query_block)
-        .wrap(Wrap { trim: false });
+    let query = rendered_query.paragraph(query_block);
     frame.render_widget(query, outer[1]);
     rendered_query.set_cursor(frame, query_inner);
 
@@ -254,9 +304,10 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &DashboardApp) {
     let issue_list = list(issue_items, issue_title);
     frame.render_stateful_widget(issue_list, body[1], &mut issue_state);
 
-    let preview = paragraph(
+    let preview = scrollable_paragraph(
         app.preview_text(),
-        panel_title("Description Preview", false),
+        panel_title("Description Preview", app.focus == Focus::Preview),
+        &app.preview_scroll,
     )
     .wrap(Wrap { trim: false });
     frame.render_widget(preview, body[2]);
@@ -317,6 +368,7 @@ impl DashboardApp {
             issue_index: 0,
             active_status,
             active_estimate: EstimateFilter::All,
+            preview_scroll: ScrollState::default(),
         };
 
         app.status_index = app.selected_status_index();
@@ -325,15 +377,49 @@ impl DashboardApp {
         app
     }
 
+    #[cfg(test)]
     fn apply(&mut self, action: DashboardAction) {
+        self.apply_in_viewport(action, preview_viewport(Rect::new(0, 0, 120, 32)));
+    }
+
+    fn apply_in_viewport(&mut self, action: DashboardAction, preview_viewport: Rect) {
         match action {
-            DashboardAction::Up => self.move_selection(-1),
-            DashboardAction::Down => self.move_selection(1),
+            DashboardAction::Up => {
+                if self.focus == Focus::Preview {
+                    self.scroll_preview_line(-1, preview_viewport);
+                } else {
+                    self.move_selection(-1);
+                }
+            }
+            DashboardAction::Down => {
+                if self.focus == Focus::Preview {
+                    self.scroll_preview_line(1, preview_viewport);
+                } else {
+                    self.move_selection(1);
+                }
+            }
+            DashboardAction::PageUp => self.scroll_preview_page(-1, preview_viewport),
+            DashboardAction::PageDown => self.scroll_preview_page(1, preview_viewport),
+            DashboardAction::Home => {
+                if self.focus == Focus::Preview {
+                    self.preview_scroll.reset();
+                }
+            }
+            DashboardAction::End => {
+                if self.focus == Focus::Preview {
+                    let _ = self.preview_scroll.apply_key_code_in_viewport(
+                        KeyCode::End,
+                        preview_viewport,
+                        self.preview_content_rows(preview_viewport.width),
+                    );
+                }
+            }
             DashboardAction::Tab => {
                 self.focus = match self.focus {
                     Focus::Status => Focus::Estimate,
                     Focus::Estimate => Focus::Issues,
-                    Focus::Issues => Focus::Status,
+                    Focus::Issues => Focus::Preview,
+                    Focus::Preview => Focus::Status,
                 };
             }
             DashboardAction::Enter => self.apply_focus_selection(),
@@ -349,7 +435,9 @@ impl DashboardApp {
             Focus::Issues => {
                 let len = self.visible_issue_results().len();
                 shift_index(&mut self.issue_index, len, delta);
+                self.preview_scroll.reset();
             }
+            Focus::Preview => {}
         }
     }
 
@@ -359,6 +447,7 @@ impl DashboardApp {
         }
         if self.query.handle_key(key) {
             self.issue_index = 0;
+            self.preview_scroll.reset();
             return true;
         }
         false
@@ -370,15 +459,17 @@ impl DashboardApp {
                 if let Some(option) = self.status_options.get(self.status_index) {
                     self.active_status = option.value.clone();
                     self.clamp_issue_index();
+                    self.preview_scroll.reset();
                 }
             }
             Focus::Estimate => {
                 if let Some(option) = self.estimate_options.get(self.estimate_index) {
                     self.active_estimate = option.value.clone();
                     self.clamp_issue_index();
+                    self.preview_scroll.reset();
                 }
             }
-            Focus::Issues => {}
+            Focus::Issues | Focus::Preview => {}
         }
     }
 
@@ -469,6 +560,51 @@ impl DashboardApp {
             .iter()
             .position(|option| option.value == self.active_estimate)
             .unwrap_or(0)
+    }
+
+    fn preview_content_rows(&self, width: u16) -> usize {
+        wrapped_rows(&plain_text(&self.preview_text()), width.max(1))
+    }
+
+    fn scroll_preview_line(&mut self, delta: isize, viewport: Rect) {
+        let key = if delta.is_negative() {
+            KeyCode::Up
+        } else {
+            KeyCode::Down
+        };
+        let _ = self.preview_scroll.apply_key_code_in_viewport(
+            key,
+            viewport,
+            self.preview_content_rows(viewport.width.max(1)),
+        );
+    }
+
+    fn scroll_preview_page(&mut self, delta: isize, viewport: Rect) {
+        if self.focus != Focus::Preview {
+            return;
+        }
+        let key = if delta.is_negative() {
+            crossterm::event::KeyEvent::from(KeyCode::PageUp)
+        } else {
+            crossterm::event::KeyEvent::from(KeyCode::PageDown)
+        };
+        let _ = self.preview_scroll.apply_key_in_viewport(
+            key,
+            viewport,
+            self.preview_content_rows(viewport.width.max(1)),
+        );
+    }
+
+    fn handle_preview_mouse(
+        &mut self,
+        mouse: crossterm::event::MouseEvent,
+        viewport: Rect,
+    ) -> bool {
+        self.preview_scroll.apply_mouse_in_viewport(
+            mouse,
+            viewport,
+            self.preview_content_rows(viewport.width.max(1)),
+        )
     }
 
     fn status_option_is_active(&self, value: &Option<String>) -> bool {
@@ -623,17 +759,58 @@ impl Drop for TerminalCleanup {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
         let mut stdout = io::stdout();
-        let _ = execute!(stdout, LeaveAlternateScreen);
+        let _ = execute!(stdout, DisableMouseCapture, LeaveAlternateScreen);
     }
+}
+
+fn preview_viewport(area: Rect) -> Rect {
+    let narrow = area.width < 115;
+    let outer = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(5),
+            Constraint::Length(3),
+            Constraint::Min(0),
+        ])
+        .split(area);
+    let body = Layout::default()
+        .direction(if narrow {
+            Direction::Vertical
+        } else {
+            Direction::Horizontal
+        })
+        .constraints(if narrow {
+            vec![
+                Constraint::Length(12),
+                Constraint::Percentage(44),
+                Constraint::Min(10),
+            ]
+        } else {
+            vec![
+                Constraint::Percentage(26),
+                Constraint::Percentage(34),
+                Constraint::Percentage(40),
+            ]
+        })
+        .split(outer[2]);
+
+    Rect::new(
+        body[2].x.saturating_add(1),
+        body[2].y.saturating_add(1),
+        body[2].width.saturating_sub(2).max(1),
+        body[2].height.saturating_sub(2).max(1),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        DashboardAction, DashboardApp, DashboardOptions, EstimateFilter, Focus, run_dashboard,
+        DashboardAction, DashboardApp, DashboardOptions, EstimateFilter, Focus, preview_viewport,
+        run_dashboard,
     };
     use crate::linear::DashboardData;
     use crate::tui::fields::InputFieldState;
+    use ratatui::layout::Rect;
 
     #[test]
     fn dashboard_state_applies_status_and_estimate_filters() {
@@ -641,6 +818,8 @@ mod tests {
 
         assert_eq!(visible_issue_ids(&app), vec!["MET-11", "MET-12"]);
 
+        app.apply(DashboardAction::Tab);
+        assert_eq!(app.focus, Focus::Preview);
         app.apply(DashboardAction::Tab);
         assert_eq!(app.focus, Focus::Status);
         app.apply(DashboardAction::Down);
@@ -709,6 +888,24 @@ mod tests {
             snapshot
                 .contains("Adjust the search query or sidebar filters to widen the result set.")
         );
+    }
+
+    #[test]
+    fn dashboard_preview_scrolls_to_overflowed_description() {
+        let mut data = DashboardData::demo();
+        data.issues[0].description = Some(
+            (1..=24)
+                .map(|index| format!("preview line {index}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        let viewport = preview_viewport(Rect::new(0, 0, 120, 20));
+        let mut app = DashboardApp::new(data, None);
+        app.apply_in_viewport(DashboardAction::Tab, viewport);
+        app.apply_in_viewport(DashboardAction::End, viewport);
+
+        assert_eq!(app.focus, Focus::Preview);
+        assert!(app.preview_scroll.offset() > 0);
     }
 
     fn visible_issue_ids(app: &DashboardApp) -> Vec<&str> {

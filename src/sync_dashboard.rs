@@ -2,7 +2,9 @@ use std::io::{self, IsTerminal};
 use std::time::Duration;
 
 use anyhow::{Result, bail};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -10,7 +12,7 @@ use crossterm::terminal::{
 use ratatui::backend::{CrosstermBackend, TestBackend};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, ListItem, ListState, Wrap};
 use ratatui::{Frame, Terminal};
 
 use crate::backlog::BacklogSyncStatus;
@@ -20,6 +22,7 @@ use crate::linear::browser::{
     render_issue_row, search_issues,
 };
 use crate::tui::fields::InputFieldState;
+use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph, wrapped_rows};
 use crate::tui::theme::{Tone, badge, empty_state, key_hints, list, panel_title, paragraph};
 
 #[derive(Debug, Clone)]
@@ -48,6 +51,11 @@ pub struct SyncDashboardOptions {
 pub enum SyncDashboardAction {
     Up,
     Down,
+    PageUp,
+    PageDown,
+    Home,
+    End,
+    Tab,
     Enter,
     Back,
 }
@@ -74,6 +82,7 @@ pub enum SyncDashboardExit {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Focus {
     Issues,
+    Preview,
     Actions,
 }
 
@@ -85,6 +94,7 @@ struct SyncDashboardApp {
     issue_index: usize,
     action_index: usize,
     completed: Option<SyncSelection>,
+    preview_scroll: ScrollState,
 }
 
 const ACTIONS: [SyncSelectionAction; 2] = [SyncSelectionAction::Pull, SyncSelectionAction::Push];
@@ -105,7 +115,7 @@ pub fn run_sync_dashboard(
 
     let mut stdout = io::stdout();
     enable_raw_mode()?;
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let _cleanup = TerminalCleanup;
 
     let backend = CrosstermBackend::new(stdout);
@@ -115,25 +125,43 @@ pub fn run_sync_dashboard(
     loop {
         terminal.draw(|frame| render_dashboard(frame, &app))?;
 
-        if event::poll(Duration::from_millis(250))?
-            && let Event::Key(key) = event::read()?
-            && key.kind == KeyEventKind::Press
-        {
-            let action = match key.code {
-                KeyCode::Char('q') => return Ok(SyncDashboardExit::Cancelled),
-                KeyCode::Up => Some(SyncDashboardAction::Up),
-                KeyCode::Down => Some(SyncDashboardAction::Down),
-                KeyCode::Enter => Some(SyncDashboardAction::Enter),
-                KeyCode::Esc => Some(SyncDashboardAction::Back),
-                _ => None,
-            };
+        if event::poll(Duration::from_millis(250))? {
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    let action = match key.code {
+                        KeyCode::Char('q') => return Ok(SyncDashboardExit::Cancelled),
+                        KeyCode::Up => Some(SyncDashboardAction::Up),
+                        KeyCode::Down => Some(SyncDashboardAction::Down),
+                        KeyCode::PageUp => Some(SyncDashboardAction::PageUp),
+                        KeyCode::PageDown => Some(SyncDashboardAction::PageDown),
+                        KeyCode::Home => Some(SyncDashboardAction::Home),
+                        KeyCode::End => Some(SyncDashboardAction::End),
+                        KeyCode::Tab => Some(SyncDashboardAction::Tab),
+                        KeyCode::Enter => Some(SyncDashboardAction::Enter),
+                        KeyCode::Esc => Some(SyncDashboardAction::Back),
+                        _ => None,
+                    };
 
-            if let Some(action) = action
-                && let Some(selection) = app.apply(action)
-            {
-                return Ok(SyncDashboardExit::Selected(selection));
-            } else {
-                let _ = app.handle_query_key(key);
+                    if let Some(action) = action
+                        && let Some(selection) =
+                            app.apply_in_viewport(action, preview_viewport(terminal.size()?.into()))
+                    {
+                        return Ok(SyncDashboardExit::Selected(selection));
+                    } else {
+                        let _ = app.handle_query_key(key);
+                    }
+                }
+                Event::Mouse(mouse)
+                    if app.focus == Focus::Preview
+                        && matches!(
+                            mouse.kind,
+                            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                        ) =>
+                {
+                    let viewport = preview_viewport(terminal.size()?.into());
+                    let _ = app.handle_preview_mouse(mouse, viewport);
+                }
+                _ => {}
             }
         }
     }
@@ -144,7 +172,10 @@ fn render_once(data: SyncDashboardData, options: SyncDashboardOptions) -> Result
     let mut terminal = Terminal::new(backend)?;
     let mut app = SyncDashboardApp::new(data);
     for action in options.actions {
-        let _ = app.apply(action);
+        let _ = app.apply_in_viewport(
+            action,
+            preview_viewport(Rect::new(0, 0, options.width, options.height)),
+        );
     }
 
     terminal.draw(|frame| render_dashboard(frame, &app))?;
@@ -188,7 +219,10 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &SyncDashboardApp) {
             Line::from(app.summary_line()),
             key_hints(&[
                 ("Type", "search"),
+                ("Tab", "focus"),
                 ("Up/Down", "move"),
+                ("PgUp/PgDn", "scroll preview"),
+                ("Wheel", "scroll preview"),
                 ("Enter", "advance"),
                 ("Esc", "back"),
                 ("q", "exit"),
@@ -210,9 +244,7 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &SyncDashboardApp) {
             "Backlog Search"
         });
     let query_inner = query_block.inner(outer[1]);
-    let query = Paragraph::new(rendered_query.text.clone())
-        .block(query_block)
-        .wrap(Wrap { trim: false });
+    let query = rendered_query.paragraph(query_block);
     frame.render_widget(query, outer[1]);
     rendered_query.set_cursor(frame, query_inner);
 
@@ -269,8 +301,12 @@ fn render_issue_list(frame: &mut Frame<'_>, area: Rect, app: &SyncDashboardApp) 
 }
 
 fn render_issue_preview(frame: &mut Frame<'_>, area: Rect, app: &SyncDashboardApp) {
-    let preview = paragraph(app.preview_text(), panel_title("Entry Preview", false))
-        .wrap(Wrap { trim: false });
+    let preview = scrollable_paragraph(
+        app.preview_text(),
+        panel_title("Entry Preview", app.focus == Focus::Preview),
+        &app.preview_scroll,
+    )
+    .wrap(Wrap { trim: false });
     frame.render_widget(preview, area);
 }
 
@@ -308,35 +344,83 @@ impl SyncDashboardApp {
             issue_index: 0,
             action_index: 0,
             completed: None,
+            preview_scroll: ScrollState::default(),
         }
     }
 
+    #[cfg(test)]
     fn apply(&mut self, action: SyncDashboardAction) -> Option<SyncSelection> {
+        self.apply_in_viewport(action, preview_viewport(Rect::new(0, 0, 120, 32)))
+    }
+
+    fn apply_in_viewport(
+        &mut self,
+        action: SyncDashboardAction,
+        preview_viewport: Rect,
+    ) -> Option<SyncSelection> {
         self.completed = None;
 
         match action {
             SyncDashboardAction::Up => match self.focus {
                 Focus::Issues => {
                     let len = self.visible_issue_results().len();
-                    shift_index(&mut self.issue_index, len, -1)
+                    shift_index(&mut self.issue_index, len, -1);
+                    self.preview_scroll.reset();
                 }
+                Focus::Preview => self.scroll_preview_key(KeyCode::Up, preview_viewport),
                 Focus::Actions => shift_index(&mut self.action_index, ACTIONS.len(), -1),
             },
             SyncDashboardAction::Down => match self.focus {
                 Focus::Issues => {
                     let len = self.visible_issue_results().len();
-                    shift_index(&mut self.issue_index, len, 1)
+                    shift_index(&mut self.issue_index, len, 1);
+                    self.preview_scroll.reset();
                 }
+                Focus::Preview => self.scroll_preview_key(KeyCode::Down, preview_viewport),
                 Focus::Actions => shift_index(&mut self.action_index, ACTIONS.len(), 1),
             },
+            SyncDashboardAction::PageUp => {
+                if self.focus == Focus::Preview {
+                    self.scroll_preview_key(KeyCode::PageUp, preview_viewport);
+                }
+            }
+            SyncDashboardAction::PageDown => {
+                if self.focus == Focus::Preview {
+                    self.scroll_preview_key(KeyCode::PageDown, preview_viewport);
+                }
+            }
+            SyncDashboardAction::Home => {
+                if self.focus == Focus::Preview {
+                    self.scroll_preview_key(KeyCode::Home, preview_viewport);
+                }
+            }
+            SyncDashboardAction::End => {
+                if self.focus == Focus::Preview {
+                    self.scroll_preview_key(KeyCode::End, preview_viewport);
+                }
+            }
+            SyncDashboardAction::Tab => {
+                self.focus = match self.focus {
+                    Focus::Issues => Focus::Preview,
+                    Focus::Preview => Focus::Actions,
+                    Focus::Actions => Focus::Issues,
+                };
+            }
             SyncDashboardAction::Back => {
                 if self.focus == Focus::Actions {
+                    self.focus = Focus::Preview;
+                } else if self.focus == Focus::Preview {
                     self.focus = Focus::Issues;
-                    self.action_index = 0;
                 }
+                self.action_index = 0;
             }
             SyncDashboardAction::Enter => match self.focus {
                 Focus::Issues => {
+                    if self.selected_issue().is_some() {
+                        self.focus = Focus::Preview;
+                    }
+                }
+                Focus::Preview => {
                     if self.selected_issue().is_some() {
                         self.focus = Focus::Actions;
                     }
@@ -363,6 +447,7 @@ impl SyncDashboardApp {
         }
         if self.query.handle_key(key) {
             self.issue_index = 0;
+            self.preview_scroll.reset();
             return true;
         }
         false
@@ -410,6 +495,9 @@ impl SyncDashboardApp {
                     )
                 }
             }
+            Focus::Preview => {
+                "Review the selected backlog preview. PgUp/PgDn/Home/End or the mouse wheel scroll when the panel overflows.".to_string()
+            }
             Focus::Actions => match self.selected_issue() {
                 Some(issue) if issue.is_linked() => format!(
                     "Choose whether to pull or push {}.",
@@ -448,12 +536,13 @@ impl SyncDashboardApp {
                     "Create or link backlog entries under `.metastack/backlog/`, then rerun `meta backlog sync`."
                         .to_string()
                 } else {
-                    "Step 1 of 2: search or choose a backlog entry sourced from local `.metastack/backlog/`."
+                    "Step 1 of 3: search or choose a backlog entry sourced from local `.metastack/backlog/`."
                         .to_string()
                 }
             }
+            Focus::Preview => "Step 2 of 3: review or scroll the selected backlog preview with PgUp/PgDn/Home/End or the mouse wheel before choosing a sync action.".to_string(),
             Focus::Actions => match self.selected_issue() {
-                Some(issue) if issue.is_linked() => "Step 2 of 2: choose pull to refresh local files or push to sync managed attachments. `index.md` only updates the Linear description when you run push with `--update-description`.".to_string(),
+                Some(issue) if issue.is_linked() => "Step 3 of 3: choose pull to refresh local files or push to sync managed attachments. `index.md` only updates the Linear description when you run push with `--update-description`.".to_string(),
                 Some(issue) => format!(
                     "This backlog entry is unlinked. Run `meta backlog sync link <ISSUE> --entry {}` before pull or push becomes available.",
                     issue.entry_slug
@@ -461,6 +550,30 @@ impl SyncDashboardApp {
                 None => "No backlog entry is selected.".to_string(),
             },
         }
+    }
+
+    fn preview_content_rows(&self, width: u16) -> usize {
+        wrapped_rows(&plain_text(&self.preview_text()), width.max(1))
+    }
+
+    fn scroll_preview_key(&mut self, key: KeyCode, viewport: Rect) {
+        let _ = self.preview_scroll.apply_key_code_in_viewport(
+            key,
+            viewport,
+            self.preview_content_rows(viewport.width.max(1)),
+        );
+    }
+
+    fn handle_preview_mouse(
+        &mut self,
+        mouse: crossterm::event::MouseEvent,
+        viewport: Rect,
+    ) -> bool {
+        self.preview_scroll.apply_mouse_in_viewport(
+            mouse,
+            viewport,
+            self.preview_content_rows(viewport.width.max(1)),
+        )
     }
 
     fn action_enabled(&self, _action: SyncSelectionAction) -> bool {
@@ -617,19 +730,54 @@ impl Drop for TerminalCleanup {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
         let mut stdout = io::stdout();
-        let _ = execute!(stdout, LeaveAlternateScreen);
+        let _ = execute!(stdout, DisableMouseCapture, LeaveAlternateScreen);
     }
+}
+
+fn preview_viewport(area: Rect) -> Rect {
+    let narrow = area.width < 104;
+    let outer = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(if narrow { 5 } else { 4 }),
+            Constraint::Length(3),
+            Constraint::Min(0),
+        ])
+        .split(area);
+    let body = Layout::default()
+        .direction(if narrow {
+            Direction::Vertical
+        } else {
+            Direction::Horizontal
+        })
+        .constraints(vec![Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(outer[2]);
+    let details = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(10),
+            Constraint::Length(8),
+            Constraint::Min(6),
+        ])
+        .split(body[1]);
+    Rect::new(
+        details[0].x.saturating_add(1),
+        details[0].y.saturating_add(1),
+        details[0].width.saturating_sub(2).max(1),
+        details[0].height.saturating_sub(2).max(1),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         Focus, SyncDashboardAction, SyncDashboardApp, SyncDashboardData, SyncDashboardExit,
-        SyncDashboardIssue, SyncDashboardOptions, run_sync_dashboard,
+        SyncDashboardIssue, SyncDashboardOptions, preview_viewport, run_sync_dashboard,
     };
     use crate::backlog::BacklogSyncStatus;
     use crate::linear::{DashboardData, IssueSummary, ProjectRef, WorkflowState};
     use crate::tui::fields::InputFieldState;
+    use ratatui::layout::Rect;
 
     fn demo_data() -> SyncDashboardData {
         let demo = DashboardData::demo();
@@ -699,6 +847,7 @@ mod tests {
                 actions: vec![
                     SyncDashboardAction::Down,
                     SyncDashboardAction::Enter,
+                    SyncDashboardAction::Enter,
                     SyncDashboardAction::Down,
                     SyncDashboardAction::Enter,
                 ],
@@ -722,7 +871,11 @@ mod tests {
 
         assert_eq!(app.focus, Focus::Issues);
         app.apply(SyncDashboardAction::Enter);
+        assert_eq!(app.focus, Focus::Preview);
+        app.apply(SyncDashboardAction::Enter);
         assert_eq!(app.focus, Focus::Actions);
+        app.apply(SyncDashboardAction::Back);
+        assert_eq!(app.focus, Focus::Preview);
         app.apply(SyncDashboardAction::Back);
         assert_eq!(app.focus, Focus::Issues);
     }
@@ -764,5 +917,43 @@ mod tests {
             snapshot.contains("<ISSUE> --entry MET-13` before pull or push becomes available.")
         );
         assert!(!snapshot.contains("Ready to push"));
+    }
+
+    #[test]
+    fn sync_dashboard_preview_scrolls_to_bottom() {
+        let mut data = demo_data();
+        data.issues[0].issue.description = Some(
+            (1..=24)
+                .map(|index| format!("sync preview line {index}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        let viewport = preview_viewport(Rect::new(0, 0, 120, 20));
+        let mut app = SyncDashboardApp::new(data);
+        let _ = app.apply_in_viewport(SyncDashboardAction::Tab, viewport);
+        let _ = app.apply_in_viewport(SyncDashboardAction::End, viewport);
+
+        assert_eq!(app.focus, Focus::Preview);
+        assert!(app.preview_scroll.offset() > 0);
+    }
+
+    #[test]
+    fn render_once_mentions_mouse_wheel_in_preview_guidance() {
+        let exit = run_sync_dashboard(
+            demo_data(),
+            SyncDashboardOptions {
+                render_once: true,
+                width: 120,
+                height: 32,
+                actions: vec![SyncDashboardAction::Enter],
+            },
+        )
+        .expect("render once should succeed");
+
+        let SyncDashboardExit::Snapshot(snapshot) = exit else {
+            panic!("render_once should return a snapshot");
+        };
+
+        assert!(snapshot.contains("mouse wheel"));
     }
 }

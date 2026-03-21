@@ -2,13 +2,14 @@ mod brief;
 mod execution;
 
 pub(crate) use execution::{
-    AgentContinuation, run_agent_capture, run_agent_capture_with_continuation,
+    AgentContinuation, AgentTokenUsage, run_agent_capture, run_agent_capture_with_continuation,
 };
 
 pub(crate) use brief::{AgentBriefRequest, TicketMetadata, write_agent_brief};
 pub(crate) use execution::{
     AgentExecutionOptions, apply_invocation_environment, apply_noninteractive_agent_environment,
-    command_args_for_invocation, format_agent_config_source, render_invocation_diagnostics,
+    command_args_for_invocation, command_args_for_invocation_with_options,
+    format_agent_config_source, render_invocation_diagnostics,
     resolve_agent_invocation_for_planning, validate_invocation_command_surface,
 };
 

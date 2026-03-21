@@ -8,7 +8,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use crossterm::event::{
-    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, KeyCode, KeyEventKind, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -51,6 +52,7 @@ use crate::progress::{LoadingPanelData, SPINNER_FRAMES, render_loading_panel};
 use crate::scaffold::{ensure_backlog_templates, ensure_planning_layout};
 use crate::sync_command::run_sync_push_for_issue;
 use crate::tui::fields::{InputFieldState, MultiSelectFieldState};
+use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph, wrapped_rows};
 use crate::{LinearCommandContext, load_linear_command_context};
 
 const ISSUE_PICKER_LIMIT: usize = 250;
@@ -81,6 +83,8 @@ struct IssuePickerApp {
     query: InputFieldState,
     issues: Vec<IssueSummary>,
     selected: usize,
+    focus: IssuePickerFocus,
+    preview_scroll: ScrollState,
     error: Option<String>,
 }
 
@@ -88,6 +92,8 @@ struct IssuePickerApp {
 struct TechnicalReviewApp {
     generated: TechnicalGeneratedBacklog,
     selected_file: usize,
+    focus: TechnicalReviewFocus,
+    preview_scroll: ScrollState,
     error: Option<String>,
 }
 
@@ -130,6 +136,18 @@ enum TechnicalAction {
     SelectIssue(IssueSummary),
     Generate(TechnicalGenerationRequest),
     Confirm(TechnicalGeneratedBacklog),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IssuePickerFocus {
+    List,
+    Preview,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TechnicalReviewFocus {
+    Files,
+    Preview,
 }
 
 #[derive(Debug, Clone)]
@@ -342,6 +360,8 @@ fn run_interactive_technical_session(
                 query: InputFieldState::default(),
                 issues,
                 selected: 0,
+                focus: IssuePickerFocus::List,
+                preview_scroll: ScrollState::default(),
                 error: None,
             }),
             pending: None,
@@ -350,7 +370,12 @@ fn run_interactive_technical_session(
 
     let mut stdout = io::stdout();
     enable_raw_mode()?;
-    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableBracketedPaste,
+        EnableMouseCapture
+    )?;
     let _cleanup = TerminalCleanup;
 
     let backend = CrosstermBackend::new(stdout);
@@ -377,12 +402,20 @@ fn run_interactive_technical_session(
                     }
 
                     let action = match &mut app.stage {
-                        TechnicalStage::PickIssue(picker) => handle_issue_picker_key(picker, key),
+                        TechnicalStage::PickIssue(picker) => handle_issue_picker_key(
+                            picker,
+                            key,
+                            issue_picker_preview_viewport(terminal.size()?.into()),
+                        ),
                         TechnicalStage::SelectCriteria(criteria) => {
                             handle_acceptance_criteria_key(criteria, key, discussion_budgets)
                         }
                         TechnicalStage::Loading(_) => TechnicalAction::None,
-                        TechnicalStage::Review(review) => handle_technical_review_key(review, key),
+                        TechnicalStage::Review(review) => handle_technical_review_key(
+                            review,
+                            key,
+                            technical_review_preview_viewport(terminal.size()?.into()),
+                        ),
                     };
 
                     match action {
@@ -440,6 +473,37 @@ fn run_interactive_technical_session(
                         handle_issue_picker_paste(picker, &text);
                     }
                 }
+                Event::Mouse(mouse) => match &mut app.stage {
+                    TechnicalStage::PickIssue(picker)
+                        if picker.focus == IssuePickerFocus::Preview
+                            && matches!(
+                                mouse.kind,
+                                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                            ) =>
+                    {
+                        let viewport = issue_picker_preview_viewport(terminal.size()?.into());
+                        let _ = picker.preview_scroll.apply_mouse_in_viewport(
+                            mouse,
+                            viewport,
+                            picker.preview_content_rows(viewport.width.max(1)),
+                        );
+                    }
+                    TechnicalStage::Review(review)
+                        if review.focus == TechnicalReviewFocus::Preview
+                            && matches!(
+                                mouse.kind,
+                                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                            ) =>
+                    {
+                        let viewport = technical_review_preview_viewport(terminal.size()?.into());
+                        let _ = review.preview_scroll.apply_mouse_in_viewport(
+                            mouse,
+                            viewport,
+                            review.preview_content_rows(viewport.width.max(1)),
+                        );
+                    }
+                    _ => {}
+                },
                 _ => {}
             }
         }
@@ -449,27 +513,65 @@ fn run_interactive_technical_session(
 fn handle_issue_picker_key(
     app: &mut IssuePickerApp,
     key: crossterm::event::KeyEvent,
+    preview_viewport: Rect,
 ) -> TechnicalAction {
     match key.code {
+        KeyCode::Tab => {
+            app.focus = match app.focus {
+                IssuePickerFocus::List => IssuePickerFocus::Preview,
+                IssuePickerFocus::Preview => IssuePickerFocus::List,
+            };
+            app.error = None;
+            TechnicalAction::None
+        }
         KeyCode::Up => {
-            let filtered = search_results(app);
-            if filtered.is_empty() {
-                app.selected = 0;
-            } else if app.selected == 0 {
-                app.selected = filtered.len().saturating_sub(1);
+            if app.focus == IssuePickerFocus::Preview {
+                let _ = app.preview_scroll.apply_key_code_in_viewport(
+                    KeyCode::Up,
+                    preview_viewport,
+                    app.preview_content_rows(preview_viewport.width.max(1)),
+                );
             } else {
-                app.selected -= 1;
+                let filtered = search_results(app);
+                if filtered.is_empty() {
+                    app.selected = 0;
+                } else if app.selected == 0 {
+                    app.selected = filtered.len().saturating_sub(1);
+                } else {
+                    app.selected -= 1;
+                }
+                app.preview_scroll.reset();
             }
             app.error = None;
             TechnicalAction::None
         }
         KeyCode::Down => {
-            let filtered = search_results(app);
-            if filtered.is_empty() {
-                app.selected = 0;
+            if app.focus == IssuePickerFocus::Preview {
+                let _ = app.preview_scroll.apply_key_code_in_viewport(
+                    KeyCode::Down,
+                    preview_viewport,
+                    app.preview_content_rows(preview_viewport.width.max(1)),
+                );
             } else {
-                app.selected = (app.selected + 1) % filtered.len();
+                let filtered = search_results(app);
+                if filtered.is_empty() {
+                    app.selected = 0;
+                } else {
+                    app.selected = (app.selected + 1) % filtered.len();
+                }
+                app.preview_scroll.reset();
             }
+            app.error = None;
+            TechnicalAction::None
+        }
+        KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End
+            if app.focus == IssuePickerFocus::Preview =>
+        {
+            let _ = app.preview_scroll.apply_key_in_viewport(
+                key,
+                preview_viewport,
+                app.preview_content_rows(preview_viewport.width.max(1)),
+            );
             app.error = None;
             TechnicalAction::None
         }
@@ -484,8 +586,9 @@ fn handle_issue_picker_key(
             TechnicalAction::SelectIssue(app.issues[issue_index].clone())
         }
         _ => {
-            if app.query.handle_key(key) {
+            if app.focus == IssuePickerFocus::List && app.query.handle_key(key) {
                 app.selected = 0;
+                app.preview_scroll.reset();
                 app.error = None;
             }
             TechnicalAction::None
@@ -494,8 +597,9 @@ fn handle_issue_picker_key(
 }
 
 fn handle_issue_picker_paste(app: &mut IssuePickerApp, text: &str) {
-    if app.query.paste(text) {
+    if app.focus == IssuePickerFocus::List && app.query.paste(text) {
         app.selected = 0;
+        app.preview_scroll.reset();
         app.error = None;
     }
 }
@@ -539,26 +643,99 @@ fn handle_acceptance_criteria_key(
 fn handle_technical_review_key(
     app: &mut TechnicalReviewApp,
     key: crossterm::event::KeyEvent,
+    preview_viewport: Rect,
 ) -> TechnicalAction {
     match key.code {
+        KeyCode::Tab => {
+            app.focus = match app.focus {
+                TechnicalReviewFocus::Files => TechnicalReviewFocus::Preview,
+                TechnicalReviewFocus::Preview => TechnicalReviewFocus::Files,
+            };
+            app.error = None;
+            TechnicalAction::None
+        }
         KeyCode::Up => {
-            if app.selected_file == 0 {
+            if app.focus == TechnicalReviewFocus::Preview {
+                let _ = app.preview_scroll.apply_key_code_in_viewport(
+                    KeyCode::Up,
+                    preview_viewport,
+                    app.preview_content_rows(preview_viewport.width.max(1)),
+                );
+            } else if app.selected_file == 0 {
                 app.selected_file = app.generated.files.len().saturating_sub(1);
             } else {
                 app.selected_file -= 1;
+                app.preview_scroll.reset();
             }
             app.error = None;
             TechnicalAction::None
         }
         KeyCode::Down => {
-            if !app.generated.files.is_empty() {
+            if app.focus == TechnicalReviewFocus::Preview {
+                let _ = app.preview_scroll.apply_key_code_in_viewport(
+                    KeyCode::Down,
+                    preview_viewport,
+                    app.preview_content_rows(preview_viewport.width.max(1)),
+                );
+            } else if !app.generated.files.is_empty() {
                 app.selected_file = (app.selected_file + 1) % app.generated.files.len();
+                app.preview_scroll.reset();
             }
+            app.error = None;
+            TechnicalAction::None
+        }
+        KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End
+            if app.focus == TechnicalReviewFocus::Preview =>
+        {
+            let _ = app.preview_scroll.apply_key_in_viewport(
+                key,
+                preview_viewport,
+                app.preview_content_rows(preview_viewport.width.max(1)),
+            );
             app.error = None;
             TechnicalAction::None
         }
         KeyCode::Enter => TechnicalAction::Confirm(app.generated.clone()),
         _ => TechnicalAction::None,
+    }
+}
+
+impl IssuePickerApp {
+    fn preview_content_rows(&self, width: u16) -> usize {
+        let preview = search_results(self)
+            .get(self.selected)
+            .and_then(|result| {
+                self.issues.get(result.issue_index).map(|issue| {
+                    render_issue_preview(
+                        issue,
+                        Some(result),
+                        None,
+                        "_No Linear description was provided._",
+                    )
+                })
+            })
+            .unwrap_or_else(|| {
+                Text::from(vec![
+                    Line::from("Search results appear here."),
+                    Line::from(""),
+                    Line::from(
+                        "Type to narrow the ticket list, then press Enter to generate the technical backlog draft.",
+                    ),
+                ])
+            });
+        wrapped_rows(&plain_text(&preview), width.max(1))
+    }
+}
+
+impl TechnicalReviewApp {
+    fn preview_content_rows(&self, width: u16) -> usize {
+        let contents = self
+            .generated
+            .files
+            .get(self.selected_file)
+            .map(|file| file.contents.as_str())
+            .unwrap_or_default();
+        wrapped_rows(contents, width.max(1))
     }
 }
 
@@ -615,6 +792,8 @@ fn process_pending_generation(app: &mut TechnicalSessionApp) -> Result<()> {
                     app.stage = TechnicalStage::Review(TechnicalReviewApp {
                         generated,
                         selected_file: 0,
+                        focus: TechnicalReviewFocus::Files,
+                        preview_scroll: ScrollState::default(),
                         error: None,
                     });
                 }
@@ -973,9 +1152,7 @@ fn render_issue_picker_frame(frame: &mut Frame<'_>, app: &IssuePickerApp) {
         true,
         query_inner.width,
     );
-    let query = Paragraph::new(rendered_query.text.clone())
-        .block(query_block)
-        .wrap(Wrap { trim: false });
+    let query = rendered_query.paragraph(query_block);
     frame.render_widget(query, body[0]);
     rendered_query.set_cursor(frame, query_inner);
 
@@ -1026,20 +1203,23 @@ fn render_issue_picker_frame(frame: &mut Frame<'_>, app: &IssuePickerApp) {
                 ),
             ])
         });
-    let preview = Paragraph::new(preview)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Issue Preview"),
-        )
-        .wrap(Wrap { trim: false });
+    let preview = scrollable_paragraph(
+        preview,
+        if app.focus == IssuePickerFocus::Preview {
+            "Issue Preview [focus]"
+        } else {
+            "Issue Preview"
+        },
+        &app.preview_scroll,
+    )
+    .wrap(Wrap { trim: false });
     frame.render_widget(preview, content[1]);
 
     render_footer(
         frame,
         layout[1],
         app.error.as_deref(),
-        "Type to search issues by identifier, title, state, project, or description. Up/Down moves the selection. Enter generates the technical backlog draft. Esc cancels.",
+        "Type to search issues by identifier, title, state, project, or description. Tab switches between the issue list and preview. Up/Down moves the active pane, and PgUp/PgDn/Home/End or the mouse wheel scroll the preview when focused. Enter generates the technical backlog draft. Esc cancels.",
     );
 }
 
@@ -1179,30 +1359,35 @@ fn render_review_frame(frame: &mut Frame<'_>, app: &TechnicalReviewApp) {
         .map(|file| ListItem::new(file.relative_path.clone()))
         .collect::<Vec<_>>();
     let file_list = List::new(file_items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Generated Files"),
-        )
+        .block(Block::default().borders(Borders::ALL).title(
+            if app.focus == TechnicalReviewFocus::Files {
+                "Generated Files [focus]"
+            } else {
+                "Generated Files"
+            },
+        ))
         .highlight_style(Style::default().add_modifier(Modifier::BOLD))
         .highlight_symbol("> ");
     frame.render_stateful_widget(file_list, sidebar[1], &mut file_state);
 
     let selected_file = &app.generated.files[app.selected_file];
-    let preview = Paragraph::new(selected_file.contents.clone())
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(format!("Preview: {}", selected_file.relative_path)),
-        )
-        .wrap(Wrap { trim: false });
+    let preview = scrollable_paragraph(
+        selected_file.contents.clone(),
+        if app.focus == TechnicalReviewFocus::Preview {
+            format!("Preview: {} [focus]", selected_file.relative_path)
+        } else {
+            format!("Preview: {}", selected_file.relative_path)
+        },
+        &app.preview_scroll,
+    )
+    .wrap(Wrap { trim: false });
     frame.render_widget(preview, body[1]);
 
     render_footer(
         frame,
         layout[1],
         app.error.as_deref(),
-        "Up/Down moves between generated files. Enter creates the technical child issue and syncs the reviewed Markdown files. Esc cancels.",
+        "Tab switches between the file list and preview. Up/Down moves the active pane, and PgUp/PgDn/Home/End or the mouse wheel scroll the preview when focused. Enter creates the technical child issue and syncs the reviewed Markdown files. Esc cancels.",
     );
 }
 
@@ -1227,10 +1412,14 @@ fn search_results(app: &IssuePickerApp) -> Vec<IssueSearchResult> {
 }
 
 fn base_layout(frame: &mut Frame<'_>) -> Vec<Rect> {
+    base_layout_for_area(frame.area())
+}
+
+fn base_layout_for_area(area: Rect) -> Vec<Rect> {
     Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(4)])
-        .split(frame.area())
+        .constraints([Constraint::Min(0), Constraint::Length(5)])
+        .split(area)
         .to_vec()
 }
 
@@ -1575,8 +1764,41 @@ impl Drop for TerminalCleanup {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
         let mut stdout = io::stdout();
-        let _ = execute!(stdout, DisableBracketedPaste, LeaveAlternateScreen);
+        let _ = execute!(
+            stdout,
+            DisableMouseCapture,
+            DisableBracketedPaste,
+            LeaveAlternateScreen
+        );
     }
+}
+
+fn issue_picker_preview_viewport(area: Rect) -> Rect {
+    let layout = base_layout_for_area(area);
+    let content = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
+        .split(layout[0]);
+    Rect::new(
+        content[1].x.saturating_add(1),
+        content[1].y.saturating_add(1),
+        content[1].width.saturating_sub(2).max(1),
+        content[1].height.saturating_sub(2).max(1),
+    )
+}
+
+fn technical_review_preview_viewport(area: Rect) -> Rect {
+    let layout = base_layout_for_area(area);
+    let body = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
+        .split(layout[0]);
+    Rect::new(
+        body[1].x.saturating_add(1),
+        body[1].y.saturating_add(1),
+        body[1].width.saturating_sub(2).max(1),
+        body[1].height.saturating_sub(2).max(1),
+    )
 }
 
 #[cfg(test)]
@@ -1597,10 +1819,11 @@ fn snapshot(backend: &TestBackend) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        AcceptanceCriteriaApp, IssuePickerApp, LoadingApp, TechnicalGeneratedBacklog,
-        TechnicalReviewApp, extract_acceptance_criteria, handle_issue_picker_paste,
-        render_acceptance_criteria_frame, render_issue_picker_frame, render_loading_frame,
-        render_review_frame, render_technical_prompt, search_results, snapshot,
+        AcceptanceCriteriaApp, IssuePickerApp, IssuePickerFocus, LoadingApp,
+        TechnicalGeneratedBacklog, TechnicalReviewApp, TechnicalReviewFocus,
+        extract_acceptance_criteria, handle_issue_picker_paste, render_acceptance_criteria_frame,
+        render_issue_picker_frame, render_loading_frame, render_review_frame,
+        render_technical_prompt, search_results, snapshot,
     };
     use crate::backlog::RenderedTemplateFile;
     use crate::fs::PlanningPaths;
@@ -1609,8 +1832,10 @@ mod tests {
         prepare_issue_context,
     };
     use crate::tui::fields::{InputFieldState, MultiSelectFieldState};
+    use crate::tui::scroll::ScrollState;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
     use std::fs;
     use tempfile::tempdir;
 
@@ -1692,6 +1917,8 @@ mod tests {
                 issue("MET-42", "Terminal experience", "Improve terminal flow"),
             ],
             selected: 0,
+            focus: IssuePickerFocus::List,
+            preview_scroll: ScrollState::default(),
             error: None,
         };
 
@@ -1718,12 +1945,15 @@ mod tests {
                 issue("MET-43", "Sync polish", "Refine sync previews."),
             ],
             selected: 0,
+            focus: IssuePickerFocus::List,
+            preview_scroll: ScrollState::default(),
             error: None,
         });
 
         assert!(snapshot.contains("Select Parent Issue [search]"));
         assert!(snapshot.contains("MET-42  Terminal experience"));
         assert!(snapshot.contains("Issue Preview"));
+        assert!(snapshot.contains("mouse wheel scroll the preview"));
     }
 
     #[test]
@@ -1736,6 +1966,8 @@ mod tests {
                 "Improve planning flow.",
             )],
             selected: 1,
+            focus: IssuePickerFocus::List,
+            preview_scroll: ScrollState::default(),
             error: Some("stale".to_string()),
         };
 
@@ -1780,6 +2012,8 @@ mod tests {
                 ],
             },
             selected_file: 1,
+            focus: TechnicalReviewFocus::Files,
+            preview_scroll: ScrollState::default(),
             error: None,
         });
 
@@ -1787,6 +2021,48 @@ mod tests {
         assert!(snapshot.contains("Generated Files"));
         assert!(snapshot.contains("Preview: specification.md"));
         assert!(snapshot.contains("Criteria: 2 selected"));
+    }
+
+    #[test]
+    fn review_preview_scrolls_to_bottom_of_long_file() {
+        let mut app = TechnicalReviewApp {
+            generated: TechnicalGeneratedBacklog {
+                parent: issue(
+                    "MET-35",
+                    "Create the technical command",
+                    "Parent description",
+                ),
+                child_title: "Technical: Create the technical command".to_string(),
+                selected_acceptance_criteria: vec!["The docs stay in sync".to_string()],
+                prepared_context: prepare_issue_context(
+                    &issue(
+                        "MET-35",
+                        "Create the technical command",
+                        "Parent description",
+                    ),
+                    TicketDiscussionBudgets::default(),
+                ),
+                files: vec![RenderedTemplateFile {
+                    relative_path: "specification.md".to_string(),
+                    contents: (1..=60)
+                        .map(|index| format!("technical preview line {index}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                }],
+            },
+            selected_file: 0,
+            focus: TechnicalReviewFocus::Preview,
+            preview_scroll: ScrollState::default(),
+            error: None,
+        };
+
+        let _ = app.preview_scroll.apply_key_code_in_viewport(
+            crossterm::event::KeyCode::End,
+            Rect::new(0, 0, 70, 20),
+            app.preview_content_rows(70),
+        );
+
+        assert!(app.preview_scroll.offset() > 0);
     }
 
     #[test]
@@ -1811,6 +2087,8 @@ mod tests {
                 "Improve planning flow.",
             )],
             selected: 0,
+            focus: IssuePickerFocus::List,
+            preview_scroll: ScrollState::default(),
             error: None,
         });
 

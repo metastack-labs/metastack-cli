@@ -2,7 +2,9 @@ use std::io::{self, IsTerminal};
 use std::time::Duration;
 
 use anyhow::{Result, bail};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -10,10 +12,11 @@ use crossterm::terminal::{
 use ratatui::backend::{CrosstermBackend, TestBackend};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, ListItem, ListState, Wrap};
 use ratatui::{Frame, Terminal};
 
 use crate::tui::fields::InputFieldState;
+use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph, wrapped_rows};
 use crate::tui::theme::{
     Tone, badge, empty_state, key_hints, label_style, list, muted_style, panel_title, paragraph,
     tone_style,
@@ -54,6 +57,11 @@ pub struct WorkspaceDashboardOptions {
 pub enum WorkspaceDashboardAction {
     Up,
     Down,
+    PageUp,
+    PageDown,
+    Home,
+    End,
+    Tab,
     Enter,
     Back,
     ToggleSelect,
@@ -83,6 +91,7 @@ pub enum WorkspaceDashboardExit {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Focus {
     Workspaces,
+    Preview,
     Actions,
 }
 
@@ -95,6 +104,7 @@ struct WorkspaceDashboardApp {
     action_index: usize,
     selected: Vec<bool>,
     completed: Option<WorkspaceSelection>,
+    preview_scroll: ScrollState,
 }
 
 const ACTIONS: [WorkspaceSelectionAction; 4] = [
@@ -128,7 +138,7 @@ pub fn run_workspace_dashboard(
 
     let mut stdout = io::stdout();
     enable_raw_mode()?;
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let _cleanup = TerminalCleanup;
 
     let backend = CrosstermBackend::new(stdout);
@@ -145,47 +155,63 @@ pub fn run_workspace_dashboard(
             }
         }
 
-        if event::poll(Duration::from_millis(150))?
-            && let Event::Key(key) = event::read()?
-            && key.kind == KeyEventKind::Press
-        {
-            // Ctrl+C always exits regardless of focus
-            if key.code == KeyCode::Char('c')
-                && key
-                    .modifiers
-                    .contains(crossterm::event::KeyModifiers::CONTROL)
-            {
-                return Ok(WorkspaceDashboardExit::Cancelled);
-            }
+        if event::poll(Duration::from_millis(150))? {
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    if key.code == KeyCode::Char('c')
+                        && key
+                            .modifiers
+                            .contains(crossterm::event::KeyModifiers::CONTROL)
+                    {
+                        return Ok(WorkspaceDashboardExit::Cancelled);
+                    }
 
-            // Esc at top level exits, in action menu goes back
-            if key.code == KeyCode::Esc {
-                if app.focus == Focus::Workspaces {
-                    return Ok(WorkspaceDashboardExit::Cancelled);
-                } else {
-                    let _ = app.apply(WorkspaceDashboardAction::Back);
-                    continue;
+                    if key.code == KeyCode::Esc {
+                        if app.focus == Focus::Workspaces {
+                            return Ok(WorkspaceDashboardExit::Cancelled);
+                        }
+                        let _ = app.apply_in_viewport(
+                            WorkspaceDashboardAction::Back,
+                            preview_viewport(terminal.size()?.into()),
+                        );
+                        continue;
+                    }
+
+                    let action = match key.code {
+                        KeyCode::Up => Some(WorkspaceDashboardAction::Up),
+                        KeyCode::Down => Some(WorkspaceDashboardAction::Down),
+                        KeyCode::PageUp => Some(WorkspaceDashboardAction::PageUp),
+                        KeyCode::PageDown => Some(WorkspaceDashboardAction::PageDown),
+                        KeyCode::Home => Some(WorkspaceDashboardAction::Home),
+                        KeyCode::End => Some(WorkspaceDashboardAction::End),
+                        KeyCode::Tab => Some(WorkspaceDashboardAction::Tab),
+                        KeyCode::Enter => Some(WorkspaceDashboardAction::Enter),
+                        KeyCode::Char(' ') if app.focus == Focus::Workspaces => {
+                            Some(WorkspaceDashboardAction::ToggleSelect)
+                        }
+                        _ => None,
+                    };
+
+                    if let Some(action) = action
+                        && let Some(selection) =
+                            app.apply_in_viewport(action, preview_viewport(terminal.size()?.into()))
+                    {
+                        return Ok(WorkspaceDashboardExit::Selected(selection));
+                    } else if action.is_none() {
+                        let _ = app.handle_query_key(key);
+                    }
                 }
-            }
-
-            // Navigation and actions
-            let action = match key.code {
-                KeyCode::Up => Some(WorkspaceDashboardAction::Up),
-                KeyCode::Down => Some(WorkspaceDashboardAction::Down),
-                KeyCode::Enter => Some(WorkspaceDashboardAction::Enter),
-                KeyCode::Char(' ') if app.focus == Focus::Workspaces => {
-                    Some(WorkspaceDashboardAction::ToggleSelect)
+                Event::Mouse(mouse)
+                    if app.focus == Focus::Preview
+                        && matches!(
+                            mouse.kind,
+                            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                        ) =>
+                {
+                    let viewport = preview_viewport(terminal.size()?.into());
+                    let _ = app.handle_preview_mouse(mouse, viewport);
                 }
-                _ => None,
-            };
-
-            if let Some(action) = action
-                && let Some(selection) = app.apply(action)
-            {
-                return Ok(WorkspaceDashboardExit::Selected(selection));
-            } else if action.is_none() {
-                // Pass to search input (absorbs typed characters)
-                let _ = app.handle_query_key(key);
+                _ => {}
             }
         }
     }
@@ -196,7 +222,10 @@ fn render_once(data: WorkspaceDashboardData, options: WorkspaceDashboardOptions)
     let mut terminal = Terminal::new(backend)?;
     let mut app = WorkspaceDashboardApp::new(data);
     for action in options.actions {
-        let _ = app.apply(action);
+        let _ = app.apply_in_viewport(
+            action,
+            preview_viewport(Rect::new(0, 0, options.width, options.height)),
+        );
     }
 
     terminal.draw(|frame| render_dashboard(frame, &app))?;
@@ -238,7 +267,10 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &WorkspaceDashboardApp) {
             Line::from(app.summary_line()),
             key_hints(&[
                 ("Type", "search"),
+                ("Tab", "focus"),
                 ("Up/Down", "move"),
+                ("PgUp/PgDn", "scroll preview"),
+                ("Wheel", "scroll preview"),
                 ("Space", "select"),
                 ("Enter", "advance"),
                 ("Esc", "back"),
@@ -265,9 +297,7 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &WorkspaceDashboardApp) {
                 format!("Search ({} selected, {})", selected_count, total_size)
             });
     let query_inner = query_block.inner(outer[1]);
-    let query = Paragraph::new(rendered_query.text.clone())
-        .block(query_block)
-        .wrap(Wrap { trim: false });
+    let query = rendered_query.paragraph(query_block);
     frame.render_widget(query, outer[1]);
     rendered_query.set_cursor(frame, query_inner);
 
@@ -424,7 +454,12 @@ fn render_workspace_preview(frame: &mut Frame<'_>, area: Rect, app: &WorkspaceDa
         Text::from("No workspace selected.")
     };
 
-    let preview = paragraph(text, panel_title("Workspace Details", false));
+    let preview = scrollable_paragraph(
+        text,
+        panel_title("Workspace Details", app.focus == Focus::Preview),
+        &app.preview_scroll,
+    )
+    .wrap(Wrap { trim: false });
     frame.render_widget(preview, area);
 }
 
@@ -467,6 +502,7 @@ impl WorkspaceDashboardApp {
             action_index: 0,
             selected: vec![false; entry_count],
             completed: None,
+            preview_scroll: ScrollState::default(),
         }
     }
 
@@ -489,24 +525,65 @@ impl WorkspaceDashboardApp {
         self.selected.resize(self.data.entries.len(), false);
     }
 
+    #[cfg(test)]
+    #[allow(dead_code)]
     fn apply(&mut self, action: WorkspaceDashboardAction) -> Option<WorkspaceSelection> {
+        self.apply_in_viewport(action, preview_viewport(Rect::new(0, 0, 120, 32)))
+    }
+
+    fn apply_in_viewport(
+        &mut self,
+        action: WorkspaceDashboardAction,
+        preview_viewport: Rect,
+    ) -> Option<WorkspaceSelection> {
         self.completed = None;
 
         match action {
             WorkspaceDashboardAction::Up => match self.focus {
                 Focus::Workspaces => {
                     let len = self.visible_results().len();
-                    shift_index(&mut self.workspace_index, len, -1)
+                    shift_index(&mut self.workspace_index, len, -1);
+                    self.preview_scroll.reset();
                 }
+                Focus::Preview => self.scroll_preview_key(KeyCode::Up, preview_viewport),
                 Focus::Actions => shift_index(&mut self.action_index, ACTIONS.len(), -1),
             },
             WorkspaceDashboardAction::Down => match self.focus {
                 Focus::Workspaces => {
                     let len = self.visible_results().len();
-                    shift_index(&mut self.workspace_index, len, 1)
+                    shift_index(&mut self.workspace_index, len, 1);
+                    self.preview_scroll.reset();
                 }
+                Focus::Preview => self.scroll_preview_key(KeyCode::Down, preview_viewport),
                 Focus::Actions => shift_index(&mut self.action_index, ACTIONS.len(), 1),
             },
+            WorkspaceDashboardAction::PageUp => {
+                if self.focus == Focus::Preview {
+                    self.scroll_preview_key(KeyCode::PageUp, preview_viewport);
+                }
+            }
+            WorkspaceDashboardAction::PageDown => {
+                if self.focus == Focus::Preview {
+                    self.scroll_preview_key(KeyCode::PageDown, preview_viewport);
+                }
+            }
+            WorkspaceDashboardAction::Home => {
+                if self.focus == Focus::Preview {
+                    self.scroll_preview_key(KeyCode::Home, preview_viewport);
+                }
+            }
+            WorkspaceDashboardAction::End => {
+                if self.focus == Focus::Preview {
+                    self.scroll_preview_key(KeyCode::End, preview_viewport);
+                }
+            }
+            WorkspaceDashboardAction::Tab => {
+                self.focus = match self.focus {
+                    Focus::Workspaces => Focus::Preview,
+                    Focus::Preview => Focus::Actions,
+                    Focus::Actions => Focus::Workspaces,
+                };
+            }
             WorkspaceDashboardAction::ToggleSelect => {
                 let results = self.visible_results();
                 if let Some(&idx) = results.get(self.workspace_index) {
@@ -517,8 +594,10 @@ impl WorkspaceDashboardApp {
             }
             WorkspaceDashboardAction::Back => {
                 if self.focus == Focus::Actions {
-                    self.focus = Focus::Workspaces;
+                    self.focus = Focus::Preview;
                     self.action_index = 0;
+                } else if self.focus == Focus::Preview {
+                    self.focus = Focus::Workspaces;
                 }
             }
             WorkspaceDashboardAction::Enter => match self.focus {
@@ -532,6 +611,11 @@ impl WorkspaceDashboardApp {
                             }
                         }
                     }
+                    if self.selected.iter().any(|s| *s) {
+                        self.focus = Focus::Preview;
+                    }
+                }
+                Focus::Preview => {
                     if self.selected.iter().any(|s| *s) {
                         self.focus = Focus::Actions;
                     }
@@ -568,6 +652,7 @@ impl WorkspaceDashboardApp {
         }
         if self.query.handle_key(key) {
             self.workspace_index = 0;
+            self.preview_scroll.reset();
             return true;
         }
         false
@@ -610,6 +695,10 @@ impl WorkspaceDashboardApp {
                     "{total} workspace clones. {candidates} safe to remove. {selected_count} selected."
                 )
             }
+            Focus::Preview => {
+                "Review the selected workspace details. PgUp/PgDn/Home/End or the mouse wheel scroll when the panel overflows."
+                    .to_string()
+            }
             Focus::Actions => {
                 format!("{selected_count} workspace(s) selected. Choose an action.")
             }
@@ -643,11 +732,67 @@ impl WorkspaceDashboardApp {
 
         match self.focus {
             Focus::Workspaces => {
-                "Step 1: Search, select workspaces with Space, then Enter to choose action."
-                    .to_string()
+                "Step 1 of 3: search workspaces and choose entries with Space.".to_string()
             }
-            Focus::Actions => "Step 2: Choose an action for the selected workspace(s).".to_string(),
+            Focus::Preview => {
+                "Step 2 of 3: review or scroll the selected workspace details with PgUp/PgDn/Home/End or the mouse wheel.".to_string()
+            }
+            Focus::Actions => {
+                "Step 3 of 3: choose an action for the selected workspace(s).".to_string()
+            }
         }
+    }
+
+    fn preview_content_rows(&self, width: u16) -> usize {
+        let results = self.visible_results();
+        let text = if let Some(&idx) = results.get(self.workspace_index) {
+            let entry = &self.data.entries[idx];
+            let mut lines = vec![
+                Line::from(format!("Ticket: {}", entry.ticket)),
+                Line::from(format!("Branch: {}", entry.branch)),
+                Line::from(format!("Size: {}", entry.size)),
+                Line::from(format!("Modified: {}", entry.modified)),
+                Line::from(format!("Linear: {}", entry.linear_state)),
+                Line::from(format!("PR: {}", entry.pr_label)),
+                Line::from(format!("Git: {}", entry.git_label)),
+            ];
+            if entry.is_removal_candidate {
+                lines.push(Line::from("Safe to remove."));
+            }
+            if entry.has_unpushed {
+                lines.push(Line::from("Warning: unpushed commits detected."));
+            }
+            if entry.has_uncommitted {
+                lines.push(Line::from("Warning: uncommitted changes detected."));
+            }
+            if entry.is_detached {
+                lines.push(Line::from("Warning: HEAD is detached."));
+            }
+            Text::from(lines)
+        } else {
+            Text::from("No workspace selected.")
+        };
+        wrapped_rows(&plain_text(&text), width.max(1))
+    }
+
+    fn scroll_preview_key(&mut self, key: KeyCode, viewport: Rect) {
+        let _ = self.preview_scroll.apply_key_code_in_viewport(
+            key,
+            viewport,
+            self.preview_content_rows(viewport.width.max(1)),
+        );
+    }
+
+    fn handle_preview_mouse(
+        &mut self,
+        mouse: crossterm::event::MouseEvent,
+        viewport: Rect,
+    ) -> bool {
+        self.preview_scroll.apply_mouse_in_viewport(
+            mouse,
+            viewport,
+            self.preview_content_rows(viewport.width.max(1)),
+        )
     }
 }
 
@@ -702,6 +847,103 @@ struct TerminalCleanup;
 impl Drop for TerminalCleanup {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        let _ = execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen);
+    }
+}
+
+fn preview_viewport(area: Rect) -> Rect {
+    let narrow = area.width < 104;
+    let outer = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(if narrow { 5 } else { 4 }),
+            Constraint::Length(3),
+            Constraint::Min(0),
+        ])
+        .split(area);
+    let body = Layout::default()
+        .direction(if narrow {
+            Direction::Vertical
+        } else {
+            Direction::Horizontal
+        })
+        .constraints(vec![Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(outer[2]);
+    let details = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(55),
+            Constraint::Length(8),
+            Constraint::Min(6),
+        ])
+        .split(body[1]);
+    Rect::new(
+        details[0].x.saturating_add(1),
+        details[0].y.saturating_add(1),
+        details[0].width.saturating_sub(2).max(1),
+        details[0].height.saturating_sub(2).max(1),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        Focus, WorkspaceDashboardAction, WorkspaceDashboardApp, WorkspaceDashboardData,
+        WorkspaceDashboardEntry, WorkspaceDashboardExit, WorkspaceDashboardOptions,
+        preview_viewport, run_workspace_dashboard,
+    };
+    use ratatui::layout::Rect;
+
+    fn demo_data() -> WorkspaceDashboardData {
+        WorkspaceDashboardData {
+            workspace_root: "/tmp/workspaces".to_string(),
+            github_note: None,
+            entries: vec![WorkspaceDashboardEntry {
+                ticket: "ENG-10259".to_string(),
+                branch: "eng-10259-scroll-support".to_string(),
+                size: "12 MB".to_string(),
+                modified: "2026-03-20 10:00".to_string(),
+                git_label: "dirty".to_string(),
+                git_clean: false,
+                linear_state: "In Progress".to_string(),
+                pr_label: "open".to_string(),
+                is_removal_candidate: true,
+                has_unpushed: true,
+                has_uncommitted: true,
+                is_detached: true,
+            }],
+        }
+    }
+
+    #[test]
+    fn workspace_dashboard_preview_scrolls_to_bottom() {
+        let viewport = preview_viewport(Rect::new(0, 0, 120, 18));
+        let mut app = WorkspaceDashboardApp::new(demo_data());
+        let _ = app.apply_in_viewport(WorkspaceDashboardAction::Enter, viewport);
+        let _ = app.apply_in_viewport(WorkspaceDashboardAction::End, viewport);
+
+        assert_eq!(app.focus, Focus::Preview);
+        assert!(app.preview_scroll.offset() > 0);
+    }
+
+    #[test]
+    fn workspace_dashboard_snapshot_mentions_mouse_wheel_preview_controls() {
+        let exit = run_workspace_dashboard(
+            demo_data(),
+            WorkspaceDashboardOptions {
+                render_once: true,
+                width: 120,
+                height: 32,
+                actions: vec![WorkspaceDashboardAction::Enter],
+            },
+            None,
+        )
+        .expect("render once should succeed");
+
+        let WorkspaceDashboardExit::Snapshot(snapshot) = exit else {
+            panic!("render_once should return a snapshot");
+        };
+
+        assert!(snapshot.contains("mouse wheel"));
     }
 }

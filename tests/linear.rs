@@ -700,7 +700,7 @@ fn linear_issue_list_render_once_launches_issue_browser_filters() {
             "MET",
             "--render-once",
             "--events",
-            "tab,down,down,enter",
+            "tab,tab,down,down,enter",
         ])
         .assert()
         .success()
@@ -1206,9 +1206,9 @@ fn dashboard_render_once_uses_ratatui_snapshot_output() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Status [focus]"))
-        .stdout(predicate::str::contains("Description Preview"))
-        .stdout(predicate::str::contains("MET-11"));
+        .stdout(predicate::str::contains("Description Preview [focus]"))
+        .stdout(predicate::str::contains("MET-11"))
+        .stdout(predicate::str::contains("Wheel scroll preview"));
 }
 
 #[test]

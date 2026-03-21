@@ -429,6 +429,15 @@ mutation UpdateIssue($id: String!, $input: IssueUpdateInput!) {{
         if let Some(priority) = request.priority {
             input.insert("priority".to_string(), Value::from(priority));
         }
+        if let Some(estimate) = request.estimate {
+            input.insert("estimate".to_string(), Value::from(estimate));
+        }
+        if let Some(label_ids) = request.label_ids {
+            input.insert("labelIds".to_string(), Value::from(label_ids));
+        }
+        if let Some(parent_id) = request.parent_id {
+            input.insert("parentId".to_string(), Value::String(parent_id));
+        }
         let data: IssueUpdatePayload = self
             .graphql()
             .query(

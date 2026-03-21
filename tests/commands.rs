@@ -147,6 +147,36 @@ fn backlog_sync_push_help_describes_opt_in_description_updates() {
 }
 
 #[test]
+fn backlog_improve_help_points_to_issue_refine_for_single_issue_rewrites() {
+    cli()
+        .args(["backlog", "improve", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Use `meta backlog improve` for a repo-scoped backlog sweep across existing issues in one state.",
+        ))
+        .stdout(predicate::str::contains("meta linear issues refine"))
+        .stdout(predicate::str::contains(
+            "the primary goal is improving that issue's description rather than scanning the backlog",
+        ));
+}
+
+#[test]
+fn issue_refine_help_points_back_to_backlog_improve_for_sweeps() {
+    cli()
+        .args(["linear", "issues", "refine", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "focused description-quality pass with auditable refinement artifacts",
+        ))
+        .stdout(predicate::str::contains("meta backlog improve"))
+        .stdout(predicate::str::contains(
+            "parent-child structure opportunities",
+        ));
+}
+
+#[test]
 fn legacy_config_alias_prints_runtime_hint() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");

@@ -2303,7 +2303,7 @@ fn sync_render_once_uses_local_backlog_entries_and_only_hydrates_linked_rows()
             &api_url,
             "--render-once",
             "--events",
-            "enter,down,enter",
+            "enter,enter,down,enter",
         ])
         .assert()
         .success()
@@ -2549,7 +2549,7 @@ fn sync_render_once_prefers_linked_backlog_children_over_project_rows() -> Resul
             &api_url,
             "--render-once",
             "--events",
-            "enter,down,enter",
+            "enter,enter,down,enter",
         ])
         .assert()
         .success()

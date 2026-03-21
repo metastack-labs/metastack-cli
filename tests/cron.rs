@@ -74,9 +74,9 @@ fn cron_init_render_once_shows_dashboard_fields() -> Result<(), Box<dyn Error>> 
         .stdout(predicate::str::contains("Agent prompt: <blank>"))
         .stdout(predicate::str::contains("Save: Create cron job"))
         .stdout(predicate::str::contains("Execution contract:"))
-        .stdout(predicate::str::contains(
-            "Ctrl+V pastes text, but image attachments are rejected until saved-prompt persistence exists.",
-        ));
+        .stdout(predicate::str::contains("Prompt preview"))
+        .stdout(predicate::str::contains("mouse wheel scrolls the editor."))
+        .stdout(predicate::str::contains("Ctrl+V pastes text,"));
 
     Ok(())
 }
@@ -143,9 +143,8 @@ Review old output
         .assert()
         .success()
         .stdout(predicate::str::contains("Agent prompt: Review old output"))
-        .stdout(predicate::str::contains(
-            "Ctrl+V pastes text, but image attachments are rejected until saved-prompt persistence exists.",
-        ));
+        .stdout(predicate::str::contains("Prompt preview"))
+        .stdout(predicate::str::contains("Ctrl+V pastes text,"));
 
     Ok(())
 }

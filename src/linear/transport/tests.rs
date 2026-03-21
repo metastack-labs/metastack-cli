@@ -5,7 +5,7 @@ use serde_json::json;
 use crate::config::LinearConfig;
 use crate::linear::{
     IssueAssigneeFilter, IssueCreateRequest, IssueLabelCreateRequest, IssueListFilters,
-    LinearClient, ReqwestLinearClient,
+    IssueUpdateRequest, LinearClient, ReqwestLinearClient,
 };
 
 #[tokio::test]
@@ -253,6 +253,49 @@ async fn reqwest_client_creates_issue_labels() {
     assert_eq!(label.id, "label-technical");
     assert_eq!(label.name, "technical");
     create_mock.assert_calls(1);
+}
+
+#[tokio::test]
+async fn reqwest_client_sends_estimate_labels_and_parent_when_updating_issue() {
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    let update_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation UpdateIssue")
+            .body_includes("\"estimate\":5.0")
+            .body_includes("\"labelIds\":[\"label-plan\",\"label-hygiene\"]")
+            .body_includes("\"parentId\":\"issue-parent\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "issueUpdate": {
+                    "success": true,
+                    "issue": issue_node("MET-41")
+                }
+            }
+        }));
+    });
+    let client = client(api_url);
+
+    let issue = client
+        .update_issue(
+            "issue-met-41",
+            IssueUpdateRequest {
+                title: None,
+                description: None,
+                project_id: None,
+                state_id: None,
+                priority: None,
+                estimate: Some(5.0),
+                label_ids: Some(vec!["label-plan".to_string(), "label-hygiene".to_string()]),
+                parent_id: Some("issue-parent".to_string()),
+            },
+        )
+        .await
+        .expect("issue update should succeed");
+
+    assert_eq!(issue.identifier, "MET-41");
+    update_mock.assert_calls(1);
 }
 
 #[tokio::test]

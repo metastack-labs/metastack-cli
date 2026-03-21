@@ -609,6 +609,9 @@ async fn edit_issue_updates_requested_fields_after_loading_context() {
             project: Some("MetaStack CLI".to_string()),
             state: Some("In Progress".to_string()),
             priority: Some(1),
+            estimate: None,
+            labels: None,
+            parent_identifier: None,
         })
         .await
         .expect("issue edit should succeed");
@@ -626,6 +629,98 @@ async fn edit_issue_updates_requested_fields_after_loading_context() {
     assert_eq!(request.project_id.as_deref(), Some("project-1"));
     assert_eq!(request.state_id.as_deref(), Some("state-2"));
     assert_eq!(request.priority, Some(1));
+    assert_eq!(request.estimate, None);
+    assert_eq!(request.label_ids, None);
+    assert_eq!(request.parent_id, None);
+}
+
+#[tokio::test]
+async fn edit_issue_updates_labels_estimate_and_parent() {
+    let mut parent = issue("MET-10", "Backlog", Some("project-1"), "MetaStack CLI");
+    parent.title = "Parent issue".to_string();
+    let client = FakeLinearClient {
+        issues: vec![issue("MET-11", "Todo", Some("project-1"), "MetaStack CLI")],
+        all_issues: vec![
+            issue("MET-11", "Todo", Some("project-1"), "MetaStack CLI"),
+            parent.clone(),
+        ],
+        issue_labels: vec![
+            label("label-plan", "plan"),
+            label("label-hygiene", "hygiene"),
+        ],
+        teams: vec![team("MET", &[("state-1", "Todo"), ("state-2", "Backlog")])],
+        issue_detail: Some(parent),
+        updated_issue: Some(issue("MET-11", "Todo", Some("project-1"), "MetaStack CLI")),
+        ..FakeLinearClient::default()
+    };
+    let service = LinearService::new(client.clone(), Some("MET".to_string()));
+
+    service
+        .edit_issue(IssueEditSpec {
+            identifier: "MET-11".to_string(),
+            title: None,
+            description: None,
+            project: None,
+            state: None,
+            priority: None,
+            estimate: Some(5.0),
+            labels: Some(vec!["plan".to_string(), "hygiene".to_string()]),
+            parent_identifier: Some("MET-10".to_string()),
+        })
+        .await
+        .expect("issue edit should succeed");
+
+    let updates = client.update_requests.lock().expect("mutex poisoned");
+    let (_issue_id, request) = updates
+        .first()
+        .expect("an update request should be recorded");
+    assert_eq!(request.estimate, Some(5.0));
+    assert_eq!(
+        request.label_ids.as_ref(),
+        Some(&vec!["label-plan".to_string(), "label-hygiene".to_string()])
+    );
+    assert_eq!(request.parent_id.as_deref(), Some("issue-met-10"));
+}
+
+#[tokio::test]
+async fn edit_issue_creates_missing_labels_and_uses_created_ids() {
+    let client = FakeLinearClient {
+        issues: vec![issue("MET-11", "Todo", Some("project-1"), "MetaStack CLI")],
+        all_issues: vec![issue("MET-11", "Todo", Some("project-1"), "MetaStack CLI")],
+        issue_labels: vec![label("label-plan", "plan")],
+        teams: vec![team("MET", &[("state-1", "Todo"), ("state-2", "Backlog")])],
+        updated_issue: Some(issue("MET-11", "Todo", Some("project-1"), "MetaStack CLI")),
+        ..FakeLinearClient::default()
+    };
+    let service = LinearService::new(client.clone(), Some("MET".to_string()));
+
+    service
+        .edit_issue(IssueEditSpec {
+            identifier: "MET-11".to_string(),
+            title: None,
+            description: None,
+            project: None,
+            state: None,
+            priority: None,
+            estimate: None,
+            labels: Some(vec!["plan".to_string(), "feature".to_string()]),
+            parent_identifier: None,
+        })
+        .await
+        .expect("issue edit should create the missing label before update");
+
+    let created = client.created_issue_labels.lock().expect("mutex poisoned");
+    assert_eq!(created.len(), 1);
+    assert_eq!(created[0].name, "feature");
+
+    let updates = client.update_requests.lock().expect("mutex poisoned");
+    let (_issue_id, request) = updates
+        .first()
+        .expect("an update request should be recorded");
+    assert_eq!(
+        request.label_ids.as_ref(),
+        Some(&vec!["label-plan".to_string(), "label-feature".to_string()])
+    );
 }
 
 #[tokio::test]

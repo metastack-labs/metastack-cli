@@ -564,6 +564,98 @@ fn listen_sessions_inspect_prunes_expired_completed_sessions_on_load() -> Result
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn listen_sessions_inspect_reports_mixed_token_usage() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    write_onboarded_config(&config_path, "")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+    init_repo_with_origin(&repo_root)?;
+
+    write_listen_store_session(
+        &config_path,
+        &repo_root,
+        vec![
+            json!({
+                "issue_id": "issue-10181",
+                "issue_identifier": "ENG-10181",
+                "issue_title": "Track built-in listen token usage",
+                "project_name": "MetaStack CLI",
+                "team_key": "MET",
+                "issue_url": "https://linear.app/issues/ENG-10181",
+                "phase": "running",
+                "summary": "Token telemetry is flowing",
+                "brief_path": null,
+                "workspace_path": "/tmp/ENG-10181",
+                "workpad_comment_id": "comment-10181",
+                "updated_at_epoch_seconds": 1_773_575_100u64,
+                "pid": 4242,
+                "session_id": "session-10181",
+                "turns": 2,
+                "tokens": {
+                    "input": 210,
+                    "output": 34
+                },
+                "log_path": "logs/ENG-10181.log"
+            }),
+            json!({
+                "issue_id": "issue-10182",
+                "issue_identifier": "ENG-10182",
+                "issue_title": "Fallback when usage is unavailable",
+                "project_name": "MetaStack CLI",
+                "team_key": "MET",
+                "issue_url": "https://linear.app/issues/ENG-10182",
+                "phase": "blocked",
+                "summary": "Provider did not emit exact counts",
+                "brief_path": null,
+                "workspace_path": "/tmp/ENG-10182",
+                "workpad_comment_id": "comment-10182",
+                "updated_at_epoch_seconds": 1_773_575_000u64,
+                "pid": null,
+                "session_id": "session-10182",
+                "turns": 1,
+                "tokens": {},
+                "log_path": "logs/ENG-10182.log"
+            }),
+        ],
+    )?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "inspect",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Latest session:"))
+        .stdout(predicate::str::contains("  - Tokens: in 210 | out 34 | total 244"))
+        .stdout(predicate::str::contains(
+            "  - ENG-10181 [Running] Token telemetry is flowing | tokens in 210 | out 34 | total 244",
+        ))
+        .stdout(predicate::str::contains(
+            "  - ENG-10182 [Blocked] Provider did not emit exact counts | tokens n/a",
+        ));
+
+    Ok(())
+}
+
 #[test]
 fn listen_once_demo_outputs_terminal_summary_without_browser_endpoints()
 -> Result<(), Box<dyn Error>> {
@@ -3802,6 +3894,7 @@ if [ "$1" = "-p" ] && [ "$2" = "--help" ]; then
 -p, --print
 --model <model>
 --effort <level>
+--output-format <format>
 --permission-mode <mode>
 EOF
   exit 0
@@ -3812,7 +3905,7 @@ printf '%s' "$METASTACK_AGENT_MODEL" > "$TEST_OUTPUT_DIR/model.txt"
 printf '%s' "$METASTACK_AGENT_REASONING" > "$TEST_OUTPUT_DIR/reasoning.txt"
 printf '%s' "$METASTACK_AGENT_PROVIDER_SOURCE" > "$TEST_OUTPUT_DIR/provider-source.txt"
 printf '%s' "$METASTACK_AGENT_ROUTE_KEY" > "$TEST_OUTPUT_DIR/route-key.txt"
-printf 'claude listen ok'
+printf '%s' '{"type":"result","subtype":"success","result":"claude listen ok","session_id":"listen-session-1"}'
 "#,
     )?;
     let mut permissions = fs::metadata(&claude_path)?.permissions();
@@ -4080,6 +4173,7 @@ exit 99
     assert!(args.contains("-p"));
     assert!(args.contains("--model=sonnet"));
     assert!(args.contains("--effort=high"));
+    assert!(args.contains("--output-format=json"));
     assert!(!args.contains("--reasoning="));
     assert_eq!(fs::read_to_string(stub_dir.join("agent.txt"))?, "claude");
     assert_eq!(fs::read_to_string(stub_dir.join("model.txt"))?, "sonnet");

@@ -24,12 +24,29 @@ Examples:
   meta backlog plan --root . --request \"Split the onboarding work into tickets\"
   meta backlog plan --root . ENG-10144
   meta backlog plan --root . ENG-10144 --velocity
+  meta backlog improve --root . --mode basic
+  meta backlog improve --root . ENG-10144 --mode advanced --apply
   meta backlog tech MET-35
   meta backlog split MET-35
   meta backlog sync status
   meta backlog sync link MET-35 --entry manual-notes --pull
   meta backlog sync pull --all
   meta backlog sync push MET-35 --update-description";
+
+const BACKLOG_IMPROVE_HELP: &str = "\
+Use `meta backlog improve` for a repo-scoped backlog sweep across existing issues in one state.
+Choose `--mode basic` for conservative metadata hygiene and `--mode advanced` for deeper
+rewrites or parent-child structure proposals.
+
+Use `meta linear issues refine` when you already know which issue needs a critique/rewrite and
+the primary goal is improving that issue's description rather than scanning the backlog.";
+
+const ISSUES_REFINE_HELP: &str = "\
+Use `meta linear issues refine` when you already know which issue needs a critique/rewrite and
+want a focused description-quality pass with auditable refinement artifacts.
+
+Use `meta backlog improve` when you want a repo-scoped backlog sweep for missing labels,
+acceptance criteria, priority/estimate, and parent-child structure opportunities.";
 
 const AGENTS_HELP_EXAMPLES: &str = "\
 Examples:
@@ -241,11 +258,50 @@ pub struct BacklogArgs {
 pub enum BacklogCommands {
     /// Plan a backlog request into one or more Linear backlog issues.
     Plan(PlanArgs),
+    /// Review repo-scoped backlog issues for hygiene gaps and optionally apply improvements.
+    Improve(BacklogImproveArgs),
     /// Create a backlog sub-issue and local planning files from a parent issue.
     #[command(name = "tech", visible_alias = "split", visible_alias = "derive")]
     Tech(TechnicalArgs),
     /// Launch the sync dashboard or run direct pull/push backlog operations.
     Sync(SyncArgs),
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+pub enum BacklogImproveModeArg {
+    Basic,
+    Advanced,
+}
+
+#[derive(Debug, Clone, Args)]
+#[command(after_help = BACKLOG_IMPROVE_HELP)]
+pub struct BacklogImproveArgs {
+    #[command(flatten)]
+    pub client: LinearClientArgs,
+    /// Optional explicit issue identifiers to improve. When omitted, scans repo-scoped backlog issues.
+    #[arg(value_name = "IDENTIFIER")]
+    pub issues: Vec<String>,
+    /// Improvement depth. `basic` focuses on safe metadata hygiene; `advanced` can rewrite more deeply and propose structure changes.
+    #[arg(long, value_enum, default_value_t = BacklogImproveModeArg::Basic)]
+    pub mode: BacklogImproveModeArg,
+    /// Backlog state to scan when no explicit issues are provided.
+    #[arg(long, default_value = "Backlog")]
+    pub state: String,
+    /// Maximum number of repo-scoped issues to scan when no explicit issues are provided.
+    #[arg(long, default_value_t = 25)]
+    pub limit: usize,
+    /// Apply the proposed updates after persisting the local artifact trail.
+    #[arg(long)]
+    pub apply: bool,
+    /// Override the configured default agent/provider for backlog improvement.
+    #[arg(long)]
+    pub agent: Option<String>,
+    /// Override the configured default model for backlog improvement.
+    #[arg(long)]
+    pub model: Option<String>,
+    /// Override the resolved built-in reasoning option for backlog improvement.
+    #[arg(long)]
+    pub reasoning: Option<String>,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -1402,6 +1458,7 @@ pub struct IssueEditArgs {
 }
 
 #[derive(Debug, Clone, Args)]
+#[command(after_help = ISSUES_REFINE_HELP)]
 pub struct IssueRefineArgs {
     /// One or more existing issue identifiers, for example MET-35.
     #[arg(value_name = "IDENTIFIER", required = true)]
@@ -1516,6 +1573,11 @@ pub enum SyncDashboardEventArg {
 pub enum MergeDashboardEventArg {
     Up,
     Down,
+    Tab,
+    PageUp,
+    PageDown,
+    Home,
+    End,
     Space,
     Enter,
     Back,

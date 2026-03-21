@@ -5,7 +5,10 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+    MouseEvent, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -28,6 +31,7 @@ use crate::progress::{LoadingPanelData, SPINNER_FRAMES, render_loading_panel};
 use crate::tui::fields::{
     FilterableSelectFieldState, InputFieldRender, InputFieldState, SelectFieldState,
 };
+use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph_with_block, wrapped_rows};
 use crate::tui::theme::{Tone, badge, emphasis_style, label_style, tone_style};
 
 const PROJECT_FETCH_LIMIT: usize = 100;
@@ -162,6 +166,7 @@ struct OnboardingApp {
     project_ids: Vec<String>,
     all_projects: Vec<ProjectSummary>,
     validation_state: ValidationState,
+    review_scroll: ScrollState,
     error: Option<String>,
 }
 
@@ -295,6 +300,7 @@ impl OnboardingApp {
             project_ids: Vec::new(),
             all_projects: Vec::new(),
             validation_state: ValidationState::Idle,
+            review_scroll: ScrollState::default(),
             error: None,
         };
         if !selected_team.is_empty() {
@@ -303,7 +309,25 @@ impl OnboardingApp {
         app
     }
 
-    fn handle_key(&mut self, key: KeyEvent) -> bool {
+    fn handle_key(&mut self, key: KeyEvent, review_viewport: Rect) -> bool {
+        if self.step == OnboardingStep::Review
+            && matches!(
+                key.code,
+                KeyCode::Up
+                    | KeyCode::Down
+                    | KeyCode::PageUp
+                    | KeyCode::PageDown
+                    | KeyCode::Home
+                    | KeyCode::End
+            )
+        {
+            let _ = self.review_scroll.apply_key_code_in_viewport(
+                key.code,
+                review_viewport,
+                self.review_content_rows(review_viewport.width),
+            );
+            return true;
+        }
         match self.step {
             OnboardingStep::Welcome => false,
             OnboardingStep::ApiKey => self.api_key.handle_key(key),
@@ -318,6 +342,25 @@ impl OnboardingApp {
             OnboardingStep::TechnicalLabel => self.technical_label.handle_key(key),
             OnboardingStep::Review => false,
         }
+    }
+
+    fn handle_review_mouse(&mut self, mouse: MouseEvent, review_viewport: Rect) -> bool {
+        if self.step != OnboardingStep::Review {
+            return false;
+        }
+        self.review_scroll.apply_mouse_in_viewport(
+            mouse,
+            review_viewport,
+            self.review_content_rows(review_viewport.width),
+        )
+    }
+
+    fn review_text(&self) -> Text<'static> {
+        Text::from(review_lines(self))
+    }
+
+    fn review_content_rows(&self, width: u16) -> usize {
+        wrapped_rows(&plain_text(&self.review_text()), width.max(1))
     }
 
     fn sync_project_options(&mut self) {
@@ -397,7 +440,8 @@ fn run_dashboard(mut app: OnboardingApp, app_config: &AppConfig) -> Result<Dashb
     let mut pending_job: Option<PendingCatalogJob> = None;
     let mut stdout = io::stdout();
     enable_raw_mode().context("failed to enable raw mode for onboarding")?;
-    execute!(stdout, EnterAlternateScreen).context("failed to enter alternate screen")?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
+        .context("failed to enter alternate screen")?;
     let _cleanup = OnboardingTerminalCleanup;
 
     let backend = CrosstermBackend::new(stdout);
@@ -459,7 +503,17 @@ fn run_dashboard(mut app: OnboardingApp, app_config: &AppConfig) -> Result<Dashb
         if !event::poll(Duration::from_millis(200))? {
             continue;
         }
-        let Event::Key(key) = event::read()? else {
+        let read = event::read()?;
+        let review_viewport = review_viewport(terminal.size()?.into());
+        let Event::Key(key) = read else {
+            if let Event::Mouse(mouse) = read
+                && matches!(
+                    mouse.kind,
+                    MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                )
+            {
+                let _ = app.handle_review_mouse(mouse, review_viewport);
+            }
             continue;
         };
         if key.kind != KeyEventKind::Press {
@@ -475,7 +529,7 @@ fn run_dashboard(mut app: OnboardingApp, app_config: &AppConfig) -> Result<Dashb
             continue;
         }
 
-        let handled = app.handle_key(key);
+        let handled = app.handle_key(key, review_viewport);
         if handled {
             if app.step == OnboardingStep::Team {
                 app.sync_project_options();
@@ -867,14 +921,16 @@ fn render_right_panel(frame: &mut Frame<'_>, app: &OnboardingApp, area: Rect) {
             "technical",
         ),
         OnboardingStep::Review => {
-            let summary = Paragraph::new(Text::from(review_lines(app)))
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title("Review")
-                        .padding(Padding::new(1, 1, 1, 0)),
-                )
-                .wrap(Wrap { trim: false });
+            let summary = scrollable_paragraph_with_block(
+                app.review_text(),
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Review [scroll]")
+                    .border_style(Style::default().add_modifier(Modifier::BOLD))
+                    .padding(Padding::new(1, 1, 1, 0)),
+                &app.review_scroll,
+            )
+            .wrap(Wrap { trim: false });
             frame.render_widget(summary, area);
         }
     }
@@ -889,7 +945,7 @@ fn render_footer(frame: &mut Frame<'_>, app: &OnboardingApp, area: Rect) {
             "Type to search • Up/Down move • Enter accepts • Shift+Tab goes back • Esc cancels"
         }
         OnboardingStep::Review => {
-            "Enter saves install defaults • Shift+Tab goes back • Esc cancels"
+            "Up/Down and PgUp/PgDn/Home/End or the mouse wheel scroll • Enter saves install defaults • Shift+Tab goes back • Esc cancels"
         }
         OnboardingStep::Welcome => "Enter starts • Esc cancels",
         _ => "Type or paste • Enter continues • Shift+Tab goes back • Esc cancels",
@@ -966,9 +1022,7 @@ fn render_input_panel(
         .padding(Padding::new(1, 1, 1, 0));
     let inner = block.inner(area);
     let rendered: InputFieldRender = field.render_with_width(placeholder, true, inner.width);
-    let paragraph = Paragraph::new(rendered.text.clone())
-        .block(block)
-        .wrap(Wrap { trim: false });
+    let paragraph = rendered.paragraph(block);
     frame.render_widget(paragraph, area);
     rendered.set_cursor(frame, inner);
 }
@@ -1112,15 +1166,44 @@ impl Drop for OnboardingTerminalCleanup {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
         let mut stdout = io::stdout();
-        let _ = execute!(stdout, LeaveAlternateScreen);
+        let _ = execute!(stdout, DisableMouseCapture, LeaveAlternateScreen);
     }
+}
+
+fn review_viewport(area: Rect) -> Rect {
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(16),
+            Constraint::Length(4),
+        ])
+        .split(area);
+    let main = if vertical[1].width < 96 {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
+            .split(vertical[1])
+    } else {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(46), Constraint::Percentage(54)])
+            .split(vertical[1])
+    };
+    Block::default()
+        .borders(Borders::ALL)
+        .title("Review")
+        .padding(Padding::new(1, 1, 1, 0))
+        .inner(main[1])
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::{KeyCode, KeyModifiers, MouseEvent, MouseEventKind};
     use httpmock::Method::POST;
     use httpmock::MockServer;
+    use ratatui::layout::Rect;
 
     #[test]
     fn onboarding_render_once_shows_two_column_shell() -> Result<()> {
@@ -1131,6 +1214,44 @@ mod tests {
         assert!(snapshot.contains("Start"));
         assert!(snapshot.contains("Press Enter to begin"));
         Ok(())
+    }
+
+    #[test]
+    fn onboarding_review_scrolls_when_summary_overflows() {
+        let mut app = OnboardingApp::new(&AppConfig::default(), OnboardingLaunchMode::Replay);
+        app.step = OnboardingStep::Review;
+        let long = "repo-default-label-".repeat(10);
+        let _ = app.listen_label.paste(&long);
+        let _ = app.plan_label.paste(&long);
+        let _ = app.technical_label.paste(&long);
+
+        let viewport = review_viewport(Rect::new(0, 0, 72, 20));
+        assert!(app.handle_key(KeyCode::End.into(), viewport));
+        assert!(app.review_scroll.offset() > 0);
+    }
+
+    #[test]
+    fn onboarding_review_mouse_wheel_scrolls_when_summary_overflows() {
+        let mut app = OnboardingApp::new(&AppConfig::default(), OnboardingLaunchMode::Replay);
+        app.step = OnboardingStep::Review;
+        let long = "repo-default-label-".repeat(10);
+        let _ = app.listen_label.paste(&long);
+        let _ = app.plan_label.paste(&long);
+        let _ = app.technical_label.paste(&long);
+
+        let viewport = review_viewport(Rect::new(0, 0, 72, 20));
+        let handled = app.handle_review_mouse(
+            MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: viewport.x,
+                row: viewport.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            viewport,
+        );
+
+        assert!(handled);
+        assert!(app.review_scroll.offset() > 0);
     }
 
     #[tokio::test]

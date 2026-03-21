@@ -4,7 +4,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+    MouseEvent, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -33,6 +36,7 @@ use crate::fs::{PlanningPaths, canonicalize_existing_dir};
 use crate::linear::{LinearService, ReqwestLinearClient};
 use crate::scaffold::{ensure_backlog_templates, ensure_planning_layout};
 use crate::tui::fields::{InputFieldState, SelectFieldState};
+use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph_with_block, wrapped_rows};
 
 #[derive(Debug, Clone)]
 struct SetupViewData {
@@ -78,6 +82,7 @@ struct SetupApp {
     interactive_plan_limit: InputFieldState,
     plan_label: InputFieldState,
     technical_label: InputFieldState,
+    summary_scroll: ScrollState,
     detected_agents: Vec<String>,
     error: Option<String>,
 }
@@ -859,6 +864,7 @@ impl SetupApp {
                     .clone()
                     .unwrap_or_default(),
             ),
+            summary_scroll: ScrollState::default(),
             detected_agents: view.detected_agents.clone(),
             error: None,
         };
@@ -985,8 +991,18 @@ impl SetupApp {
         }
     }
 
-    fn handle_key(&mut self, key: KeyEvent) -> Option<SetupExit> {
+    fn handle_key(&mut self, key: KeyEvent, summary_viewport: Rect) -> Option<SetupExit> {
         match key.code {
+            KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End
+                if self.step == SetupStep::Save =>
+            {
+                let _ = self.summary_scroll.apply_key_code_in_viewport(
+                    key.code,
+                    summary_viewport,
+                    self.summary_content_rows(summary_viewport.width),
+                );
+                None
+            }
             KeyCode::Char(_)
             | KeyCode::Backspace
             | KeyCode::Left
@@ -1004,6 +1020,17 @@ impl SetupApp {
             KeyCode::Esc => self.apply_action(SetupAction::Esc),
             _ => None,
         }
+    }
+
+    fn handle_summary_mouse(&mut self, mouse: MouseEvent, summary_viewport: Rect) -> bool {
+        if self.step != SetupStep::Save {
+            return false;
+        }
+        self.summary_scroll.apply_mouse_in_viewport(
+            mouse,
+            summary_viewport,
+            self.summary_content_rows(summary_viewport.width),
+        )
     }
 
     fn handle_paste(&mut self, text: &str) {
@@ -1105,6 +1132,19 @@ impl SetupApp {
             SetupStep::Reasoning => self.reasoning.move_by(delta),
             SetupStep::AssignmentScope => self.assignment_field.move_by(delta),
             SetupStep::RefreshPolicy => self.refresh_policy_field.move_by(delta),
+            SetupStep::Save => {
+                let key = if delta.is_negative() {
+                    KeyCode::Up
+                } else {
+                    KeyCode::Down
+                };
+                let viewport = summary_viewport(Rect::new(0, 0, 120, 32));
+                let _ = self.summary_scroll.apply_key_code_in_viewport(
+                    key,
+                    viewport,
+                    self.summary_content_rows(viewport.width),
+                );
+            }
             SetupStep::LinearApiKey
             | SetupStep::Team
             | SetupStep::Project
@@ -1113,9 +1153,76 @@ impl SetupApp {
             | SetupStep::ListenPollInterval
             | SetupStep::InteractivePlanLimit
             | SetupStep::PlanLabel
-            | SetupStep::TechnicalLabel
-            | SetupStep::Save => {}
+            | SetupStep::TechnicalLabel => {}
         }
+    }
+
+    fn summary_text(&self, width: u16) -> Text<'static> {
+        Text::from(summary_lines(
+            width,
+            &[
+                (
+                    "Linear auth",
+                    summarize_repo_auth(&self.repo_auth_field, &self.api_key),
+                ),
+                ("Default team", summarize_optional(&self.team)),
+                ("Project selector", summarize_optional(&self.project)),
+                (
+                    "Repo provider",
+                    self.provider_field
+                        .selected_label()
+                        .unwrap_or("unset")
+                        .to_string(),
+                ),
+                (
+                    "Repo model",
+                    self.model_field
+                        .selected_label()
+                        .unwrap_or("Leave unset")
+                        .to_string(),
+                ),
+                (
+                    "Repo reasoning",
+                    summarize_optional_select(&self.reasoning, "Leave unset"),
+                ),
+                ("Listen labels", summarize_listen_labels(&self.listen_label)),
+                (
+                    "Assignee filter",
+                    assignment_scope_label(match self.assignment_field.selected() {
+                        1 => ListenAssignmentScope::ViewerOnly,
+                        2 => ListenAssignmentScope::ViewerOrUnassigned,
+                        _ => ListenAssignmentScope::Any,
+                    })
+                    .to_string(),
+                ),
+                (
+                    "Workspace refresh",
+                    refresh_policy_label(match self.refresh_policy_field.selected() {
+                        1 => ListenRefreshPolicy::RecreateFromOriginMain,
+                        _ => ListenRefreshPolicy::ReuseAndRefresh,
+                    })
+                    .to_string(),
+                ),
+                (
+                    "Instructions file",
+                    summarize_optional(&self.instructions_path),
+                ),
+                (
+                    "Listen poll interval",
+                    summarize_optional(&self.listen_poll_interval),
+                ),
+                (
+                    "Interactive plan limit",
+                    summarize_optional(&self.interactive_plan_limit),
+                ),
+                ("Plan label", summarize_optional(&self.plan_label)),
+                ("Technical label", summarize_optional(&self.technical_label)),
+            ],
+        ))
+    }
+
+    fn summary_content_rows(&self, width: u16) -> usize {
+        wrapped_rows(&plain_text(&self.summary_text(width.max(1))), width.max(1))
     }
 
     fn submit(&self) -> Result<SubmittedSetup> {
@@ -1218,7 +1325,7 @@ fn render_once(app: SetupApp, args: &SetupArgs) -> Result<String> {
 fn run_setup_dashboard(app: SetupApp) -> Result<SetupExit> {
     let mut stdout = io::stdout();
     enable_raw_mode()?;
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let _cleanup = TerminalCleanup;
 
     let backend = CrosstermBackend::new(stdout);
@@ -1231,11 +1338,21 @@ fn run_setup_dashboard(app: SetupApp) -> Result<SetupExit> {
         if event::poll(Duration::from_millis(250))? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    if let Some(exit) = app.handle_key(key) {
+                    let viewport = summary_viewport(terminal.size()?.into());
+                    if let Some(exit) = app.handle_key(key, viewport) {
                         return Ok(exit);
                     }
                 }
                 Event::Paste(text) => app.handle_paste(&text),
+                Event::Mouse(mouse)
+                    if matches!(
+                        mouse.kind,
+                        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                    ) =>
+                {
+                    let viewport = summary_viewport(terminal.size()?.into());
+                    let _ = app.handle_summary_mouse(mouse, viewport);
+                }
                 _ => {}
             }
         }
@@ -1478,70 +1595,24 @@ fn render_step_panel(frame: &mut Frame<'_>, app: &SetupApp, area: Rect) {
 }
 
 fn render_summary_panel(frame: &mut Frame<'_>, app: &SetupApp, area: Rect) {
-    let summary = summary_lines(
-        area.width,
-        &[
-            (
-                "Linear auth",
-                summarize_repo_auth(&app.repo_auth_field, &app.api_key),
-            ),
-            ("Default team", summarize_optional(&app.team)),
-            ("Project selector", summarize_optional(&app.project)),
-            (
-                "Repo provider",
-                app.provider_field
-                    .selected_label()
-                    .unwrap_or("unset")
-                    .to_string(),
-            ),
-            (
-                "Repo model",
-                app.model_field
-                    .selected_label()
-                    .unwrap_or("Leave unset")
-                    .to_string(),
-            ),
-            (
-                "Repo reasoning",
-                summarize_optional_select(&app.reasoning, "Leave unset"),
-            ),
-            ("Listen labels", summarize_listen_labels(&app.listen_label)),
-            (
-                "Assignee filter",
-                assignment_scope_label(match app.assignment_field.selected() {
-                    1 => ListenAssignmentScope::ViewerOnly,
-                    2 => ListenAssignmentScope::ViewerOrUnassigned,
-                    _ => ListenAssignmentScope::Any,
-                })
-                .to_string(),
-            ),
-            (
-                "Workspace refresh",
-                refresh_policy_label(match app.refresh_policy_field.selected() {
-                    1 => ListenRefreshPolicy::RecreateFromOriginMain,
-                    _ => ListenRefreshPolicy::ReuseAndRefresh,
-                })
-                .to_string(),
-            ),
-            (
-                "Instructions file",
-                summarize_optional(&app.instructions_path),
-            ),
-            (
-                "Listen poll interval",
-                summarize_optional(&app.listen_poll_interval),
-            ),
-            (
-                "Interactive plan limit",
-                summarize_optional(&app.interactive_plan_limit),
-            ),
-            ("Plan label", summarize_optional(&app.plan_label)),
-            ("Technical label", summarize_optional(&app.technical_label)),
-        ],
-    );
-    let paragraph = Paragraph::new(Text::from(summary))
-        .block(Block::default().borders(Borders::ALL).title("Summary"))
-        .wrap(Wrap { trim: false });
+    let active = app.step == SetupStep::Save;
+    let paragraph = scrollable_paragraph_with_block(
+        app.summary_text(area.width.saturating_sub(2)),
+        Block::default()
+            .borders(Borders::ALL)
+            .title(if active {
+                "Summary [scroll]"
+            } else {
+                "Summary"
+            })
+            .border_style(if active {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            }),
+        &app.summary_scroll,
+    )
+    .wrap(Wrap { trim: false });
     frame.render_widget(paragraph, area);
 }
 
@@ -1555,7 +1626,9 @@ fn render_footer(frame: &mut Frame<'_>, app: &SetupApp, area: Rect) {
         | SetupStep::RefreshPolicy => {
             "Use Up/Down to choose. Enter or Tab advances. Shift+Tab goes back. Esc cancels."
         }
-        SetupStep::Save => "Press Enter to save. Shift+Tab goes back. Esc cancels.",
+        SetupStep::Save => {
+            "Review the summary. Up/Down and PgUp/PgDn/Home/End or the mouse wheel scroll. Enter saves. Shift+Tab goes back. Esc cancels."
+        }
         _ => "Type or paste the value. Enter or Tab advances. Shift+Tab goes back. Esc cancels.",
     };
     let status = app.error.as_deref().unwrap_or("Ready.");
@@ -1578,9 +1651,7 @@ fn render_input_panel(
         .border_style(Style::default().add_modifier(Modifier::BOLD));
     let inner = block.inner(area);
     let rendered = field.render_with_width(placeholder, true, inner.width);
-    let paragraph = Paragraph::new(rendered.text.clone())
-        .block(block)
-        .wrap(Wrap { trim: false });
+    let paragraph = rendered.paragraph(block);
     frame.render_widget(paragraph, area);
     rendered.set_cursor(frame, inner);
 }
@@ -1852,8 +1923,61 @@ impl Drop for TerminalCleanup {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
         let mut stdout = io::stdout();
-        let _ = execute!(stdout, LeaveAlternateScreen);
+        let _ = execute!(stdout, DisableMouseCapture, LeaveAlternateScreen);
     }
+}
+
+fn summary_viewport(area: Rect) -> Rect {
+    let header_height = if area.width >= 110 { 5 } else { 6 };
+    let footer_height = if area.width >= 100 { 4 } else { 5 };
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(header_height),
+            Constraint::Min(0),
+            Constraint::Length(footer_height),
+        ])
+        .split(area);
+    let step_col = setup_step_column_width();
+    let body_area = layout[1];
+    let summary_area = if body_area.width >= 118 {
+        let body = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(step_col),
+                Constraint::Min(38),
+                Constraint::Length(44),
+            ])
+            .split(body_area);
+        body[2]
+    } else if body_area.width >= 90 {
+        let sidebar_width = step_col.max(40);
+        let body = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Length(sidebar_width), Constraint::Min(40)])
+            .split(body_area);
+        let sidebar = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(12), Constraint::Min(10)])
+            .split(body[0]);
+        sidebar[1]
+    } else {
+        let stacked = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(10),
+                Constraint::Min(8),
+                Constraint::Length(14),
+            ])
+            .split(body_area);
+        stacked[2]
+    };
+    Rect::new(
+        summary_area.x.saturating_add(1),
+        summary_area.y.saturating_add(1),
+        summary_area.width.saturating_sub(2).max(1),
+        summary_area.height.saturating_sub(2).max(1),
+    )
 }
 
 #[cfg(test)]
@@ -1861,15 +1985,17 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        BacklogTemplateConflictAction, SetupApp, SetupViewData,
+        BacklogTemplateConflictAction, SetupApp, SetupStep, SetupViewData,
         parse_backlog_template_conflict_action, parse_optional_listen_labels_input,
-        prompt_backlog_template_conflicts_with_io, render_summary,
+        prompt_backlog_template_conflicts_with_io, render_summary, summary_viewport,
     };
     use crate::config::{
         AgentSettings, AppConfig, ListenAssignmentScope, PlanningAgentSettings,
         PlanningListenSettings, PlanningMeta,
     };
     use anyhow::Result;
+    use crossterm::event::{KeyCode, KeyModifiers, MouseEvent, MouseEventKind};
+    use ratatui::layout::Rect;
     use std::io::Cursor;
 
     #[test]
@@ -1931,6 +2057,59 @@ mod tests {
             ]
         );
         assert_eq!(app.reasoning.selected_label(), Some("max"));
+    }
+
+    #[test]
+    fn setup_save_summary_scrolls_when_content_overflows() {
+        let mut view = SetupViewData {
+            root: PathBuf::from("/tmp/repo"),
+            config_path: PathBuf::from("/tmp/metastack-config.toml"),
+            metastack_meta_path: PathBuf::from("/tmp/repo/.metastack/meta.json"),
+            app_config: AppConfig::default(),
+            app_config_changed: false,
+            planning_meta: PlanningMeta::default(),
+            detected_agents: Vec::new(),
+        };
+        view.planning_meta.listen.instructions_path =
+            Some("docs/".to_string() + &"very-long-review-value/".repeat(12));
+        let mut app = SetupApp::new(&view);
+        app.step = SetupStep::Save;
+
+        let viewport = summary_viewport(Rect::new(0, 0, 72, 20));
+        let _ = app.handle_key(KeyCode::End.into(), viewport);
+
+        assert!(app.summary_scroll.offset() > 0);
+    }
+
+    #[test]
+    fn setup_save_summary_mouse_wheel_scrolls_when_content_overflows() {
+        let mut view = SetupViewData {
+            root: PathBuf::from("/tmp/repo"),
+            config_path: PathBuf::from("/tmp/metastack-config.toml"),
+            metastack_meta_path: PathBuf::from("/tmp/repo/.metastack/meta.json"),
+            app_config: AppConfig::default(),
+            app_config_changed: false,
+            planning_meta: PlanningMeta::default(),
+            detected_agents: Vec::new(),
+        };
+        view.planning_meta.listen.instructions_path =
+            Some("docs/".to_string() + &"very-long-review-value/".repeat(12));
+        let mut app = SetupApp::new(&view);
+        app.step = SetupStep::Save;
+
+        let viewport = summary_viewport(Rect::new(0, 0, 72, 20));
+        let handled = app.handle_summary_mouse(
+            MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: viewport.x,
+                row: viewport.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            viewport,
+        );
+
+        assert!(handled);
+        assert!(app.summary_scroll.offset() > 0);
     }
 
     #[test]

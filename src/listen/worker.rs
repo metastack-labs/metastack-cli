@@ -1,13 +1,18 @@
+use std::cell::RefCell;
 use std::fs;
 use std::io::Write;
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::thread;
 
 use anyhow::{Context, Result, anyhow, bail};
 
+use crate::agent_provider::builtin_provider_adapter;
 use crate::agents::{
-    apply_invocation_environment, apply_noninteractive_agent_environment,
-    command_args_for_invocation, render_invocation_diagnostics,
+    AgentExecutionOptions, AgentTokenUsage, apply_invocation_environment,
+    apply_noninteractive_agent_environment, command_args_for_invocation,
+    command_args_for_invocation_with_options, render_invocation_diagnostics,
     resolve_agent_invocation_for_planning, validate_invocation_command_surface,
 };
 use crate::backlog::load_issue_metadata;
@@ -88,6 +93,9 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
         backlog_issue: backlog_issue.as_ref(),
         pid: Some(worker_pid),
     };
+    let mut session_tokens =
+        load_existing_session_tokens(&source_root, project_selector, &args.issue)?;
+    let mut session_id = load_existing_session_id(&source_root, project_selector, &args.issue)?;
     let mut saw_implementation_progress = workspace_has_meaningful_progress(&workspace_path)?;
     let mut stalled_turns = 0u32;
     let log_path = agent_log_path(&source_root, args.project.as_deref(), &args.issue);
@@ -126,6 +134,8 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                 ),
                 &session_context,
                 turns_completed,
+                session_id.as_deref(),
+                &session_tokens,
             ),
         )?;
         return Err(error);
@@ -141,6 +151,8 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     compact_completed_summary(None, turns_completed, &issue_state_label(&issue)),
                     &session_context,
                     turns_completed,
+                    session_id.as_deref(),
+                    &session_tokens,
                 ),
             )?;
             return Ok(());
@@ -166,6 +178,8 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     ),
                     &session_context,
                     turns_completed,
+                    session_id.as_deref(),
+                    &session_tokens,
                 ),
             )?;
             return Ok(());
@@ -193,26 +207,96 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                 ),
                 &session_context,
                 turns_completed,
+                session_id.as_deref(),
+                &session_tokens,
             ),
         )?;
 
-        if let Err(error) = execute_agent_turn(&issue, turn_number, &turn_context) {
-            write_listen_session(
-                &source_root,
-                project_selector,
-                build_worker_session(
-                    &issue,
-                    SessionPhase::Blocked,
-                    compact_blocked_summary(
-                        &format!("Blocked | turn {turn_number}/{} failed", args.max_turns),
-                        backlog_progress_before.as_ref(),
-                        &log_path,
+        let session_id_state = RefCell::new(session_id.clone());
+        let turn_result = match execute_agent_turn(
+            &issue,
+            turn_number,
+            &turn_context,
+            |current_session_id| {
+                if session_id_state.borrow().as_deref() == Some(current_session_id) {
+                    return Ok(());
+                }
+                *session_id_state.borrow_mut() = Some(current_session_id.to_string());
+                write_listen_session(
+                    &source_root,
+                    project_selector,
+                    build_worker_session(
+                        &issue,
+                        SessionPhase::Running,
+                        compact_running_summary(
+                            backlog_progress_before.as_ref(),
+                            turn_number,
+                            args.max_turns,
+                            0,
+                        ),
+                        &session_context,
+                        turns_completed,
+                        session_id_state.borrow().as_deref(),
+                        &session_tokens,
                     ),
-                    &session_context,
-                    turns_completed,
-                ),
-            )?;
-            return Err(error);
+                )
+            },
+            |usage| {
+                let mut displayed_tokens = session_tokens.clone();
+                displayed_tokens.accumulate(&TokenUsage {
+                    input: usage.input,
+                    output: usage.output,
+                });
+                write_listen_session(
+                    &source_root,
+                    project_selector,
+                    build_worker_session(
+                        &issue,
+                        SessionPhase::Running,
+                        compact_running_summary(
+                            backlog_progress_before.as_ref(),
+                            turn_number,
+                            args.max_turns,
+                            0,
+                        ),
+                        &session_context,
+                        turns_completed,
+                        session_id_state.borrow().as_deref(),
+                        &displayed_tokens,
+                    ),
+                )
+            },
+        ) {
+            Ok(result) => result,
+            Err(error) => {
+                write_listen_session(
+                    &source_root,
+                    project_selector,
+                    build_worker_session(
+                        &issue,
+                        SessionPhase::Blocked,
+                        compact_blocked_summary(
+                            &format!("Blocked | turn {turn_number}/{} failed", args.max_turns),
+                            backlog_progress_before.as_ref(),
+                            &log_path,
+                        ),
+                        &session_context,
+                        turns_completed,
+                        session_id.as_deref(),
+                        &session_tokens,
+                    ),
+                )?;
+                return Err(error);
+            }
+        };
+        session_id = turn_result
+            .session_id
+            .or_else(|| session_id_state.into_inner());
+        if let Some(usage) = turn_result.usage {
+            session_tokens.accumulate(&TokenUsage {
+                input: usage.input,
+                output: usage.output,
+            });
         }
 
         turns_completed = turn_number;
@@ -254,6 +338,8 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                             ),
                             &session_context,
                             turns_completed,
+                            session_id.as_deref(),
+                            &session_tokens,
                         ),
                     )?;
                     return Ok(());
@@ -295,6 +381,8 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                             summary,
                             &session_context,
                             turns_completed,
+                            session_id.as_deref(),
+                            &session_tokens,
                         ),
                     )?;
                     return Ok(());
@@ -313,6 +401,8 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                         ),
                         &session_context,
                         turns_completed,
+                        session_id.as_deref(),
+                        &session_tokens,
                     ),
                 )?;
                 return Ok(());
@@ -332,6 +422,8 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                         ),
                         &session_context,
                         turns_completed,
+                        session_id.as_deref(),
+                        &session_tokens,
                     ),
                 )?;
                 return Ok(());
@@ -351,6 +443,8 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     ),
                     &session_context,
                     turns_completed,
+                    session_id.as_deref(),
+                    &session_tokens,
                 ),
             )?;
         } else {
@@ -363,6 +457,8 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     compact_running_summary(None, turns_completed, args.max_turns, stalled_turns),
                     &session_context,
                     turns_completed,
+                    session_id.as_deref(),
+                    &session_tokens,
                 ),
             )?;
         }
@@ -389,6 +485,12 @@ struct WorkerSessionContext<'a> {
     workpad_comment_id: &'a str,
     backlog_issue: Option<&'a IssueSummary>,
     pid: Option<u32>,
+}
+
+#[derive(Debug, Default)]
+struct TurnExecutionResult {
+    session_id: Option<String>,
+    usage: Option<AgentTokenUsage>,
 }
 
 async fn load_worker_issue<C>(service: &LinearService<C>, identifier: &str) -> Result<IssueSummary>
@@ -498,14 +600,29 @@ fn execute_agent_turn(
     issue: &IssueSummary,
     turn_number: u32,
     context: &ListenTurnContext<'_>,
-) -> Result<()> {
+    mut on_session_started: impl FnMut(&str) -> Result<()>,
+    mut on_usage: impl FnMut(&AgentTokenUsage) -> Result<()>,
+) -> Result<TurnExecutionResult> {
     let run_args = build_listen_run_args(issue, turn_number, context)?;
     let invocation = resolve_agent_invocation_for_planning(
         context.app_config,
         context.planning_meta,
         &run_args,
     )?;
-    let command_args = command_args_for_invocation(&invocation, Some(context.workspace_path))?;
+    let capture_output = invocation.builtin_provider;
+    let command_args = if capture_output {
+        command_args_for_invocation_with_options(
+            &invocation,
+            AgentExecutionOptions {
+                working_dir: Some(context.workspace_path.to_path_buf()),
+                extra_env: Vec::new(),
+                capture_output: true,
+                continuation: None,
+            },
+        )?
+    } else {
+        command_args_for_invocation(&invocation, Some(context.workspace_path))?
+    };
     let attempted_command = validate_invocation_command_surface(&invocation, &command_args)?;
     let log_path = agent_log_path(
         context.source_root,
@@ -542,22 +659,26 @@ fn execute_agent_turn(
                 .with_context(|| format!("failed to write `{}`", log_path.display()))?;
         }
     }
-    let stdout = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-        .with_context(|| format!("failed to open `{}`", log_path.display()))?;
-    let stderr = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-        .with_context(|| format!("failed to open `{}`", log_path.display()))?;
-
     let mut command = Command::new(&invocation.command);
     command.current_dir(context.workspace_path);
     command.args(&command_args);
-    command.stdout(Stdio::from(stdout));
-    command.stderr(Stdio::from(stderr));
+    if capture_output {
+        command.stdout(Stdio::piped());
+        command.stderr(Stdio::piped());
+    } else {
+        let stdout = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .with_context(|| format!("failed to open `{}`", log_path.display()))?;
+        let stderr = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .with_context(|| format!("failed to open `{}`", log_path.display()))?;
+        command.stdout(Stdio::from(stdout));
+        command.stderr(Stdio::from(stderr));
+    }
     apply_noninteractive_agent_environment(&mut command);
     apply_invocation_environment(
         &mut command,
@@ -634,6 +755,87 @@ fn execute_agent_turn(
             .context("failed to write prompt payload to the launched agent")?;
     }
 
+    if capture_output {
+        let provider = builtin_provider_adapter(&invocation.agent)
+            .ok_or_else(|| anyhow!("builtin provider `{}` is not configured", invocation.agent))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow!("failed to capture stdout for listen turn {turn_number}"))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| anyhow!("failed to capture stderr for listen turn {turn_number}"))?;
+        let stderr_log_path = log_path.clone();
+        let stderr_handle = thread::spawn(move || -> Result<()> {
+            let mut stderr_log = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&stderr_log_path)
+                .with_context(|| format!("failed to open `{}`", stderr_log_path.display()))?;
+            for line in BufReader::new(stderr).lines() {
+                let line = line.with_context(|| {
+                    format!("failed to read stderr for `{}`", stderr_log_path.display())
+                })?;
+                writeln!(stderr_log, "{line}")
+                    .with_context(|| format!("failed to write `{}`", stderr_log_path.display()))?;
+            }
+            Ok(())
+        });
+
+        let mut stdout_log = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .with_context(|| format!("failed to open `{}`", log_path.display()))?;
+        let mut raw_stdout = String::new();
+        let mut continuation = None;
+        let mut usage = None;
+        for line in BufReader::new(stdout).lines() {
+            let line = line
+                .with_context(|| format!("failed to read stdout for `{}`", log_path.display()))?;
+            writeln!(stdout_log, "{line}")
+                .with_context(|| format!("failed to write `{}`", log_path.display()))?;
+            raw_stdout.push_str(&line);
+            raw_stdout.push('\n');
+            let parsed = provider.parse_capture_output(&line)?;
+            if let Some(current_session_id) = parsed.continuation
+                && continuation.as_deref() != Some(current_session_id.as_str())
+            {
+                on_session_started(&current_session_id)?;
+                continuation = Some(current_session_id);
+            }
+            if let Some(update) = parsed.usage
+                && usage.as_ref() != Some(&update)
+            {
+                on_usage(&update)?;
+                usage = Some(update);
+            }
+        }
+
+        let status = child
+            .wait()
+            .with_context(|| format!("failed to wait for agent turn {turn_number}"))?;
+        stderr_handle
+            .join()
+            .map_err(|_| anyhow!("stderr drain thread panicked for listen turn {turn_number}"))??;
+        if !status.success() {
+            let code = status
+                .code()
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "terminated by signal".to_string());
+            bail!(
+                "agent `{}` exited unsuccessfully during listen turn {turn_number} ({code})",
+                invocation.agent
+            );
+        }
+        let parsed = provider.parse_capture_output(&raw_stdout)?;
+        return Ok(TurnExecutionResult {
+            session_id: parsed.continuation.or(continuation),
+            usage: parsed.usage.or(usage),
+        });
+    }
+
     let status = child
         .wait()
         .with_context(|| format!("failed to wait for agent turn {turn_number}"))?;
@@ -648,7 +850,7 @@ fn execute_agent_turn(
         );
     }
 
-    Ok(())
+    Ok(TurnExecutionResult::default())
 }
 
 fn build_agent_instructions(
@@ -730,6 +932,8 @@ fn build_worker_session(
     summary: String,
     context: &WorkerSessionContext<'_>,
     turns: u32,
+    session_id: Option<&str>,
+    tokens: &TokenUsage,
 ) -> super::AgentSession {
     super::AgentSession {
         issue_id: Some(issue.id.clone()),
@@ -764,9 +968,11 @@ fn build_worker_session(
         workpad_comment_id: Some(context.workpad_comment_id.to_string()),
         updated_at_epoch_seconds: now_epoch_seconds(),
         pid: context.pid.filter(|value| *value > 0),
-        session_id: Some(issue.id.clone()),
+        session_id: session_id
+            .map(str::to_string)
+            .or_else(|| Some(issue.id.clone())),
         turns: Some(turns),
-        tokens: TokenUsage::default(),
+        tokens: tokens.clone(),
         log_path: Some(
             agent_log_path(
                 context.source_root,
@@ -776,5 +982,128 @@ fn build_worker_session(
             .display()
             .to_string(),
         ),
+    }
+}
+
+fn load_existing_session_tokens(
+    root: &Path,
+    project_selector: Option<&str>,
+    issue_identifier: &str,
+) -> Result<TokenUsage> {
+    let store = super::store::ListenProjectStore::resolve(root, project_selector)?;
+    let state = store.load_state()?;
+    Ok(state
+        .sessions
+        .into_iter()
+        .find(|session| session.issue_matches(issue_identifier))
+        .map(|session| session.tokens)
+        .unwrap_or_default())
+}
+
+fn load_existing_session_id(
+    root: &Path,
+    project_selector: Option<&str>,
+    issue_identifier: &str,
+) -> Result<Option<String>> {
+    let store = super::store::ListenProjectStore::resolve(root, project_selector)?;
+    let state = store.load_state()?;
+    Ok(state
+        .sessions
+        .into_iter()
+        .find(|session| session.issue_matches(issue_identifier))
+        .and_then(|session| session.session_id))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{WorkerSessionContext, build_worker_session};
+    use crate::linear::{IssueSummary, TeamRef};
+    use crate::listen::{SessionPhase, TokenUsage};
+    use std::path::Path;
+
+    fn issue() -> IssueSummary {
+        IssueSummary {
+            id: "issue-1".to_string(),
+            identifier: "ENG-10181".to_string(),
+            title: "Track listen tokens".to_string(),
+            description: None,
+            url: "https://linear.app/issues/ENG-10181".to_string(),
+            priority: None,
+            estimate: None,
+            updated_at: "2026-03-20T00:00:00Z".to_string(),
+            team: TeamRef {
+                id: "team-1".to_string(),
+                key: "ENG".to_string(),
+                name: "Engineering".to_string(),
+            },
+            project: None,
+            assignee: None,
+            labels: Vec::new(),
+            comments: Vec::new(),
+            state: None,
+            attachments: Vec::new(),
+            parent: None,
+            children: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn worker_session_updates_keep_cumulative_tokens() {
+        let issue = issue();
+        let context = WorkerSessionContext {
+            source_root: Path::new("/tmp/source"),
+            project_selector: None,
+            workspace_path: Path::new("/tmp/workspace"),
+            branch: Some("eng-10181"),
+            workpad_comment_id: "comment-1",
+            backlog_issue: None,
+            pid: Some(1234),
+        };
+        let mut tokens = TokenUsage::default();
+
+        let first = build_worker_session(
+            &issue,
+            SessionPhase::Running,
+            "turn 1".to_string(),
+            &context,
+            0,
+            Some("thread-1"),
+            &tokens,
+        );
+        assert_eq!(first.tokens.input, None);
+        assert_eq!(first.tokens.output, None);
+
+        tokens.accumulate(&TokenUsage {
+            input: Some(120),
+            output: None,
+        });
+        let second = build_worker_session(
+            &issue,
+            SessionPhase::Running,
+            "turn 2".to_string(),
+            &context,
+            1,
+            Some("thread-1"),
+            &tokens,
+        );
+        assert_eq!(second.tokens.input, Some(120));
+        assert_eq!(second.tokens.output, None);
+
+        tokens.accumulate(&TokenUsage {
+            input: None,
+            output: Some(45),
+        });
+        let third = build_worker_session(
+            &issue,
+            SessionPhase::Completed,
+            "done".to_string(),
+            &context,
+            2,
+            Some("thread-1"),
+            &tokens,
+        );
+        assert_eq!(third.tokens.input, Some(120));
+        assert_eq!(third.tokens.output, Some(45));
+        assert_eq!(third.tokens.total(), Some(165));
     }
 }

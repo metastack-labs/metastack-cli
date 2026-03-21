@@ -181,6 +181,9 @@ pub struct IssueEditSpec {
     pub project: Option<String>,
     pub state: Option<String>,
     pub priority: Option<u8>,
+    pub estimate: Option<f64>,
+    pub labels: Option<Vec<String>>,
+    pub parent_identifier: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -216,6 +219,9 @@ pub struct IssueUpdateRequest {
     pub project_id: Option<String>,
     pub state_id: Option<String>,
     pub priority: Option<u8>,
+    pub estimate: Option<f64>,
+    pub label_ids: Option<Vec<String>>,
+    pub parent_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]

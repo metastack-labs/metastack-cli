@@ -39,6 +39,7 @@ The initial implementation delivered in `MET-13` focuses on the smallest end-to-
 17. Completed sessions older than the default 24-hour TTL are pruned automatically during store
     loads and reconciliation, while blocked sessions are retained until explicit cleanup.
 18. Live mode keeps the ratatui dashboard open in the terminal and uses the same shared listen snapshot for deterministic `--render-once` output.
+19. Built-in `codex` and `claude` worker runs opportunistically capture structured input/output token usage when the provider surfaces it, accumulate those counts in the persisted session record across turns, and leave token fields blank instead of failing when providers omit exact usage data.
 
 This mirrors the scheduler + status-surface split in Symphony while using one clear workspace
 contract: each claimed ticket gets its own standalone clone and ticket branch under the configured
@@ -100,6 +101,9 @@ Listen worker agent selection uses the shared built-in provider resolver:
 When the selected provider is one of the built-in adapters, the listen worker also emits the
 resolved provider/model/reasoning, route key, and config sources through the common launch
 diagnostics and `METASTACK_AGENT_*` environment variables before the provider process starts.
+Structured built-in output is also parsed for token telemetry so persisted listen sessions and the
+dashboard can show cumulative `in`, `out`, and `total` counts when usage is available, while
+unsupported or missing counts still render as `n/a`.
 
 ## Runtime Modules
 

@@ -5,7 +5,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+    MouseEvent, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -29,6 +32,7 @@ use crate::config::{
     validate_interactive_plan_follow_up_question_limit, validate_listen_poll_interval_seconds,
 };
 use crate::tui::fields::{InputFieldState, SelectFieldState};
+use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph_with_block, wrapped_rows};
 
 #[derive(Debug, Clone)]
 pub struct ConfigReport {
@@ -844,6 +848,7 @@ struct ConfigApp {
     default_reasoning: SelectFieldState,
     agent_field: SelectFieldState,
     model_field: SelectFieldState,
+    summary_scroll: ScrollState,
     detected_agents: Vec<String>,
     error: Option<String>,
 }
@@ -986,6 +991,7 @@ impl ConfigApp {
             default_reasoning: SelectFieldState::new(vec!["Leave unset".to_string()], 0),
             agent_field: SelectFieldState::new(agent_options, agent_index),
             model_field: SelectFieldState::new(vec!["Leave unset".to_string()], 0),
+            summary_scroll: ScrollState::default(),
             detected_agents: view.detected_agents.clone(),
             error: None,
         };
@@ -1090,6 +1096,14 @@ impl ConfigApp {
                     ConfigStep::DefaultReasoning => self.default_reasoning.move_by(-1),
                     ConfigStep::AssignmentScope => self.assignment_scope.move_by(-1),
                     ConfigStep::RefreshPolicy => self.refresh_policy.move_by(-1),
+                    ConfigStep::Save => {
+                        let viewport = summary_viewport(Rect::new(0, 0, 120, 32));
+                        let _ = self.summary_scroll.apply_key_code_in_viewport(
+                            KeyCode::Up,
+                            viewport,
+                            self.summary_content_rows(viewport.width),
+                        );
+                    }
                     _ => self.step = self.step.previous(),
                 }
                 None
@@ -1108,6 +1122,14 @@ impl ConfigApp {
                     ConfigStep::DefaultReasoning => self.default_reasoning.move_by(1),
                     ConfigStep::AssignmentScope => self.assignment_scope.move_by(1),
                     ConfigStep::RefreshPolicy => self.refresh_policy.move_by(1),
+                    ConfigStep::Save => {
+                        let viewport = summary_viewport(Rect::new(0, 0, 120, 32));
+                        let _ = self.summary_scroll.apply_key_code_in_viewport(
+                            KeyCode::Down,
+                            viewport,
+                            self.summary_content_rows(viewport.width),
+                        );
+                    }
                     _ => self.step = self.step.next(),
                 }
                 None
@@ -1115,8 +1137,18 @@ impl ConfigApp {
         }
     }
 
-    fn handle_key(&mut self, key: KeyEvent) -> Option<ConfigDashboardExit> {
+    fn handle_key(&mut self, key: KeyEvent, summary_viewport: Rect) -> Option<ConfigDashboardExit> {
         match key.code {
+            KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End
+                if self.step == ConfigStep::Save =>
+            {
+                let _ = self.summary_scroll.apply_key_code_in_viewport(
+                    key.code,
+                    summary_viewport,
+                    self.summary_content_rows(summary_viewport.width),
+                );
+                None
+            }
             KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Left | KeyCode::Right => {
                 self.error = None;
                 match self.step {
@@ -1166,6 +1198,17 @@ impl ConfigApp {
         }
     }
 
+    fn handle_summary_mouse(&mut self, mouse: MouseEvent, summary_viewport: Rect) -> bool {
+        if self.step != ConfigStep::Save {
+            return false;
+        }
+        self.summary_scroll.apply_mouse_in_viewport(
+            mouse,
+            summary_viewport,
+            self.summary_content_rows(summary_viewport.width),
+        )
+    }
+
     fn handle_paste(&mut self, text: &str) {
         self.error = None;
         match self.step {
@@ -1203,6 +1246,73 @@ impl ConfigApp {
             | ConfigStep::DefaultReasoning
             | ConfigStep::Save => {}
         }
+    }
+
+    fn summary_text(&self, width: u16) -> Text<'static> {
+        Text::from(summary_lines(
+            width,
+            &[
+                ("Linear API key", summarize_secret(&self.api_key)),
+                ("Default team", summarize_optional_value(&self.team)),
+                ("Project ID", summarize_optional_value(&self.project_id)),
+                ("Listen label", summarize_optional_value(&self.listen_label)),
+                (
+                    "Assignee scope",
+                    summarize_optional_select(&self.assignment_scope, ""),
+                ),
+                (
+                    "Refresh policy",
+                    summarize_optional_select(&self.refresh_policy, ""),
+                ),
+                (
+                    "Poll interval",
+                    summarize_optional_value(&self.poll_interval),
+                ),
+                (
+                    "Plan follow-ups",
+                    summarize_optional_value(&self.plan_follow_up_limit),
+                ),
+                ("Plan label", summarize_optional_value(&self.plan_label)),
+                (
+                    "Tech label",
+                    summarize_optional_value(&self.technical_label),
+                ),
+                (
+                    "Default profile",
+                    summarize_optional_value(&self.default_profile),
+                ),
+                (
+                    "Default agent",
+                    self.agent_field
+                        .selected_label()
+                        .unwrap_or("unset")
+                        .to_string(),
+                ),
+                (
+                    "Default model",
+                    self.model_field
+                        .selected_label()
+                        .unwrap_or("Leave unset")
+                        .to_string(),
+                ),
+                (
+                    "Default reasoning",
+                    summarize_optional_select(&self.default_reasoning, "Leave unset"),
+                ),
+                (
+                    "Detected agents",
+                    if self.detected_agents.is_empty() {
+                        "none".to_string()
+                    } else {
+                        self.detected_agents.join(", ")
+                    },
+                ),
+            ],
+        ))
+    }
+
+    fn summary_content_rows(&self, width: u16) -> usize {
+        wrapped_rows(&plain_text(&self.summary_text(width.max(1))), width.max(1))
     }
 
     fn submit(&self) -> Result<SubmittedConfig> {
@@ -1701,7 +1811,7 @@ fn render_once(app: ConfigApp, args: &ConfigArgs) -> Result<String> {
 fn run_config_dashboard(app: ConfigApp) -> Result<ConfigDashboardExit> {
     let mut stdout = io::stdout();
     enable_raw_mode()?;
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let _cleanup = TerminalCleanup;
 
     let backend = CrosstermBackend::new(stdout);
@@ -1714,11 +1824,21 @@ fn run_config_dashboard(app: ConfigApp) -> Result<ConfigDashboardExit> {
         if event::poll(Duration::from_millis(250))? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    if let Some(exit) = app.handle_key(key) {
+                    let viewport = summary_viewport(terminal.size()?.into());
+                    if let Some(exit) = app.handle_key(key, viewport) {
                         return Ok(exit);
                     }
                 }
                 Event::Paste(text) => app.handle_paste(&text),
+                Event::Mouse(mouse)
+                    if matches!(
+                        mouse.kind,
+                        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                    ) =>
+                {
+                    let viewport = summary_viewport(terminal.size()?.into());
+                    let _ = app.handle_summary_mouse(mouse, viewport);
+                }
                 _ => {}
             }
         }
@@ -2211,66 +2331,24 @@ fn render_step_panel(frame: &mut Frame<'_>, app: &ConfigApp, area: Rect) {
 }
 
 fn render_summary_panel(frame: &mut Frame<'_>, app: &ConfigApp, area: Rect) {
-    let summary = summary_lines(
-        area.width,
-        &[
-            ("Linear API key", summarize_secret(&app.api_key)),
-            ("Default team", summarize_optional_value(&app.team)),
-            ("Project ID", summarize_optional_value(&app.project_id)),
-            ("Listen label", summarize_optional_value(&app.listen_label)),
-            (
-                "Assignee scope",
-                summarize_optional_select(&app.assignment_scope, ""),
-            ),
-            (
-                "Refresh policy",
-                summarize_optional_select(&app.refresh_policy, ""),
-            ),
-            (
-                "Poll interval",
-                summarize_optional_value(&app.poll_interval),
-            ),
-            (
-                "Plan follow-ups",
-                summarize_optional_value(&app.plan_follow_up_limit),
-            ),
-            ("Plan label", summarize_optional_value(&app.plan_label)),
-            ("Tech label", summarize_optional_value(&app.technical_label)),
-            (
-                "Default profile",
-                summarize_optional_value(&app.default_profile),
-            ),
-            (
-                "Default agent",
-                app.agent_field
-                    .selected_label()
-                    .unwrap_or("unset")
-                    .to_string(),
-            ),
-            (
-                "Default model",
-                app.model_field
-                    .selected_label()
-                    .unwrap_or("Leave unset")
-                    .to_string(),
-            ),
-            (
-                "Default reasoning",
-                summarize_optional_select(&app.default_reasoning, "Leave unset"),
-            ),
-            (
-                "Detected agents",
-                if app.detected_agents.is_empty() {
-                    "none".to_string()
-                } else {
-                    app.detected_agents.join(", ")
-                },
-            ),
-        ],
-    );
-    let paragraph = Paragraph::new(Text::from(summary))
-        .block(Block::default().borders(Borders::ALL).title("Summary"))
-        .wrap(Wrap { trim: false });
+    let active = app.step == ConfigStep::Save;
+    let paragraph = scrollable_paragraph_with_block(
+        app.summary_text(area.width.saturating_sub(2)),
+        Block::default()
+            .borders(Borders::ALL)
+            .title(if active {
+                "Summary [scroll]"
+            } else {
+                "Summary"
+            })
+            .border_style(if active {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            }),
+        &app.summary_scroll,
+    )
+    .wrap(Wrap { trim: false });
     frame.render_widget(paragraph, area);
 }
 
@@ -2294,7 +2372,9 @@ fn render_footer(frame: &mut Frame<'_>, app: &ConfigApp, area: Rect) {
         | ConfigStep::DefaultReasoning => {
             "Use Up/Down to choose. Enter or Tab advances. Shift+Tab goes back. Esc cancels."
         }
-        ConfigStep::Save => "Press Enter to save. Shift+Tab goes back. Esc cancels.",
+        ConfigStep::Save => {
+            "Review the summary. Up/Down and PgUp/PgDn/Home/End or the mouse wheel scroll. Enter saves. Shift+Tab goes back. Esc cancels."
+        }
     };
     let status = app.error.as_deref().unwrap_or("Ready.");
     let footer = Paragraph::new(Text::from(vec![Line::from(controls), Line::from(status)]))
@@ -2316,9 +2396,7 @@ fn render_input_panel(
         .border_style(Style::default().add_modifier(Modifier::BOLD));
     let inner = block.inner(area);
     let rendered = field.render_with_width(placeholder, true, inner.width);
-    let paragraph = Paragraph::new(rendered.text.clone())
-        .block(block)
-        .wrap(Wrap { trim: false });
+    let paragraph = rendered.paragraph(block);
     frame.render_widget(paragraph, area);
     rendered.set_cursor(frame, inner);
 }
@@ -2410,8 +2488,61 @@ impl Drop for TerminalCleanup {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
         let mut stdout = io::stdout();
-        let _ = execute!(stdout, LeaveAlternateScreen);
+        let _ = execute!(stdout, DisableMouseCapture, LeaveAlternateScreen);
     }
+}
+
+fn summary_viewport(area: Rect) -> Rect {
+    let header_height = if area.width >= 110 { 5 } else { 6 };
+    let footer_height = if area.width >= 96 { 4 } else { 5 };
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(header_height),
+            Constraint::Min(0),
+            Constraint::Length(footer_height),
+        ])
+        .split(area);
+    let step_col = config_step_column_width();
+    let body_area = layout[1];
+    let summary_area = if body_area.width >= 118 {
+        let body = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(step_col),
+                Constraint::Min(34),
+                Constraint::Length(48),
+            ])
+            .split(body_area);
+        body[2]
+    } else if body_area.width >= 90 {
+        let sidebar_width = step_col.max(36);
+        let body = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Length(sidebar_width), Constraint::Min(40)])
+            .split(body_area);
+        let sidebar = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(17), Constraint::Min(10)])
+            .split(body[0]);
+        sidebar[1]
+    } else {
+        let stacked = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(10),
+                Constraint::Min(8),
+                Constraint::Length(18),
+            ])
+            .split(body_area);
+        stacked[2]
+    };
+    Rect::new(
+        summary_area.x.saturating_add(1),
+        summary_area.y.saturating_add(1),
+        summary_area.width.saturating_sub(2).max(1),
+        summary_area.height.saturating_sub(2).max(1),
+    )
 }
 
 #[cfg(test)]
@@ -2419,8 +2550,10 @@ mod tests {
     use std::path::PathBuf;
 
     use anyhow::Result;
+    use crossterm::event::{KeyCode, KeyModifiers, MouseEvent, MouseEventKind};
+    use ratatui::layout::Rect;
 
-    use super::{AdvancedRoutingApp, ConfigApp, ConfigViewData};
+    use super::{AdvancedRoutingApp, ConfigApp, ConfigStep, ConfigViewData, summary_viewport};
     use crate::config::{AgentSettings, AppConfig};
 
     #[test]
@@ -2473,6 +2606,55 @@ mod tests {
             ]
         );
         assert_eq!(app.default_reasoning.selected_label(), Some("max"));
+    }
+
+    #[test]
+    fn config_save_summary_scrolls_when_content_overflows() {
+        let view = ConfigViewData {
+            config_path: PathBuf::from("/tmp/metastack-config.toml"),
+            app_config: AppConfig::default(),
+            detected_agents: vec!["codex".to_string(), "claude".to_string()],
+        };
+
+        let mut app = ConfigApp::new(&view);
+        app.step = ConfigStep::Save;
+        let long = "profile-value-".repeat(12);
+        let _ = app.default_profile.paste(&long);
+        let _ = app.listen_label.paste(&long);
+
+        let viewport = summary_viewport(Rect::new(0, 0, 72, 20));
+        let _ = app.handle_key(KeyCode::End.into(), viewport);
+
+        assert!(app.summary_scroll.offset() > 0);
+    }
+
+    #[test]
+    fn config_save_summary_mouse_wheel_scrolls_when_content_overflows() {
+        let view = ConfigViewData {
+            config_path: PathBuf::from("/tmp/metastack-config.toml"),
+            app_config: AppConfig::default(),
+            detected_agents: vec!["codex".to_string(), "claude".to_string()],
+        };
+
+        let mut app = ConfigApp::new(&view);
+        app.step = ConfigStep::Save;
+        let long = "profile-value-".repeat(12);
+        let _ = app.default_profile.paste(&long);
+        let _ = app.listen_label.paste(&long);
+
+        let viewport = summary_viewport(Rect::new(0, 0, 72, 20));
+        let handled = app.handle_summary_mouse(
+            MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: viewport.x,
+                row: viewport.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            viewport,
+        );
+
+        assert!(handled);
+        assert!(app.summary_scroll.offset() > 0);
     }
 
     #[test]

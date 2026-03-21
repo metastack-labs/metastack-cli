@@ -27,6 +27,7 @@ pub const DEFAULT_MERGE_VALIDATION_REPAIR_ATTEMPTS: usize = 6;
 pub const DEFAULT_MERGE_VALIDATION_TRANSIENT_RETRY_ATTEMPTS: usize = 3;
 pub const DEFAULT_MERGE_PUBLICATION_RETRY_ATTEMPTS: usize = 5;
 pub const AGENT_ROUTE_BACKLOG_PLAN: &str = "backlog.plan";
+pub const AGENT_ROUTE_BACKLOG_IMPROVE: &str = "backlog.improve";
 pub const AGENT_ROUTE_BACKLOG_SPLIT: &str = "backlog.split";
 pub const AGENT_ROUTE_CONTEXT_SCAN: &str = "context.scan";
 pub const AGENT_ROUTE_CONTEXT_RELOAD: &str = "context.reload";
@@ -1270,6 +1271,11 @@ pub fn supported_agent_route_definitions() -> &'static [AgentRouteDefinition] {
             key: AGENT_ROUTE_BACKLOG_PLAN,
             family: "backlog",
             label: "meta backlog plan",
+        },
+        AgentRouteDefinition {
+            key: AGENT_ROUTE_BACKLOG_IMPROVE,
+            family: "backlog",
+            label: "meta backlog improve",
         },
         AgentRouteDefinition {
             key: AGENT_ROUTE_BACKLOG_SPLIT,

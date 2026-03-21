@@ -874,7 +874,7 @@ fi
         .stdout(predicate::str::contains("MET-41"))
         .stdout(predicate::str::contains("MET-42"));
 
-    teams_mock.assert_calls(2);
+    teams_mock.assert_calls(4);
     projects_mock.assert_calls(2);
     issue_labels_mock.assert_calls(2);
     create_command_mock.assert_calls(1);
@@ -1766,7 +1766,7 @@ fi
         .stdout(predicate::str::contains("Created 1 backlog issue(s):"))
         .stdout(predicate::str::contains("MET-42"));
 
-    teams_mock.assert_calls(1);
+    teams_mock.assert_calls(2);
     projects_mock.assert_calls(1);
     issue_labels_mock.assert_calls(1);
     create_issue_mock.assert_calls(1);
@@ -2053,7 +2053,7 @@ fi
         .stdout(predicate::str::contains("Created 1 backlog issue(s):"))
         .stdout(predicate::str::contains("MET-61"));
 
-    teams_mock.assert_calls(1);
+    teams_mock.assert_calls(2);
     projects_mock.assert_calls(1);
     labels_mock.assert_calls(1);
     viewer_mock.assert_calls(1);
@@ -2265,7 +2265,7 @@ fi
         .stdout(predicate::str::contains("Created 1 backlog issue(s):"))
         .stdout(predicate::str::contains("MET-52"));
 
-    teams_mock.assert();
+    teams_mock.assert_calls(2);
     projects_mock.assert();
     issue_labels_mock.assert();
     create_issue_mock.assert();
@@ -2471,7 +2471,7 @@ fi
         .success()
         .stdout(predicate::str::contains("MET-77"));
 
-    teams_mock.assert_calls(1);
+    teams_mock.assert_calls(2);
     projects_mock.assert_calls(1);
     issue_labels_mock.assert_calls(1);
     create_issue_mock.assert_calls(1);
@@ -2713,7 +2713,7 @@ fi
         .success()
         .stdout(predicate::str::contains("MET-79"));
 
-    teams_mock.assert_calls(1);
+    teams_mock.assert_calls(2);
     projects_mock.assert_calls(1);
     issue_labels_mock.assert_calls(1);
     create_issue_mock.assert_calls(1);

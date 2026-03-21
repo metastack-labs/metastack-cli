@@ -270,9 +270,9 @@ fn render_sessions(
             Constraint::Length(13),
             Constraint::Length(8),
             Constraint::Length(10),
+            Constraint::Length(44),
             Constraint::Length(14),
-            Constraint::Length(14),
-            Constraint::Min(24),
+            Constraint::Min(8),
         ],
     )
     .header(header)
@@ -509,6 +509,28 @@ mod tests {
         assert!(snapshot.contains("n/a"));
         assert!(snapshot.contains("019c...e1bf2a"));
         assert!(snapshot.contains("Progress text stays clean"));
+    }
+
+    #[test]
+    fn snapshot_shows_explicit_runtime_and_session_token_breakdown() {
+        let cycle = demo_cycle();
+        let data = build_dashboard_data(
+            &cycle,
+            &DashboardRuntimeContext {
+                started_at_epoch_seconds: 1_773_568_249,
+                now_epoch_seconds: 1_773_575_600,
+                poll_interval_seconds: 7,
+                dashboard_label: "terminal dashboard (TUI)",
+                dashboard_refresh_seconds: 1,
+                linear_refresh_seconds: 15,
+            },
+        );
+
+        let snapshot = render_dashboard(&data, 180, 36).expect("snapshot should render");
+
+        assert!(snapshot.contains("Tokens"));
+        assert!(snapshot.contains("in 17,995,071 | out 58,080 | total 18,053,151"));
+        assert!(snapshot.contains("in 9,614,112 | out 8,120 | total 9,622,232"));
     }
 
     #[test]

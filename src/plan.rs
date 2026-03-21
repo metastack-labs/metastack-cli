@@ -8,7 +8,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use crossterm::event::{
-    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind, KeyModifiers,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, KeyCode, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -51,6 +52,7 @@ use crate::scaffold::ensure_planning_layout;
 use crate::text_diff::render_text_diff;
 use crate::tui::fields::InputFieldState;
 use crate::tui::prompt_images::PromptImageAttachment;
+use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph, wrapped_rows};
 
 const NON_INTERACTIVE_MAX_FOLLOW_UP_QUESTIONS: usize = 3;
 const SKIPPED_FOLLOW_UP_LABEL: &str = "Skipped intentionally.";
@@ -141,7 +143,19 @@ struct ReviewApp {
     selected: usize,
     decisions: Vec<usize>,
     revision: usize,
+    focus: ReviewFocus,
+    overview_scroll: ScrollState,
+    selected_ticket_scroll: ScrollState,
+    combination_scroll: ScrollState,
     error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReviewFocus {
+    Tickets,
+    SelectedTicket,
+    Overview,
+    CombinationPlan,
 }
 
 #[derive(Debug, Clone)]
@@ -446,6 +460,9 @@ async fn run_reshape_plan(
             project: None,
             state: None,
             priority: None,
+            estimate: None,
+            labels: None,
+            parent_identifier: None,
         })
         .await?;
     service
@@ -1005,7 +1022,12 @@ fn run_interactive_plan_session(
     };
     let mut stdout = io::stdout();
     enable_raw_mode()?;
-    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableBracketedPaste,
+        EnableMouseCapture
+    )?;
     let _cleanup = TerminalCleanup;
 
     let backend = CrosstermBackend::new(stdout);
@@ -1042,17 +1064,23 @@ fn run_interactive_plan_session(
 
                     let frame_size = terminal.size()?;
                     let action = match &mut app.stage {
-                        PlanStage::Request(request_app) => handle_request_step_key(
+                        PlanStage::Request(request_app) => handle_request_step_key_with_viewport(
                             request_app,
                             key,
-                            request_input_width(frame_size.into()),
+                            request_input_viewport(frame_size.into()),
                         ),
-                        PlanStage::Questions(questions_app) => handle_questions_step_key(
-                            questions_app,
+                        PlanStage::Questions(questions_app) => {
+                            handle_questions_step_key_with_viewport(
+                                questions_app,
+                                key,
+                                questions_answer_input_viewport(frame_size.into()),
+                            )
+                        }
+                        PlanStage::Review(review_app) => handle_review_step_key(
+                            review_app,
                             key,
-                            questions_answer_input_width(frame_size.into()),
+                            review_layout(frame_size.into()),
                         ),
-                        PlanStage::Review(review_app) => handle_review_step_key(review_app, key),
                         PlanStage::Loading(_) => SessionAction::None,
                     };
 
@@ -1125,6 +1153,34 @@ fn run_interactive_plan_session(
                     }
                     PlanStage::Review(_) | PlanStage::Loading(_) => {}
                 },
+                Event::Mouse(mouse) => {
+                    if app.pending.is_some() {
+                        continue;
+                    }
+                    let frame_size = terminal.size()?;
+                    match &mut app.stage {
+                        PlanStage::Request(request_app) => {
+                            let viewport = request_input_viewport(frame_size.into());
+                            let _ = handle_request_step_mouse(request_app, mouse, viewport);
+                        }
+                        PlanStage::Questions(questions_app) => {
+                            if let Some(question) =
+                                questions_app.questions.get_mut(questions_app.selected)
+                            {
+                                let viewport = questions_answer_input_viewport(frame_size.into());
+                                let _ = handle_questions_step_mouse(question, mouse, viewport);
+                            }
+                        }
+                        PlanStage::Review(review_app) => {
+                            let _ = handle_review_step_mouse(
+                                review_app,
+                                mouse,
+                                review_layout(frame_size.into()),
+                            );
+                        }
+                        PlanStage::Loading(_) => {}
+                    }
+                }
                 _ => {}
             }
         }
@@ -1168,7 +1224,200 @@ fn build_review_app(
         selected: 0,
         decisions: vec![0; decision_len],
         revision,
+        focus: ReviewFocus::Tickets,
+        overview_scroll: ScrollState::default(),
+        selected_ticket_scroll: ScrollState::default(),
+        combination_scroll: ScrollState::default(),
         error: None,
+    }
+}
+
+impl ReviewFocus {
+    fn next(self) -> Self {
+        match self {
+            Self::Tickets => Self::SelectedTicket,
+            Self::SelectedTicket => Self::Overview,
+            Self::Overview => Self::CombinationPlan,
+            Self::CombinationPlan => Self::Tickets,
+        }
+    }
+
+    fn previous(self) -> Self {
+        match self {
+            Self::Tickets => Self::CombinationPlan,
+            Self::SelectedTicket => Self::Tickets,
+            Self::Overview => Self::SelectedTicket,
+            Self::CombinationPlan => Self::Overview,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ReviewLayout {
+    issue_list: Rect,
+    selected_ticket: Rect,
+    overview: Rect,
+    combination_plan: Rect,
+}
+
+impl ReviewApp {
+    fn selected_issue(&self) -> &PlannedIssueDraft {
+        &self.plan.issues[self.selected]
+    }
+
+    fn overview_text(&self) -> Text<'static> {
+        let decisions = review_decision_counts(self);
+        let answered_follow_ups = self
+            .follow_ups
+            .iter()
+            .filter(|follow_up| !follow_up.skipped)
+            .count();
+        let skipped_follow_ups = self
+            .follow_ups
+            .iter()
+            .filter(|follow_up| follow_up.skipped)
+            .count();
+        Text::from(vec![
+            Line::from("Original request"),
+            Line::from(""),
+            Line::from(self.request.clone()),
+            Line::from(""),
+            Line::from(format!(
+                "Follow-ups: {} answered, {} skipped",
+                answered_follow_ups, skipped_follow_ups
+            )),
+            Line::from(format!("Draft batch: {}", self.revision)),
+            Line::from(format!(
+                "Selected: {}/{}",
+                decisions.selected_count,
+                self.plan.issues.len()
+            )),
+            Line::from(format!("Skipped: {}", decisions.skipped_count)),
+            Line::from(format!("Keeping as-is: {}", decisions.keep_count)),
+            Line::from(format!("Merge groups: {}", decisions.group_count)),
+            Line::from(""),
+            Line::from("Plan Summary"),
+            Line::from(""),
+            Line::from(self.plan.summary.clone()),
+        ])
+    }
+
+    fn selected_ticket_text(&self) -> Text<'static> {
+        let selected = self.selected_issue();
+        let mut detail_lines = vec![
+            Line::from(format!("Title: {}", selected.title)),
+            Line::from(format!(
+                "Priority: {}",
+                selected
+                    .priority
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "unset".to_string())
+            )),
+            Line::from(""),
+            Line::from(selected.description.clone()),
+        ];
+        if !selected.acceptance_criteria.is_empty() {
+            detail_lines.push(Line::from(""));
+            detail_lines.push(Line::from("Acceptance Criteria"));
+            detail_lines.push(Line::from(""));
+            detail_lines.extend(
+                selected
+                    .acceptance_criteria
+                    .iter()
+                    .map(|criterion| Line::from(format!("- {criterion}"))),
+            );
+        }
+        Text::from(detail_lines)
+    }
+
+    fn combination_plan_text(&self) -> Text<'static> {
+        let decisions = review_decision_counts(self);
+        let mut merge_lines = vec![
+            Line::from("Space cycles the active ticket through review states."),
+            Line::from(""),
+            Line::from("[ ] Skip the ticket"),
+            Line::from("[x] Keep the ticket as-is"),
+            Line::from("[1], [2], ... Merge every ticket sharing that number"),
+            Line::from(""),
+            Line::from(format!(
+                "Active ticket state: {}",
+                review_marker(
+                    self.decisions
+                        .get(self.selected)
+                        .copied()
+                        .unwrap_or_default()
+                )
+            )),
+            Line::from(""),
+        ];
+        if decisions.selected_count == 0 {
+            merge_lines.push(Line::from(
+                "Select at least one ticket to keep or merge. Leave [ ] on tickets you want to skip.",
+            ));
+        } else if decisions.group_count == 0 {
+            merge_lines.push(Line::from(
+                "Press Enter to create the checked [x] tickets in Linear. Unchecked [ ] tickets will be skipped.",
+            ));
+        } else {
+            merge_lines.push(Line::from(
+                "Press Enter to rebuild the next preview from the checked [x] tickets and these merge groups. Unchecked [ ] tickets will be skipped:",
+            ));
+            merge_lines.push(Line::from(""));
+            merge_lines.extend(render_merge_group_lines(self));
+        }
+        Text::from(merge_lines)
+    }
+
+    fn overview_rows(&self, width: u16) -> usize {
+        wrapped_rows(&plain_text(&self.overview_text()), width.max(1))
+    }
+
+    fn selected_ticket_rows(&self, width: u16) -> usize {
+        wrapped_rows(&plain_text(&self.selected_ticket_text()), width.max(1))
+    }
+
+    fn combination_plan_rows(&self, width: u16) -> usize {
+        wrapped_rows(&plain_text(&self.combination_plan_text()), width.max(1))
+    }
+
+    fn move_selection(&mut self, delta: isize) {
+        let next = if delta.is_negative() {
+            self.selected.saturating_sub(delta.unsigned_abs())
+        } else {
+            self.selected
+                .saturating_add(delta as usize)
+                .min(self.plan.issues.len().saturating_sub(1))
+        };
+        if next != self.selected {
+            self.selected = next;
+            self.selected_ticket_scroll.reset();
+        }
+    }
+}
+
+fn review_layout(frame_area: Rect) -> ReviewLayout {
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(4)])
+        .split(frame_area);
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(56), Constraint::Percentage(44)])
+        .split(layout[0]);
+    let top_row = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(34), Constraint::Percentage(66)])
+        .split(rows[0]);
+    let bottom_row = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(34), Constraint::Percentage(66)])
+        .split(rows[1]);
+
+    ReviewLayout {
+        issue_list: top_row[0],
+        selected_ticket: top_row[1],
+        overview: bottom_row[0],
+        combination_plan: bottom_row[1],
     }
 }
 
@@ -1189,10 +1438,19 @@ enum SessionAction {
     Confirm(PlannedIssueSet),
 }
 
+#[cfg(test)]
 fn handle_request_step_key(
     app: &mut RequestApp,
     key: crossterm::event::KeyEvent,
     input_width: u16,
+) -> SessionAction {
+    handle_request_step_key_with_viewport(app, key, Rect::new(0, 0, input_width.max(1), 8))
+}
+
+fn handle_request_step_key_with_viewport(
+    app: &mut RequestApp,
+    key: crossterm::event::KeyEvent,
+    input_viewport: Rect,
 ) -> SessionAction {
     match key.code {
         KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -1238,7 +1496,11 @@ fn handle_request_step_key(
             }
         }
         _ => {
-            if app.request.handle_key_with_width(key, input_width) {
+            if app.request.handle_key_with_viewport(
+                key,
+                input_viewport.width,
+                input_viewport.height,
+            ) {
                 app.error = None;
             }
             SessionAction::None
@@ -1253,10 +1515,39 @@ fn handle_request_step_paste(app: &mut RequestApp, text: &str) {
     }
 }
 
+fn handle_request_step_mouse(
+    app: &mut RequestApp,
+    mouse: MouseEvent,
+    input_viewport: Rect,
+) -> bool {
+    if !matches!(
+        mouse.kind,
+        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+    ) {
+        return false;
+    }
+
+    app.request.handle_mouse_scroll(
+        mouse,
+        input_viewport,
+        input_viewport.width,
+        input_viewport.height,
+    )
+}
+
+#[cfg(test)]
 fn handle_questions_step_key(
     app: &mut QuestionsApp,
     key: crossterm::event::KeyEvent,
     input_width: u16,
+) -> SessionAction {
+    handle_questions_step_key_with_viewport(app, key, Rect::new(0, 0, input_width.max(1), 8))
+}
+
+fn handle_questions_step_key_with_viewport(
+    app: &mut QuestionsApp,
+    key: crossterm::event::KeyEvent,
+    input_viewport: Rect,
 ) -> SessionAction {
     match key.code {
         KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -1347,7 +1638,11 @@ fn handle_questions_step_key(
         }
         _ => {
             if let Some(question) = app.questions.get_mut(app.selected)
-                && question.answer.handle_key_with_width(key, input_width)
+                && question.answer.handle_key_with_viewport(
+                    key,
+                    input_viewport.width,
+                    input_viewport.height,
+                )
             {
                 question.state = FollowUpAnswerState::Pending;
                 app.error = None;
@@ -1369,17 +1664,62 @@ fn handle_questions_step_paste(app: &mut QuestionsApp, text: &str) {
     }
 }
 
-fn handle_review_step_key(app: &mut ReviewApp, key: crossterm::event::KeyEvent) -> SessionAction {
+fn handle_questions_step_mouse(
+    question: &mut QuestionAnswer,
+    mouse: MouseEvent,
+    input_viewport: Rect,
+) -> bool {
+    if !matches!(
+        mouse.kind,
+        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+    ) {
+        return false;
+    }
+
+    question.answer.handle_mouse_scroll(
+        mouse,
+        input_viewport,
+        input_viewport.width,
+        input_viewport.height,
+    )
+}
+
+fn handle_review_step_key(
+    app: &mut ReviewApp,
+    key: crossterm::event::KeyEvent,
+    layout: ReviewLayout,
+) -> SessionAction {
     match key.code {
+        KeyCode::BackTab => {
+            app.focus = app.focus.previous();
+            app.error = None;
+            SessionAction::None
+        }
+        KeyCode::Tab => {
+            app.focus = app.focus.next();
+            app.error = None;
+            SessionAction::None
+        }
         KeyCode::Up => {
-            app.selected = app.selected.saturating_sub(1);
+            if app.focus == ReviewFocus::Tickets {
+                app.move_selection(-1);
+            } else {
+                let _ = handle_review_scroll_key(app, key, layout);
+            }
             app.error = None;
             SessionAction::None
         }
         KeyCode::Down => {
-            if app.selected + 1 < app.plan.issues.len() {
-                app.selected += 1;
+            if app.focus == ReviewFocus::Tickets {
+                app.move_selection(1);
+            } else {
+                let _ = handle_review_scroll_key(app, key, layout);
             }
+            app.error = None;
+            SessionAction::None
+        }
+        KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End => {
+            let _ = handle_review_scroll_key(app, key, layout);
             app.error = None;
             SessionAction::None
         }
@@ -1411,6 +1751,59 @@ fn handle_review_step_key(app: &mut ReviewApp, key: crossterm::event::KeyEvent) 
             }
         },
         _ => SessionAction::None,
+    }
+}
+
+fn handle_review_scroll_key(
+    app: &mut ReviewApp,
+    key: crossterm::event::KeyEvent,
+    layout: ReviewLayout,
+) -> bool {
+    match app.focus {
+        ReviewFocus::Tickets => false,
+        ReviewFocus::SelectedTicket => app.selected_ticket_scroll.apply_key_in_viewport(
+            key,
+            layout.selected_ticket,
+            app.selected_ticket_rows(layout.selected_ticket.width.saturating_sub(2)),
+        ),
+        ReviewFocus::Overview => app.overview_scroll.apply_key_in_viewport(
+            key,
+            layout.overview,
+            app.overview_rows(layout.overview.width.saturating_sub(2)),
+        ),
+        ReviewFocus::CombinationPlan => app.combination_scroll.apply_key_in_viewport(
+            key,
+            layout.combination_plan,
+            app.combination_plan_rows(layout.combination_plan.width.saturating_sub(2)),
+        ),
+    }
+}
+
+fn handle_review_step_mouse(app: &mut ReviewApp, mouse: MouseEvent, layout: ReviewLayout) -> bool {
+    if !matches!(
+        mouse.kind,
+        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+    ) {
+        return false;
+    }
+
+    match app.focus {
+        ReviewFocus::Tickets => false,
+        ReviewFocus::SelectedTicket => app.selected_ticket_scroll.apply_mouse_in_viewport(
+            mouse,
+            layout.selected_ticket,
+            app.selected_ticket_rows(layout.selected_ticket.width.saturating_sub(2)),
+        ),
+        ReviewFocus::Overview => app.overview_scroll.apply_mouse_in_viewport(
+            mouse,
+            layout.overview,
+            app.overview_rows(layout.overview.width.saturating_sub(2)),
+        ),
+        ReviewFocus::CombinationPlan => app.combination_scroll.apply_mouse_in_viewport(
+            mouse,
+            layout.combination_plan,
+            app.combination_plan_rows(layout.combination_plan.width.saturating_sub(2)),
+        ),
     }
 }
 
@@ -1516,14 +1909,13 @@ fn render_request_form_frame(frame: &mut Frame<'_>, app: &RequestApp) {
         .title("Planning Request [editing]")
         .border_style(Style::default().add_modifier(Modifier::BOLD));
     let request_inner = request_block.inner(body[0]);
-    let rendered = app.request.render_with_width(
+    let rendered = app.request.render_with_viewport(
         "Describe the feature or workflow you want to plan...",
         true,
         request_inner.width,
+        request_inner.height,
     );
-    let request = Paragraph::new(rendered.text.clone())
-        .block(request_block)
-        .wrap(Wrap { trim: false });
+    let request = rendered.paragraph(request_block);
     frame.render_widget(request, body[0]);
     rendered.set_cursor(frame, request_inner);
 
@@ -1545,7 +1937,7 @@ fn render_request_form_frame(frame: &mut Frame<'_>, app: &RequestApp) {
         frame,
         layout[1],
         app.error.as_deref(),
-        "Type the planning request. Up/Down moves between wrapped lines. Enter continues. Shift+Enter inserts a newline. Ctrl+S also continues. Ctrl+V checks for clipboard images first, otherwise pastes text. Attached images render as [Image #N] placeholders. Esc cancels.",
+        "Type the planning request. Up/Down and PgUp/PgDn/Home/End move through wrapped lines, and the mouse wheel scrolls while the editor is focused. Enter continues. Shift+Enter inserts a newline. Ctrl+S also continues. Ctrl+V checks for clipboard images first, otherwise pastes text. Attached images render as [Image #N] placeholders. Esc cancels.",
     );
 }
 
@@ -1569,7 +1961,7 @@ fn render_questions_form_frame(frame: &mut Frame<'_>, app: &QuestionsApp) {
         Line::from(selected.question.clone()),
         Line::from(""),
         Line::styled(
-            "Enter records the current answer. Shift+Enter inserts a newline. Ctrl+S also moves to the next unanswered question, or generates the ticket plan once every answer is complete. Ctrl+V checks for clipboard images first, otherwise pastes text.",
+            "Enter records the current answer. Up/Down and PgUp/PgDn/Home/End move through wrapped content, and the mouse wheel scrolls while the answer pane is focused. Shift+Enter inserts a newline. Ctrl+S also moves to the next unanswered question, or generates the ticket plan once every answer is complete. Ctrl+V checks for clipboard images first, otherwise pastes text.",
             Style::default().add_modifier(Modifier::DIM),
         ),
     ]))
@@ -1595,14 +1987,13 @@ fn render_questions_form_frame(frame: &mut Frame<'_>, app: &QuestionsApp) {
         ))
         .border_style(Style::default().add_modifier(Modifier::BOLD));
     let answer_inner = answer_block.inner(main[1]);
-    let rendered = selected.answer.render_with_width(
+    let rendered = selected.answer.render_with_viewport(
         "Type your answer for the active question...",
         true,
         answer_inner.width,
+        answer_inner.height,
     );
-    let answer = Paragraph::new(rendered.text.clone())
-        .block(answer_block)
-        .wrap(Wrap { trim: false });
+    let answer = rendered.paragraph(answer_block);
     frame.render_widget(answer, main[1]);
     rendered.set_cursor(frame, answer_inner);
 
@@ -1679,18 +2070,7 @@ fn render_questions_form_frame(frame: &mut Frame<'_>, app: &QuestionsApp) {
 
 fn render_review_form_frame(frame: &mut Frame<'_>, app: &ReviewApp) {
     let layout = base_layout(frame);
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(56), Constraint::Percentage(44)])
-        .split(layout[0]);
-    let top_row = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(34), Constraint::Percentage(66)])
-        .split(rows[0]);
-    let bottom_row = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(34), Constraint::Percentage(66)])
-        .split(rows[1]);
+    let review_layout = review_layout(frame.area());
 
     let mut issue_state = ListState::default();
     issue_state.select(Some(
@@ -1711,128 +2091,110 @@ fn render_review_form_frame(frame: &mut Frame<'_>, app: &ReviewApp) {
             Block::default()
                 .borders(Borders::ALL)
                 .title(format!(
-                    "Suggested Tickets ({}) [active]",
-                    app.plan.issues.len()
+                    "Suggested Tickets ({}){}",
+                    app.plan.issues.len(),
+                    if app.focus == ReviewFocus::Tickets {
+                        " [active]"
+                    } else {
+                        ""
+                    }
                 ))
-                .border_style(Style::default().add_modifier(Modifier::BOLD)),
+                .border_style(if app.focus == ReviewFocus::Tickets {
+                    Style::default().add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                }),
         )
         .highlight_style(Style::default().add_modifier(Modifier::BOLD))
         .highlight_symbol("> ");
-    frame.render_stateful_widget(issue_list, top_row[0], &mut issue_state);
+    frame.render_stateful_widget(issue_list, review_layout.issue_list, &mut issue_state);
 
-    let decisions = review_decision_counts(app);
-    let answered_follow_ups = app
-        .follow_ups
-        .iter()
-        .filter(|follow_up| !follow_up.skipped)
-        .count();
-    let skipped_follow_ups = app
-        .follow_ups
-        .iter()
-        .filter(|follow_up| follow_up.skipped)
-        .count();
-    let summary = Paragraph::new(Text::from(vec![
-        Line::from("Original request"),
-        Line::from(""),
-        Line::from(app.request.clone()),
-        Line::from(""),
-        Line::from(format!(
-            "Follow-ups: {} answered, {} skipped",
-            answered_follow_ups, skipped_follow_ups
-        )),
-        Line::from(format!("Draft batch: {}", app.revision)),
-        Line::from(format!(
-            "Selected: {}/{}",
-            decisions.selected_count,
-            app.plan.issues.len()
-        )),
-        Line::from(format!("Skipped: {}", decisions.skipped_count)),
-        Line::from(format!("Keeping as-is: {}", decisions.keep_count)),
-        Line::from(format!("Merge groups: {}", decisions.group_count)),
-        Line::from(""),
-        Line::from("Plan Summary"),
-        Line::from(""),
-        Line::from(app.plan.summary.clone()),
-    ]))
-    .block(Block::default().borders(Borders::ALL).title("Overview"))
-    .wrap(Wrap { trim: false });
-    frame.render_widget(summary, bottom_row[0]);
+    let detail = scrollable_paragraph(
+        app.selected_ticket_text(),
+        if app.focus == ReviewFocus::SelectedTicket {
+            "Selected Ticket [scroll]"
+        } else {
+            "Selected Ticket"
+        },
+        &app.selected_ticket_scroll,
+    )
+    .wrap(Wrap { trim: false })
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(if app.focus == ReviewFocus::SelectedTicket {
+                "Selected Ticket [scroll]"
+            } else {
+                "Selected Ticket"
+            })
+            .border_style(if app.focus == ReviewFocus::SelectedTicket {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            }),
+    )
+    .scroll((app.selected_ticket_scroll.offset(), 0));
+    frame.render_widget(detail, review_layout.selected_ticket);
 
-    let selected = &app.plan.issues[app.selected];
-    let mut detail_lines = vec![
-        Line::from(format!("Title: {}", selected.title)),
-        Line::from(format!(
-            "Priority: {}",
-            selected
-                .priority
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "unset".to_string())
-        )),
-        Line::from(""),
-        Line::from(selected.description.clone()),
-    ];
-    if !selected.acceptance_criteria.is_empty() {
-        detail_lines.push(Line::from(""));
-        detail_lines.push(Line::from("Acceptance Criteria"));
-        detail_lines.push(Line::from(""));
-        detail_lines.extend(
-            selected
-                .acceptance_criteria
-                .iter()
-                .map(|criterion| Line::from(format!("- {criterion}"))),
-        );
-    }
-    let detail = Paragraph::new(Text::from(detail_lines))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Selected Ticket"),
-        )
-        .wrap(Wrap { trim: false });
-    frame.render_widget(detail, top_row[1]);
+    let overview = scrollable_paragraph(
+        app.overview_text(),
+        if app.focus == ReviewFocus::Overview {
+            "Overview [scroll]"
+        } else {
+            "Overview"
+        },
+        &app.overview_scroll,
+    )
+    .wrap(Wrap { trim: false })
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(if app.focus == ReviewFocus::Overview {
+                "Overview [scroll]"
+            } else {
+                "Overview"
+            })
+            .border_style(if app.focus == ReviewFocus::Overview {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            }),
+    )
+    .scroll((app.overview_scroll.offset(), 0));
+    frame.render_widget(overview, review_layout.overview);
 
-    let mut merge_lines = vec![
-        Line::from("Space cycles the active ticket through review states."),
-        Line::from(""),
-        Line::from("[ ] Skip the ticket"),
-        Line::from("[x] Keep the ticket as-is"),
-        Line::from("[1], [2], ... Merge every ticket sharing that number"),
-        Line::from(""),
-        Line::from(format!(
-            "Active ticket state: {}",
-            review_marker(app.decisions.get(app.selected).copied().unwrap_or_default())
-        )),
-        Line::from(""),
-    ];
-    if decisions.selected_count == 0 {
-        merge_lines.push(Line::from(
-            "Select at least one ticket to keep or merge. Leave [ ] on tickets you want to skip.",
-        ));
-    } else if decisions.group_count == 0 {
-        merge_lines.push(Line::from(
-            "Press Enter to create the checked [x] tickets in Linear. Unchecked [ ] tickets will be skipped.",
-        ));
-    } else {
-        merge_lines.push(Line::from(
-            "Press Enter to rebuild the next preview from the checked [x] tickets and these merge groups. Unchecked [ ] tickets will be skipped:",
-        ));
-        merge_lines.push(Line::from(""));
-        merge_lines.extend(render_merge_group_lines(app));
-    }
-    let merge = Paragraph::new(Text::from(merge_lines))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Combination Plan"),
-        )
-        .wrap(Wrap { trim: false });
-    frame.render_widget(merge, bottom_row[1]);
+    let merge = scrollable_paragraph(
+        app.combination_plan_text(),
+        if app.focus == ReviewFocus::CombinationPlan {
+            "Combination Plan [scroll]"
+        } else {
+            "Combination Plan"
+        },
+        &app.combination_scroll,
+    )
+    .wrap(Wrap { trim: false })
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(if app.focus == ReviewFocus::CombinationPlan {
+                "Combination Plan [scroll]"
+            } else {
+                "Combination Plan"
+            })
+            .border_style(if app.focus == ReviewFocus::CombinationPlan {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            }),
+    )
+    .scroll((app.combination_scroll.offset(), 0));
+    frame.render_widget(merge, review_layout.combination_plan);
 
     render_footer(
         frame,
         layout[1],
         app.error.as_deref(),
-        "Up/Down moves through tickets. Space cycles [ ] skip -> [x] keep -> [1] -> [2] ... Enter creates the checked batch or rebuilds the next preview when numbered merge groups are present. U clears all marks. Esc cancels.",
+        "Tab/Shift+Tab changes review focus. In [scroll] panes, Up/Down and PgUp/PgDn/Home/End or the mouse wheel scroll. Space cycles [ ] skip -> [x] keep -> [1] -> [2] for the active ticket. Enter creates the checked batch or rebuilds the next preview when numbered merge groups are present. U clears all marks. Esc cancels.",
     );
 }
 
@@ -1853,16 +2215,16 @@ fn stage_kind(stage: &PlanStage) -> PlanStageKind {
     }
 }
 
-fn request_input_width(area: Rect) -> u16 {
+fn request_input_viewport(area: Rect) -> Rect {
     let layout = base_layout_for_area(area);
     let body = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(68), Constraint::Percentage(32)])
         .split(layout[0]);
-    inner_width(body[0])
+    inner_rect(body[0])
 }
 
-fn questions_answer_input_width(area: Rect) -> u16 {
+fn questions_answer_input_viewport(area: Rect) -> Rect {
     let layout = base_layout_for_area(area);
     let body = Layout::default()
         .direction(Direction::Horizontal)
@@ -1872,7 +2234,7 @@ fn questions_answer_input_width(area: Rect) -> u16 {
         .direction(Direction::Vertical)
         .constraints([Constraint::Percentage(42), Constraint::Min(0)])
         .split(body[0]);
-    inner_width(main[1])
+    inner_rect(main[1])
 }
 
 fn base_layout_for_area(area: Rect) -> Vec<Rect> {
@@ -1883,8 +2245,13 @@ fn base_layout_for_area(area: Rect) -> Vec<Rect> {
         .to_vec()
 }
 
-fn inner_width(area: Rect) -> u16 {
-    area.width.saturating_sub(2).max(1)
+fn inner_rect(area: Rect) -> Rect {
+    Rect::new(
+        area.x.saturating_add(1),
+        area.y.saturating_add(1),
+        area.width.saturating_sub(2).max(1),
+        area.height.saturating_sub(2).max(1),
+    )
 }
 
 fn render_loading_frame(frame: &mut Frame<'_>, app: &LoadingApp) {
@@ -2325,7 +2692,12 @@ impl Drop for TerminalCleanup {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
         let mut stdout = io::stdout();
-        let _ = execute!(stdout, DisableBracketedPaste, LeaveAlternateScreen);
+        let _ = execute!(
+            stdout,
+            DisableMouseCapture,
+            DisableBracketedPaste,
+            LeaveAlternateScreen
+        );
     }
 }
 
@@ -2350,19 +2722,24 @@ mod tests {
         FollowUpAnswerState, FollowUpQuestions, FollowUpResponse, LoadingApp, PendingPlanJob,
         PlanSessionApp, PlanStage, PlanWorkerOutcome, PlanWorkerReport, PlannedIssueDraft,
         PlannedIssueSet, PlanningAgentOverrides, QuestionAnswer, QuestionsApp, RequestApp,
-        ReviewApp, ReviewSubmissionAction, SKIPPED_FOLLOW_UP_LABEL, SessionAction,
-        build_review_app, handle_questions_step_key, handle_questions_step_paste,
-        handle_request_step_key, handle_request_step_paste, next_incomplete_question,
-        parse_agent_json, process_pending_plan_job, render_issue_merge_prompt,
-        render_loading_frame, render_plan_session, render_question_prompt,
-        render_questions_form_frame, render_request_form_frame, render_review_form_frame,
-        review_kept_indices, review_marker, review_merge_groups, review_submission_action,
-        selected_issue_plan, snapshot,
+        ReviewApp, ReviewFocus, ReviewSubmissionAction, SKIPPED_FOLLOW_UP_LABEL, SessionAction,
+        build_review_app, handle_questions_step_key, handle_questions_step_key_with_viewport,
+        handle_questions_step_mouse, handle_questions_step_paste, handle_request_step_key,
+        handle_request_step_key_with_viewport, handle_request_step_mouse,
+        handle_request_step_paste, handle_review_step_key, handle_review_step_mouse,
+        next_incomplete_question, parse_agent_json, process_pending_plan_job,
+        questions_answer_input_viewport, render_issue_merge_prompt, render_loading_frame,
+        render_plan_session, render_question_prompt, render_questions_form_frame,
+        render_request_form_frame, render_review_form_frame, request_input_viewport,
+        review_kept_indices, review_layout, review_marker, review_merge_groups,
+        review_submission_action, selected_issue_plan, snapshot,
     };
     use crate::config::DEFAULT_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT;
     use crate::tui::fields::InputFieldState;
+    use crossterm::event::{KeyModifiers, MouseEvent, MouseEventKind};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
     use std::sync::mpsc;
     use tempfile::tempdir;
 
@@ -2400,8 +2777,8 @@ mod tests {
         }
     }
 
-    fn render_request_snapshot(app: &RequestApp) -> String {
-        let backend = TestBackend::new(120, 32);
+    fn render_request_snapshot_with_size(app: &RequestApp, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).expect("terminal should initialize");
         terminal
             .draw(|frame| render_request_form_frame(frame, app))
@@ -2409,13 +2786,21 @@ mod tests {
         snapshot(terminal.backend())
     }
 
-    fn render_questions_snapshot(app: &QuestionsApp) -> String {
-        let backend = TestBackend::new(140, 36);
+    fn render_request_snapshot(app: &RequestApp) -> String {
+        render_request_snapshot_with_size(app, 120, 32)
+    }
+
+    fn render_questions_snapshot_with_size(app: &QuestionsApp, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).expect("terminal should initialize");
         terminal
             .draw(|frame| render_questions_form_frame(frame, app))
             .expect("questions form should render");
         snapshot(terminal.backend())
+    }
+
+    fn render_questions_snapshot(app: &QuestionsApp) -> String {
+        render_questions_snapshot_with_size(app, 140, 36)
     }
 
     fn render_review_snapshot(app: &ReviewApp) -> String {
@@ -2611,6 +2996,59 @@ mod tests {
     }
 
     #[test]
+    fn request_editor_snapshot_scrolls_to_visible_bottom_rows() {
+        let mut app = RequestApp {
+            request: InputFieldState::multiline(
+                (1..=20)
+                    .map(|index| format!("REQ-{index:02}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            error: None,
+        };
+
+        let action = handle_request_step_key_with_viewport(
+            &mut app,
+            crossterm::event::KeyEvent::from(crossterm::event::KeyCode::End),
+            request_input_viewport(Rect::new(0, 0, 120, 16)),
+        );
+
+        assert!(matches!(action, SessionAction::None));
+
+        let snapshot = render_request_snapshot_with_size(&app, 120, 16);
+        assert!(snapshot.contains("REQ-20"));
+        assert!(!snapshot.contains("REQ-01"));
+    }
+
+    #[test]
+    fn request_step_mouse_wheel_scrolls_the_request_editor() {
+        let mut app = RequestApp {
+            request: InputFieldState::multiline(
+                (1..=20)
+                    .map(|index| format!("REQ-{index:02}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            error: None,
+        };
+        let viewport = request_input_viewport(Rect::new(0, 0, 120, 16));
+        let mouse = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: viewport.x + 1,
+            row: viewport.y + 1,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        assert!(handle_request_step_mouse(&mut app, mouse, viewport));
+        assert!(
+            app.request
+                .render_with_viewport("", true, viewport.width, viewport.height)
+                .scroll_offset
+                > 0
+        );
+    }
+
+    #[test]
     fn questions_step_paste_updates_only_the_active_answer() {
         let mut app = QuestionsApp {
             request: "Plan a new command".to_string(),
@@ -2763,6 +3201,117 @@ mod tests {
         assert_eq!(
             app.questions[1].answer.cursor(),
             app.questions[1].answer.value().len()
+        );
+    }
+
+    #[test]
+    fn questions_step_page_down_advances_within_active_answer() {
+        let mut app = QuestionsApp {
+            request: "Plan a new command".to_string(),
+            request_attachments: Vec::new(),
+            questions: vec![QuestionAnswer {
+                question: "How should it be validated?".to_string(),
+                answer: InputFieldState::multiline(
+                    (1..=20)
+                        .map(|index| format!("line {index}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+                state: FollowUpAnswerState::Pending,
+            }],
+            selected: 0,
+            error: None,
+        };
+        let _ = app.questions[0]
+            .answer
+            .handle_key(crossterm::event::KeyEvent::from(
+                crossterm::event::KeyCode::Home,
+            ));
+
+        let before = app.questions[0].answer.cursor();
+        let action = handle_questions_step_key(
+            &mut app,
+            crossterm::event::KeyEvent::from(crossterm::event::KeyCode::PageDown),
+            12,
+        );
+
+        assert!(matches!(action, SessionAction::None));
+        assert_eq!(app.selected, 0);
+        assert!(app.questions[0].answer.cursor() > before);
+    }
+
+    #[test]
+    fn questions_editor_snapshot_scrolls_to_visible_bottom_rows() {
+        let mut app = QuestionsApp {
+            request: "Plan a new command".to_string(),
+            request_attachments: Vec::new(),
+            questions: vec![QuestionAnswer {
+                question: "How should it be validated?".to_string(),
+                answer: InputFieldState::multiline(
+                    (1..=20)
+                        .map(|index| format!("ANS-{index:02}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+                state: FollowUpAnswerState::Pending,
+            }],
+            selected: 0,
+            error: None,
+        };
+
+        let action = handle_questions_step_key_with_viewport(
+            &mut app,
+            crossterm::event::KeyEvent::from(crossterm::event::KeyCode::End),
+            questions_answer_input_viewport(Rect::new(0, 0, 120, 18)),
+        );
+
+        assert!(matches!(action, SessionAction::None));
+
+        let snapshot = render_questions_snapshot_with_size(&app, 120, 18);
+        assert!(snapshot.contains("ANS-20"));
+        assert!(!snapshot.contains("ANS-01"));
+    }
+
+    #[test]
+    fn questions_step_mouse_wheel_scrolls_only_the_active_answer() {
+        let mut app = QuestionsApp {
+            request: "Plan a new command".to_string(),
+            request_attachments: Vec::new(),
+            questions: vec![
+                answered_question("Who owns it?", "owner"),
+                QuestionAnswer {
+                    question: "How should it be validated?".to_string(),
+                    answer: InputFieldState::multiline(
+                        (1..=20)
+                            .map(|index| format!("ANS-{index:02}"))
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    ),
+                    state: FollowUpAnswerState::Pending,
+                },
+            ],
+            selected: 1,
+            error: None,
+        };
+        let viewport = questions_answer_input_viewport(Rect::new(0, 0, 120, 18));
+        let mouse = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: viewport.x + 1,
+            row: viewport.y + 1,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        assert!(handle_questions_step_mouse(
+            &mut app.questions[1],
+            mouse,
+            viewport
+        ));
+        assert!(
+            app.questions[1]
+                .answer
+                .render_with_viewport("", true, viewport.width, viewport.height)
+                .scroll_offset
+                > 0
         );
     }
 
@@ -2985,6 +3534,124 @@ mod tests {
         assert!(snapshot.contains("Combination Plan"));
         assert!(snapshot.contains("[ ] Skip the ticket"));
         assert!(snapshot.contains("[1] Add the planning dashboard"));
+    }
+
+    #[test]
+    fn review_step_tab_focuses_scrollable_review_panes() {
+        let mut app = build_review_app(
+            "Plan a meta plan command".to_string(),
+            vec![],
+            vec![],
+            PlannedIssueSet {
+                summary: "Split the work into command wiring and dashboard behavior.".to_string(),
+                issues: vec![PlannedIssueDraft {
+                    title: "Add the review UI".to_string(),
+                    description: "Capture request, follow-up answers, and review.".to_string(),
+                    acceptance_criteria: vec![],
+                    priority: Some(2),
+                }],
+            },
+            1,
+        );
+        let layout = review_layout(Rect::new(0, 0, 140, 36));
+
+        let action = handle_review_step_key(
+            &mut app,
+            crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Tab),
+            layout,
+        );
+        assert!(matches!(action, SessionAction::None));
+        assert_eq!(app.focus, ReviewFocus::SelectedTicket);
+
+        let action = handle_review_step_key(
+            &mut app,
+            crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Tab),
+            layout,
+        );
+        assert!(matches!(action, SessionAction::None));
+        assert_eq!(app.focus, ReviewFocus::Overview);
+
+        let snapshot = render_review_snapshot(&app);
+        assert!(snapshot.contains("Overview [scroll]"));
+    }
+
+    #[test]
+    fn review_selected_ticket_snapshot_scrolls_to_visible_bottom_rows() {
+        let mut app = build_review_app(
+            "Plan a long review".to_string(),
+            vec![],
+            vec![],
+            PlannedIssueSet {
+                summary: "Split the work.".to_string(),
+                issues: vec![PlannedIssueDraft {
+                    title: "Scroll the selected ticket".to_string(),
+                    description: (1..=80)
+                        .map(|index| format!("DETAIL-{index:02}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    acceptance_criteria: vec!["Criterion A".to_string(), "Criterion B".to_string()],
+                    priority: Some(2),
+                }],
+            },
+            1,
+        );
+        app.focus = ReviewFocus::SelectedTicket;
+        let layout = review_layout(Rect::new(0, 0, 100, 18));
+
+        let action = handle_review_step_key(
+            &mut app,
+            crossterm::event::KeyEvent::from(crossterm::event::KeyCode::End),
+            layout,
+        );
+
+        assert!(matches!(action, SessionAction::None));
+        assert!(app.selected_ticket_scroll.offset() > 0);
+
+        let backend = TestBackend::new(100, 18);
+        let mut terminal = Terminal::new(backend).expect("terminal should initialize");
+        terminal
+            .draw(|frame| render_review_form_frame(frame, &app))
+            .expect("review form should render");
+        let snapshot = snapshot(terminal.backend());
+
+        assert!(snapshot.contains("DETAIL-80"));
+        assert!(!snapshot.contains("DETAIL-01"));
+    }
+
+    #[test]
+    fn review_step_mouse_wheel_scrolls_only_the_focused_selected_ticket() {
+        let mut app = build_review_app(
+            "Plan a long review".to_string(),
+            vec![],
+            vec![],
+            PlannedIssueSet {
+                summary: "Split the work.".to_string(),
+                issues: vec![PlannedIssueDraft {
+                    title: "Scroll the selected ticket".to_string(),
+                    description: (1..=80)
+                        .map(|index| format!("DETAIL-{index:02}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    acceptance_criteria: vec![],
+                    priority: Some(2),
+                }],
+            },
+            1,
+        );
+        let layout = review_layout(Rect::new(0, 0, 100, 18));
+        let mouse = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: layout.selected_ticket.x + 1,
+            row: layout.selected_ticket.y + 1,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        assert!(!handle_review_step_mouse(&mut app, mouse, layout));
+        assert_eq!(app.selected_ticket_scroll.offset(), 0);
+
+        app.focus = ReviewFocus::SelectedTicket;
+        assert!(handle_review_step_mouse(&mut app, mouse, layout));
+        assert!(app.selected_ticket_scroll.offset() > 0);
     }
 
     #[test]

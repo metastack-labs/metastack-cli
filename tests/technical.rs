@@ -527,7 +527,7 @@ JSON
             &api_url,
             "--render-once",
             "--events",
-            "enter,down,enter",
+            "enter,enter,down,enter",
         ])
         .assert()
         .success()

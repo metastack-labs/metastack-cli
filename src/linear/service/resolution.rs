@@ -1,8 +1,8 @@
-use std::collections::BTreeSet;
-
 use anyhow::{Result, anyhow, bail};
 
-use crate::linear::{IssueLabelCreateRequest, LinearClient, ProjectSummary, TeamSummary, UserRef};
+use crate::linear::{
+    IssueLabelCreateRequest, LabelRef, LinearClient, ProjectSummary, TeamSummary, UserRef,
+};
 
 use super::LinearService;
 
@@ -15,58 +15,7 @@ where
         team: Option<String>,
         labels: &[String],
     ) -> Result<()> {
-        let requested = normalize_requested_labels(labels);
-        if requested.is_empty() {
-            return Ok(());
-        }
-
-        let selected_team = team.or_else(|| self.default_team.clone());
-        let Some(team_selector) = selected_team else {
-            return Ok(());
-        };
-
-        let teams = self.client.list_teams().await?;
-        let team = self.resolve_team(Some(&team_selector), &teams)?.clone();
-        let available_labels = self.client.list_issue_labels(Some(&team.key)).await?;
-        let mut available_names = available_labels
-            .into_iter()
-            .map(|label| label.name)
-            .collect::<BTreeSet<_>>();
-
-        for label in requested {
-            if available_names
-                .iter()
-                .any(|existing| existing.eq_ignore_ascii_case(&label))
-            {
-                continue;
-            }
-
-            match self
-                .client
-                .create_issue_label(IssueLabelCreateRequest {
-                    team_id: team.id.clone(),
-                    name: label.clone(),
-                })
-                .await
-            {
-                Ok(created) => {
-                    available_names.insert(created.name);
-                }
-                Err(error) if is_duplicate_label_error(&error) => {
-                    let refreshed_labels = self.client.list_issue_labels(Some(&team.key)).await?;
-                    if let Some(existing) = refreshed_labels
-                        .into_iter()
-                        .find(|existing| existing.name.eq_ignore_ascii_case(&label))
-                    {
-                        available_names.insert(existing.name);
-                    }
-                    available_names.insert(label.clone());
-                    continue;
-                }
-                Err(error) => return Err(error),
-            }
-        }
-
+        self.reconcile_issue_labels(team, labels).await?;
         Ok(())
     }
 
@@ -181,18 +130,17 @@ where
         ))
     }
 
-    pub(super) async fn resolve_label_ids(
+    pub(super) async fn ensure_and_resolve_label_ids(
         &self,
+        team: Option<String>,
         labels: &[String],
-        team_key: &str,
     ) -> Result<Vec<String>> {
         let requested = normalize_requested_labels(labels);
-
         if requested.is_empty() {
             return Ok(Vec::new());
         }
 
-        let available_labels = self.client.list_issue_labels(Some(team_key)).await?;
+        let available_labels = self.reconcile_issue_labels(team, &requested).await?;
         let mut resolved = Vec::with_capacity(requested.len());
         let mut missing = Vec::new();
 
@@ -209,7 +157,7 @@ where
 
         if !missing.is_empty() {
             bail!(
-                "issue label(s) {} were not found on team `{team_key}`",
+                "issue label(s) {} were not found after reconciliation",
                 missing
                     .into_iter()
                     .map(|label| format!("`{label}`"))
@@ -219,6 +167,65 @@ where
         }
 
         Ok(resolved)
+    }
+
+    async fn reconcile_issue_labels(
+        &self,
+        team: Option<String>,
+        labels: &[String],
+    ) -> Result<Vec<LabelRef>> {
+        let requested = normalize_requested_labels(labels);
+        if requested.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let selected_team = team.or_else(|| self.default_team.clone());
+        let Some(team_selector) = selected_team else {
+            return Ok(Vec::new());
+        };
+
+        let teams = self.client.list_teams().await?;
+        let team = self.resolve_team(Some(&team_selector), &teams)?.clone();
+        let mut available_labels = self.client.list_issue_labels(Some(&team.key)).await?;
+
+        for label in requested {
+            if available_labels
+                .iter()
+                .any(|existing| existing.name.eq_ignore_ascii_case(&label))
+            {
+                continue;
+            }
+
+            match self
+                .client
+                .create_issue_label(IssueLabelCreateRequest {
+                    team_id: team.id.clone(),
+                    name: label.clone(),
+                })
+                .await
+            {
+                Ok(created) => {
+                    available_labels.push(created);
+                }
+                Err(error) if is_duplicate_label_error(&error) => {
+                    let refreshed_labels = self.client.list_issue_labels(Some(&team.key)).await?;
+                    if let Some(existing) = refreshed_labels
+                        .into_iter()
+                        .find(|existing| existing.name.eq_ignore_ascii_case(&label))
+                    {
+                        available_labels.push(existing);
+                    } else {
+                        available_labels.push(LabelRef {
+                            id: format!("pending-label-{label}"),
+                            name: label.clone(),
+                        });
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
+        Ok(available_labels)
     }
 }
 

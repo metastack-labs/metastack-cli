@@ -25,7 +25,7 @@ impl From<IssueSummary> for PendingIssue {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenUsage {
     #[serde(default)]
     pub input: Option<u64>,
@@ -34,17 +34,37 @@ pub struct TokenUsage {
 }
 
 impl TokenUsage {
-    fn total(&self) -> Option<u64> {
+    pub(super) fn total(&self) -> Option<u64> {
         match (self.input, self.output) {
             (None, None) => None,
             (input, output) => Some(input.unwrap_or(0) + output.unwrap_or(0)),
         }
     }
 
+    pub(super) fn accumulate(&mut self, usage: &Self) {
+        if let Some(input) = usage.input {
+            self.input = Some(self.input.unwrap_or(0) + input);
+        }
+        if let Some(output) = usage.output {
+            self.output = Some(self.output.unwrap_or(0) + output);
+        }
+    }
+
     pub(super) fn display_compact(&self) -> String {
-        self.total()
-            .map(format_number)
-            .unwrap_or_else(|| "n/a".to_string())
+        match (self.input, self.output, self.total()) {
+            (None, None, _) => "n/a".to_string(),
+            (input, output, Some(total)) => format!(
+                "in {} | out {} | total {}",
+                input
+                    .map(format_number)
+                    .unwrap_or_else(|| "n/a".to_string()),
+                output
+                    .map(format_number)
+                    .unwrap_or_else(|| "n/a".to_string()),
+                format_number(total)
+            ),
+            (_, _, None) => "n/a".to_string(),
+        }
     }
 }
 
