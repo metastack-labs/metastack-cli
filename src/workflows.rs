@@ -155,6 +155,7 @@ struct WorkflowParameterField {
 
 #[derive(Debug, Clone)]
 struct WorkflowRunApp {
+    repo_root: PathBuf,
     workflow: WorkflowPlaybook,
     fields: Vec<WorkflowParameterField>,
     screen: WorkflowRunScreen,
@@ -824,6 +825,7 @@ impl WorkflowRunApp {
             .unwrap_or_else(|| default_output_path(root, &workflow, &provided_params));
 
         Self {
+            repo_root: root.to_path_buf(),
             workflow,
             fields,
             screen: WorkflowRunScreen::Wizard,
@@ -868,7 +870,8 @@ impl WorkflowRunApp {
             .preferred_output
             .clone()
             .unwrap_or_else(|| artifact.default_output.clone());
-        self.save_path_input = InputFieldState::new(save_path.display().to_string());
+        self.save_path_input =
+            InputFieldState::new(display_output_path(&self.repo_root, &save_path));
         self.artifact = Some(artifact);
         self.screen = WorkflowRunScreen::Review;
         self.review_focus = ReviewFocus::Artifact;
