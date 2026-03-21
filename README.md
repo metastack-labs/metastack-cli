@@ -415,7 +415,7 @@ meta runtime setup --json
 meta runtime setup --team MET --project "MetaStack CLI"
 meta runtime setup --api-key lin_api_repo --team MET --project "MetaStack CLI"
 meta runtime setup --provider codex --model gpt-5.4 --reasoning medium
-meta runtime setup --listen-label agent --assignment-scope viewer-only --refresh-policy reuse-and-refresh
+meta runtime setup --listen-label agent --assignee-scope viewer-only --refresh-policy reuse-and-refresh
 meta runtime setup --default-assignee viewer --default-state Todo --default-priority 3 --default-label platform
 meta runtime setup --velocity-project "MetaStack CLI" --velocity-state Backlog --velocity-auto-assign viewer
 ```
@@ -987,7 +987,7 @@ meta agents listen --team MET --project "MetaStack CLI" --once
 meta agents listen --team MET --project "MetaStack API"
 meta agents listen --team MET --project "MetaStack CLI" --once --all-assignees
 meta agents listen --team MET --project "MetaStack CLI"
-meta runtime setup --listen-label agent --assignment-scope viewer-only --refresh-policy reuse-and-refresh
+meta runtime setup --listen-label agent --assignee-scope viewer-only --refresh-policy reuse-and-refresh
 ```
 
 Listen prerequisites:

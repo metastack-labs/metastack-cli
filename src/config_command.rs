@@ -194,7 +194,7 @@ fn render_summary(view: &ConfigViewData, include_path: bool) -> String {
         display_optional(view.app_config.defaults.listen.required_label.as_deref())
     ));
     lines.push(format!(
-        "Install assignee scope: {}",
+        "Install listen assignee scope: {}",
         view.app_config
             .defaults
             .listen
@@ -394,6 +394,30 @@ fn render_velocity_auto_assign(value: VelocityAutoAssign) -> String {
     }
 }
 
+fn assignee_scope_options() -> Vec<String> {
+    vec![
+        "Any eligible issue".to_string(),
+        "Only issues assigned to the authenticated viewer".to_string(),
+        "Viewer-assigned issues plus unassigned issues".to_string(),
+    ]
+}
+
+fn assignee_scope_index(scope: ListenAssignmentScope) -> usize {
+    match scope {
+        ListenAssignmentScope::Any => 0,
+        ListenAssignmentScope::ViewerOnly => 1,
+        ListenAssignmentScope::ViewerOrUnassigned => 2,
+    }
+}
+
+fn assignee_scope_from_index(index: usize) -> ListenAssignmentScope {
+    match index {
+        1 => ListenAssignmentScope::ViewerOnly,
+        2 => ListenAssignmentScope::ViewerOrUnassigned,
+        _ => ListenAssignmentScope::Any,
+    }
+}
+
 fn mask_secret(value: Option<&str>) -> String {
     match value.map(str::trim).filter(|value| !value.is_empty()) {
         Some(value) if value.len() <= 6 => "*".repeat(value.len()),
@@ -411,7 +435,7 @@ fn has_direct_updates(args: &ConfigArgs) -> bool {
         || args.team.is_some()
         || args.project_id.is_some()
         || args.listen_label.is_some()
-        || args.assignment_scope.is_some()
+        || args.assignee_scope.is_some()
         || args.refresh_policy.is_some()
         || args.poll_interval.is_some()
         || args.plan_follow_up_limit.is_some()
@@ -457,7 +481,7 @@ fn apply_direct_updates(view: &mut ConfigViewData, args: &ConfigArgs) -> Result<
     if let Some(listen_label) = &args.listen_label {
         view.app_config.defaults.listen.required_label = normalize_optional(listen_label);
     }
-    if let Some(scope) = &args.assignment_scope {
+    if let Some(scope) = &args.assignee_scope {
         view.app_config.defaults.listen.assignment_scope =
             Some(ListenAssignmentScope::from(*scope));
     }
@@ -1024,10 +1048,6 @@ impl ConfigApp {
             .position(|candidate| candidate.eq_ignore_ascii_case(&selected_agent))
             .unwrap_or(0);
 
-        let assignment_scope_options = vec![
-            "Any eligible issue".to_string(),
-            "Viewer-assigned plus unassigned".to_string(),
-        ];
         let refresh_options = vec![
             "Reuse workspace and refresh from origin/main".to_string(),
             "Recreate workspace from origin/main".to_string(),
@@ -1124,18 +1144,14 @@ impl ConfigApp {
                     .unwrap_or_default(),
             ),
             assignment_scope: SelectFieldState::new(
-                assignment_scope_options,
-                match view
-                    .app_config
-                    .defaults
-                    .listen
-                    .assignment_scope
-                    .unwrap_or_default()
-                {
-                    ListenAssignmentScope::Any => 0,
-                    ListenAssignmentScope::ViewerOnly => 1,
-                    ListenAssignmentScope::ViewerOrUnassigned => 1,
-                },
+                assignee_scope_options(),
+                assignee_scope_index(
+                    view.app_config
+                        .defaults
+                        .listen
+                        .assignment_scope
+                        .unwrap_or_default(),
+                ),
             ),
             refresh_policy: SelectFieldState::new(
                 refresh_options,
@@ -1604,10 +1620,7 @@ impl ConfigApp {
             project_id: normalize_optional(self.project_id.value()),
             default_issue_status: normalize_optional(self.default_issue_status.value()),
             listen_label: normalize_optional(self.listen_label.value()),
-            assignment_scope: match self.assignment_scope.selected() {
-                1 => ListenAssignmentScope::ViewerOrUnassigned,
-                _ => ListenAssignmentScope::Any,
-            },
+            assignment_scope: assignee_scope_from_index(self.assignment_scope.selected()),
             refresh_policy: match self.refresh_policy.selected() {
                 1 => ListenRefreshPolicy::RecreateFromOriginMain,
                 _ => ListenRefreshPolicy::ReuseAndRefresh,
@@ -2846,8 +2859,14 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
     use ratatui::layout::Rect;
 
-    use super::{AdvancedRoutingApp, ConfigApp, ConfigStep, ConfigViewData, summary_viewport};
-    use crate::config::{AgentSettings, AppConfig, InstallDefaults, InstallUiSettings};
+    use super::{
+        AdvancedRoutingApp, ConfigApp, ConfigStep, ConfigViewData, assignee_scope_options,
+        summary_viewport,
+    };
+    use crate::config::{
+        AgentSettings, AppConfig, InstallDefaults, InstallListenSettings, InstallUiSettings,
+        ListenAssignmentScope,
+    };
 
     #[test]
     fn config_app_refreshes_reasoning_options_when_provider_changes() {
@@ -2999,6 +3018,69 @@ mod tests {
         );
 
         assert_eq!(app.assignment_scope.selected(), initial + 1);
+    }
+
+    #[test]
+    fn assignment_scope_navigates_with_arrow_keys() {
+        let view = ConfigViewData {
+            config_path: PathBuf::from("/tmp/metastack-config.toml"),
+            app_config: AppConfig::default(),
+            detected_agents: Vec::new(),
+        };
+
+        let mut app = ConfigApp::new(&view);
+        app.step = ConfigStep::AssignmentScope;
+
+        let _ = app.handle_key(KeyCode::Down.into(), Rect::new(0, 0, 120, 32));
+        assert_eq!(app.assignment_scope.selected(), 1);
+
+        let _ = app.handle_key(KeyCode::Down.into(), Rect::new(0, 0, 120, 32));
+        assert_eq!(app.assignment_scope.selected(), 2);
+
+        let _ = app.handle_key(KeyCode::Up.into(), Rect::new(0, 0, 120, 32));
+        assert_eq!(app.assignment_scope.selected(), 1);
+    }
+
+    #[test]
+    fn config_assignment_scope_preserves_viewer_only_selection() {
+        let view = ConfigViewData {
+            config_path: PathBuf::from("/tmp/metastack-config.toml"),
+            app_config: AppConfig {
+                defaults: InstallDefaults {
+                    listen: InstallListenSettings {
+                        assignment_scope: Some(ListenAssignmentScope::ViewerOnly),
+                        ..InstallListenSettings::default()
+                    },
+                    ..InstallDefaults::default()
+                },
+                ..AppConfig::default()
+            },
+            detected_agents: Vec::new(),
+        };
+
+        let app = ConfigApp::new(&view);
+
+        assert_eq!(app.assignment_scope.options(), &assignee_scope_options());
+        assert_eq!(app.assignment_scope.selected(), 1);
+    }
+
+    #[test]
+    fn config_submit_round_trips_viewer_only_assignment_scope() {
+        let view = ConfigViewData {
+            config_path: PathBuf::from("/tmp/metastack-config.toml"),
+            app_config: AppConfig::default(),
+            detected_agents: Vec::new(),
+        };
+
+        let mut app = ConfigApp::new(&view);
+        app.assignment_scope.move_by(1);
+
+        let submitted = app.submit().expect("config submission should succeed");
+
+        assert_eq!(
+            submitted.assignment_scope,
+            ListenAssignmentScope::ViewerOnly
+        );
     }
 
     #[test]

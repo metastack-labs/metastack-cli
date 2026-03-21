@@ -758,6 +758,7 @@ fn handle_dynamic_linear_connection(
 fn read_http_request(stream: &mut TcpStream, pending: &mut Vec<u8>) -> Result<String, Box<dyn Error>> {
     let mut chunk = [0u8; 4096];
     let mut idle_reads_after_data = 0usize;
+    let mut idle_reads_without_data = 0usize;
 
     loop {
         if let Some(request_len) = complete_http_request_len(pending) {
@@ -769,6 +770,7 @@ fn read_http_request(stream: &mut TcpStream, pending: &mut Vec<u8>) -> Result<St
         let read = match stream.read(&mut chunk) {
             Ok(read) => {
                 idle_reads_after_data = 0;
+                idle_reads_without_data = 0;
                 read
             }
             Err(error)
@@ -778,7 +780,11 @@ fn read_http_request(stream: &mut TcpStream, pending: &mut Vec<u8>) -> Result<St
                 ) =>
             {
                 if pending.is_empty() {
-                    return Ok(String::new());
+                    idle_reads_without_data += 1;
+                    if idle_reads_without_data >= 240 {
+                        return Ok(String::new());
+                    }
+                    continue;
                 }
                 idle_reads_after_data += 1;
                 if idle_reads_after_data >= 20 {

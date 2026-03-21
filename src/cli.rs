@@ -809,8 +809,8 @@ pub struct ConfigArgs {
     #[arg(long)]
     pub listen_label: Option<String>,
     /// Update the install-scoped listen assignee scope.
-    #[arg(long, value_enum)]
-    pub assignment_scope: Option<ListenAssignmentScopeArg>,
+    #[arg(long = "assignee-scope", alias = "assignment-scope", value_enum)]
+    pub assignee_scope: Option<ListenAssigneeScopeArg>,
     /// Update the install-scoped listen refresh policy.
     #[arg(long, value_enum)]
     pub refresh_policy: Option<ListenRefreshPolicyArg>,
@@ -909,9 +909,9 @@ pub struct SetupArgs {
     /// Update the labels required for `meta listen` pickup. Provide a comma-separated list.
     #[arg(long)]
     pub listen_label: Option<String>,
-    /// Update the assignee filter used by `meta listen`.
-    #[arg(long, value_enum)]
-    pub assignment_scope: Option<ListenAssignmentScopeArg>,
+    /// Update the assignee scope used by `meta listen`.
+    #[arg(long = "assignee-scope", alias = "assignment-scope", value_enum)]
+    pub assignee_scope: Option<ListenAssigneeScopeArg>,
     /// Update how `meta listen` refreshes existing ticket workspaces.
     #[arg(long, value_enum)]
     pub refresh_policy: Option<ListenRefreshPolicyArg>,
@@ -1698,8 +1698,8 @@ pub enum PromptTransportArg {
     Stdin,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
-pub enum ListenAssignmentScopeArg {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ListenAssigneeScopeArg {
     Any,
     ViewerOnly,
     ViewerOrUnassigned,
@@ -1921,4 +1921,75 @@ fn matches_subcommand(tokens: &[String], name: &str) -> bool {
 
 fn has_flag(tokens: &[String], flag: &str) -> bool {
     tokens.iter().any(|token| token == flag)
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::{Cli, Command, ListenAssigneeScopeArg};
+
+    #[test]
+    fn config_accepts_public_assignee_scope_flag() {
+        let cli = Cli::try_parse_from(["meta", "config", "--assignee-scope", "viewer-only"])
+            .expect("config should parse public assignee-scope flag");
+
+        match cli.command {
+            Command::Config(args) => {
+                assert_eq!(
+                    args.assignee_scope,
+                    Some(ListenAssigneeScopeArg::ViewerOnly)
+                );
+            }
+            other => panic!("expected config command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn config_accepts_hidden_assignment_scope_alias() {
+        let cli = Cli::try_parse_from(["meta", "config", "--assignment-scope", "viewer-only"])
+            .expect("config should parse hidden assignment-scope alias");
+
+        match cli.command {
+            Command::Config(args) => {
+                assert_eq!(
+                    args.assignee_scope,
+                    Some(ListenAssigneeScopeArg::ViewerOnly)
+                );
+            }
+            other => panic!("expected config command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn setup_accepts_public_assignee_scope_flag() {
+        let cli = Cli::try_parse_from(["meta", "setup", "--assignee-scope", "viewer-only"])
+            .expect("setup should parse public assignee-scope flag");
+
+        match cli.command {
+            Command::Setup(args) => {
+                assert_eq!(
+                    args.assignee_scope,
+                    Some(ListenAssigneeScopeArg::ViewerOnly)
+                );
+            }
+            other => panic!("expected setup command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn setup_accepts_hidden_assignment_scope_alias() {
+        let cli = Cli::try_parse_from(["meta", "setup", "--assignment-scope", "viewer-only"])
+            .expect("setup should parse hidden assignment-scope alias");
+
+        match cli.command {
+            Command::Setup(args) => {
+                assert_eq!(
+                    args.assignee_scope,
+                    Some(ListenAssigneeScopeArg::ViewerOnly)
+                );
+            }
+            other => panic!("expected setup command, got {other:?}"),
+        }
+    }
 }

@@ -46,7 +46,7 @@ use crate::backlog_improve::run_backlog_improve;
 use crate::cli::{
     AgentsCommands, BacklogCommands, Cli, Command, ConfigEventArg, DashboardCommands,
     DashboardEventArg, IssueCreateEventArg, IssueEditEventArg, LinearCommands,
-    ListenAssignmentScopeArg, MergeDashboardEventArg, RuntimeCommands, SyncCommands,
+    ListenAssigneeScopeArg, MergeDashboardEventArg, RuntimeCommands, SyncCommands,
     SyncDashboardEventArg,
 };
 use crate::config::ListenAssignmentScope;
@@ -684,14 +684,12 @@ impl From<IssueEditEventArg> for IssueEditAction {
     }
 }
 
-impl From<ListenAssignmentScopeArg> for ListenAssignmentScope {
-    fn from(value: ListenAssignmentScopeArg) -> Self {
+impl From<ListenAssigneeScopeArg> for ListenAssignmentScope {
+    fn from(value: ListenAssigneeScopeArg) -> Self {
         match value {
-            ListenAssignmentScopeArg::Any => ListenAssignmentScope::Any,
-            ListenAssignmentScopeArg::ViewerOnly => ListenAssignmentScope::ViewerOnly,
-            ListenAssignmentScopeArg::ViewerOrUnassigned => {
-                ListenAssignmentScope::ViewerOrUnassigned
-            }
+            ListenAssigneeScopeArg::Any => ListenAssignmentScope::Any,
+            ListenAssigneeScopeArg::ViewerOnly => ListenAssignmentScope::ViewerOnly,
+            ListenAssigneeScopeArg::ViewerOrUnassigned => ListenAssignmentScope::ViewerOrUnassigned,
         }
     }
 }
