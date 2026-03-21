@@ -963,7 +963,7 @@ Legacy alias: `meta listen`
 
 The live terminal dashboard refreshes locally every second so session-state changes stay visible, while the configured listen poll interval continues to control how often Linear is queried. Steady-state listen runs stay entirely in the terminal TUI as an interactive session browser, `--render-once` emits a terminal snapshot, and `--once --json` emits one machine-readable poll-cycle payload without going through the ratatui snapshot path.
 
-When built-in `codex` or `claude` workers emit structured usage telemetry, `meta agents listen` accumulates session-level input and output tokens across repeated turns and renders both per-session and runtime rollups as `in`, `out`, and `total`. When exact counts are unavailable, the dashboard and textual summaries continue to show `n/a`.
+When built-in `codex` or `claude` workers emit structured usage telemetry, `meta agents listen` accumulates session-level input and output tokens across repeated turns. Runtime summaries, detail panes, and textual inspection output render `in`, `out`, and `total`, while the session table keeps a compact total-only token column. When exact counts are unavailable, the dashboard and textual summaries continue to show `n/a`.
 When install-scoped `vim_mode` is enabled, the listen dashboard also accepts `h` / `l` as aliases
 for the existing left/right view-switching controls. The session table keeps an active row
 selection, renders a compact `PR` badge (`none`, `draft #N`, `ready #N`), and opens a structured

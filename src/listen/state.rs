@@ -88,6 +88,12 @@ impl TokenUsage {
             (_, _, None) => "n/a".to_string(),
         }
     }
+
+    pub(super) fn display_table_compact(&self) -> String {
+        self.total()
+            .map(format_number)
+            .unwrap_or_else(|| "n/a".to_string())
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -191,8 +197,8 @@ impl AgentSession {
         format_duration(now_epoch_seconds.saturating_sub(self.updated_at_epoch_seconds))
     }
 
-    pub(super) fn tokens_label(&self) -> String {
-        self.tokens.display_compact()
+    pub(super) fn table_tokens_label(&self) -> String {
+        self.tokens.display_table_compact()
     }
 
     pub(super) fn session_label(&self) -> String {
@@ -431,5 +437,17 @@ mod tests {
 
         session.pull_request.status = PullRequestStatus::Ready;
         assert_eq!(session.pull_request_label(), "ready #321");
+    }
+
+    #[test]
+    fn session_table_tokens_label_prefers_total_only() {
+        let mut session = session();
+        assert_eq!(session.table_tokens_label(), "n/a");
+
+        session.tokens = TokenUsage {
+            input: Some(12_300),
+            output: Some(40),
+        };
+        assert_eq!(session.table_tokens_label(), "12,340");
     }
 }

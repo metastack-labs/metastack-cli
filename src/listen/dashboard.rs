@@ -404,7 +404,7 @@ fn render_session_table(
             Cell::from(session.pid_label()),
             Cell::from(session.age_label(data.runtime.current_epoch_seconds)),
             Cell::from(session.pull_request_label()),
-            Cell::from(session.tokens_label()),
+            Cell::from(session.table_tokens_label()),
             Cell::from(session.latest_resume_provider_label()),
             Cell::from(session.session_label()),
             Cell::from(session.summary.clone()),
@@ -436,23 +436,23 @@ fn render_session_table(
             Constraint::Length(8),
             Constraint::Length(10),
             Constraint::Length(12),
-            Constraint::Length(44),
+            Constraint::Length(12),
             Constraint::Length(8),
             Constraint::Length(13),
-            Constraint::Min(24),
+            Constraint::Min(52),
         ]
     } else {
         vec![
             Constraint::Length(2),
             Constraint::Length(9),
-            Constraint::Length(9),
+            Constraint::Length(12),
             Constraint::Length(8),
             Constraint::Length(9),
             Constraint::Length(10),
-            Constraint::Length(16),
+            Constraint::Length(9),
             Constraint::Length(8),
             Constraint::Length(13),
-            Constraint::Min(24),
+            Constraint::Min(29),
         ]
     };
     let table = Table::new(rows, constraints)
@@ -874,8 +874,34 @@ mod tests {
 
         assert!(snapshot.contains("Tokens"));
         assert!(snapshot.contains("in 17,995,071 | out 58,080 | total 18,053,151"));
-        assert!(snapshot.contains("in 9,614,112 | out 8,120 | total 9,622,232"));
+        assert!(snapshot.contains("9,622,232"));
+        assert!(!snapshot.contains("in 9,614,112 | out 8,120 | total 9,622,232"));
         assert!(snapshot.contains("draft #321"));
+    }
+
+    #[test]
+    fn snapshot_keeps_stage_labels_readable_in_medium_width_layout() {
+        let cycle = demo_cycle();
+        let data = build_dashboard_data(
+            &cycle,
+            &DashboardRuntimeContext {
+                started_at_epoch_seconds: 1_773_568_249,
+                now_epoch_seconds: 1_773_575_600,
+                poll_interval_seconds: 7,
+                dashboard_label: "terminal dashboard (TUI)",
+                dashboard_refresh_seconds: 1,
+                linear_refresh_seconds: 15,
+                vim_mode: false,
+            },
+        );
+
+        let snapshot = render_dashboard(&data, 140, 36).expect("snapshot should render");
+
+        assert!(snapshot.contains("Brief Ready"));
+        assert!(snapshot.contains("draft #321"));
+        assert!(snapshot.contains("9,622,232"));
+        assert!(snapshot.contains("PROVIDER"));
+        assert!(snapshot.contains("Brief ready | backlog MET-14"));
     }
 
     #[test]
