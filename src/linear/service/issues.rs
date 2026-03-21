@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use anyhow::{Result, anyhow, bail};
 
 use crate::linear::{
@@ -199,6 +201,57 @@ where
                     project_id,
                     state_id,
                     priority: spec.priority,
+                    label_ids: None,
+                },
+            )
+            .await
+    }
+
+    /// Update a constrained set of issue fields used by batch backlog maintenance workflows.
+    ///
+    /// Returns an error when the issue cannot be resolved, requested state or labels are invalid,
+    /// or Linear rejects the field update.
+    pub(crate) async fn update_issue_fields(
+        &self,
+        identifier: &str,
+        description: Option<String>,
+        state: Option<String>,
+        labels_to_add: &[String],
+    ) -> Result<IssueSummary> {
+        let IssueEditContext { issue, team }: IssueEditContext =
+            self.load_issue_edit_context(identifier).await?;
+        let state_id = resolve_state_id(state.as_deref(), &team)?;
+        let label_ids = if labels_to_add.is_empty() {
+            None
+        } else {
+            self.ensure_issue_labels_exist(Some(team.key.clone()), labels_to_add)
+                .await?;
+            let mut label_names = issue
+                .labels
+                .iter()
+                .map(|label| label.name.clone())
+                .collect::<BTreeSet<_>>();
+            label_names.extend(labels_to_add.iter().cloned());
+            Some(
+                self.resolve_label_ids(&label_names.into_iter().collect::<Vec<_>>(), &team.key)
+                    .await?,
+            )
+        };
+
+        if description.is_none() && state_id.is_none() && label_ids.is_none() {
+            bail!("no issue fields were provided to update");
+        }
+
+        self.client
+            .update_issue(
+                &issue.id,
+                IssueUpdateRequest {
+                    title: None,
+                    description,
+                    project_id: None,
+                    state_id,
+                    priority: None,
+                    label_ids,
                 },
             )
             .await

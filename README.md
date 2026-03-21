@@ -28,9 +28,9 @@ Most planning tools split work across issue trackers, docs, scripts, and ad hoc 
 - `meta runtime config` saves install-scoped Linear and agent defaults.
 - `meta runtime setup` bootstraps the repo and saves repo-scoped defaults under `.metastack/`.
 - `meta context scan` turns the codebase into reusable planning context.
-- `meta backlog plan`, `meta backlog tech`, `meta linear issues refine`, and `meta agents workflows` generate structured backlog work.
+- `meta backlog plan`, `meta backlog tech`, `meta backlog groom`, `meta linear issues refine`, and `meta agents workflows` generate structured backlog work.
 - `meta merge` batches open GitHub PRs into one isolated aggregate merge run and publish step.
-- `meta linear ...` and `meta backlog sync` keep Linear and local files aligned.
+- `meta linear ...`, `meta backlog groom`, and `meta backlog sync` keep Linear and local files aligned.
 - `meta agents listen` runs unattended ticket execution in dedicated workspace clones instead of your source checkout.
 
 ## Install `meta` During Development
@@ -642,6 +642,22 @@ The sync dashboard and render-once snapshot also show each issue's local sync st
 - `unlinked`: the local packet is missing or the existing `.linear.json` predates hash baselines
 
 Local hashes are derived deterministically from tracked files under `.metastack/backlog/<ISSUE>/`. Dotfiles, including `.linear.json`, are excluded so repeat no-op syncs remain `synced`.
+
+### `backlog groom`
+
+Run repo-scoped backlog hygiene:
+
+```bash
+meta backlog groom --api-key "$LINEAR_API_KEY"
+meta backlog groom --api-key "$LINEAR_API_KEY" --apply
+```
+
+Notes:
+
+- report mode is the default; it scans repo-scoped Linear issues, categorizes findings as `refine`, `merge`, `split`, `archive`, or `rescan-required`, and creates any missing `.metastack/backlog/<ISSUE>/` packet structure without mutating Linear
+- scan drift is part of the report: missing local packets, non-`synced` packet baselines, and packets or repo scan context older than the latest Linear update are surfaced as `rescan-required`
+- apply mode only performs explicit Linear issue description, label, and state updates, and prints each mutated issue identifier plus the changed field names
+- apply mode adds maintenance labels such as `backlog-refine`, `backlog-merge`, `backlog-split`, and `backlog-rescan`; archive recommendations move the issue into the first matching team state among `Archive`, `Archived`, `Canceled`, or `Cancelled`
 
 ### `linear issues`, `linear projects`, and `dashboard`
 

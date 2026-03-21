@@ -51,8 +51,10 @@ fn backlog_help_lists_tech_and_sync_commands() {
         .success()
         .stdout(predicate::str::contains("\n  plan "))
         .stdout(predicate::str::contains("\n  tech "))
+        .stdout(predicate::str::contains("\n  groom "))
         .stdout(predicate::str::contains("\n  sync "))
-        .stdout(predicate::str::contains("meta backlog tech MET-35"));
+        .stdout(predicate::str::contains("meta backlog tech MET-35"))
+        .stdout(predicate::str::contains("meta backlog groom --apply"));
 }
 
 #[test]

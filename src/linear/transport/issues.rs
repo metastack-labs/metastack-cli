@@ -289,6 +289,12 @@ mutation UpdateIssue($id: String!, $input: IssueUpdateInput!) {{
         if let Some(priority) = request.priority {
             input.insert("priority".to_string(), Value::from(priority));
         }
+        if let Some(label_ids) = request.label_ids {
+            input.insert(
+                "labelIds".to_string(),
+                Value::Array(label_ids.into_iter().map(Value::String).collect()),
+            );
+        }
         let data: IssueUpdatePayload = self
             .graphql()
             .query(

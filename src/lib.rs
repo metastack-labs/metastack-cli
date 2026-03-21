@@ -8,6 +8,7 @@ mod context;
 mod cron;
 mod cron_dashboard;
 mod fs;
+mod groom;
 mod linear;
 mod listen;
 mod merge;
@@ -42,6 +43,7 @@ use crate::config::ListenAssignmentScope;
 use crate::config_command::{ConfigAction, ConfigCommandOutput, run_config};
 use crate::context::run_context_command;
 use crate::cron::run_cron;
+use crate::groom::run_backlog_groom;
 use crate::linear::create::IssueCreateAction;
 use crate::linear::dashboard::DashboardAction;
 use crate::linear::edit::IssueEditAction;
@@ -86,6 +88,9 @@ async fn dispatch(cli: Cli) -> Result<()> {
             }
             BacklogCommands::Tech(args) => {
                 run_technical(&args).await?;
+            }
+            BacklogCommands::Groom(args) => {
+                run_backlog_groom(&args).await?;
             }
             BacklogCommands::Sync(args) => match args.command {
                 Some(SyncCommands::Link(link_args)) => {

@@ -22,6 +22,8 @@ Examples:
   meta backlog plan --root . --request \"Split the onboarding work into tickets\"
   meta backlog tech MET-35
   meta backlog split MET-35
+  meta backlog groom
+  meta backlog groom --apply
   meta backlog sync status
   meta backlog sync link MET-35 --entry manual-notes --pull
   meta backlog sync pull --all
@@ -190,8 +192,22 @@ pub enum BacklogCommands {
     /// Create a backlog sub-issue and local planning files from a parent issue.
     #[command(name = "tech", visible_alias = "split", visible_alias = "derive")]
     Tech(TechnicalArgs),
+    /// Groom repo-scoped backlog issues for quality gaps, stale context, and packet drift.
+    Groom(GroomArgs),
     /// Launch the sync dashboard or run direct pull/push backlog operations.
     Sync(SyncArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct GroomArgs {
+    #[command(flatten)]
+    pub client: LinearClientArgs,
+    /// Apply explicit Linear mutations for recommended grooming actions.
+    #[arg(long)]
+    pub apply: bool,
+    /// Maximum number of repo-scoped issues to inspect.
+    #[arg(long, default_value_t = 250)]
+    pub limit: usize,
 }
 
 #[derive(Debug, Clone, Args)]
