@@ -2748,7 +2748,9 @@ fn listen_dashboard_action(event: ListenDashboardEventArg) -> dashboard::Session
         ListenDashboardEventArg::Left => dashboard::SessionBrowserAction::Left,
         ListenDashboardEventArg::Right => dashboard::SessionBrowserAction::Right,
         ListenDashboardEventArg::Enter => dashboard::SessionBrowserAction::Enter,
-        ListenDashboardEventArg::Back => dashboard::SessionBrowserAction::Back,
+        ListenDashboardEventArg::Back | ListenDashboardEventArg::Esc => {
+            dashboard::SessionBrowserAction::Back
+        }
         ListenDashboardEventArg::PageUp => dashboard::SessionBrowserAction::PageUp,
         ListenDashboardEventArg::PageDown => dashboard::SessionBrowserAction::PageDown,
     }

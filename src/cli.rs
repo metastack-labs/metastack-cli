@@ -1628,6 +1628,7 @@ pub enum ListenDashboardEventArg {
     Right,
     Enter,
     Back,
+    Esc,
     PageUp,
     PageDown,
 }
