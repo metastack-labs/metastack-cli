@@ -2,15 +2,17 @@ use anyhow::{Result, anyhow, bail};
 use serde_json::{Value, json};
 
 use crate::linear::{
-    IssueAssigneeFilter, IssueCreateRequest, IssueListFilters, IssueSummary, IssueUpdateRequest,
-    UserRef,
+    IssueAssigneeFilter, IssueCreateRequest, IssueDependencySnapshot, IssueListFilters,
+    IssueRelationCreateRequest, IssueRelationSummary, IssueRelationUpdateRequest, IssueSummary,
+    IssueUpdateRequest, UserRef,
 };
 
 use super::{
     ReqwestLinearClient,
     model::{
-        Connection, IssueByIdPayload, IssueCommentsPayload, IssueCreatePayload, IssueUpdatePayload,
-        IssuesPayload, UsersPayload,
+        Connection, IssueByIdPayload, IssueCommentsPayload, IssueCreatePayload,
+        IssueDependencySnapshotPayload, IssueRelationCreatePayload, IssueRelationUpdatePayload,
+        IssueUpdatePayload, IssuesPayload, UsersPayload,
     },
     pagination::CursorPager,
 };
@@ -212,6 +214,25 @@ children(first: 100) {
 }
 "#;
 
+const ISSUE_RELATION_FIELDS: &str = r#"
+id
+type
+issue {
+  id
+  identifier
+  title
+  url
+  description
+}
+relatedIssue {
+  id
+  identifier
+  title
+  url
+  description
+}
+"#;
+
 impl ReqwestLinearClient {
     pub(super) async fn list_users_resource(&self, limit: usize) -> Result<Vec<UserRef>> {
         let mut users = Vec::new();
@@ -306,6 +327,39 @@ query Issue($id: String!) {{
         }
 
         Ok(IssueSummary::from(issue))
+    }
+
+    pub(super) async fn get_issue_dependency_snapshot_resource(
+        &self,
+        issue_id: &str,
+    ) -> Result<IssueDependencySnapshot> {
+        let query = format!(
+            r#"
+query IssueDependencies($id: String!) {{
+  issue(id: $id) {{
+    {ISSUE_DETAIL_FIELDS}
+    relations(first: 100) {{
+      nodes {{
+        {ISSUE_RELATION_FIELDS}
+      }}
+    }}
+    inverseRelations(first: 100) {{
+      nodes {{
+        {ISSUE_RELATION_FIELDS}
+      }}
+    }}
+  }}
+}}
+"#
+        );
+        let data: IssueDependencySnapshotPayload = self
+            .graphql()
+            .query(&query, json!({ "id": issue_id }))
+            .await?;
+        let snapshot = data
+            .issue
+            .ok_or_else(|| anyhow!("Linear issue `{issue_id}` returned no issue body"))?;
+        Ok(IssueDependencySnapshot::from(snapshot))
     }
 
     async fn get_issue_comments_page(
@@ -460,6 +514,99 @@ mutation UpdateIssue($id: String!, $input: IssueUpdateInput!) {{
             .ok_or_else(|| anyhow!("Linear issue update returned no issue body"))
     }
 
+    pub(super) async fn create_issue_relation_resource(
+        &self,
+        request: IssueRelationCreateRequest,
+    ) -> Result<IssueRelationSummary> {
+        let query = format!(
+            r#"
+mutation CreateIssueRelation($input: IssueRelationCreateInput!) {{
+  issueRelationCreate(input: $input) {{
+    success
+    issueRelation {{
+      {ISSUE_RELATION_FIELDS}
+    }}
+  }}
+}}
+"#
+        );
+        let data: IssueRelationCreatePayload = self
+            .graphql()
+            .query(
+                &query,
+                json!({
+                    "input": {
+                        "type": request.relation_type.as_str(),
+                        "issueId": request.issue_id,
+                        "relatedIssueId": request.related_issue_id,
+                    }
+                }),
+            )
+            .await?;
+        let payload = data.issue_relation_create;
+        if !payload.success {
+            bail!("Linear did not confirm issue relation creation");
+        }
+
+        payload
+            .issue_relation
+            .map(IssueRelationSummary::from)
+            .ok_or_else(|| anyhow!("Linear issue relation creation returned no relation body"))
+    }
+
+    pub(super) async fn update_issue_relation_resource(
+        &self,
+        relation_id: &str,
+        request: IssueRelationUpdateRequest,
+    ) -> Result<IssueRelationSummary> {
+        let query = format!(
+            r#"
+mutation UpdateIssueRelation($id: String!, $input: IssueRelationUpdateInput!) {{
+  issueRelationUpdate(id: $id, input: $input) {{
+    success
+    issueRelation {{
+      {ISSUE_RELATION_FIELDS}
+    }}
+  }}
+}}
+"#
+        );
+        let mut input = serde_json::Map::new();
+        if let Some(relation_type) = request.relation_type {
+            input.insert(
+                "type".to_string(),
+                Value::String(relation_type.as_str().to_string()),
+            );
+        }
+        if let Some(issue_id) = request.issue_id {
+            input.insert("issueId".to_string(), Value::String(issue_id));
+        }
+        if let Some(related_issue_id) = request.related_issue_id {
+            input.insert(
+                "relatedIssueId".to_string(),
+                Value::String(related_issue_id),
+            );
+        }
+        let data: IssueRelationUpdatePayload = self
+            .graphql()
+            .query(
+                &query,
+                json!({
+                    "id": relation_id,
+                    "input": Value::Object(input),
+                }),
+            )
+            .await?;
+        let payload = data.issue_relation_update;
+        if !payload.success {
+            bail!("Linear did not confirm issue relation update");
+        }
+
+        payload
+            .issue_relation
+            .map(IssueRelationSummary::from)
+            .ok_or_else(|| anyhow!("Linear issue relation update returned no relation body"))
+    }
     async fn collect_issues(
         &self,
         limit: Option<usize>,

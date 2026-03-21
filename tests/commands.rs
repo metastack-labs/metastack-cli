@@ -171,8 +171,12 @@ fn backlog_help_lists_tech_and_sync_commands() {
         .assert()
         .success()
         .stdout(predicate::str::contains("\n  plan "))
+        .stdout(predicate::str::contains("\n  dependencies "))
         .stdout(predicate::str::contains("\n  tech "))
         .stdout(predicate::str::contains("\n  sync "))
+        .stdout(predicate::str::contains(
+            "meta backlog dependencies --root . --fetch --json",
+        ))
         .stdout(predicate::str::contains("meta backlog tech MET-35"));
 }
 
