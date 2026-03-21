@@ -1450,24 +1450,38 @@ fn render_save_prompt(frame: &mut ratatui::Frame<'_>, app: &WorkflowRunApp, area
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Percentage(30),
-            Constraint::Length(7),
+            Constraint::Length(10),
             Constraint::Percentage(30),
         ])
         .split(area);
-    let prompt_area = centered_rect(vertical[1], 90, 7);
+    let prompt_area = centered_rect(vertical[1], 90, 10);
     let block = Block::default()
         .borders(Borders::ALL)
         .title("Save Artifact Path")
         .border_style(Style::default().add_modifier(Modifier::BOLD));
     let inner = block.inner(prompt_area);
+    frame.render_widget(block, prompt_area);
+
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(1)])
+        .split(inner);
+    let helper = Paragraph::new(Text::from(vec![
+        Line::from("Default target:"),
+        Line::from(app.save_path_input.value().to_string()),
+        Line::from("Paths must stay inside the repository root."),
+    ]))
+    .wrap(Wrap { trim: false });
+    frame.render_widget(helper, sections[0]);
+
     let rendered = app.save_path_input.render_with_viewport(
         ".metastack/workflows/generated/...",
         true,
-        inner.width,
-        inner.height,
+        sections[1].width,
+        sections[1].height,
     );
-    frame.render_widget(rendered.paragraph(block), prompt_area);
-    rendered.set_cursor(frame, inner);
+    frame.render_widget(rendered.paragraph(Block::default()), sections[1]);
+    rendered.set_cursor(frame, sections[1]);
 }
 
 fn render_overwrite_prompt(frame: &mut ratatui::Frame<'_>, _app: &WorkflowRunApp, area: Rect) {
@@ -1551,12 +1565,16 @@ fn save_prompt_viewport(area: Rect) -> Rect {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Percentage(30),
-            Constraint::Length(7),
+            Constraint::Length(10),
             Constraint::Percentage(30),
         ])
         .split(area);
-    let prompt_area = centered_rect(vertical[1], 90, 7);
-    Block::default().borders(Borders::ALL).inner(prompt_area)
+    let prompt_area = centered_rect(vertical[1], 90, 10);
+    let inner = Block::default().borders(Borders::ALL).inner(prompt_area);
+    Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(1)])
+        .split(inner)[1]
 }
 
 fn centered_rect(area: Rect, width_percent: u16, height: u16) -> Rect {

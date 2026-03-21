@@ -1152,6 +1152,10 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"#
         .stdout(predicate::str::contains(
             ".metastack/workflows/generated/render-once-proof.md",
         ))
+        .stdout(predicate::str::contains("Default target:"))
+        .stdout(predicate::str::contains(
+            "Paths must stay inside the repository root.",
+        ))
         .stdout(predicate::str::contains(repo_root.display().to_string()).not());
 
     Ok(())
