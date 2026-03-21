@@ -587,6 +587,10 @@ Legacy alias: `meta workflows`
 
 Compatibility alias under `meta agents`: `meta agents workflow ...`
 
+```bash
+meta agents workflow run ticket-implementation --render-once
+```
+
 Playbooks use Markdown with YAML front matter. The front matter defines the workflow name, summary, default provider, parameter contract, validation steps, optional instructions, and optional Linear issue lookup parameter. See [`src/artifacts/workflows/README.md`](src/artifacts/workflows/README.md) for the shipped format and `.metastack/workflows/README.md` for the repo-local scaffold.
 
 Interactive terminal runs are TUI-first:

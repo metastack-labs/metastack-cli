@@ -940,6 +940,42 @@ fn workflows_run_render_once_shows_tui_first_wizard() -> Result<(), Box<dyn Erro
     Ok(())
 }
 
+#[test]
+fn agents_workflow_alias_run_render_once_uses_tui_first_flow() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    ensure_workflow_test_config(&config_path)?;
+
+    cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "agents",
+            "workflow",
+            "run",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+            "ticket-implementation",
+            "--render-once",
+            "--width",
+            "120",
+            "--height",
+            "34",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Workflow Run (ticket-implementation)",
+        ))
+        .stdout(predicate::str::contains("Wizard Steps"))
+        .stdout(predicate::str::contains("issue (required)"))
+        .stdout(predicate::str::contains("implementation_notes (op"))
+        .stdout(predicate::str::contains("Generated Markdown").not());
+
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn workflows_run_render_once_events_can_reach_edit_and_accept_it() -> Result<(), Box<dyn Error>> {
