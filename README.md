@@ -28,7 +28,7 @@ Most planning tools split work across issue trackers, docs, scripts, and ad hoc 
 - `meta runtime config` saves install-scoped Linear and agent defaults.
 - `meta runtime setup` bootstraps the repo and saves repo-scoped defaults under `.metastack/`.
 - `meta context scan` turns the codebase into reusable planning context.
-- `meta backlog plan`, `meta backlog tech`, `meta linear issues refine`, and `meta agents workflows` generate structured backlog work.
+- `meta backlog plan`, `meta backlog release`, `meta backlog tech`, `meta linear issues refine`, and `meta agents workflows` generate structured backlog work.
 - `meta merge` batches open GitHub PRs into one isolated aggregate merge run and publish step.
 - `meta linear ...` and `meta backlog sync` keep Linear and local files aligned.
 - `meta agents listen` runs unattended ticket execution in dedicated workspace clones instead of your source checkout.
@@ -86,6 +86,7 @@ meta runtime setup
 meta context scan
 meta context show
 meta backlog plan --request "Break the next release into Linear-ready tickets"
+meta backlog release --name sprint-1 --batch-size 5
 ```
 
 If you are ready to supervise issue execution:
@@ -150,7 +151,7 @@ The preferred public surface is domain-first. Legacy top-level commands such as 
 
 | Command family | Use it for |
 | --- | --- |
-| `meta backlog` | Plan, create technical backlog children, and sync backlog work for the current repository |
+| `meta backlog` | Plan, batch, create technical backlog children, and sync backlog work for the current repository |
 | `meta linear` | Browse, create, edit, refine, and dashboard Linear work |
 | `meta agents` | Run the unattended listener and reusable workflow playbooks |
 | `meta context` | Inspect, map, doctor, scan, or reload the effective agent context |
@@ -179,7 +180,7 @@ A typical end-to-end loop looks like this:
 1. Run `meta runtime config` once to save install-scoped Linear auth and agent defaults.
 2. Run `meta runtime setup` once per repository to scaffold `.metastack/` and save repo defaults.
 3. Run `meta context scan` to refresh the repo context under `.metastack/codebase/`.
-4. Use `meta backlog plan` or `meta backlog tech` to create structured backlog work.
+4. Use `meta backlog plan`, `meta backlog release`, or `meta backlog tech` to create structured backlog work.
 5. Use `meta linear ...`, `meta dashboard ...`, or `meta backlog sync` to coordinate with Linear.
 6. Use `meta merge` when you want to batch open GitHub PRs in one isolated aggregate merge run.
 7. Use `meta agents listen` when you want unattended ticket execution inside a dedicated workspace clone.
@@ -192,6 +193,7 @@ Engineer:
 meta runtime setup --team MET --project "MetaStack CLI"
 meta context scan
 meta backlog plan --request "Break the next release into Linear-ready tickets"
+meta backlog release --name sprint-1 --batch-size 5
 meta backlog tech MET-35
 ```
 
@@ -570,6 +572,36 @@ Side effects:
 - writes the generated backlog item to `.metastack/backlog/<NEW_ISSUE_ID>/`
 - uses `.metastack/backlog/<NEW_ISSUE_ID>/index.md` as the Linear issue description
 - uploads the remaining managed backlog files as Linear attachments
+
+### `backlog release`
+
+Slice existing repo-scoped backlog items into a milestone-ready execution batch and write the packet locally before any optional Linear edits:
+
+```bash
+meta backlog release --name sprint-1 --batch-size 5
+meta backlog release --name sprint-1 --issue MET-10 --issue MET-11 --batch-size 2
+meta backlog release --name sprint-1 --batch-size 5 --apply --project "Sprint 1" --state "Todo"
+```
+
+`meta backlog release` reads local backlog packets from `.metastack/backlog/<ISSUE>/`, enriches them with live Linear issue data when auth is available, infers lightweight dependency signals from parent-child relationships plus local markdown notes, and writes an execution packet under `.metastack/releases/<NAME>/`.
+
+The generated packet includes:
+
+- an ordered issue sequence that pulls prerequisites ahead of downstream higher-priority work
+- a recommended cut line based on `--batch-size`
+- must-have versus deferrable slices
+- planning risks and fallback notes when Linear data is missing or dependency signals are weak
+- both Markdown (`index.md`) and machine-readable JSON (`plan.json`) output
+
+Pass `--apply` only when you want to update existing Linear issue metadata for the issues above the cut line. The current apply path reassigns those included issues to an existing Linear project and/or workflow state; it does not mutate the primary issue descriptions.
+
+Side effects:
+
+- ensures `.metastack/releases/` exists
+- reads selected backlog issue metadata from `.metastack/backlog/<ISSUE>/.linear.json`
+- writes `.metastack/releases/<NAME>/index.md`
+- writes `.metastack/releases/<NAME>/plan.json`
+- with `--apply`, updates only the included issues above the cut line using the requested existing Linear project and/or state
 
 ### `issues refine`
 

@@ -21,6 +21,7 @@ const BACKLOG_HELP_EXAMPLES: &str = "\
 Examples:
   meta backlog plan --root . --request \"Split the onboarding work into tickets\"
   meta backlog tech MET-35
+  meta backlog release --root . --name sprint-1 --batch-size 5
   meta backlog split MET-35
   meta backlog sync status
   meta backlog sync link MET-35 --entry manual-notes --pull
@@ -190,6 +191,8 @@ pub enum BacklogCommands {
     /// Create a backlog sub-issue and local planning files from a parent issue.
     #[command(name = "tech", visible_alias = "split", visible_alias = "derive")]
     Tech(TechnicalArgs),
+    /// Slice repo-scoped backlog issues into a release-ready execution batch.
+    Release(ReleaseArgs),
     /// Launch the sync dashboard or run direct pull/push backlog operations.
     Sync(SyncArgs),
 }
@@ -782,6 +785,33 @@ pub struct TechnicalArgs {
     /// Override the resolved built-in reasoning option for backlog generation.
     #[arg(long)]
     pub reasoning: Option<String>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ReleaseArgs {
+    #[command(flatten)]
+    pub client: LinearClientArgs,
+    /// Stable release packet name written under `.metastack/releases/<NAME>/`.
+    #[arg(long, value_name = "NAME")]
+    pub name: String,
+    /// Explicit backlog issue identifiers to include. Defaults to all local backlog items.
+    #[arg(long = "issue", value_name = "IDENTIFIER")]
+    pub issues: Vec<String>,
+    /// Maximum number of issues to keep above the recommended cut line.
+    #[arg(long = "batch-size", default_value_t = 5)]
+    pub batch_size: usize,
+    /// Assign included issues to an existing Linear project and/or state after writing the local packet.
+    #[arg(long)]
+    pub apply: bool,
+    /// Existing Linear project name or id to set when `--apply` is enabled.
+    #[arg(long)]
+    pub project: Option<String>,
+    /// Existing Linear workflow state name to set when `--apply` is enabled.
+    #[arg(long)]
+    pub state: Option<String>,
+    /// Emit the generated packet summary as JSON.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Clone, Args)]

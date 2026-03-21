@@ -50,9 +50,13 @@ fn backlog_help_lists_tech_and_sync_commands() {
         .assert()
         .success()
         .stdout(predicate::str::contains("\n  plan "))
+        .stdout(predicate::str::contains("\n  release "))
         .stdout(predicate::str::contains("\n  tech "))
         .stdout(predicate::str::contains("\n  sync "))
-        .stdout(predicate::str::contains("meta backlog tech MET-35"));
+        .stdout(predicate::str::contains("meta backlog tech MET-35"))
+        .stdout(predicate::str::contains(
+            "meta backlog release --root . --name sprint-1 --batch-size 5",
+        ));
 }
 
 #[test]
