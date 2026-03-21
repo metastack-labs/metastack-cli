@@ -11,6 +11,7 @@ mod config_command;
 mod context;
 mod cron;
 mod cron_dashboard;
+mod doctor;
 mod fs;
 mod github_pr;
 mod linear;
@@ -57,6 +58,7 @@ use crate::config::ListenAssignmentScope;
 use crate::config_command::{ConfigAction, ConfigCommandOutput, run_config};
 use crate::context::run_context_command;
 use crate::cron::run_cron;
+use crate::doctor::run_doctor;
 use crate::linear::create::IssueCreateAction;
 use crate::linear::dashboard::DashboardAction;
 use crate::linear::edit::IssueEditAction;
@@ -499,6 +501,9 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 .await?;
             }
         },
+        Command::Doctor(args) => {
+            run_doctor(&args).await?;
+        }
         Command::ListenWorker(args) => {
             run_listen_worker(&args).await?;
         }
@@ -559,7 +564,10 @@ fn command_bypasses_onboarding(cli: &Cli) -> bool {
     matches!(
         &cli.command,
         Command::Runtime(args) if matches!(&args.command, RuntimeCommands::Config(_))
-    ) || matches!(&cli.command, Command::Config(_) | Command::Upgrade(_))
+    ) || matches!(
+        &cli.command,
+        Command::Config(_) | Command::Upgrade(_) | Command::Doctor(_)
+    )
 }
 
 fn command_label(cli: &Cli) -> String {
@@ -586,6 +594,7 @@ fn command_label(cli: &Cli) -> String {
         Command::ListenWorker(_) => "meta listen-worker".to_string(),
         Command::Scaffold(_) => "meta scaffold".to_string(),
         Command::Upgrade(_) => "meta upgrade".to_string(),
+        Command::Doctor(_) => "meta doctor".to_string(),
     }
 }
 

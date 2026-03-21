@@ -250,6 +250,8 @@ pub enum Command {
     /// Create the local .metastack workspace and reusable templates.
     #[command(hide = true)]
     Scaffold(ScaffoldArgs),
+    /// Run environment health checks for tools, config, and service connectivity.
+    Doctor(DoctorArgs),
 }
 
 #[derive(Debug, Clone, Args)]
@@ -260,6 +262,13 @@ pub struct ScaffoldArgs {
     /// Replace any scaffold-managed files that already exist.
     #[arg(long)]
     pub force: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct DoctorArgs {
+    /// Emit check results as JSON.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Clone, Args)]
