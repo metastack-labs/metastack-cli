@@ -105,6 +105,7 @@ fn plan_fast_no_interactive_skips_questions_and_addendum_but_uses_backlog_templa
 }
 "#,
     )?;
+    fs::remove_file(repo_root.join(".metastack/codebase/ARCHITECTURE.md"))?;
     write_onboarded_config(
         &config_path,
         format!(
@@ -263,6 +264,18 @@ printf '%s' '{"summary":"Create one fast ticket.","issues":[{"title":"Fast plan 
     let payload = fs::read_to_string(stub_dir.join("payload-1.txt"))?;
     assert!(payload.contains("fast single-pass mode"));
     assert!(payload.contains("Anything else to add:\nNo additional addendum was provided."));
+    assert!(payload.contains("## SCAN.md"));
+    assert!(payload.contains("## ARCHITECTURE.md"));
+    assert!(payload.contains("## CONVENTIONS.md"));
+    assert!(payload.contains("## STACK.md"));
+    assert!(payload.contains("## STRUCTURE.md"));
+    assert!(payload.contains("## TESTING.md"));
+    assert!(!payload.contains("## CONCERNS.md"));
+    assert!(!payload.contains("## INTEGRATIONS.md"));
+    assert!(payload.contains(
+        "_Missing `ARCHITECTURE.md`. Run `meta scan` to generate it._"
+    ));
+    assert!(!payload.contains("meta context reload"));
     assert!(!payload.contains("Ask at most"));
 
     let backlog_index = fs::read_to_string(repo_root.join(".metastack/backlog/MET-91/index.md"))?;

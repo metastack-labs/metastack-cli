@@ -366,3 +366,31 @@ impl DoctorReport {
         lines.join("\n")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn bundled_context_includes_all_sections_and_reload_or_scan_hints() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let root = temp.path();
+        let paths = PlanningPaths::new(root);
+        fs::create_dir_all(&paths.codebase_dir).expect("codebase dir should be created");
+
+        let bundle = load_codebase_context_bundle(root).expect("bundle should render");
+
+        assert!(bundle.contains("## SCAN.md"));
+        assert!(bundle.contains("## ARCHITECTURE.md"));
+        assert!(bundle.contains("## CONCERNS.md"));
+        assert!(bundle.contains("## CONVENTIONS.md"));
+        assert!(bundle.contains("## INTEGRATIONS.md"));
+        assert!(bundle.contains("## STACK.md"));
+        assert!(bundle.contains("## STRUCTURE.md"));
+        assert!(bundle.contains("## TESTING.md"));
+        assert!(bundle.contains("_Missing `SCAN.md`. Run `meta context reload --root "));
+        assert!(bundle.contains("` or `meta context scan --root "));
+        assert!(bundle.contains("` to generate it._"));
+    }
+}
