@@ -31,6 +31,9 @@ Examples:
   meta backlog plan --root . ENG-10144 --velocity
   meta backlog improve --root . --mode basic
   meta backlog improve --root . ENG-10144 --mode advanced --apply
+  meta backlog dependencies --root .
+  meta backlog dependencies --root . --fetch --json
+  meta backlog dependencies --root . --fetch --apply --yes
   meta backlog tech MET-35
   meta backlog split MET-35
   meta backlog sync status
@@ -291,6 +294,8 @@ pub enum BacklogCommands {
     Plan(PlanArgs),
     /// Review repo-scoped backlog issues for hygiene gaps and optionally apply improvements.
     Improve(BacklogImproveArgs),
+    /// Propose dependency relationships, rollout order, and optional Linear updates for repo backlog packets.
+    Dependencies(BacklogDependenciesArgs),
     /// Create a backlog sub-issue and local planning files from a parent issue.
     #[command(name = "tech", visible_alias = "split", visible_alias = "derive")]
     Tech(TechnicalArgs),
@@ -333,6 +338,24 @@ pub struct BacklogImproveArgs {
     /// Override the resolved built-in reasoning option for backlog improvement.
     #[arg(long)]
     pub reasoning: Option<String>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct BacklogDependenciesArgs {
+    #[command(flatten)]
+    pub client: LinearClientArgs,
+    /// Enrich the local backlog analysis with current Linear issue metadata and relationships.
+    #[arg(long)]
+    pub fetch: bool,
+    /// Emit the result as machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+    /// Apply the proposed parent and issue-relation changes after showing a dry-run preview.
+    #[arg(long)]
+    pub apply: bool,
+    /// Skip the interactive confirmation prompt for `--apply`.
+    #[arg(long)]
+    pub yes: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -705,6 +728,10 @@ pub enum CronCommands {
     /// Launch the cron-init dashboard or create a Markdown cron job template directly from flags.
     #[command(visible_alias = "new")]
     Init(CronInitArgs),
+    /// List discovered cron workflow definitions without starting the daemon.
+    List(CronListArgs),
+    /// Validate discovered cron workflow definitions without starting the daemon.
+    Validate(CronValidateArgs),
     /// Start the cron scheduler, detached when supported.
     Start(CronStartArgs),
     /// Stop the detached cron scheduler.
@@ -713,6 +740,14 @@ pub enum CronCommands {
     Status,
     /// Run one cron job immediately.
     Run(CronRunArgs),
+    /// Resume an interrupted cron workflow run from persisted state.
+    Resume(CronResumeArgs),
+    /// List pending cron workflow approvals.
+    Approvals(CronApprovalsArgs),
+    /// Approve a waiting cron workflow run and continue execution.
+    Approve(CronApproveArgs),
+    /// Reject a waiting cron workflow run.
+    Reject(CronRejectArgs),
     /// Hidden worker used by `meta cron start` for the detached scheduler loop.
     #[command(hide = true)]
     Daemon(CronDaemonArgs),
@@ -780,11 +815,59 @@ pub struct CronStartArgs {
     pub poll_interval_seconds: u64,
 }
 
+#[derive(Debug, Clone, Args, Default)]
+pub struct CronListArgs {
+    /// Emit the discovered workflow list as JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, Args, Default)]
+pub struct CronValidateArgs {
+    /// Emit validation results as JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
 #[derive(Debug, Clone, Args)]
 pub struct CronRunArgs {
     /// Cron job name without the `.md` suffix.
     #[arg(value_name = "NAME")]
     pub name: String,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct CronResumeArgs {
+    /// Persisted cron workflow run identifier.
+    #[arg(value_name = "RUN_ID")]
+    pub run_id: String,
+}
+
+#[derive(Debug, Clone, Args, Default)]
+pub struct CronApprovalsArgs {
+    /// Emit pending approvals as JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct CronApproveArgs {
+    /// Persisted cron workflow run identifier.
+    #[arg(value_name = "RUN_ID")]
+    pub run_id: String,
+    /// Optional approval note persisted into the run artifact.
+    #[arg(long)]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct CronRejectArgs {
+    /// Persisted cron workflow run identifier.
+    #[arg(value_name = "RUN_ID")]
+    pub run_id: String,
+    /// Rejection reason persisted into the run artifact.
+    #[arg(long)]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -1891,6 +1974,7 @@ impl Cli {
         match &self.command {
             Command::Backlog(args) => match &args.command {
                 BacklogCommands::Plan(args) if args.no_interactive => Some("backlog.plan"),
+                BacklogCommands::Dependencies(args) if args.json => Some("backlog.dependencies"),
                 BacklogCommands::Tech(args) if args.no_interactive => Some("backlog.tech"),
                 BacklogCommands::Sync(args) if args.no_interactive || args.json => {
                     Some("backlog.sync")
@@ -2002,6 +2086,7 @@ fn infer_backlog_machine_output(tokens: &[String]) -> Option<&'static str> {
     let (command, rest) = tokens.split_first()?;
     match command.as_str() {
         "plan" if has_flag(rest, "--no-interactive") => Some("backlog.plan"),
+        "dependencies" if has_flag(rest, "--json") => Some("backlog.dependencies"),
         "tech" | "split" | "derive" if has_flag(rest, "--no-interactive") => Some("backlog.tech"),
         "sync" if has_flag(rest, "--json") || has_flag(rest, "--no-interactive") => {
             Some("backlog.sync")

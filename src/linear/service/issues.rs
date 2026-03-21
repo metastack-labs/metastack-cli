@@ -1,8 +1,10 @@
 use anyhow::{Result, anyhow, bail};
 
 use crate::linear::{
-    IssueAssigneeFilter, IssueCreateRequest, IssueCreateSpec, IssueEditContext, IssueEditSpec,
-    IssueListFilters, IssueSummary, IssueUpdateRequest, LinearClient,
+    IssueAssigneeFilter, IssueCreateRequest, IssueCreateSpec, IssueDependencySnapshot,
+    IssueEditContext, IssueEditSpec, IssueListFilters, IssueRelationCreateRequest,
+    IssueRelationSummary, IssueRelationUpdateRequest, IssueSummary, IssueUpdateRequest,
+    LinearClient,
 };
 
 use super::{
@@ -171,6 +173,24 @@ where
         self.client.get_issue(&issue.id).await
     }
 
+    pub async fn load_issue_dependency_snapshot(
+        &self,
+        identifier: &str,
+    ) -> Result<IssueDependencySnapshot> {
+        let issue = self
+            .find_issue_by_identifier(
+                identifier,
+                IssueListFilters {
+                    team: identifier_team(identifier).map(str::to_string),
+                    ..IssueListFilters::default()
+                },
+            )
+            .await?
+            .ok_or_else(|| anyhow!("issue `{identifier}` was not found in Linear"))?;
+
+        self.client.get_issue_dependency_snapshot(&issue.id).await
+    }
+
     pub async fn create_issue(&self, spec: IssueCreateSpec) -> Result<IssueSummary> {
         let teams = self.client.list_teams().await?;
         let team = self.resolve_team(spec.team.as_deref(), &teams)?;
@@ -261,6 +281,23 @@ where
                     parent_id,
                 },
             )
+            .await
+    }
+
+    pub async fn create_issue_relation(
+        &self,
+        request: IssueRelationCreateRequest,
+    ) -> Result<IssueRelationSummary> {
+        self.client.create_issue_relation(request).await
+    }
+
+    pub async fn update_issue_relation(
+        &self,
+        relation_id: &str,
+        request: IssueRelationUpdateRequest,
+    ) -> Result<IssueRelationSummary> {
+        self.client
+            .update_issue_relation(relation_id, request)
             .await
     }
 }

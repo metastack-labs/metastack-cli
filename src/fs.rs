@@ -18,6 +18,7 @@ pub struct PlanningPaths {
     pub cron_runtime_dir: PathBuf,
     pub cron_runtime_jobs_dir: PathBuf,
     pub cron_runtime_logs_dir: PathBuf,
+    pub cron_runtime_runs_dir: PathBuf,
 }
 
 impl PlanningPaths {
@@ -35,6 +36,7 @@ impl PlanningPaths {
         let cron_runtime_dir = cron_dir.join(".runtime");
         let cron_runtime_jobs_dir = cron_runtime_dir.join("jobs");
         let cron_runtime_logs_dir = cron_runtime_dir.join("logs");
+        let cron_runtime_runs_dir = cron_runtime_dir.join("runs");
 
         Self {
             metastack_dir,
@@ -50,6 +52,7 @@ impl PlanningPaths {
             cron_runtime_dir,
             cron_runtime_jobs_dir,
             cron_runtime_logs_dir,
+            cron_runtime_runs_dir,
         }
     }
 
@@ -157,8 +160,8 @@ impl PlanningPaths {
         self.cron_runtime_jobs_dir.join(format!("{name}.json"))
     }
 
-    pub fn cron_job_log_path(&self, name: &str) -> PathBuf {
-        self.cron_runtime_logs_dir.join(format!("{name}.log"))
+    pub fn cron_run_state_path(&self, run_id: &str) -> PathBuf {
+        self.cron_runtime_runs_dir.join(format!("{run_id}.json"))
     }
 }
 
