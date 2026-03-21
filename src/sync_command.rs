@@ -1343,6 +1343,7 @@ async fn load_sync_project_issues(
         service,
         default_team,
         default_project_id,
+        ..
     } = load_linear_command_context(client_args, None)?;
 
     let (filter, title) = if let Some(project_name) = project_override {

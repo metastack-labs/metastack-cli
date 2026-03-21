@@ -235,6 +235,7 @@ pub async fn run_technical(args: &TechnicalArgs) -> Result<TechnicalReport> {
         service,
         default_team,
         default_project_id,
+        ..
     } = load_linear_command_context(&args.client, None)?;
     let can_launch_tui = io::stdin().is_terminal() && io::stdout().is_terminal();
     let run_non_interactive = args.no_interactive || !can_launch_tui;

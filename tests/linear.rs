@@ -1322,6 +1322,9 @@ fn linear_issue_create_uses_repo_meta_defaults() -> Result<(), Box<dyn Error>> {
   "linear": {
     "team": "MET",
     "project_id": "project-1"
+  },
+  "backlog": {
+    "default_state": "Todo"
   }
 }
 "#,
@@ -1391,7 +1394,8 @@ api_url = "{api_url}"
             .path("/graphql")
             .body_includes("mutation CreateIssue")
             .body_includes("\"projectId\":\"project-1\"")
-            .body_includes("\"teamId\":\"team-1\"");
+            .body_includes("\"teamId\":\"team-1\"")
+            .body_includes("\"stateId\":\"state-1\"");
         then.status(200).json_body(json!({
             "data": {
                 "issueCreate": {

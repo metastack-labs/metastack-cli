@@ -62,6 +62,7 @@ pub(crate) async fn run_issues_command(
         service,
         default_team,
         default_project_id,
+        default_state,
     } = load_linear_command_context(client_args, cli_default_team.clone())?;
 
     match command {
@@ -136,10 +137,7 @@ pub(crate) async fn run_issues_command(
             let run_non_interactive =
                 create_args.no_interactive || (!create_args.render_once && !can_launch_tui);
 
-            let resolved_default_state = create_args
-                .state
-                .clone()
-                .or_else(|| app_config.backlog.default_state.clone());
+            let resolved_default_state = create_args.state.clone().or(default_state.clone());
 
             if run_non_interactive {
                 let title = create_args.title.ok_or_else(|| {
@@ -356,6 +354,7 @@ pub(crate) async fn run_dashboard_command(
         service,
         default_team,
         default_project_id,
+        ..
     } = load_linear_command_context(client_args, cli_default_team)?;
     let project = dashboard_args.project;
 
@@ -400,6 +399,7 @@ pub(crate) struct LinearCommandContext {
     pub(crate) service: LinearService<ReqwestLinearClient>,
     pub(crate) default_team: Option<String>,
     pub(crate) default_project_id: Option<String>,
+    pub(crate) default_state: Option<String>,
 }
 
 pub(crate) fn load_linear_command_context(
@@ -420,6 +420,11 @@ pub(crate) fn load_linear_command_context(
     )?;
     let default_team = config.default_team.clone();
     let default_project_id = planning_meta.effective_project_id(&app_config);
+    let default_state = planning_meta
+        .backlog
+        .default_state
+        .clone()
+        .or_else(|| app_config.backlog.default_state.clone());
     let client = ReqwestLinearClient::new(config)?;
     let service = LinearService::new(client, default_team.clone());
 
@@ -427,6 +432,7 @@ pub(crate) fn load_linear_command_context(
         service,
         default_team,
         default_project_id,
+        default_state,
     })
 }
 

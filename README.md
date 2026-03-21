@@ -496,6 +496,8 @@ Precedence is consistent across the CLI:
 - Linear-backed commands use `CLI flag override -> install-scoped repo auth -> repo .metastack/meta.json/profile -> global config -> LINEAR_* environment fallback`
 - Agent-backed launches use `CLI override -> repo .metastack/meta.json -> global config`
 - Default issue status for standalone tickets resolves as `CLI --state override -> velocity_defaults.state (zero-prompt) -> repo backlog.default_state -> global backlog.default_state -> built-in "Backlog"`. Child tickets created by `meta backlog tech` inherit the parent issue's status instead of using the configured default; explicit `--state` overrides still take precedence.
+- `meta linear issues create` also resolves the default issue status from repo and global config when no `--state` flag is provided.
+- The CLI is read-only for workflow state selection: onboarding and config pickers query existing states from the Linear team but cannot create new ones. If a configured `default_state` does not match any state on the target team, the command fails with a clear error. Create new workflow states in the Linear UI first. See [`docs/linear-workflow-state-creation.md`](docs/linear-workflow-state-creation.md) for the full decision.
 
 ### `merge`
 
