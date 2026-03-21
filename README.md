@@ -968,8 +968,9 @@ When install-scoped `vim_mode` is enabled, the listen dashboard also accepts `h`
 for the existing left/right view-switching controls. The session table keeps an active row
 selection, renders a compact `PR` badge (`none`, `draft #N`, `ready #N`), and opens a structured
 detail pane with `Enter`. That drill-down shows the selected session's milestones, workspace and
-backlog references, prompt-context references, PR publication state, and short log excerpts from
-the install-scoped session detail artifact. Use `Up` / `Down` or `j` / `k` to move between
+backlog references, prompt-context references, PR publication state, any available PR URL or bare
+`#N` reference, and short log excerpts from the install-scoped session detail artifact. Use `Up` /
+`Down` or `j` / `k` to move between
 sessions, `Esc` or `Backspace` to close detail mode, and `PgUp` / `PgDn` to scroll the focused
 detail pane.
 Examples:
@@ -1033,7 +1034,8 @@ meta listen sessions resume --project-key <PROJECT_KEY> --once
 `meta listen sessions ...` manages the install-scoped listener store only. It does not inventory or delete the sibling workspace clones themselves.
 `meta listen sessions inspect` now expands the latest stored session with structured detail-artifact
 fields when available, including PR URL/state, workspace/backlog/workpad references, recent
-milestones, prompt-context references, and compact log excerpts.
+milestones, prompt-context references, compact log excerpts, and a fallback `Detail PR Ref: #N`
+line when the detail artifact only carries a PR number.
 
 ### `workspace`
 

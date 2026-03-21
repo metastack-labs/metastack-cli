@@ -148,7 +148,7 @@ fn agents_listen_help_describes_session_browser_navigation() {
             "include PR visibility as `none`, `draft #N`, or `ready #N`",
         ))
         .stdout(predicate::str::contains(
-            "Press Enter on the selected session to open the detail pane",
+            "Press Enter on the selected session to open the detail pane for milestones, references, prompt context, log excerpts, and any available PR URL or `#N` ref",
         ))
         .stdout(predicate::str::contains(
             "Use Up/Down (or j/k when vim mode is enabled)",
