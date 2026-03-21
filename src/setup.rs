@@ -4,7 +4,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+    MouseEvent, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -22,16 +25,19 @@ use crate::cli::{ConfigEventArg, SetupArgs};
 use crate::config::{
     AppConfig, DEFAULT_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT,
     DEFAULT_LISTEN_POLL_INTERVAL_SECONDS, LinearConfig, LinearConfigOverrides,
-    ListenAssignmentScope, ListenRefreshPolicy, PlanningMeta, ensure_saved_issue_labels,
-    normalize_agent_name, supported_agent_models, supported_agent_names,
-    supported_reasoning_options, validate_agent_model, validate_agent_name,
-    validate_agent_reasoning, validate_interactive_plan_follow_up_question_limit,
-    validate_listen_poll_interval_seconds,
+    ListenAssignmentScope, ListenRefreshPolicy, PlanDefaultMode, PlanningMeta, VelocityAutoAssign,
+    ensure_saved_issue_labels, normalize_agent_name, parse_listen_required_labels_csv,
+    supported_agent_models, supported_agent_names, supported_reasoning_options,
+    validate_agent_model, validate_agent_name, validate_agent_reasoning,
+    validate_backlog_default_priority, validate_backlog_labels, validate_fast_plan_question_limit,
+    validate_interactive_plan_follow_up_question_limit, validate_listen_poll_interval_seconds,
 };
 use crate::fs::{PlanningPaths, canonicalize_existing_dir};
 use crate::linear::{LinearService, ReqwestLinearClient};
 use crate::scaffold::{ensure_backlog_templates, ensure_planning_layout};
 use crate::tui::fields::{InputFieldState, SelectFieldState};
+use crate::tui::keybindings::KeybindingPolicy;
+use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph_with_block, wrapped_rows};
 
 #[derive(Debug, Clone)]
 struct SetupViewData {
@@ -60,6 +66,7 @@ struct SetupReport {
 
 #[derive(Debug, Clone)]
 struct SetupApp {
+    keybindings: KeybindingPolicy,
     step: SetupStep,
     profile: Option<String>,
     repo_auth_field: SelectFieldState,
@@ -75,8 +82,12 @@ struct SetupApp {
     instructions_path: InputFieldState,
     listen_poll_interval: InputFieldState,
     interactive_plan_limit: InputFieldState,
+    plan_default_mode: SelectFieldState,
+    plan_fast_single_ticket: SelectFieldState,
+    plan_fast_questions: InputFieldState,
     plan_label: InputFieldState,
     technical_label: InputFieldState,
+    summary_scroll: ScrollState,
     detected_agents: Vec<String>,
     error: Option<String>,
 }
@@ -90,12 +101,15 @@ struct SubmittedSetup {
     provider: Option<String>,
     model: Option<String>,
     reasoning: Option<String>,
-    listen_label: Option<String>,
+    listen_labels: Option<Vec<String>>,
     assignment_scope: ListenAssignmentScope,
     refresh_policy: ListenRefreshPolicy,
     instructions_path: Option<String>,
     listen_poll_interval: Option<u64>,
     interactive_plan_limit: Option<usize>,
+    plan_default_mode: Option<PlanDefaultMode>,
+    fast_single_ticket: Option<bool>,
+    fast_questions: Option<usize>,
     plan_label: Option<String>,
     technical_label: Option<String>,
 }
@@ -122,13 +136,16 @@ enum SetupStep {
     InstructionsPath,
     ListenPollInterval,
     InteractivePlanLimit,
+    PlanDefaultMode,
+    PlanFastSingleTicket,
+    PlanFastQuestions,
     PlanLabel,
     TechnicalLabel,
     Save,
 }
 
 impl SetupStep {
-    fn all() -> [Self; 16] {
+    fn all() -> [Self; 19] {
         [
             Self::LinearAuth,
             Self::LinearApiKey,
@@ -143,6 +160,9 @@ impl SetupStep {
             Self::InstructionsPath,
             Self::ListenPollInterval,
             Self::InteractivePlanLimit,
+            Self::PlanDefaultMode,
+            Self::PlanFastSingleTicket,
+            Self::PlanFastQuestions,
             Self::PlanLabel,
             Self::TechnicalLabel,
             Self::Save,
@@ -175,12 +195,15 @@ impl SetupStep {
             Self::Provider => "Repo agent",
             Self::Model => "Repo model",
             Self::Reasoning => "Repo reasoning",
-            Self::ListenLabel => "Listen label",
+            Self::ListenLabel => "Listen labels",
             Self::AssignmentScope => "Assignee filter",
             Self::RefreshPolicy => "Workspace refresh",
             Self::InstructionsPath => "Instructions file",
             Self::ListenPollInterval => "Listen poll interval",
             Self::InteractivePlanLimit => "Plan follow-up limit",
+            Self::PlanDefaultMode => "Plan mode",
+            Self::PlanFastSingleTicket => "Fast plan shape",
+            Self::PlanFastQuestions => "Fast plan questions",
             Self::PlanLabel => "Plan issue label",
             Self::TechnicalLabel => "Technical issue label",
             Self::Save => "Save",
@@ -196,12 +219,15 @@ impl SetupStep {
             Self::Provider => "Agent",
             Self::Model => "Model",
             Self::Reasoning => "Reasoning",
-            Self::ListenLabel => "Listen label",
+            Self::ListenLabel => "Listen labels",
             Self::AssignmentScope => "Assignee",
             Self::RefreshPolicy => "Refresh",
             Self::InstructionsPath => "Instructions",
             Self::ListenPollInterval => "Poll interval",
             Self::InteractivePlanLimit => "Plan limit",
+            Self::PlanDefaultMode => "Plan mode",
+            Self::PlanFastSingleTicket => "Fast shape",
+            Self::PlanFastQuestions => "Fast questions",
             Self::PlanLabel => "Plan label",
             Self::TechnicalLabel => "Tech label",
             Self::Save => "Save",
@@ -217,12 +243,15 @@ impl SetupStep {
             Self::Provider => "Repo default agent/provider",
             Self::Model => "Repo default model",
             Self::Reasoning => "Repo default reasoning effort",
-            Self::ListenLabel => "Listen required label",
+            Self::ListenLabel => "Listen required labels",
             Self::AssignmentScope => "Listen assignee filter",
             Self::RefreshPolicy => "Listen workspace refresh policy",
             Self::InstructionsPath => "Listen instructions file",
             Self::ListenPollInterval => "Listen poll interval in seconds",
             Self::InteractivePlanLimit => "Interactive plan follow-up question limit",
+            Self::PlanDefaultMode => "Default plan mode",
+            Self::PlanFastSingleTicket => "Default fast ticket shape",
+            Self::PlanFastQuestions => "Default fast follow-up batch size",
             Self::PlanLabel => "Default plan issue label",
             Self::TechnicalLabel => "Default technical issue label",
             Self::Save => "Save repo setup",
@@ -447,16 +476,16 @@ fn render_summary(view: &SetupViewData, include_paths: bool) -> String {
         display_optional(view.planning_meta.agent.reasoning.as_deref())
     ));
     lines.push(format!(
-        "Listen label: {}",
-        display_optional(view.planning_meta.listen.required_label.as_deref())
+        "Listen labels: {}",
+        display_listen_labels(view.planning_meta.listen.required_label_names())
     ));
     lines.push(format!(
         "Assignee filter: {}",
-        assignment_scope_label(view.planning_meta.listen.assignment_scope)
+        assignment_scope_label(view.planning_meta.listen.assignment_scope())
     ));
     lines.push(format!(
         "Workspace refresh: {}",
-        refresh_policy_label(view.planning_meta.listen.refresh_policy)
+        refresh_policy_label(view.planning_meta.listen.refresh_policy())
     ));
     lines.push(format!(
         "Instructions file: {}",
@@ -471,6 +500,18 @@ fn render_summary(view: &SetupViewData, include_paths: bool) -> String {
         display_plan_limit(view.planning_meta.plan.interactive_follow_up_questions)
     ));
     lines.push(format!(
+        "Default plan mode: {}",
+        display_plan_default_mode(view.planning_meta.plan.default_mode)
+    ));
+    lines.push(format!(
+        "Fast single-ticket default: {}",
+        display_fast_single_ticket(view.planning_meta.plan.fast_single_ticket)
+    ));
+    lines.push(format!(
+        "Fast plan question limit: {}",
+        display_fast_question_limit(view.planning_meta.plan.fast_questions)
+    ));
+    lines.push(format!(
         "Plan issue label: {}",
         effective_label(view.planning_meta.issue_labels.plan.as_deref(), "plan")
     ));
@@ -480,6 +521,55 @@ fn render_summary(view: &SetupViewData, include_paths: bool) -> String {
             view.planning_meta.issue_labels.technical.as_deref(),
             "technical"
         )
+    ));
+    lines.push(format!(
+        "Backlog default assignee: {}",
+        display_optional(view.planning_meta.backlog.default_assignee.as_deref())
+    ));
+    lines.push(format!(
+        "Backlog default state: {}",
+        display_optional(view.planning_meta.backlog.default_state.as_deref())
+    ));
+    lines.push(format!(
+        "Backlog default priority: {}",
+        view.planning_meta
+            .backlog
+            .default_priority
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "unset".to_string())
+    ));
+    lines.push(format!(
+        "Backlog default labels: {}",
+        render_label_summary(&view.planning_meta.backlog.default_labels)
+    ));
+    lines.push(format!(
+        "Zero-prompt velocity project: {}",
+        display_optional(
+            view.planning_meta
+                .backlog
+                .velocity_defaults
+                .project
+                .as_deref()
+        )
+    ));
+    lines.push(format!(
+        "Zero-prompt velocity state: {}",
+        display_optional(
+            view.planning_meta
+                .backlog
+                .velocity_defaults
+                .state
+                .as_deref()
+        )
+    ));
+    lines.push(format!(
+        "Zero-prompt auto-assign: {}",
+        view.planning_meta
+            .backlog
+            .velocity_defaults
+            .auto_assign
+            .map(render_velocity_auto_assign)
+            .unwrap_or_else(|| "unset".to_string())
     ));
     lines.push(format!(
         "Listen prerequisites: {}",
@@ -507,8 +597,18 @@ fn has_direct_updates(args: &SetupArgs) -> bool {
         || args.instructions_path.is_some()
         || args.listen_poll_interval.is_some()
         || args.interactive_plan_follow_up_question_limit.is_some()
+        || args.plan_default_mode.is_some()
+        || args.plan_fast_single_ticket.is_some()
+        || args.plan_fast_questions.is_some()
         || args.plan_label.is_some()
         || args.technical_label.is_some()
+        || args.default_assignee.is_some()
+        || args.default_state.is_some()
+        || args.default_priority.is_some()
+        || !args.default_labels.is_empty()
+        || args.velocity_project.is_some()
+        || args.velocity_state.is_some()
+        || args.velocity_auto_assign.is_some()
 }
 
 async fn apply_direct_updates(view: &mut SetupViewData, args: &SetupArgs) -> Result<bool> {
@@ -597,13 +697,13 @@ async fn apply_direct_updates(view: &mut SetupViewData, args: &SetupArgs) -> Res
         view.planning_meta.agent.reasoning = normalized;
     }
     if let Some(label) = &args.listen_label {
-        view.planning_meta.listen.required_label = normalize_optional(label);
+        view.planning_meta.listen.required_labels = parse_optional_listen_labels_input(label);
     }
     if let Some(scope) = args.assignment_scope {
-        view.planning_meta.listen.assignment_scope = scope.into();
+        view.planning_meta.listen.assignment_scope = Some(scope.into());
     }
     if let Some(policy) = args.refresh_policy {
-        view.planning_meta.listen.refresh_policy = policy.into();
+        view.planning_meta.listen.refresh_policy = Some(policy.into());
     }
     if let Some(path) = &args.instructions_path {
         view.planning_meta.listen.instructions_path = normalize_optional(path);
@@ -614,11 +714,45 @@ async fn apply_direct_updates(view: &mut SetupViewData, args: &SetupArgs) -> Res
     if let Some(limit) = &args.interactive_plan_follow_up_question_limit {
         view.planning_meta.plan.interactive_follow_up_questions = parse_plan_limit(limit)?;
     }
+    if let Some(mode) = &args.plan_default_mode {
+        view.planning_meta.plan.default_mode =
+            parse_optional_plan_default_mode(mode, "plan default mode")?;
+    }
+    if let Some(single_ticket) = &args.plan_fast_single_ticket {
+        view.planning_meta.plan.fast_single_ticket =
+            parse_optional_bool(single_ticket, "fast single-ticket default")?;
+    }
+    if let Some(limit) = &args.plan_fast_questions {
+        view.planning_meta.plan.fast_questions =
+            parse_fast_plan_limit(limit, "fast plan question limit")?;
+    }
     if let Some(label) = &args.plan_label {
         view.planning_meta.issue_labels.plan = normalize_optional(label);
     }
     if let Some(label) = &args.technical_label {
         view.planning_meta.issue_labels.technical = normalize_optional(label);
+    }
+    if let Some(assignee) = &args.default_assignee {
+        view.planning_meta.backlog.default_assignee = normalize_optional(assignee);
+    }
+    if let Some(state) = &args.default_state {
+        view.planning_meta.backlog.default_state = normalize_optional(state);
+    }
+    if let Some(priority) = &args.default_priority {
+        view.planning_meta.backlog.default_priority = parse_optional_priority(priority)?;
+    }
+    if !args.default_labels.is_empty() {
+        view.planning_meta.backlog.default_labels = parse_default_labels(&args.default_labels)?;
+    }
+    if let Some(project) = &args.velocity_project {
+        view.planning_meta.backlog.velocity_defaults.project = normalize_optional(project);
+    }
+    if let Some(state) = &args.velocity_state {
+        view.planning_meta.backlog.velocity_defaults.state = normalize_optional(state);
+    }
+    if let Some(auto_assign) = &args.velocity_auto_assign {
+        view.planning_meta.backlog.velocity_defaults.auto_assign =
+            parse_velocity_auto_assign(auto_assign)?;
     }
 
     let after_meta = serde_json::to_value(&view.planning_meta)?;
@@ -681,6 +815,16 @@ impl SetupApp {
             .iter()
             .map(|name| (*name).to_string())
             .collect::<Vec<_>>();
+        let plan_mode_options = vec![
+            "Leave unset".to_string(),
+            "Normal".to_string(),
+            "Fast".to_string(),
+        ];
+        let fast_single_ticket_options = vec![
+            "Leave unset".to_string(),
+            "Single ticket by default".to_string(),
+            "Multiple tickets by default".to_string(),
+        ];
         let selected_provider = view
             .planning_meta
             .agent
@@ -695,6 +839,7 @@ impl SetupApp {
             .unwrap_or(0);
 
         let mut app = Self {
+            keybindings: KeybindingPolicy::new(view.app_config.vim_mode_enabled()),
             step: SetupStep::LinearAuth,
             profile: view.planning_meta.linear.profile.clone(),
             repo_auth_field: SelectFieldState::new(
@@ -721,20 +866,18 @@ impl SetupApp {
             model_field: SelectFieldState::new(vec!["Leave unset".to_string()], 0),
             reasoning: SelectFieldState::new(vec!["Leave unset".to_string()], 0),
             listen_label: InputFieldState::new(
-                view.planning_meta
-                    .listen
-                    .required_label
-                    .clone()
-                    .unwrap_or_default(),
+                view.planning_meta.listen.required_label_names().join(", "),
             ),
             assignment_field: SelectFieldState::new(
                 vec![
                     "Any eligible issue".to_string(),
-                    "Only issues assigned to the Linear viewer".to_string(),
+                    "Only issues assigned to the authenticated viewer".to_string(),
+                    "Viewer-assigned issues plus unassigned issues".to_string(),
                 ],
-                match view.planning_meta.listen.assignment_scope {
+                match view.planning_meta.listen.assignment_scope() {
                     ListenAssignmentScope::Any => 0,
-                    ListenAssignmentScope::Viewer => 1,
+                    ListenAssignmentScope::ViewerOnly => 1,
+                    ListenAssignmentScope::ViewerOrUnassigned => 2,
                 },
             ),
             refresh_policy_field: SelectFieldState::new(
@@ -742,7 +885,7 @@ impl SetupApp {
                     "Reuse the clone and hard-refresh it from origin/main".to_string(),
                     "Delete the clone and recreate it from origin/main".to_string(),
                 ],
-                match view.planning_meta.listen.refresh_policy {
+                match view.planning_meta.listen.refresh_policy() {
                     ListenRefreshPolicy::ReuseAndRefresh => 0,
                     ListenRefreshPolicy::RecreateFromOriginMain => 1,
                 },
@@ -768,6 +911,29 @@ impl SetupApp {
                     .map(|value| value.to_string())
                     .unwrap_or_default(),
             ),
+            plan_default_mode: SelectFieldState::new(
+                plan_mode_options,
+                match view.planning_meta.plan.default_mode {
+                    Some(PlanDefaultMode::Normal) => 1,
+                    Some(PlanDefaultMode::Fast) => 2,
+                    None => 0,
+                },
+            ),
+            plan_fast_single_ticket: SelectFieldState::new(
+                fast_single_ticket_options,
+                match view.planning_meta.plan.fast_single_ticket {
+                    Some(true) => 1,
+                    Some(false) => 2,
+                    None => 0,
+                },
+            ),
+            plan_fast_questions: InputFieldState::new(
+                view.planning_meta
+                    .plan
+                    .fast_questions
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
+            ),
             plan_label: InputFieldState::new(
                 view.planning_meta
                     .issue_labels
@@ -782,6 +948,7 @@ impl SetupApp {
                     .clone()
                     .unwrap_or_default(),
             ),
+            summary_scroll: ScrollState::default(),
             detected_agents: view.detected_agents.clone(),
             error: None,
         };
@@ -882,6 +1049,8 @@ impl SetupApp {
                         | SetupStep::Reasoning
                         | SetupStep::AssignmentScope
                         | SetupStep::RefreshPolicy
+                        | SetupStep::PlanDefaultMode
+                        | SetupStep::PlanFastSingleTicket
                 ) {
                     self.move_selection(-1);
                 } else {
@@ -898,6 +1067,8 @@ impl SetupApp {
                         | SetupStep::Reasoning
                         | SetupStep::AssignmentScope
                         | SetupStep::RefreshPolicy
+                        | SetupStep::PlanDefaultMode
+                        | SetupStep::PlanFastSingleTicket
                 ) {
                     self.move_selection(1);
                 } else {
@@ -908,8 +1079,28 @@ impl SetupApp {
         }
     }
 
-    fn handle_key(&mut self, key: KeyEvent) -> Option<SetupExit> {
+    fn handle_key(&mut self, key: KeyEvent, summary_viewport: Rect) -> Option<SetupExit> {
+        if self.select_step_active()
+            && let Some(delta) = self.keybindings.vertical_delta(key)
+        {
+            return self.apply_action(if delta < 0 {
+                SetupAction::Up
+            } else {
+                SetupAction::Down
+            });
+        }
+
         match key.code {
+            KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End
+                if self.step == SetupStep::Save =>
+            {
+                let _ = self.summary_scroll.apply_key_code_in_viewport(
+                    key.code,
+                    summary_viewport,
+                    self.summary_content_rows(summary_viewport.width),
+                );
+                None
+            }
             KeyCode::Char(_)
             | KeyCode::Backspace
             | KeyCode::Left
@@ -927,6 +1118,31 @@ impl SetupApp {
             KeyCode::Esc => self.apply_action(SetupAction::Esc),
             _ => None,
         }
+    }
+
+    fn handle_summary_mouse(&mut self, mouse: MouseEvent, summary_viewport: Rect) -> bool {
+        if self.step != SetupStep::Save {
+            return false;
+        }
+        self.summary_scroll.apply_mouse_in_viewport(
+            mouse,
+            summary_viewport,
+            self.summary_content_rows(summary_viewport.width),
+        )
+    }
+
+    fn select_step_active(&self) -> bool {
+        matches!(
+            self.step,
+            SetupStep::LinearAuth
+                | SetupStep::Provider
+                | SetupStep::Model
+                | SetupStep::Reasoning
+                | SetupStep::AssignmentScope
+                | SetupStep::RefreshPolicy
+                | SetupStep::PlanDefaultMode
+                | SetupStep::PlanFastSingleTicket
+        )
     }
 
     fn handle_paste(&mut self, text: &str) {
@@ -953,6 +1169,9 @@ impl SetupApp {
             SetupStep::InteractivePlanLimit => {
                 let _ = self.interactive_plan_limit.paste(text);
             }
+            SetupStep::PlanFastQuestions => {
+                let _ = self.plan_fast_questions.paste(text);
+            }
             SetupStep::PlanLabel => {
                 let _ = self.plan_label.paste(text);
             }
@@ -965,6 +1184,8 @@ impl SetupApp {
             | SetupStep::Reasoning
             | SetupStep::AssignmentScope
             | SetupStep::RefreshPolicy
+            | SetupStep::PlanDefaultMode
+            | SetupStep::PlanFastSingleTicket
             | SetupStep::Save => {}
         }
     }
@@ -993,6 +1214,9 @@ impl SetupApp {
             SetupStep::InteractivePlanLimit => {
                 let _ = self.interactive_plan_limit.handle_key(key);
             }
+            SetupStep::PlanFastQuestions => {
+                let _ = self.plan_fast_questions.handle_key(key);
+            }
             SetupStep::PlanLabel => {
                 let _ = self.plan_label.handle_key(key);
             }
@@ -1005,6 +1229,8 @@ impl SetupApp {
             | SetupStep::Reasoning
             | SetupStep::AssignmentScope
             | SetupStep::RefreshPolicy
+            | SetupStep::PlanDefaultMode
+            | SetupStep::PlanFastSingleTicket
             | SetupStep::Save => {}
         }
     }
@@ -1028,6 +1254,21 @@ impl SetupApp {
             SetupStep::Reasoning => self.reasoning.move_by(delta),
             SetupStep::AssignmentScope => self.assignment_field.move_by(delta),
             SetupStep::RefreshPolicy => self.refresh_policy_field.move_by(delta),
+            SetupStep::PlanDefaultMode => self.plan_default_mode.move_by(delta),
+            SetupStep::PlanFastSingleTicket => self.plan_fast_single_ticket.move_by(delta),
+            SetupStep::Save => {
+                let key = if delta.is_negative() {
+                    KeyCode::Up
+                } else {
+                    KeyCode::Down
+                };
+                let viewport = summary_viewport(Rect::new(0, 0, 120, 32));
+                let _ = self.summary_scroll.apply_key_code_in_viewport(
+                    key,
+                    viewport,
+                    self.summary_content_rows(viewport.width),
+                );
+            }
             SetupStep::LinearApiKey
             | SetupStep::Team
             | SetupStep::Project
@@ -1035,10 +1276,90 @@ impl SetupApp {
             | SetupStep::InstructionsPath
             | SetupStep::ListenPollInterval
             | SetupStep::InteractivePlanLimit
+            | SetupStep::PlanFastQuestions
             | SetupStep::PlanLabel
-            | SetupStep::TechnicalLabel
-            | SetupStep::Save => {}
+            | SetupStep::TechnicalLabel => {}
         }
+    }
+
+    fn summary_text(&self, width: u16) -> Text<'static> {
+        Text::from(summary_lines(
+            width,
+            &[
+                (
+                    "Linear auth",
+                    summarize_repo_auth(&self.repo_auth_field, &self.api_key),
+                ),
+                ("Default team", summarize_optional(&self.team)),
+                ("Project selector", summarize_optional(&self.project)),
+                (
+                    "Repo provider",
+                    self.provider_field
+                        .selected_label()
+                        .unwrap_or("unset")
+                        .to_string(),
+                ),
+                (
+                    "Repo model",
+                    self.model_field
+                        .selected_label()
+                        .unwrap_or("Leave unset")
+                        .to_string(),
+                ),
+                (
+                    "Repo reasoning",
+                    summarize_optional_select(&self.reasoning, "Leave unset"),
+                ),
+                ("Listen labels", summarize_listen_labels(&self.listen_label)),
+                (
+                    "Assignee filter",
+                    assignment_scope_label(match self.assignment_field.selected() {
+                        1 => ListenAssignmentScope::ViewerOnly,
+                        2 => ListenAssignmentScope::ViewerOrUnassigned,
+                        _ => ListenAssignmentScope::Any,
+                    })
+                    .to_string(),
+                ),
+                (
+                    "Workspace refresh",
+                    refresh_policy_label(match self.refresh_policy_field.selected() {
+                        1 => ListenRefreshPolicy::RecreateFromOriginMain,
+                        _ => ListenRefreshPolicy::ReuseAndRefresh,
+                    })
+                    .to_string(),
+                ),
+                (
+                    "Instructions file",
+                    summarize_optional(&self.instructions_path),
+                ),
+                (
+                    "Listen poll interval",
+                    summarize_optional(&self.listen_poll_interval),
+                ),
+                (
+                    "Interactive plan limit",
+                    summarize_optional(&self.interactive_plan_limit),
+                ),
+                (
+                    "Plan mode",
+                    summarize_optional_select(&self.plan_default_mode, "Leave unset"),
+                ),
+                (
+                    "Fast single-ticket",
+                    summarize_optional_select(&self.plan_fast_single_ticket, "Leave unset"),
+                ),
+                (
+                    "Fast questions",
+                    summarize_optional(&self.plan_fast_questions),
+                ),
+                ("Plan label", summarize_optional(&self.plan_label)),
+                ("Technical label", summarize_optional(&self.technical_label)),
+            ],
+        ))
+    }
+
+    fn summary_content_rows(&self, width: u16) -> usize {
+        wrapped_rows(&plain_text(&self.summary_text(width.max(1))), width.max(1))
     }
 
     fn submit(&self) -> Result<SubmittedSetup> {
@@ -1072,9 +1393,10 @@ impl SetupApp {
             provider,
             model,
             reasoning,
-            listen_label: normalize_optional(self.listen_label.value()),
+            listen_labels: parse_optional_listen_labels_input(self.listen_label.value()),
             assignment_scope: match self.assignment_field.selected() {
-                1 => ListenAssignmentScope::Viewer,
+                1 => ListenAssignmentScope::ViewerOnly,
+                2 => ListenAssignmentScope::ViewerOrUnassigned,
                 _ => ListenAssignmentScope::Any,
             },
             refresh_policy: match self.refresh_policy_field.selected() {
@@ -1084,6 +1406,20 @@ impl SetupApp {
             instructions_path: normalize_optional(self.instructions_path.value()),
             listen_poll_interval: parse_poll_interval(self.listen_poll_interval.value())?,
             interactive_plan_limit: parse_plan_limit(self.interactive_plan_limit.value())?,
+            plan_default_mode: match self.plan_default_mode.selected() {
+                1 => Some(PlanDefaultMode::Normal),
+                2 => Some(PlanDefaultMode::Fast),
+                _ => None,
+            },
+            fast_single_ticket: match self.plan_fast_single_ticket.selected() {
+                1 => Some(true),
+                2 => Some(false),
+                _ => None,
+            },
+            fast_questions: parse_fast_plan_limit(
+                self.plan_fast_questions.value(),
+                "fast plan question limit",
+            )?,
             plan_label: normalize_optional(self.plan_label.value()),
             technical_label: normalize_optional(self.technical_label.value()),
         })
@@ -1110,12 +1446,15 @@ impl SubmittedSetup {
         view.planning_meta.agent.provider = self.provider.clone();
         view.planning_meta.agent.model = self.model.clone();
         view.planning_meta.agent.reasoning = self.reasoning.clone();
-        view.planning_meta.listen.required_label = self.listen_label.clone();
-        view.planning_meta.listen.assignment_scope = self.assignment_scope;
-        view.planning_meta.listen.refresh_policy = self.refresh_policy;
+        view.planning_meta.listen.required_labels = self.listen_labels.clone();
+        view.planning_meta.listen.assignment_scope = Some(self.assignment_scope);
+        view.planning_meta.listen.refresh_policy = Some(self.refresh_policy);
         view.planning_meta.listen.instructions_path = self.instructions_path.clone();
         view.planning_meta.listen.poll_interval_seconds = self.listen_poll_interval;
         view.planning_meta.plan.interactive_follow_up_questions = self.interactive_plan_limit;
+        view.planning_meta.plan.default_mode = self.plan_default_mode;
+        view.planning_meta.plan.fast_single_ticket = self.fast_single_ticket;
+        view.planning_meta.plan.fast_questions = self.fast_questions;
         view.planning_meta.issue_labels.plan = self.plan_label.clone();
         view.planning_meta.issue_labels.technical = self.technical_label.clone();
         Ok(())
@@ -1140,7 +1479,7 @@ fn render_once(app: SetupApp, args: &SetupArgs) -> Result<String> {
 fn run_setup_dashboard(app: SetupApp) -> Result<SetupExit> {
     let mut stdout = io::stdout();
     enable_raw_mode()?;
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let _cleanup = TerminalCleanup;
 
     let backend = CrosstermBackend::new(stdout);
@@ -1153,15 +1492,41 @@ fn run_setup_dashboard(app: SetupApp) -> Result<SetupExit> {
         if event::poll(Duration::from_millis(250))? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    if let Some(exit) = app.handle_key(key) {
+                    let viewport = summary_viewport(terminal.size()?.into());
+                    if let Some(exit) = app.handle_key(key, viewport) {
                         return Ok(exit);
                     }
                 }
                 Event::Paste(text) => app.handle_paste(&text),
+                Event::Mouse(mouse)
+                    if matches!(
+                        mouse.kind,
+                        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                    ) =>
+                {
+                    let viewport = summary_viewport(terminal.size()?.into());
+                    let _ = app.handle_summary_mouse(mouse, viewport);
+                }
                 _ => {}
             }
         }
     }
+}
+
+/// Minimum column width to show every step label without wrapping (single-column mode).
+/// Accounts for `"> XX. Label"` prefix plus two border characters.
+fn setup_step_column_width() -> u16 {
+    let steps = SetupStep::all();
+    let max_label = steps
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let digits = if i + 1 >= 10 { 2 } else { 1 };
+            2 + digits + 2 + s.label().len()
+        })
+        .max()
+        .unwrap_or(20);
+    (max_label + 2) as u16
 }
 
 fn render_setup_dashboard(frame: &mut Frame<'_>, app: &SetupApp) {
@@ -1180,7 +1545,7 @@ fn render_setup_dashboard(frame: &mut Frame<'_>, app: &SetupApp) {
     let header = Paragraph::new(Text::from(vec![
         Line::from("Meta Setup"),
         Line::from(
-            "Configure repo-scoped defaults stored in `.metastack/meta.json` and keep repo onboarding rerunnable.",
+            "Configure repo-scoped defaults stored in `.metastack/meta.json` after install onboarding is complete.",
         ),
         Line::from(format!(
             "Detected supported agents on PATH: {}",
@@ -1198,12 +1563,13 @@ fn render_setup_dashboard(frame: &mut Frame<'_>, app: &SetupApp) {
     .wrap(Wrap { trim: false });
     frame.render_widget(header, layout[0]);
 
+    let step_col = setup_step_column_width();
     let body_area = layout[1];
     if body_area.width >= 118 {
         let body = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Length(28),
+                Constraint::Length(step_col),
                 Constraint::Min(38),
                 Constraint::Length(44),
             ])
@@ -1212,9 +1578,10 @@ fn render_setup_dashboard(frame: &mut Frame<'_>, app: &SetupApp) {
         render_step_panel(frame, app, body[1]);
         render_summary_panel(frame, app, body[2]);
     } else if body_area.width >= 90 {
+        let sidebar_width = step_col.max(40);
         let body = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(40), Constraint::Min(40)])
+            .constraints([Constraint::Length(sidebar_width), Constraint::Min(40)])
             .split(body_area);
         let sidebar = Layout::default()
             .direction(Direction::Vertical)
@@ -1334,7 +1701,7 @@ fn render_step_panel(frame: &mut Frame<'_>, app: &SetupApp, area: Rect) {
             area,
             &title,
             &app.listen_label,
-            "Only tickets carrying this label will be picked up automatically. Leave blank to unset.",
+            "Only tickets carrying any of these comma-separated labels will be picked up automatically. Leave blank to unset.",
         ),
         SetupStep::AssignmentScope => {
             render_select_panel(frame, area, &title, &app.assignment_field)
@@ -1363,6 +1730,19 @@ fn render_step_panel(frame: &mut Frame<'_>, app: &SetupApp, area: Rect) {
             &app.interactive_plan_limit,
             "Optional `meta backlog plan` interactive follow-up limit between 1 and 10.",
         ),
+        SetupStep::PlanDefaultMode => {
+            render_select_panel(frame, area, &title, &app.plan_default_mode)
+        }
+        SetupStep::PlanFastSingleTicket => {
+            render_select_panel(frame, area, &title, &app.plan_fast_single_ticket)
+        }
+        SetupStep::PlanFastQuestions => render_input_panel(
+            frame,
+            area,
+            &title,
+            &app.plan_fast_questions,
+            "Optional fast planning follow-up batch size between 0 and 10.",
+        ),
         SetupStep::PlanLabel => render_input_panel(
             frame,
             area,
@@ -1382,69 +1762,24 @@ fn render_step_panel(frame: &mut Frame<'_>, app: &SetupApp, area: Rect) {
 }
 
 fn render_summary_panel(frame: &mut Frame<'_>, app: &SetupApp, area: Rect) {
-    let summary = summary_lines(
-        area.width,
-        &[
-            (
-                "Linear auth",
-                summarize_repo_auth(&app.repo_auth_field, &app.api_key),
-            ),
-            ("Default team", summarize_optional(&app.team)),
-            ("Project selector", summarize_optional(&app.project)),
-            (
-                "Repo provider",
-                app.provider_field
-                    .selected_label()
-                    .unwrap_or("unset")
-                    .to_string(),
-            ),
-            (
-                "Repo model",
-                app.model_field
-                    .selected_label()
-                    .unwrap_or("Leave unset")
-                    .to_string(),
-            ),
-            (
-                "Repo reasoning",
-                summarize_optional_select(&app.reasoning, "Leave unset"),
-            ),
-            ("Listen label", summarize_optional(&app.listen_label)),
-            (
-                "Assignee filter",
-                assignment_scope_label(match app.assignment_field.selected() {
-                    1 => ListenAssignmentScope::Viewer,
-                    _ => ListenAssignmentScope::Any,
-                })
-                .to_string(),
-            ),
-            (
-                "Workspace refresh",
-                refresh_policy_label(match app.refresh_policy_field.selected() {
-                    1 => ListenRefreshPolicy::RecreateFromOriginMain,
-                    _ => ListenRefreshPolicy::ReuseAndRefresh,
-                })
-                .to_string(),
-            ),
-            (
-                "Instructions file",
-                summarize_optional(&app.instructions_path),
-            ),
-            (
-                "Listen poll interval",
-                summarize_optional(&app.listen_poll_interval),
-            ),
-            (
-                "Interactive plan limit",
-                summarize_optional(&app.interactive_plan_limit),
-            ),
-            ("Plan label", summarize_optional(&app.plan_label)),
-            ("Technical label", summarize_optional(&app.technical_label)),
-        ],
-    );
-    let paragraph = Paragraph::new(Text::from(summary))
-        .block(Block::default().borders(Borders::ALL).title("Summary"))
-        .wrap(Wrap { trim: false });
+    let active = app.step == SetupStep::Save;
+    let paragraph = scrollable_paragraph_with_block(
+        app.summary_text(area.width.saturating_sub(2)),
+        Block::default()
+            .borders(Borders::ALL)
+            .title(if active {
+                "Summary [scroll]"
+            } else {
+                "Summary"
+            })
+            .border_style(if active {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            }),
+        &app.summary_scroll,
+    )
+    .wrap(Wrap { trim: false });
     frame.render_widget(paragraph, area);
 }
 
@@ -1455,10 +1790,18 @@ fn render_footer(frame: &mut Frame<'_>, app: &SetupApp, area: Rect) {
         | SetupStep::Model
         | SetupStep::Reasoning
         | SetupStep::AssignmentScope
-        | SetupStep::RefreshPolicy => {
-            "Use Up/Down to choose. Enter or Tab advances. Shift+Tab goes back. Esc cancels."
+        | SetupStep::RefreshPolicy
+        | SetupStep::PlanDefaultMode
+        | SetupStep::PlanFastSingleTicket => {
+            if app.keybindings.vim_mode_enabled() {
+                "Use Up/Down/j/k to choose. Enter or Tab advances. Shift+Tab goes back. Esc cancels."
+            } else {
+                "Use Up/Down to choose. Enter or Tab advances. Shift+Tab goes back. Esc cancels."
+            }
         }
-        SetupStep::Save => "Press Enter to save. Shift+Tab goes back. Esc cancels.",
+        SetupStep::Save => {
+            "Review the summary. Up/Down and PgUp/PgDn/Home/End or the mouse wheel scroll. Enter saves. Shift+Tab goes back. Esc cancels."
+        }
         _ => "Type or paste the value. Enter or Tab advances. Shift+Tab goes back. Esc cancels.",
     };
     let status = app.error.as_deref().unwrap_or("Ready.");
@@ -1475,15 +1818,13 @@ fn render_input_panel(
     field: &InputFieldState,
     placeholder: &str,
 ) {
-    let rendered = field.render(placeholder, true);
     let block = Block::default()
         .borders(Borders::ALL)
         .title(format!("{title} [editing]"))
         .border_style(Style::default().add_modifier(Modifier::BOLD));
     let inner = block.inner(area);
-    let paragraph = Paragraph::new(rendered.text.clone())
-        .block(block)
-        .wrap(Wrap { trim: false });
+    let rendered = field.render_with_width(placeholder, true, inner.width);
+    let paragraph = rendered.paragraph(block);
     frame.render_widget(paragraph, area);
     rendered.set_cursor(frame, inner);
 }
@@ -1523,7 +1864,10 @@ fn render_save_panel(frame: &mut Frame<'_>, area: Rect) {
 fn assignment_scope_label(scope: ListenAssignmentScope) -> &'static str {
     match scope {
         ListenAssignmentScope::Any => "Any eligible issue",
-        ListenAssignmentScope::Viewer => "Only issues assigned to the Linear viewer",
+        ListenAssignmentScope::ViewerOnly => "Only issues assigned to the authenticated viewer",
+        ListenAssignmentScope::ViewerOrUnassigned => {
+            "Viewer-assigned issues plus unassigned issues"
+        }
     }
 }
 
@@ -1565,6 +1909,23 @@ fn display_optional(value: Option<&str>) -> String {
         .to_string()
 }
 
+fn display_listen_labels(labels: &[String]) -> String {
+    if labels.is_empty() {
+        "unset".to_string()
+    } else {
+        labels.join(", ")
+    }
+}
+
+fn render_label_summary(labels: &[String]) -> String {
+    display_listen_labels(labels)
+}
+
+fn render_velocity_auto_assign(value: VelocityAutoAssign) -> String {
+    match value {
+        VelocityAutoAssign::Viewer => "viewer".to_string(),
+    }
+}
 fn display_repo_auth(api_key: Option<&str>, profile: Option<&str>) -> String {
     if api_key
         .map(str::trim)
@@ -1593,6 +1954,29 @@ fn display_plan_limit(limit: Option<usize>) -> String {
     }
 }
 
+fn display_plan_default_mode(mode: Option<PlanDefaultMode>) -> String {
+    match mode {
+        Some(PlanDefaultMode::Normal) => "normal".to_string(),
+        Some(PlanDefaultMode::Fast) => "fast".to_string(),
+        None => "unset".to_string(),
+    }
+}
+
+fn display_fast_single_ticket(value: Option<bool>) -> String {
+    match value {
+        Some(true) => "single ticket".to_string(),
+        Some(false) => "multiple tickets".to_string(),
+        None => "unset".to_string(),
+    }
+}
+
+fn display_fast_question_limit(limit: Option<usize>) -> String {
+    match limit {
+        Some(limit) => limit.to_string(),
+        None => "unset".to_string(),
+    }
+}
+
 fn effective_label(value: Option<&str>, default: &str) -> String {
     value
         .map(str::trim)
@@ -1607,6 +1991,51 @@ fn normalize_optional(value: &str) -> Option<String> {
         None
     } else {
         Some(trimmed.to_string())
+    }
+}
+
+fn parse_optional_priority(value: &str) -> Result<Option<u8>> {
+    let Some(value) = normalize_optional(value) else {
+        return Ok(None);
+    };
+    let priority = value
+        .parse::<u8>()
+        .map_err(|_| anyhow!("backlog default priority must be an integer between 1 and 4"))?;
+    validate_backlog_default_priority(priority)?;
+    Ok(Some(priority))
+}
+
+fn parse_default_labels(values: &[String]) -> Result<Vec<String>> {
+    if values.len() == 1 && values[0].trim().eq_ignore_ascii_case("none") {
+        return Ok(Vec::new());
+    }
+
+    let labels = values
+        .iter()
+        .map(|value| value.trim().to_string())
+        .collect::<Vec<_>>();
+    validate_backlog_labels(&labels)?;
+    Ok(labels)
+}
+
+fn parse_velocity_auto_assign(value: &str) -> Result<Option<VelocityAutoAssign>> {
+    let Some(value) = normalize_optional(value) else {
+        return Ok(None);
+    };
+    match value.as_str() {
+        "viewer" => Ok(Some(VelocityAutoAssign::Viewer)),
+        _ => Err(anyhow!(
+            "velocity auto-assign must be `viewer` or empty to clear it"
+        )),
+    }
+}
+
+fn parse_optional_listen_labels_input(value: &str) -> Option<Vec<String>> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none") {
+        None
+    } else {
+        parse_listen_required_labels_csv(trimmed)
     }
 }
 
@@ -1632,8 +2061,47 @@ fn parse_plan_limit(value: &str) -> Result<Option<usize>> {
     Ok(Some(limit))
 }
 
+fn parse_fast_plan_limit(value: &str, label: &str) -> Result<Option<usize>> {
+    let Some(value) = normalize_optional(value) else {
+        return Ok(None);
+    };
+    let limit = value
+        .parse::<usize>()
+        .map_err(|_| anyhow!("{label} must be a whole number between 0 and 10"))?;
+    validate_fast_plan_question_limit(limit)?;
+    Ok(Some(limit))
+}
+
+fn parse_optional_bool(value: &str, label: &str) -> Result<Option<bool>> {
+    let Some(value) = normalize_optional(value) else {
+        return Ok(None);
+    };
+    match value.to_ascii_lowercase().as_str() {
+        "true" => Ok(Some(true)),
+        "false" => Ok(Some(false)),
+        _ => Err(anyhow!("{label} must be `true`, `false`, or `none`")),
+    }
+}
+
+fn parse_optional_plan_default_mode(value: &str, label: &str) -> Result<Option<PlanDefaultMode>> {
+    let Some(value) = normalize_optional(value) else {
+        return Ok(None);
+    };
+    match value.to_ascii_lowercase().as_str() {
+        "normal" => Ok(Some(PlanDefaultMode::Normal)),
+        "fast" => Ok(Some(PlanDefaultMode::Fast)),
+        _ => Err(anyhow!("{label} must be `normal`, `fast`, or `none`")),
+    }
+}
+
 fn summarize_optional(field: &InputFieldState) -> String {
     normalize_optional(field.value()).unwrap_or_else(|| "unset".to_string())
+}
+
+fn summarize_listen_labels(field: &InputFieldState) -> String {
+    parse_optional_listen_labels_input(field.value())
+        .map(|labels| labels.join(", "))
+        .unwrap_or_else(|| "unset".to_string())
 }
 
 fn summarize_optional_select(field: &SelectFieldState, unset_label: &str) -> String {
@@ -1684,8 +2152,61 @@ impl Drop for TerminalCleanup {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
         let mut stdout = io::stdout();
-        let _ = execute!(stdout, LeaveAlternateScreen);
+        let _ = execute!(stdout, DisableMouseCapture, LeaveAlternateScreen);
     }
+}
+
+fn summary_viewport(area: Rect) -> Rect {
+    let header_height = if area.width >= 110 { 5 } else { 6 };
+    let footer_height = if area.width >= 100 { 4 } else { 5 };
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(header_height),
+            Constraint::Min(0),
+            Constraint::Length(footer_height),
+        ])
+        .split(area);
+    let step_col = setup_step_column_width();
+    let body_area = layout[1];
+    let summary_area = if body_area.width >= 118 {
+        let body = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(step_col),
+                Constraint::Min(38),
+                Constraint::Length(44),
+            ])
+            .split(body_area);
+        body[2]
+    } else if body_area.width >= 90 {
+        let sidebar_width = step_col.max(40);
+        let body = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Length(sidebar_width), Constraint::Min(40)])
+            .split(body_area);
+        let sidebar = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(12), Constraint::Min(10)])
+            .split(body[0]);
+        sidebar[1]
+    } else {
+        let stacked = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(10),
+                Constraint::Min(8),
+                Constraint::Length(14),
+            ])
+            .split(body_area);
+        stacked[2]
+    };
+    Rect::new(
+        summary_area.x.saturating_add(1),
+        summary_area.y.saturating_add(1),
+        summary_area.width.saturating_sub(2).max(1),
+        summary_area.height.saturating_sub(2).max(1),
+    )
 }
 
 #[cfg(test)]
@@ -1693,11 +2214,17 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        BacklogTemplateConflictAction, SetupApp, SetupViewData,
-        parse_backlog_template_conflict_action, prompt_backlog_template_conflicts_with_io,
+        BacklogTemplateConflictAction, SetupApp, SetupStep, SetupViewData,
+        parse_backlog_template_conflict_action, parse_optional_listen_labels_input,
+        prompt_backlog_template_conflicts_with_io, render_summary, summary_viewport,
     };
-    use crate::config::{AgentSettings, AppConfig, PlanningAgentSettings, PlanningMeta};
+    use crate::config::{
+        AgentSettings, AppConfig, ListenAssignmentScope, PlanningAgentSettings,
+        PlanningListenSettings, PlanningMeta,
+    };
     use anyhow::Result;
+    use crossterm::event::{KeyCode, KeyModifiers, MouseEvent, MouseEventKind};
+    use ratatui::layout::Rect;
     use std::io::Cursor;
 
     #[test]
@@ -1762,6 +2289,90 @@ mod tests {
     }
 
     #[test]
+    fn setup_save_summary_scrolls_when_content_overflows() {
+        let mut view = SetupViewData {
+            root: PathBuf::from("/tmp/repo"),
+            config_path: PathBuf::from("/tmp/metastack-config.toml"),
+            metastack_meta_path: PathBuf::from("/tmp/repo/.metastack/meta.json"),
+            app_config: AppConfig::default(),
+            app_config_changed: false,
+            planning_meta: PlanningMeta::default(),
+            detected_agents: Vec::new(),
+        };
+        view.planning_meta.listen.instructions_path =
+            Some("docs/".to_string() + &"very-long-review-value/".repeat(12));
+        let mut app = SetupApp::new(&view);
+        app.step = SetupStep::Save;
+
+        let viewport = summary_viewport(Rect::new(0, 0, 72, 20));
+        let _ = app.handle_key(KeyCode::End.into(), viewport);
+
+        assert!(app.summary_scroll.offset() > 0);
+    }
+
+    #[test]
+    fn setup_save_summary_mouse_wheel_scrolls_when_content_overflows() {
+        let mut view = SetupViewData {
+            root: PathBuf::from("/tmp/repo"),
+            config_path: PathBuf::from("/tmp/metastack-config.toml"),
+            metastack_meta_path: PathBuf::from("/tmp/repo/.metastack/meta.json"),
+            app_config: AppConfig::default(),
+            app_config_changed: false,
+            planning_meta: PlanningMeta::default(),
+            detected_agents: Vec::new(),
+        };
+        view.planning_meta.listen.instructions_path =
+            Some("docs/".to_string() + &"very-long-review-value/".repeat(12));
+        let mut app = SetupApp::new(&view);
+        app.step = SetupStep::Save;
+
+        let viewport = summary_viewport(Rect::new(0, 0, 72, 20));
+        let handled = app.handle_summary_mouse(
+            MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: viewport.x,
+                row: viewport.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            viewport,
+        );
+
+        assert!(handled);
+        assert!(app.summary_scroll.offset() > 0);
+    }
+
+    #[test]
+    fn setup_parse_optional_listen_labels_supports_comma_separated_values() {
+        assert_eq!(
+            parse_optional_listen_labels_input(" plan, urgent ,Plan "),
+            Some(vec!["plan".to_string(), "urgent".to_string()])
+        );
+        assert_eq!(parse_optional_listen_labels_input("none"), None);
+    }
+
+    #[test]
+    fn setup_render_summary_lists_all_required_labels() {
+        let view = SetupViewData {
+            root: PathBuf::from("/tmp/repo"),
+            config_path: PathBuf::from("/tmp/metastack-config.toml"),
+            metastack_meta_path: PathBuf::from("/tmp/repo/.metastack/meta.json"),
+            app_config: AppConfig::default(),
+            app_config_changed: false,
+            planning_meta: PlanningMeta {
+                listen: PlanningListenSettings {
+                    required_labels: Some(vec!["plan".to_string(), "urgent".to_string()]),
+                    ..PlanningListenSettings::default()
+                },
+                ..PlanningMeta::default()
+            },
+            detected_agents: Vec::new(),
+        };
+
+        let summary = render_summary(&view, false);
+        assert!(summary.contains("Listen labels: plan, urgent"));
+    }
+
+    #[test]
     fn parse_backlog_template_conflict_action_accepts_supported_inputs() {
         assert_eq!(
             parse_backlog_template_conflict_action("o"),
@@ -1794,5 +2405,21 @@ mod tests {
         assert!(output.contains("Enter `o`, `s`, or `c`"));
 
         Ok(())
+    }
+
+    #[test]
+    fn assignment_scope_labels_match_explicit_listen_semantics() {
+        assert_eq!(
+            crate::setup::assignment_scope_label(ListenAssignmentScope::Any),
+            "Any eligible issue"
+        );
+        assert_eq!(
+            crate::setup::assignment_scope_label(ListenAssignmentScope::ViewerOnly),
+            "Only issues assigned to the authenticated viewer"
+        );
+        assert_eq!(
+            crate::setup::assignment_scope_label(ListenAssignmentScope::ViewerOrUnassigned),
+            "Viewer-assigned issues plus unassigned issues"
+        );
     }
 }

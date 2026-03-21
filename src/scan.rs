@@ -7,13 +7,14 @@ use std::thread;
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, anyhow, bail};
+use serde::Serialize;
 use toml::Value;
 use walkdir::{DirEntry, WalkDir};
 
 use crate::agents::{
-    AgentExecutionOptions, apply_invocation_environment, command_args_for_invocation,
-    render_invocation_diagnostics, resolve_agent_invocation_for_planning,
-    validate_invocation_command_surface,
+    AgentExecutionOptions, apply_invocation_environment, apply_noninteractive_agent_environment,
+    command_args_for_invocation, render_invocation_diagnostics,
+    resolve_agent_invocation_for_planning, validate_invocation_command_surface,
 };
 use crate::cli::{RunAgentArgs, ScanArgs};
 use crate::config::{
@@ -23,6 +24,7 @@ use crate::context::load_workflow_contract;
 use crate::fs::{
     FileWriteStatus, PlanningPaths, canonicalize_existing_dir, display_path, write_text_file,
 };
+use crate::output::render_json_success;
 use crate::repo_target::RepoTarget;
 use crate::scaffold::ensure_planning_layout;
 use crate::scan_dashboard::{ScanDashboard, ScanDashboardData, ScanDashboardRow, ScanItemState};
@@ -36,7 +38,7 @@ const STEP_WRITE_FACT_BASE: usize = 1;
 const STEP_REFRESH_DOCS: usize = 2;
 const STEP_VERIFY_OUTPUTS: usize = 3;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ScanReport {
     root: PathBuf,
     agent: String,
@@ -176,6 +178,7 @@ pub(crate) fn run_scan_for_route(args: &ScanArgs, route_key: &str) -> Result<Sca
         model: None,
         reasoning: None,
         transport: None,
+        attachments: Vec::new(),
     };
     let options = AgentExecutionOptions {
         working_dir: Some(root.clone()),
@@ -197,6 +200,8 @@ pub(crate) fn run_scan_for_route(args: &ScanArgs, route_key: &str) -> Result<Sca
                 scan_document_file_names().join(","),
             ),
         ],
+        capture_output: false,
+        continuation: None,
     };
 
     progress.set_step(
@@ -303,6 +308,11 @@ impl ScanReport {
         lines.push(format!("Agent log kept off-screen: {}", self.log_path));
 
         lines.join("\n")
+    }
+
+    /// Render the scan report in the standard machine-readable success envelope.
+    pub(crate) fn render_json(&self) -> Result<String> {
+        render_json_success("context.scan", self)
     }
 }
 
@@ -499,6 +509,7 @@ fn run_scan_agent_with_dashboard(
     }
     command.stdout(Stdio::from(log.try_clone()?));
     command.stderr(Stdio::from(log.try_clone()?));
+    apply_noninteractive_agent_environment(&mut command);
     apply_invocation_environment(
         &mut command,
         &invocation,

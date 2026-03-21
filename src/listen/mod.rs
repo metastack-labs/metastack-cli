@@ -1,19 +1,19 @@
 pub mod dashboard;
 mod preflight;
 mod state;
-mod store;
-mod web;
+pub(crate) mod store;
 mod worker;
 mod workpad;
 mod workspace;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
+use std::env;
 use std::fs;
 use std::future::Future;
-use std::io;
+use std::io::{self, BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::process::{Command, Stdio};
-use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -24,32 +24,40 @@ use crossterm::terminal::{
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use serde::Serialize;
+use serde_json::Value;
 use walkdir::WalkDir;
 
 use crate::agents::{AgentBriefRequest, TicketMetadata, write_agent_brief};
 use crate::backlog::{
-    BacklogIssueMetadata, INDEX_FILE_NAME, ManagedFileRecord, TemplateContext,
-    render_template_files, save_issue_metadata, write_issue_description,
+    BacklogIssueMetadata, INDEX_FILE_NAME, ManagedFileRecord, TICKET_DISCUSSION_FILE_NAME,
+    TemplateContext, render_template_files, save_issue_metadata, write_issue_description,
 };
 use crate::cli::{
     ListenRunArgs, ListenSessionClearArgs, ListenSessionInspectArgs, ListenSessionListArgs,
     ListenSessionResumeArgs, ListenWorkerArgs,
 };
 use crate::config::{
-    AppConfig, LinearConfig, LinearConfigOverrides, ListenAssignmentScope, PlanningListenSettings,
-    PlanningMeta, load_required_planning_meta,
+    AppConfig, DEFAULT_SYNC_DISCUSSION_PROMPT_CHAR_LIMIT, LinearConfig, LinearConfigOverrides,
+    ListenAssignmentScope, PlanningListenSettings, PlanningMeta, load_required_planning_meta,
 };
 use crate::fs::{PlanningPaths, canonicalize_existing_dir, display_path};
 use crate::linear::{
-    IssueComment, IssueEditSpec, IssueListFilters, IssueSummary, LinearClient, LinearService,
-    ReqwestLinearClient, UserRef,
+    IssueAssigneeFilter, IssueComment, IssueEditSpec, IssueListFilters, IssueSummary, LinearClient,
+    LinearService, ReqwestLinearClient, UserRef,
 };
 use crate::listen::workpad::{extract_requirements, render_bootstrap_workpad};
 use crate::listen::workspace::{TicketWorkspace, ensure_ticket_workspace};
+use crate::output::render_json_success;
 use crate::scaffold::ensure_planning_layout;
-use state::ListenState;
-pub use state::{AgentSession, PendingIssue, SessionPhase, TokenUsage};
-use store::{ListenProjectStore, StoredListenProjectSummary, resolve_source_project_root};
+pub use state::{
+    AgentSession, LatestResumeHandle, PendingIssue, ResumeProvider, SessionPhase, TokenUsage,
+};
+use state::{COMPLETED_SESSION_TTL_SECONDS, ListenState};
+use store::{
+    ListenProjectStore, SessionSelector, StoredListenProjectSummary, pid_is_running,
+    resolve_source_project_root,
+};
 
 const TODO_STATE: &str = "Todo";
 const BACKLOG_STATE: &str = "Backlog";
@@ -57,17 +65,19 @@ const IN_PROGRESS_STATE: &str = "In Progress";
 const ISSUE_ATTACHMENT_CONTEXT_FILES_DIR: &str = "files";
 const DEFAULT_LISTEN_MAX_TURNS: u32 = 20;
 const MAX_STALLED_TURNS: u32 = 2;
-const DEFAULT_DASHBOARD_HOST: &str = "127.0.0.1";
-const DASHBOARD_REFRESH_INTERVAL_SECONDS: u64 = 1;
+const TERMINAL_REFRESH_INTERVAL_SECONDS: u64 = 1;
+const INPUT_POLL_INTERVAL_MILLIS: u64 = 100;
 const DEMO_NOW_EPOCH_SECONDS: u64 = 1_773_575_600;
 const DEMO_START_EPOCH_SECONDS: u64 = DEMO_NOW_EPOCH_SECONDS - 7_351;
 const REVIEW_STATE_CANDIDATES: &[&str] =
     &["Human Review", "In Review", "Review", "Ready for Review"];
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ListenDashboardData {
     pub title: String,
     pub scope: String,
+    pub watch_scope: String,
     pub cycle_summary: String,
+    pub vim_mode: bool,
     pub runtime: ListenRuntimeSummary,
     pub pending_issues: Vec<PendingIssue>,
     pub sessions: Vec<AgentSession>,
@@ -86,8 +96,9 @@ impl ListenDashboardData {
             format!("Tokens: {}", self.runtime.tokens),
             format!("Rate Limits: {}", self.runtime.rate_limits),
             format!("Project: {}", self.runtime.project),
+            format!("Watching: {}", self.watch_scope),
             format!("Dashboard: {}", self.runtime.dashboard),
-            format!("Dashboard refresh: {}", self.runtime.dashboard_refresh),
+            format!("Terminal refresh: {}", self.runtime.dashboard_refresh),
             format!("Linear refresh: {}", self.runtime.linear_refresh),
             format!("State file: {}", self.state_file),
         ];
@@ -129,7 +140,7 @@ impl ListenDashboardData {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ListenRuntimeSummary {
     pub agents: String,
     pub throughput: String,
@@ -138,9 +149,7 @@ pub struct ListenRuntimeSummary {
     pub rate_limits: String,
     pub project: String,
     pub dashboard: String,
-    pub dashboard_url: Option<String>,
     pub dashboard_refresh: String,
-    pub dashboard_refresh_seconds: u64,
     pub linear_refresh: String,
     pub current_epoch_seconds: u64,
 }
@@ -160,38 +169,11 @@ impl SessionListView {
         }
     }
 
-    pub(crate) fn query_value(self) -> &'static str {
-        match self {
-            Self::Active => "active",
-            Self::Completed => "completed",
-        }
-    }
-
     pub(crate) fn toggle(self) -> Self {
         match self {
             Self::Active => Self::Completed,
             Self::Completed => Self::Active,
         }
-    }
-
-    pub(crate) fn from_query(query: &str) -> Self {
-        query
-            .split('&')
-            .filter_map(|part| part.split_once('='))
-            .find_map(|(key, value)| {
-                if !key.eq_ignore_ascii_case("view") {
-                    return None;
-                }
-
-                if value.eq_ignore_ascii_case("completed") {
-                    Some(Self::Completed)
-                } else if value.eq_ignore_ascii_case("active") {
-                    Some(Self::Active)
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_default()
     }
 }
 
@@ -219,6 +201,7 @@ impl SessionListCounts {
 #[derive(Debug, Clone)]
 struct ListenCycleData {
     scope: String,
+    watch_scope: String,
     claimed_this_cycle: usize,
     pending_issues: Vec<PendingIssue>,
     sessions: Vec<AgentSession>,
@@ -228,9 +211,10 @@ struct ListenCycleData {
 }
 
 impl ListenCycleData {
-    fn loading(scope: String, state_file: String) -> Self {
+    fn loading(scope: String, watch_scope: String, state_file: String) -> Self {
         Self {
             scope,
+            watch_scope,
             claimed_this_cycle: 0,
             pending_issues: Vec::new(),
             sessions: Vec::new(),
@@ -244,13 +228,14 @@ impl ListenCycleData {
         }
     }
 
-    fn demo(root: &Path) -> Self {
-        Self::demo_at(root, DEMO_NOW_EPOCH_SECONDS)
+    fn demo(root: &Path, state_file: String) -> Self {
+        Self::demo_at(root, DEMO_NOW_EPOCH_SECONDS, state_file)
     }
 
-    fn demo_at(root: &Path, reference_now: u64) -> Self {
+    fn demo_at(_root: &Path, reference_now: u64, state_file: String) -> Self {
         Self {
             scope: "MET / MetaStack CLI".to_string(),
+            watch_scope: "all assignees".to_string(),
             claimed_this_cycle: 1,
             pending_issues: vec![PendingIssue {
                 identifier: "MET-18".to_string(),
@@ -278,10 +263,14 @@ impl ListenCycleData {
                     workpad_comment_id: Some("comment-met-13".to_string()),
                     updated_at_epoch_seconds: reference_now - 1_180,
                     pid: Some(95_388),
-                    session_id: Some(
-                        "019cedb4-2293-7651-b0b4-dfac4af6a640-019cedb4-229b-7453-825e-3e3da4e1bf2a"
+                    session_id: Some("019cedb422937651b0b4dfac4af6a640".to_string()),
+                    latest_resume_handle: Some(LatestResumeHandle {
+                        provider: ResumeProvider::Codex,
+                        id: (
+                            "019cedb4-2293-7651-b0b4-dfac4af6a640-019cedb4-229b-7453-825e-3e3da4e1bf2a"
+                        )
                             .to_string(),
-                    ),
+                    }),
                     turns: Some(1),
                     tokens: TokenUsage {
                         input: Some(9_614_112),
@@ -308,10 +297,14 @@ impl ListenCycleData {
                     workpad_comment_id: None,
                     updated_at_epoch_seconds: reference_now - 2_940,
                     pid: Some(96_104),
-                    session_id: Some(
-                        "019ceda5-0a41-7ef1-bf96-4f26683c1570-019ceda5-0a57-7820-b050-c05e112d66dd"
+                    session_id: Some("019ceda50a417ef1bf964f26683c1570".to_string()),
+                    latest_resume_handle: Some(LatestResumeHandle {
+                        provider: ResumeProvider::Claude,
+                        id: (
+                            "019ceda5-0a41-7ef1-bf96-4f26683c1570-019ceda5-0a57-7820-b050-c05e112d66dd"
+                        )
                             .to_string(),
-                    ),
+                    }),
                     turns: Some(1),
                     tokens: TokenUsage {
                         input: Some(8_380_959),
@@ -322,18 +315,10 @@ impl ListenCycleData {
             ],
             notes: vec![
                 "Demo mode: no Linear requests were made.".to_string(),
-                "The live dashboard now adapts to the full terminal viewport and mirrors the browser view."
-                    .to_string(),
-                format!(
-                    "State file: {}",
-                    ListenProjectStore::resolve(root)
-                        .map(|store| display_path(&store.paths().state_path, root))
-                        .unwrap_or_else(|_| "n/a".to_string())
-                ),
+                "The live terminal dashboard adapts to the full viewport.".to_string(),
+                format!("State file: {state_file}"),
             ],
-            state_file: ListenProjectStore::resolve(root)
-                .map(|store| display_path(&store.paths().state_path, root))
-                .unwrap_or_else(|_| "n/a".to_string()),
+            state_file,
             rate_limits: Some(
                 "codex | primary 12% / reset 1,773,515,901s | secondary 8% / reset 1,773,855,871s | credits n/a".to_string(),
             ),
@@ -350,9 +335,237 @@ struct DashboardRuntimeContext {
     started_at_epoch_seconds: u64,
     now_epoch_seconds: u64,
     poll_interval_seconds: u64,
+    dashboard_label: &'static str,
     dashboard_refresh_seconds: u64,
     linear_refresh_seconds: u64,
-    dashboard_url: Option<String>,
+    vim_mode: bool,
+}
+
+struct ListenLoopConfig {
+    poll_interval_seconds: u64,
+    started_at_epoch_seconds: u64,
+    refresh_immediately: bool,
+    vim_mode: bool,
+}
+
+#[derive(Debug, Default)]
+struct CodexLiveTokenHydrator {
+    sessions_root: Option<PathBuf>,
+    snapshots: HashMap<String, CodexSessionSnapshot>,
+}
+
+#[derive(Debug, Clone)]
+struct CodexSessionSnapshot {
+    path: PathBuf,
+    file_len: u64,
+    usage: Option<TokenUsage>,
+}
+
+impl CodexLiveTokenHydrator {
+    fn new() -> Self {
+        Self {
+            sessions_root: env::var_os("HOME")
+                .map(PathBuf::from)
+                .map(|home| home.join(".codex").join("sessions"))
+                .filter(|path| path.is_dir()),
+            snapshots: HashMap::new(),
+        }
+    }
+
+    fn refresh_sessions(&mut self, sessions: &mut [AgentSession]) -> Result<()> {
+        for session in sessions
+            .iter_mut()
+            .filter(|session| !session.phase.is_completed())
+        {
+            let Some(thread_id) = self.resolve_thread_id(session)? else {
+                continue;
+            };
+            session.session_id = Some(thread_id.clone());
+            if let Some(usage) = self.load_usage(&thread_id)? {
+                session.tokens.accumulate(&usage);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn resolve_thread_id(&mut self, session: &AgentSession) -> Result<Option<String>> {
+        if let Some(candidate) = session.session_id.as_deref()
+            && self.session_file_path(candidate)?.is_some()
+        {
+            return Ok(Some(candidate.to_string()));
+        }
+
+        let Some(log_path) = session.log_path.as_deref() else {
+            return Ok(None);
+        };
+        let thread_id = parse_codex_thread_id_from_log(Path::new(log_path))?;
+        if let Some(thread_id) = thread_id.as_deref()
+            && self.session_file_path(thread_id)?.is_none()
+        {
+            return Ok(None);
+        }
+        Ok(thread_id)
+    }
+
+    fn load_usage(&mut self, thread_id: &str) -> Result<Option<TokenUsage>> {
+        let Some(path) = self.session_file_path(thread_id)? else {
+            return Ok(None);
+        };
+        let metadata = fs::metadata(&path)
+            .with_context(|| format!("failed to read `{}` metadata", path.display()))?;
+        let file_len = metadata.len();
+
+        if let Some(snapshot) = self.snapshots.get(thread_id)
+            && snapshot.file_len == file_len
+        {
+            return Ok(snapshot.usage.clone());
+        }
+
+        let usage = parse_codex_token_usage_from_session_file(&path)?;
+        self.snapshots.insert(
+            thread_id.to_string(),
+            CodexSessionSnapshot {
+                path,
+                file_len,
+                usage: usage.clone(),
+            },
+        );
+        Ok(usage)
+    }
+
+    fn session_file_path(&mut self, thread_id: &str) -> Result<Option<PathBuf>> {
+        if let Some(snapshot) = self.snapshots.get(thread_id)
+            && snapshot.path.is_file()
+        {
+            return Ok(Some(snapshot.path.clone()));
+        }
+
+        let Some(root) = self.sessions_root.as_deref() else {
+            return Ok(None);
+        };
+        for entry in WalkDir::new(root).min_depth(1).max_depth(4) {
+            let entry = entry.with_context(|| {
+                format!(
+                    "failed to scan Codex session files under `{}`",
+                    root.display()
+                )
+            })?;
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            if entry.file_name().to_string_lossy().contains(thread_id) {
+                let path = entry.into_path();
+                self.snapshots
+                    .entry(thread_id.to_string())
+                    .or_insert(CodexSessionSnapshot {
+                        path: path.clone(),
+                        file_len: 0,
+                        usage: None,
+                    });
+                return Ok(Some(path));
+            }
+        }
+
+        Ok(None)
+    }
+}
+
+fn parse_codex_thread_id_from_log(path: &Path) -> Result<Option<String>> {
+    if !path.is_file() {
+        return Ok(None);
+    }
+
+    let file =
+        fs::File::open(path).with_context(|| format!("failed to open `{}`", path.display()))?;
+    let mut latest = None;
+    for line in BufReader::new(file).lines() {
+        let line = line.with_context(|| format!("failed to read `{}`", path.display()))?;
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        match value.get("type").and_then(Value::as_str) {
+            Some("thread.started") => {
+                latest = value
+                    .get("thread_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+            }
+            Some("thread/started") => {
+                latest = value
+                    .get("params")
+                    .and_then(|params| {
+                        params
+                            .get("thread_id")
+                            .or_else(|| params.get("threadId"))
+                            .or_else(|| params.get("id"))
+                    })
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .or(latest);
+            }
+            _ => {}
+        }
+    }
+
+    Ok(latest)
+}
+
+fn parse_codex_token_usage_from_session_file(path: &Path) -> Result<Option<TokenUsage>> {
+    let file =
+        fs::File::open(path).with_context(|| format!("failed to open `{}`", path.display()))?;
+    let mut latest = None;
+    for line in BufReader::new(file).lines() {
+        let line = line.with_context(|| format!("failed to read `{}`", path.display()))?;
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if value.get("type").and_then(Value::as_str) != Some("event_msg") {
+            continue;
+        }
+        let Some(payload) = value.get("payload") else {
+            continue;
+        };
+        if payload.get("type").and_then(Value::as_str) != Some("token_count") {
+            continue;
+        }
+        let Some(total_usage) = payload
+            .get("info")
+            .and_then(|info| info.get("total_token_usage"))
+        else {
+            continue;
+        };
+        latest = extract_codex_token_usage(total_usage);
+    }
+
+    Ok(latest)
+}
+
+fn extract_codex_token_usage(value: &Value) -> Option<TokenUsage> {
+    fn parse_u64(value: Option<&Value>) -> u64 {
+        value
+            .and_then(Value::as_u64)
+            .or_else(|| {
+                value
+                    .and_then(Value::as_i64)
+                    .filter(|number| *number >= 0)
+                    .map(|number| number as u64)
+            })
+            .or_else(|| {
+                value
+                    .and_then(Value::as_str)
+                    .and_then(|text| text.parse().ok())
+            })
+            .unwrap_or(0)
+    }
+
+    let input = parse_u64(value.get("input_tokens")) + parse_u64(value.get("cached_input_tokens"));
+    let output =
+        parse_u64(value.get("output_tokens")) + parse_u64(value.get("reasoning_output_tokens"));
+    (input > 0 || output > 0).then_some(TokenUsage {
+        input: (input > 0).then_some(input),
+        output: (output > 0).then_some(output),
+    })
 }
 
 #[derive(Debug)]
@@ -561,6 +774,61 @@ fn compact_blocked_summary(
     ])
 }
 
+fn mark_running_session_stale(
+    session: &mut AgentSession,
+    issue_identifier: &str,
+    fallback_log_path: &Path,
+    pid: u32,
+) {
+    let log_path = session
+        .log_path
+        .clone()
+        .unwrap_or_else(|| fallback_log_path.display().to_string());
+    session.phase = SessionPhase::Blocked;
+    session.log_path = Some(log_path.clone());
+    session.summary = compact_session_summary([
+        Some("Blocked | worker died".to_string()),
+        Some(format!("stale pid {pid}")),
+        Some(log_reference_summary(Path::new(&log_path))),
+    ]);
+    session.updated_at_epoch_seconds = now_epoch_seconds();
+    if session.issue_identifier.is_empty() {
+        session.issue_identifier = issue_identifier.to_string();
+    }
+}
+
+fn render_watch_scope(assignment_scope: ListenAssignmentScope, viewer: Option<&UserRef>) -> String {
+    match assignment_scope {
+        ListenAssignmentScope::Any => "all assignees".to_string(),
+        ListenAssignmentScope::ViewerOnly => viewer
+            .map(|viewer| format!("only {}", viewer.name))
+            .unwrap_or_else(|| "viewer only".to_string()),
+        ListenAssignmentScope::ViewerOrUnassigned => viewer
+            .map(|viewer| format!("{} + unassigned", viewer.name))
+            .unwrap_or_else(|| "viewer + unassigned".to_string()),
+    }
+}
+
+fn issue_assignee_filter(
+    assignment_scope: ListenAssignmentScope,
+    viewer: Option<&UserRef>,
+) -> IssueAssigneeFilter {
+    match assignment_scope {
+        ListenAssignmentScope::Any => IssueAssigneeFilter::Any,
+        ListenAssignmentScope::ViewerOnly => viewer.map_or(IssueAssigneeFilter::Any, |viewer| {
+            IssueAssigneeFilter::Viewer {
+                viewer_id: viewer.id.clone(),
+            }
+        }),
+        ListenAssignmentScope::ViewerOrUnassigned => {
+            viewer.map_or(IssueAssigneeFilter::Any, |viewer| {
+                IssueAssigneeFilter::ViewerOrUnassigned {
+                    viewer_id: viewer.id.clone(),
+                }
+            })
+        }
+    }
+}
 fn render_listen_backlog_file(
     relative_path: &str,
     contents: String,
@@ -576,6 +844,39 @@ fn render_listen_backlog_file(
     )
 }
 
+fn format_required_label_filter(required_labels: &[String]) -> String {
+    required_labels
+        .iter()
+        .map(|label| format!("`{label}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn required_label_skip_reason(
+    listen_settings: &PlanningListenSettings,
+    issue: &IssueSummary,
+) -> Option<String> {
+    let required_labels = listen_settings.required_label_names();
+    if required_labels.is_empty()
+        || issue.labels.iter().any(|issue_label| {
+            required_labels
+                .iter()
+                .any(|required| issue_label.name.eq_ignore_ascii_case(required))
+        })
+    {
+        return None;
+    }
+
+    Some(if required_labels.len() == 1 {
+        format!("missing required label `{}`", required_labels[0])
+    } else {
+        format!(
+            "missing any required label ({})",
+            format_required_label_filter(required_labels)
+        )
+    })
+}
+
 impl<C> AgentDaemon<C>
 where
     C: LinearClient,
@@ -589,17 +890,14 @@ where
             pending.len()
         )];
         self.reconcile_sessions(&mut state, &mut notes).await?;
-        if let Some(label) = self.listen_settings.required_label.as_deref() {
-            notes.push(format!("Listen label filter is active: `{label}`."));
-        }
-        if self.listen_settings.assignment_scope == ListenAssignmentScope::Viewer
-            && let Some(viewer) = &self.viewer
-        {
+        let required_labels = self.listen_settings.required_label_names();
+        if !required_labels.is_empty() {
             notes.push(format!(
-                "Listen assignee filter is active: only issues assigned to `{}` are eligible.",
-                viewer.name
+                "Listen label filter is active: any of {}.",
+                format_required_label_filter(required_labels)
             ));
         }
+        notes.push(format!("Watching: {}.", self.watch_scope_label()));
         let mut claimed_this_cycle = 0usize;
         let mut claimed_identifiers = Vec::new();
         let mut eligible = Vec::new();
@@ -653,6 +951,7 @@ where
 
         Ok(ListenCycleData {
             scope,
+            watch_scope: self.watch_scope_label(),
             claimed_this_cycle,
             pending_issues,
             sessions,
@@ -667,6 +966,22 @@ where
         state: &mut ListenState,
         notes: &mut Vec<String>,
     ) -> Result<()> {
+        let pruned = state.prune_completed_sessions_older_than(
+            now_epoch_seconds(),
+            COMPLETED_SESSION_TTL_SECONDS,
+        );
+        if !pruned.is_empty() {
+            notes.push(format!(
+                "Pruned {} completed session(s) older than the 24-hour TTL: {}.",
+                pruned.len(),
+                pruned
+                    .iter()
+                    .map(|session| session.issue_identifier.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+
         let existing_sessions = state.sessions.clone();
         let mut reconciled = Vec::with_capacity(existing_sessions.len());
 
@@ -702,6 +1017,26 @@ where
                 continue;
             }
 
+            if matches!(session.phase, SessionPhase::Running)
+                && session.pid.is_some_and(pid_is_running)
+            {
+                reconciled.push(session);
+                continue;
+            }
+
+            if !matches!(
+                session.phase,
+                SessionPhase::Completed | SessionPhase::Blocked
+            ) && let Some(reason) = self.session_drop_reason(&issue)
+            {
+                session.phase = SessionPhase::Completed;
+                session.summary = reason.clone();
+                session.updated_at_epoch_seconds = now_epoch_seconds();
+                notes.push(format!("Ended {} session: {reason}.", issue.identifier));
+                reconciled.push(session);
+                continue;
+            }
+
             if matches!(
                 session.phase,
                 SessionPhase::Completed | SessionPhase::Blocked
@@ -720,12 +1055,21 @@ where
             }
 
             if matches!(session.phase, SessionPhase::Running)
-                && session.pid.is_some_and(pid_is_running)
+                && let Some(pid) = session.pid
             {
+                mark_running_session_stale(
+                    &mut session,
+                    &issue.identifier,
+                    &self.agent_log_path(&issue.identifier),
+                    pid,
+                );
+                notes.push(format!(
+                    "{} worker pid {} was no longer running; marked the stored session blocked instead of auto-resuming it.",
+                    session.issue_identifier, pid
+                ));
                 reconciled.push(session);
                 continue;
             }
-
             let (Some(workspace_path), Some(workpad_comment_id)) = (
                 session.workspace_path.as_deref(),
                 session.workpad_comment_id.as_deref(),
@@ -861,6 +1205,7 @@ where
                 local_hash: None,
                 remote_hash: None,
                 last_sync_at: None,
+                last_pulled_comment_ids: Vec::new(),
                 managed_files: Vec::<ManagedFileRecord>::new(),
             },
         )?;
@@ -881,6 +1226,9 @@ where
                 project: None,
                 state: Some(IN_PROGRESS_STATE.to_string()),
                 priority: None,
+                estimate: None,
+                labels: None,
+                parent_identifier: None,
             })
             .await?;
 
@@ -910,7 +1258,7 @@ where
 
         let workspace = match ensure_ticket_workspace(
             &self.root,
-            self.listen_settings.refresh_policy,
+            self.listen_settings.refresh_policy(),
             &detailed_issue.identifier,
             &detailed_issue.title,
         ) {
@@ -1093,29 +1441,62 @@ where
     fn skip_reason(&self, issue: &IssueSummary) -> Option<String> {
         let mut reasons = Vec::new();
 
-        if let Some(required_label) = self.listen_settings.required_label.as_deref()
-            && !issue
-                .labels
-                .iter()
-                .any(|label| label.name.eq_ignore_ascii_case(required_label))
-        {
-            reasons.push(format!("missing required label `{required_label}`"));
+        if let Some(reason) = required_label_skip_reason(&self.listen_settings, issue) {
+            reasons.push(reason);
         }
 
-        if self.listen_settings.assignment_scope == ListenAssignmentScope::Viewer
-            && let Some(viewer) = &self.viewer
-        {
-            match issue.assignee.as_ref() {
-                Some(assignee) if assignee.id == viewer.id => {}
-                Some(assignee) => reasons.push(format!(
-                    "assigned to `{}` instead of `{}`",
-                    assignee.name, viewer.name
-                )),
-                None => reasons.push("issue is unassigned".to_string()),
-            }
+        if let Some(reason) = self.assignee_scope_skip_reason(issue) {
+            reasons.push(reason);
         }
 
         (!reasons.is_empty()).then(|| reasons.join("; "))
+    }
+
+    fn watch_scope_label(&self) -> String {
+        render_watch_scope(
+            self.listen_settings.assignment_scope(),
+            self.viewer.as_ref(),
+        )
+    }
+
+    fn assignee_scope_skip_reason(&self, issue: &IssueSummary) -> Option<String> {
+        let viewer = self.viewer.as_ref()?;
+        match self.listen_settings.assignment_scope() {
+            ListenAssignmentScope::Any => None,
+            ListenAssignmentScope::ViewerOnly => match issue.assignee.as_ref() {
+                Some(assignee) if assignee.id == viewer.id => None,
+                Some(assignee) => Some(format!(
+                    "assigned to `{}` instead of `{}`",
+                    assignee.name, viewer.name
+                )),
+                None => Some(format!("unassigned; only `{}` is in scope", viewer.name)),
+            },
+            ListenAssignmentScope::ViewerOrUnassigned => match issue.assignee.as_ref() {
+                Some(assignee) if assignee.id == viewer.id => None,
+                Some(assignee) => Some(format!(
+                    "assigned to `{}` instead of `{}`",
+                    assignee.name, viewer.name
+                )),
+                None => None,
+            },
+        }
+    }
+
+    fn session_drop_reason(&self, issue: &IssueSummary) -> Option<String> {
+        let viewer = self.viewer.as_ref()?;
+        match self.listen_settings.assignment_scope() {
+            ListenAssignmentScope::Any => None,
+            ListenAssignmentScope::ViewerOnly => match issue.assignee.as_ref() {
+                Some(assignee) if assignee.id == viewer.id => None,
+                Some(_) => Some("session ended: ticket reassigned".to_string()),
+                None => Some("session ended: ticket became unassigned".to_string()),
+            },
+            ListenAssignmentScope::ViewerOrUnassigned => match issue.assignee.as_ref() {
+                Some(assignee) if assignee.id == viewer.id => None,
+                Some(_) => Some("session ended: ticket reassigned".to_string()),
+                None => None,
+            },
+        }
     }
 
     fn build_session(
@@ -1151,6 +1532,7 @@ where
             updated_at_epoch_seconds,
             pid: artifacts.pid.filter(|pid| *pid > 0),
             session_id: Some(issue.id.clone()),
+            latest_resume_handle: None,
             turns: artifacts.turns.or(Some(0)),
             tokens: TokenUsage::default(),
             log_path: artifacts.log_path,
@@ -1203,14 +1585,15 @@ where
 
         let mut command = Command::new(current_exe);
         command.current_dir(&self.root);
+        command.arg("listen-worker").arg("--source-root").arg(
+            self.root
+                .to_str()
+                .ok_or_else(|| anyhow!("source root is not valid utf-8"))?,
+        );
+        if let Some(project_selector) = self.store.identity().project_selector.as_deref() {
+            command.arg("--project").arg(project_selector);
+        }
         command
-            .arg("listen-worker")
-            .arg("--source-root")
-            .arg(
-                self.root
-                    .to_str()
-                    .ok_or_else(|| anyhow!("source root is not valid utf-8"))?,
-            )
             .arg("--workspace")
             .arg(
                 workspace_path
@@ -1264,8 +1647,12 @@ struct WorkspaceSnapshot {
     status_entries: Vec<String>,
 }
 
-fn write_listen_session(root: &Path, session: AgentSession) -> Result<()> {
-    ListenProjectStore::resolve(root)?.upsert_session(session)
+fn write_listen_session(
+    root: &Path,
+    project_selector: Option<&str>,
+    session: AgentSession,
+) -> Result<()> {
+    ListenProjectStore::resolve(root, project_selector)?.upsert_session(session)
 }
 
 fn current_workspace_branch(workspace_path: &Path) -> Result<String> {
@@ -1273,8 +1660,8 @@ fn current_workspace_branch(workspace_path: &Path) -> Result<String> {
         .context("failed to inspect the workspace branch")
 }
 
-fn agent_log_path(root: &Path, identifier: &str) -> PathBuf {
-    ListenProjectStore::resolve(root)
+fn agent_log_path(root: &Path, project_selector: Option<&str>, identifier: &str) -> PathBuf {
+    ListenProjectStore::resolve(root, project_selector)
         .map(|store| store.log_path(identifier))
         .unwrap_or_else(|_| PathBuf::from(format!("{identifier}.log")))
 }
@@ -1497,6 +1884,9 @@ where
                 project: None,
                 state: Some((*candidate).to_string()),
                 priority: None,
+                estimate: None,
+                labels: None,
+                parent_identifier: None,
             })
             .await
         {
@@ -1555,6 +1945,19 @@ fn normalize_issue_state_name(state_name: &str) -> String {
     state_name.trim().to_ascii_lowercase()
 }
 
+fn listen_scope_label(
+    team: Option<&str>,
+    project_selector: Option<&str>,
+    project_label: &str,
+) -> String {
+    match (team, project_selector) {
+        (Some(team), Some(_)) => format!("{team} / {project_label}"),
+        (Some(team), None) => team.to_string(),
+        (None, Some(_)) => project_label.to_string(),
+        (None, None) => "all teams".to_string(),
+    }
+}
+
 pub fn run_listen_session_list(_: &ListenSessionListArgs) -> Result<String> {
     let projects = ListenProjectStore::list_projects()?;
     if projects.is_empty() {
@@ -1564,7 +1967,7 @@ pub fn run_listen_session_list(_: &ListenSessionListArgs) -> Result<String> {
     let now = now_epoch_seconds();
     let mut lines = vec![
         "Stored MetaListen project sessions:".to_string(),
-        "KEY  PHASE  UPDATED  ISSUE  PROJECT  ROOT".to_string(),
+        "KEY  PHASE  UPDATED  ISSUE  PROVIDER  RESUME ID  PROJECT  ROOT".to_string(),
     ];
     for project in projects {
         let latest = project.latest_session.as_ref();
@@ -1577,12 +1980,20 @@ pub fn run_listen_session_list(_: &ListenSessionListArgs) -> Result<String> {
         let issue = latest
             .map(|session| session.issue_identifier.clone())
             .unwrap_or_else(|| "-".to_string());
+        let provider = latest
+            .map(AgentSession::latest_resume_provider_label)
+            .unwrap_or_else(|| "-".to_string());
+        let resume_id = latest
+            .map(AgentSession::latest_resume_id_label)
+            .unwrap_or_else(|| "-".to_string());
         lines.push(format!(
-            "{}  {}  {}  {}  {}  {}",
+            "{}  {}  {}  {}  {}  {}  {}  {}",
             compact_identifier(&project.metadata.project_key),
             phase,
             updated,
             issue,
+            provider,
+            resume_id,
             project.metadata.project_label,
             project.metadata.source_root
         ));
@@ -1625,9 +2036,18 @@ pub fn run_listen_session_inspect(args: &ListenSessionInspectArgs) -> Result<Str
         lines.push(format!("  - Title: {}", session.issue_title));
         lines.push(format!("  - Phase: {}", session.phase.display_label()));
         lines.push(format!("  - Summary: {}", session.summary));
+        lines.push(format!("  - Tokens: {}", session.tokens.display_compact()));
         lines.push(format!(
             "  - Updated: {}",
             now_timestamp_for_epoch(session.updated_at_epoch_seconds)
+        ));
+        lines.push(format!(
+            "  - Resume provider: {}",
+            session.latest_resume_provider_label()
+        ));
+        lines.push(format!(
+            "  - Resume ID: {}",
+            session.latest_resume_id_label()
         ));
         if let Some(workspace_path) = session.workspace_path {
             lines.push(format!("  - Workspace: {workspace_path}"));
@@ -1643,10 +2063,11 @@ pub fn run_listen_session_inspect(args: &ListenSessionInspectArgs) -> Result<Str
         lines.push("Tracked sessions:".to_string());
         for session in state.sorted_sessions() {
             lines.push(format!(
-                "  - {} [{}] {}",
+                "  - {} [{}] {} | tokens {}",
                 session.issue_identifier,
                 session.phase.display_label(),
-                session.summary
+                session.summary,
+                session.tokens.display_compact()
             ));
         }
     }
@@ -1658,46 +2079,96 @@ pub fn run_listen_session_clear(args: &ListenSessionClearArgs) -> Result<String>
     let store = resolve_session_store(&args.target)?;
     let label = store.identity().project_label.clone();
     let key = store.identity().project_key.clone();
-    store.clear()?;
+    let selector = clear_selector(args);
+    let outcome = store.clear_sessions(&selector)?;
+    if outcome.cleared_sessions.is_empty() {
+        return Ok(format!(
+            "No stored MetaListen sessions matched {} for project `{label}` ({key}); {} tracked session(s) remain.",
+            selector.display_label(),
+            outcome.remaining_sessions
+        ));
+    }
+
+    let cleared = outcome
+        .cleared_sessions
+        .iter()
+        .map(|session| {
+            format!(
+                "{} [{}]",
+                session.issue_identifier,
+                session.phase.display_label()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
     Ok(format!(
-        "Cleared stored MetaListen session data for project `{label}` ({key})."
+        "Cleared {} stored MetaListen session(s) matched by {} for project `{label}` ({key}): {}. {} tracked session(s) remain.",
+        outcome.cleared_sessions.len(),
+        selector.display_label(),
+        cleared,
+        outcome.remaining_sessions
     ))
 }
 
 pub async fn run_listen_session_resume(args: &ListenSessionResumeArgs) -> Result<()> {
     let store = match args.project_key.as_deref() {
         Some(project_key) => ListenProjectStore::from_project_key(project_key)?,
-        None => ListenProjectStore::resolve(&args.run.root)?,
+        None => resolve_project_store(&args.run.root, args.run.project.as_deref())?,
     };
     let mut run_args = args.run.clone();
     run_args.root = store.identity().source_root.clone();
+    run_args.project = store.identity().project_selector.clone();
     run_listen(&run_args).await
 }
 
 pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
+    if args.json && !args.once {
+        bail!("`meta agents listen --json` requires `--once`");
+    }
+
     let requested_root = canonicalize_existing_dir(&args.root)?;
     let root = resolve_source_project_root(&requested_root)?;
     let planning_meta = load_required_planning_meta(&root, "listen")?;
     ensure_planning_layout(&root, false)?;
     let app_config = AppConfig::load()?;
-    let poll_interval_seconds = resolve_listen_poll_interval_seconds(args, &planning_meta);
+    let poll_interval_seconds =
+        resolve_listen_poll_interval_seconds(args, &planning_meta, &app_config);
+    let mut listen_settings = planning_meta.listen.clone();
+    if listen_settings.assignment_scope.is_none() {
+        listen_settings.assignment_scope =
+            Some(planning_meta.effective_listen_assignment_scope(&app_config));
+    }
+    if listen_settings.refresh_policy.is_none() {
+        listen_settings.refresh_policy =
+            Some(planning_meta.effective_listen_refresh_policy(&app_config));
+    }
+    if args.all_assignees {
+        listen_settings.assignment_scope = Some(ListenAssignmentScope::Any);
+    }
 
     if args.demo {
-        let store = ListenProjectStore::resolve(&root)?;
+        let store = resolve_project_store_for_run(
+            &root,
+            args.project.as_deref(),
+            &planning_meta,
+            &app_config,
+        )?;
         let _lock = store.acquire_listener_lock(std::process::id())?;
         let demo_now = now_epoch_seconds();
-        let cycle = ListenCycleData::demo_at(&root, demo_now);
+        let demo_state_file = display_path(&store.paths().state_path, &root);
+        let cycle = ListenCycleData::demo_at(&root, demo_now, demo_state_file.clone());
         if args.render_once {
-            let cycle = ListenCycleData::demo(&root);
+            let cycle = ListenCycleData::demo(&root, demo_state_file.clone());
             let data = build_dashboard_data(
                 &cycle,
                 &DashboardRuntimeContext {
                     started_at_epoch_seconds: DEMO_START_EPOCH_SECONDS,
                     now_epoch_seconds: DEMO_NOW_EPOCH_SECONDS,
                     poll_interval_seconds,
-                    dashboard_refresh_seconds: DASHBOARD_REFRESH_INTERVAL_SECONDS,
+                    dashboard_label: "terminal snapshot",
+                    dashboard_refresh_seconds: TERMINAL_REFRESH_INTERVAL_SECONDS,
                     linear_refresh_seconds: poll_interval_seconds,
-                    dashboard_url: None,
+                    vim_mode: app_config.vim_mode_enabled(),
                 },
             );
             println!(
@@ -1707,29 +2178,37 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
             return Ok(());
         }
         if args.once {
-            let cycle = ListenCycleData::demo(&root);
+            let cycle = ListenCycleData::demo(&root, demo_state_file.clone());
             let data = build_dashboard_data(
                 &cycle,
                 &DashboardRuntimeContext {
                     started_at_epoch_seconds: DEMO_START_EPOCH_SECONDS,
                     now_epoch_seconds: DEMO_NOW_EPOCH_SECONDS,
                     poll_interval_seconds,
-                    dashboard_refresh_seconds: DASHBOARD_REFRESH_INTERVAL_SECONDS,
+                    dashboard_label: "terminal summary",
+                    dashboard_refresh_seconds: TERMINAL_REFRESH_INTERVAL_SECONDS,
                     linear_refresh_seconds: poll_interval_seconds,
-                    dashboard_url: None,
+                    vim_mode: app_config.vim_mode_enabled(),
                 },
             );
-            println!("{}", data.render_summary());
+            if args.json {
+                println!("{}", render_json_success("agents.listen", &data)?);
+            } else {
+                println!("{}", data.render_summary());
+            }
             return Ok(());
         }
 
         let initial_cycle = cycle.clone();
         run_live_loop(
             args,
-            poll_interval_seconds,
-            demo_now - 7_351,
+            ListenLoopConfig {
+                poll_interval_seconds,
+                started_at_epoch_seconds: demo_now - 7_351,
+                refresh_immediately: false,
+                vim_mode: app_config.vim_mode_enabled(),
+            },
             initial_cycle,
-            false,
             move || {
                 let cycle = cycle.clone();
                 async move { Ok(cycle) }
@@ -1770,10 +2249,12 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
             profile: args.profile.clone(),
         },
     )?;
-    let store = ListenProjectStore::resolve(&root)?;
+    let store =
+        resolve_project_store_for_run(&root, args.project.as_deref(), &planning_meta, &app_config)?;
     let _lock = store.acquire_listener_lock(std::process::id())?;
     let client = ReqwestLinearClient::new(config.clone())?;
     let service = LinearService::new(client, config.default_team.clone());
+    let mut preflight_viewer = None;
     if let Some(provider_report) = startup_provider_preflight {
         let startup_preflight =
             preflight::complete_listen_preflight(&service, &config, provider_report).await;
@@ -1781,6 +2262,18 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
             match startup_preflight {
                 Ok(report) => {
                     println!("{}", preflight::render_listen_preflight_report(Ok(&report)));
+                    println!(
+                        "- Effective assignee filter: {}",
+                        render_watch_scope(
+                            listen_settings.assignment_scope(),
+                            report.viewer().filter(|_| {
+                                !matches!(
+                                    listen_settings.assignment_scope(),
+                                    ListenAssignmentScope::Any
+                                )
+                            }),
+                        )
+                    );
                     return Ok(());
                 }
                 Err(error) => {
@@ -1789,14 +2282,23 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
             }
         }
         match startup_preflight {
-            Ok(report) => preflight::emit_listen_preflight_warnings(&report),
+            Ok(report) => {
+                preflight_viewer = report.viewer().cloned();
+                preflight::emit_listen_preflight_warnings(&report);
+            }
             Err(error) => return Err(error),
         }
     } else if args.check {
         unreachable!("`--check` exits on provider preflight failures before Linear validation");
     }
-    let viewer = if planning_meta.listen.assignment_scope == ListenAssignmentScope::Viewer {
-        Some(service.viewer().await?)
+    let viewer = if matches!(
+        listen_settings.assignment_scope(),
+        ListenAssignmentScope::ViewerOnly | ListenAssignmentScope::ViewerOrUnassigned
+    ) {
+        match preflight_viewer {
+            Some(viewer) => Some(viewer),
+            None => Some(service.viewer().await?),
+        }
     } else {
         None
     };
@@ -1809,9 +2311,10 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
             project_id: if args.project.is_some() {
                 None
             } else {
-                planning_meta.linear.project_id.clone()
+                planning_meta.effective_project_id(&app_config)
             },
             state: Some(TODO_STATE.to_string()),
+            assignee: issue_assignee_filter(listen_settings.assignment_scope(), viewer.as_ref()),
             limit: args.limit.max(1),
         },
         max_pickups: args.max_pickups.max(1),
@@ -1821,7 +2324,7 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
         worker_agent: args.agent.clone(),
         worker_model: args.model.clone(),
         worker_reasoning: args.reasoning.clone(),
-        listen_settings: planning_meta.listen.clone(),
+        listen_settings,
         viewer,
         service,
     };
@@ -1835,9 +2338,10 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
                 started_at_epoch_seconds: now,
                 now_epoch_seconds: now,
                 poll_interval_seconds,
-                dashboard_refresh_seconds: DASHBOARD_REFRESH_INTERVAL_SECONDS,
+                dashboard_label: "terminal snapshot",
+                dashboard_refresh_seconds: TERMINAL_REFRESH_INTERVAL_SECONDS,
                 linear_refresh_seconds: 0,
-                dashboard_url: None,
+                vim_mode: daemon.app_config.vim_mode_enabled(),
             },
         );
         println!(
@@ -1856,34 +2360,44 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
                 started_at_epoch_seconds: now,
                 now_epoch_seconds: now,
                 poll_interval_seconds,
-                dashboard_refresh_seconds: DASHBOARD_REFRESH_INTERVAL_SECONDS,
+                dashboard_label: "terminal summary",
+                dashboard_refresh_seconds: TERMINAL_REFRESH_INTERVAL_SECONDS,
                 linear_refresh_seconds: 0,
-                dashboard_url: None,
+                vim_mode: daemon.app_config.vim_mode_enabled(),
             },
         );
-        println!("{}", data.render_summary());
+        if args.json {
+            println!("{}", render_json_success("agents.listen", &data)?);
+        } else {
+            println!("{}", data.render_summary());
+        }
         return Ok(());
     }
 
     let started_at_epoch_seconds = now_epoch_seconds();
     let initial_cycle = ListenCycleData::loading(
-        match (&daemon.filters.team, &daemon.filters.project) {
-            (Some(team), Some(project)) => format!("{team} / {project}"),
-            (Some(team), None) => team.clone(),
-            (None, Some(project)) => project.clone(),
-            (None, None) => "all teams".to_string(),
-        },
+        listen_scope_label(
+            daemon.filters.team.as_deref(),
+            daemon.store.identity().project_selector.as_deref(),
+            &daemon.store.identity().project_label,
+        ),
+        daemon.watch_scope_label(),
         display_path(&daemon.store.paths().state_path, &daemon.root),
     );
+    let mut codex_live_tokens = CodexLiveTokenHydrator::new();
     run_live_loop(
         args,
-        poll_interval_seconds,
-        started_at_epoch_seconds,
+        ListenLoopConfig {
+            poll_interval_seconds,
+            started_at_epoch_seconds,
+            refresh_immediately: true,
+            vim_mode: daemon.app_config.vim_mode_enabled(),
+        },
         initial_cycle,
-        true,
         || daemon.run_cycle(),
         |cycle| {
             cycle.apply_state_snapshot(daemon.store.load_state()?);
+            codex_live_tokens.refresh_sessions(&mut cycle.sessions)?;
             Ok(())
         },
     )
@@ -1895,8 +2409,43 @@ fn resolve_session_store(
 ) -> Result<ListenProjectStore> {
     match target.project_key.as_deref() {
         Some(project_key) => ListenProjectStore::from_project_key(project_key),
-        None => ListenProjectStore::resolve(&target.root),
+        None => resolve_project_store(&target.root, target.project.as_deref()),
     }
+}
+
+fn resolve_project_store(
+    root: &Path,
+    explicit_project: Option<&str>,
+) -> Result<ListenProjectStore> {
+    let requested_root = canonicalize_existing_dir(root)?;
+    let source_root = resolve_source_project_root(&requested_root)?;
+    let planning_meta = load_required_planning_meta(&source_root, "listen")?;
+    let app_config = AppConfig::load()?;
+    resolve_project_store_for_run(&source_root, explicit_project, &planning_meta, &app_config)
+}
+
+fn resolve_project_store_for_run(
+    root: &Path,
+    explicit_project: Option<&str>,
+    planning_meta: &PlanningMeta,
+    app_config: &AppConfig,
+) -> Result<ListenProjectStore> {
+    ListenProjectStore::resolve(
+        root,
+        effective_listen_project_selector(explicit_project, planning_meta, app_config).as_deref(),
+    )
+}
+
+fn effective_listen_project_selector(
+    explicit_project: Option<&str>,
+    planning_meta: &PlanningMeta,
+    app_config: &AppConfig,
+) -> Option<String> {
+    explicit_project
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| planning_meta.effective_project_id(app_config))
 }
 
 fn store_summary(store: &ListenProjectStore) -> Result<StoredListenProjectSummary> {
@@ -1912,12 +2461,24 @@ fn store_summary(store: &ListenProjectStore) -> Result<StoredListenProjectSummar
         })
 }
 
+fn clear_selector(args: &ListenSessionClearArgs) -> SessionSelector {
+    if let Some(identifier) = args.issue_identifier.as_deref() {
+        SessionSelector::IssueIdentifier(identifier.to_string())
+    } else if args.blocked {
+        SessionSelector::Blocked
+    } else if args.completed {
+        SessionSelector::Completed
+    } else if args.stale {
+        SessionSelector::Stale
+    } else {
+        SessionSelector::All
+    }
+}
+
 async fn run_live_loop<F, Fut, S>(
-    args: &ListenRunArgs,
-    poll_interval_seconds: u64,
-    started_at_epoch_seconds: u64,
+    _args: &ListenRunArgs,
+    loop_config: ListenLoopConfig,
     initial_cycle: ListenCycleData,
-    refresh_immediately: bool,
     mut next_cycle: F,
     mut refresh_dashboard_state: S,
 ) -> Result<()>
@@ -1926,30 +2487,24 @@ where
     Fut: Future<Output = Result<ListenCycleData>>,
     S: FnMut(&mut ListenCycleData) -> Result<()>,
 {
-    let initial_data = build_dashboard_data(
+    let _initial_data = build_dashboard_data(
         &initial_cycle,
         &DashboardRuntimeContext {
-            started_at_epoch_seconds,
-            now_epoch_seconds: started_at_epoch_seconds,
-            poll_interval_seconds,
-            dashboard_refresh_seconds: DASHBOARD_REFRESH_INTERVAL_SECONDS,
-            linear_refresh_seconds: if refresh_immediately {
+            started_at_epoch_seconds: loop_config.started_at_epoch_seconds,
+            now_epoch_seconds: loop_config.started_at_epoch_seconds,
+            poll_interval_seconds: loop_config.poll_interval_seconds,
+            dashboard_label: "terminal dashboard (TUI)",
+            dashboard_refresh_seconds: TERMINAL_REFRESH_INTERVAL_SECONDS,
+            linear_refresh_seconds: if loop_config.refresh_immediately {
                 0
             } else {
-                poll_interval_seconds
+                loop_config.poll_interval_seconds
             },
-            dashboard_url: None,
+            vim_mode: loop_config.vim_mode,
         },
     );
-    let shared_state = Arc::new(RwLock::new(initial_data));
-    let server = web::ListenDashboardServer::start(
-        DEFAULT_DASHBOARD_HOST,
-        args.dashboard_port,
-        shared_state.clone(),
-    )?;
-    let dashboard_url = server.url().to_string();
-    let linear_refresh_interval = Duration::from_secs(poll_interval_seconds);
-    let dashboard_refresh_interval = Duration::from_secs(DASHBOARD_REFRESH_INTERVAL_SECONDS);
+    let linear_refresh_interval = Duration::from_secs(loop_config.poll_interval_seconds);
+    let terminal_refresh_interval = Duration::from_secs(TERMINAL_REFRESH_INTERVAL_SECONDS);
 
     let mut stdout = io::stdout();
     enable_raw_mode()?;
@@ -1960,12 +2515,13 @@ where
     let mut terminal = Terminal::new(backend)?;
     let mut cycle = initial_cycle;
     let mut session_view = SessionListView::Active;
-    let mut next_linear_refresh_at = if refresh_immediately {
+    let mut next_linear_refresh_at = if loop_config.refresh_immediately {
         Instant::now()
     } else {
         Instant::now() + linear_refresh_interval
     };
-    let mut next_dashboard_refresh_at = Instant::now() + dashboard_refresh_interval;
+    let mut next_terminal_refresh_at = Instant::now() + terminal_refresh_interval;
+    let mut pending_cycle_refresh: Option<Pin<Box<Fut>>> = None;
 
     loop {
         let now = now_epoch_seconds();
@@ -1975,21 +2531,21 @@ where
         let data = build_dashboard_data(
             &cycle,
             &DashboardRuntimeContext {
-                started_at_epoch_seconds,
+                started_at_epoch_seconds: loop_config.started_at_epoch_seconds,
                 now_epoch_seconds: now,
-                poll_interval_seconds,
-                dashboard_refresh_seconds: DASHBOARD_REFRESH_INTERVAL_SECONDS,
+                poll_interval_seconds: loop_config.poll_interval_seconds,
+                dashboard_label: "terminal dashboard (TUI)",
+                dashboard_refresh_seconds: TERMINAL_REFRESH_INTERVAL_SECONDS,
                 linear_refresh_seconds,
-                dashboard_url: Some(dashboard_url.clone()),
+                vim_mode: loop_config.vim_mode,
             },
         );
-        update_shared_state(&shared_state, data.clone());
         terminal.draw(|frame| dashboard::render(frame, &data, session_view))?;
 
         let wait_for_input = next_linear_refresh_at
             .saturating_duration_since(Instant::now())
             .min(
-                next_dashboard_refresh_at
+                next_terminal_refresh_at
                     .saturating_duration_since(Instant::now())
                     .min(Duration::from_millis(250)),
             );
@@ -2004,31 +2560,53 @@ where
                 break;
             } else if matches!(key.code, KeyCode::Tab) {
                 session_view = session_view.toggle();
-            } else if matches!(key.code, KeyCode::Left) {
+            } else if matches!(key.code, KeyCode::Left)
+                || (loop_config.vim_mode && matches!(key.code, KeyCode::Char('h')))
+            {
                 session_view = SessionListView::Active;
-            } else if matches!(key.code, KeyCode::Right) {
+            } else if matches!(key.code, KeyCode::Right)
+                || (loop_config.vim_mode && matches!(key.code, KeyCode::Char('l')))
+            {
                 session_view = SessionListView::Completed;
             }
         }
 
         let now = Instant::now();
-        if now >= next_linear_refresh_at {
-            cycle = next_cycle().await?;
-            let refreshed_at = Instant::now();
-            next_linear_refresh_at = refreshed_at + linear_refresh_interval;
-            next_dashboard_refresh_at = refreshed_at + dashboard_refresh_interval;
-        } else if now >= next_dashboard_refresh_at {
+        if pending_cycle_refresh.is_none() && now >= next_linear_refresh_at {
+            pending_cycle_refresh = Some(Box::pin(next_cycle()));
+        }
+        if now >= next_terminal_refresh_at {
             refresh_dashboard_state(&mut cycle)?;
-            next_dashboard_refresh_at = Instant::now() + dashboard_refresh_interval;
+            next_terminal_refresh_at = Instant::now() + terminal_refresh_interval;
+        }
+
+        if let Some(refresh) = pending_cycle_refresh.as_mut() {
+            tokio::select! {
+                result = refresh => {
+                    cycle = result?;
+                    let refreshed_at = Instant::now();
+                    next_linear_refresh_at = refreshed_at + linear_refresh_interval;
+                    pending_cycle_refresh = None;
+                    refresh_dashboard_state(&mut cycle)?;
+                    next_terminal_refresh_at = Instant::now() + terminal_refresh_interval;
+                }
+                _ = tokio::time::sleep(Duration::from_millis(INPUT_POLL_INTERVAL_MILLIS)) => {}
+            }
+        } else {
+            tokio::time::sleep(Duration::from_millis(INPUT_POLL_INTERVAL_MILLIS)).await;
         }
     }
 
     Ok(())
 }
 
-fn resolve_listen_poll_interval_seconds(args: &ListenRunArgs, planning_meta: &PlanningMeta) -> u64 {
+fn resolve_listen_poll_interval_seconds(
+    args: &ListenRunArgs,
+    planning_meta: &PlanningMeta,
+    app_config: &AppConfig,
+) -> u64 {
     args.poll_interval
-        .unwrap_or_else(|| planning_meta.listen.poll_interval_seconds())
+        .unwrap_or_else(|| planning_meta.effective_listen_poll_interval_seconds(app_config))
         .max(1)
 }
 
@@ -2041,20 +2619,22 @@ fn build_dashboard_data(
         .map(|totals| {
             format!(
                 "in {} | out {} | total {}",
-                format_number(totals.input),
-                format_number(totals.output),
+                totals
+                    .input
+                    .map(format_number)
+                    .unwrap_or_else(|| "n/a".to_string()),
+                totals
+                    .output
+                    .map(format_number)
+                    .unwrap_or_else(|| "n/a".to_string()),
                 format_number(totals.total)
             )
         })
         .unwrap_or_else(|| "n/a".to_string());
-    let dashboard = runtime
-        .dashboard_url
-        .clone()
-        .unwrap_or_else(|| "not running in one-shot mode".to_string());
-
     ListenDashboardData {
         title: "meta listen".to_string(),
         scope: cycle.scope.clone(),
+        watch_scope: cycle.watch_scope.clone(),
         cycle_summary: format!(
             "{} pending, {} active / {} completed sessions, {} claimed this cycle",
             cycle.pending_issues.len(),
@@ -2062,6 +2642,7 @@ fn build_dashboard_data(
             session_counts.completed,
             cycle.claimed_this_cycle
         ),
+        vim_mode: runtime.vim_mode,
         runtime: ListenRuntimeSummary {
             agents: format!(
                 "{} active / {} completed / {} queued",
@@ -2083,10 +2664,8 @@ fn build_dashboard_data(
                 "n/a (agent rate-limit telemetry is not surfaced by this CLI yet)".to_string()
             }),
             project: cycle.scope.clone(),
-            dashboard: dashboard.clone(),
-            dashboard_url: runtime.dashboard_url.clone(),
+            dashboard: runtime.dashboard_label.to_string(),
             dashboard_refresh: format!("{}s", runtime.dashboard_refresh_seconds),
-            dashboard_refresh_seconds: runtime.dashboard_refresh_seconds,
             linear_refresh: format!("{}s", runtime.linear_refresh_seconds),
             current_epoch_seconds: runtime.now_epoch_seconds,
         },
@@ -2097,32 +2676,23 @@ fn build_dashboard_data(
     }
 }
 
-fn update_shared_state(shared_state: &Arc<RwLock<ListenDashboardData>>, data: ListenDashboardData) {
-    if let Ok(mut shared) = shared_state.write() {
-        *shared = data;
-    }
-}
-
 fn aggregate_token_usage(sessions: &[AgentSession]) -> Option<TokenTotals> {
-    let mut input = 0u64;
-    let mut output = 0u64;
-    let mut has_any = false;
+    let mut input = None;
+    let mut output = None;
 
     for session in sessions {
         if let Some(value) = session.tokens.input {
-            has_any = true;
-            input += value;
+            input = Some(input.unwrap_or(0) + value);
         }
         if let Some(value) = session.tokens.output {
-            has_any = true;
-            output += value;
+            output = Some(output.unwrap_or(0) + value);
         }
     }
 
-    has_any.then_some(TokenTotals {
+    (input.is_some() || output.is_some()).then_some(TokenTotals {
         input,
         output,
-        total: input + output,
+        total: input.unwrap_or(0) + output.unwrap_or(0),
     })
 }
 
@@ -2183,9 +2753,29 @@ fn render_agent_prompt(
             String::new()
         }
     };
+    let discussion_context = backlog_issue
+        .and_then(|backlog_issue| {
+            let discussion_path = PlanningPaths::new(workspace_path)
+                .backlog_issue_dir(&backlog_issue.identifier)
+                .join(TICKET_DISCUSSION_FILE_NAME);
+            discussion_path.is_file().then_some(discussion_path)
+        })
+        .and_then(|discussion_path| {
+            let contents = fs::read_to_string(&discussion_path).ok()?;
+            let char_limit = PlanningMeta::load(workspace_path)
+                .ok()
+                .map(|planning_meta| planning_meta.sync.discussion_prompt_char_limit())
+                .unwrap_or(DEFAULT_SYNC_DISCUSSION_PROMPT_CHAR_LIMIT);
+            Some(format!(
+                "\nDiscussion context: {}\nDiscussion excerpt:\n\n{}",
+                discussion_path.display(),
+                truncate_discussion_excerpt(&contents, char_limit),
+            ))
+        })
+        .unwrap_or_default();
 
     format!(
-        "You are working on Linear ticket `{identifier}`\n\n{continuation}Issue context:\nIdentifier: {identifier}\nTitle: {title}\nCurrent status: {state}\nAssignee: {assignee}\nLabels: {labels}\nURL: {url}\nWorkspace: {workspace}\nTracking workpad comment ID: {comment_id}{backlog_context}{attachment_context}\n\nDescription:\n\n{description}",
+        "You are working on Linear ticket `{identifier}`\n\n{continuation}Issue context:\nIdentifier: {identifier}\nTitle: {title}\nCurrent status: {state}\nAssignee: {assignee}\nLabels: {labels}\nURL: {url}\nWorkspace: {workspace}\nTracking workpad comment ID: {comment_id}{backlog_context}{attachment_context}{discussion_context}\n\nDescription:\n\n{description}",
         identifier = issue.identifier,
         title = issue.title,
         state = state,
@@ -2196,8 +2786,28 @@ fn render_agent_prompt(
         comment_id = workpad_comment_id,
         backlog_context = backlog_context,
         attachment_context = attachment_context,
+        discussion_context = discussion_context,
         description = description,
         continuation = continuation,
+    )
+}
+
+fn truncate_discussion_excerpt(contents: &str, char_limit: usize) -> String {
+    if contents.len() <= char_limit {
+        return contents.to_string();
+    }
+    if char_limit <= 32 {
+        return contents.chars().take(char_limit).collect();
+    }
+    let mut tail = contents
+        .chars()
+        .rev()
+        .take(char_limit.saturating_sub(27))
+        .collect::<Vec<_>>();
+    tail.reverse();
+    format!(
+        "[truncated to most recent excerpt]\n\n{}",
+        tail.into_iter().collect::<String>()
     )
 }
 
@@ -2413,17 +3023,6 @@ fn render_issue_attachment_manifest(
     lines.join("\n")
 }
 
-fn pid_is_running(pid: u32) -> bool {
-    Command::new("ps")
-        .arg("-p")
-        .arg(pid.to_string())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(true)
-}
-
 fn now_timestamp() -> String {
     Command::new("date")
         .args(["-u", "+%Y-%m-%dT%H:%M:%SZ"])
@@ -2485,8 +3084,8 @@ fn compact_identifier(value: &str) -> String {
 
 #[derive(Debug, Clone, Copy)]
 struct TokenTotals {
-    input: u64,
-    output: u64,
+    input: Option<u64>,
+    output: Option<u64>,
     total: u64,
 }
 
@@ -2503,9 +3102,23 @@ impl Drop for TerminalCleanup {
 #[cfg(test)]
 mod tests {
     use super::{
-        ListenCycleData, ListenState, SessionPhase, TokenUsage, capture_workspace_snapshot,
-        compact_identifier, format_duration, format_number,
+        AgentDaemon, AgentSession, DashboardRuntimeContext, ListenCycleData, ListenState,
+        SessionPhase, TODO_STATE, TokenUsage, capture_workspace_snapshot, compact_identifier,
+        format_duration, format_number, listen_scope_label, mark_running_session_stale,
+        render_agent_prompt, required_label_skip_reason,
     };
+    use crate::config::{
+        AppConfig, LinearConfig, ListenAssignmentScope, ListenRefreshPolicy,
+        PlanningListenSettings, PlanningMeta,
+    };
+    use crate::linear::{
+        AttachmentCreateRequest, AttachmentSummary, IssueComment, IssueCreateRequest,
+        IssueLabelCreateRequest, IssueListFilters, IssueSummary, IssueUpdateRequest, LabelRef,
+        LinearClient, LinearService, ProjectSummary, TeamRef, TeamSummary, UserRef,
+    };
+    use crate::listen::store::ListenProjectStore;
+    use anyhow::Result;
+    use async_trait::async_trait;
     use std::fs;
     use std::path::Path;
     use std::process::Command;
@@ -2544,23 +3157,378 @@ mod tests {
     }
 
     #[test]
-    fn token_usage_compact_display_uses_total() {
+    fn token_usage_compact_display_shows_in_out_and_total() {
         let usage = TokenUsage {
             input: Some(12_300),
             output: Some(40),
         };
 
-        assert_eq!(usage.display_compact(), "12,340");
+        assert_eq!(usage.display_compact(), "in 12,300 | out 40 | total 12,340");
+    }
+
+    #[test]
+    fn token_usage_accumulate_preserves_partial_counts() {
+        let mut usage = TokenUsage {
+            input: Some(10),
+            output: None,
+        };
+        usage.accumulate(&TokenUsage {
+            input: None,
+            output: Some(5),
+        });
+        usage.accumulate(&TokenUsage {
+            input: Some(7),
+            output: None,
+        });
+
+        assert_eq!(usage.input, Some(17));
+        assert_eq!(usage.output, Some(5));
+        assert_eq!(usage.display_compact(), "in 17 | out 5 | total 22");
+    }
+
+    #[test]
+    fn aggregate_token_usage_sums_mixed_partial_session_counts() {
+        let sessions = vec![
+            AgentSession {
+                issue_id: Some("issue-1".to_string()),
+                issue_identifier: "ENG-1".to_string(),
+                issue_title: "One".to_string(),
+                project_name: None,
+                team_key: "ENG".to_string(),
+                issue_url: "https://linear.app/issues/ENG-1".to_string(),
+                phase: SessionPhase::Running,
+                summary: "running".to_string(),
+                brief_path: None,
+                backlog_issue_identifier: None,
+                backlog_issue_title: None,
+                backlog_path: None,
+                workspace_path: None,
+                branch: None,
+                workpad_comment_id: None,
+                updated_at_epoch_seconds: 1,
+                pid: None,
+                session_id: None,
+                latest_resume_handle: None,
+                turns: None,
+                tokens: TokenUsage {
+                    input: Some(100),
+                    output: None,
+                },
+                log_path: None,
+            },
+            AgentSession {
+                issue_id: Some("issue-2".to_string()),
+                issue_identifier: "ENG-2".to_string(),
+                issue_title: "Two".to_string(),
+                project_name: None,
+                team_key: "ENG".to_string(),
+                issue_url: "https://linear.app/issues/ENG-2".to_string(),
+                phase: SessionPhase::Completed,
+                summary: "done".to_string(),
+                brief_path: None,
+                backlog_issue_identifier: None,
+                backlog_issue_title: None,
+                backlog_path: None,
+                workspace_path: None,
+                branch: None,
+                workpad_comment_id: None,
+                updated_at_epoch_seconds: 2,
+                pid: None,
+                session_id: None,
+                latest_resume_handle: None,
+                turns: None,
+                tokens: TokenUsage {
+                    input: None,
+                    output: Some(25),
+                },
+                log_path: None,
+            },
+        ];
+
+        let totals = super::aggregate_token_usage(&sessions).expect("usage totals should exist");
+        assert_eq!(totals.input, Some(100));
+        assert_eq!(totals.output, Some(25));
+        assert_eq!(totals.total, 125);
+    }
+
+    #[test]
+    fn aggregate_token_usage_preserves_missing_output_counts() {
+        let sessions = vec![AgentSession {
+            issue_id: Some("issue-1".to_string()),
+            issue_identifier: "ENG-1".to_string(),
+            issue_title: "One".to_string(),
+            project_name: None,
+            team_key: "ENG".to_string(),
+            issue_url: "https://linear.app/issues/ENG-1".to_string(),
+            phase: SessionPhase::Running,
+            summary: "running".to_string(),
+            brief_path: None,
+            backlog_issue_identifier: None,
+            backlog_issue_title: None,
+            backlog_path: None,
+            workspace_path: None,
+            branch: None,
+            workpad_comment_id: None,
+            updated_at_epoch_seconds: 1,
+            pid: None,
+            session_id: None,
+            latest_resume_handle: None,
+            turns: None,
+            tokens: TokenUsage {
+                input: Some(100),
+                output: None,
+            },
+            log_path: None,
+        }];
+
+        let totals = super::aggregate_token_usage(&sessions).expect("usage totals should exist");
+        assert_eq!(totals.input, Some(100));
+        assert_eq!(totals.output, None);
+        assert_eq!(totals.total, 100);
+    }
+
+    #[test]
+    fn dashboard_runtime_tokens_render_partial_counts_as_na() {
+        let cycle = ListenCycleData {
+            scope: "MET".to_string(),
+            watch_scope: "all assignees".to_string(),
+            pending_issues: Vec::new(),
+            sessions: vec![AgentSession {
+                issue_id: Some("issue-1".to_string()),
+                issue_identifier: "ENG-1".to_string(),
+                issue_title: "One".to_string(),
+                project_name: None,
+                team_key: "ENG".to_string(),
+                issue_url: "https://linear.app/issues/ENG-1".to_string(),
+                phase: SessionPhase::Running,
+                summary: "running".to_string(),
+                brief_path: None,
+                backlog_issue_identifier: None,
+                backlog_issue_title: None,
+                backlog_path: None,
+                workspace_path: None,
+                branch: None,
+                workpad_comment_id: None,
+                updated_at_epoch_seconds: 1,
+                pid: None,
+                session_id: None,
+                latest_resume_handle: None,
+                turns: None,
+                tokens: TokenUsage {
+                    input: Some(100),
+                    output: None,
+                },
+                log_path: None,
+            }],
+            notes: Vec::new(),
+            state_file: "/tmp/session.json".to_string(),
+            rate_limits: None,
+            claimed_this_cycle: 0,
+        };
+        let runtime = DashboardRuntimeContext {
+            started_at_epoch_seconds: 1,
+            now_epoch_seconds: 11,
+            poll_interval_seconds: 5,
+            dashboard_label: "terminal snapshot",
+            dashboard_refresh_seconds: 1,
+            linear_refresh_seconds: 5,
+            vim_mode: false,
+        };
+
+        let dashboard = super::build_dashboard_data(&cycle, &runtime);
+        assert_eq!(dashboard.runtime.tokens, "in 100 | out n/a | total 100");
+    }
+
+    #[test]
+    fn parse_codex_thread_id_from_log_reads_latest_started_event() -> Result<()> {
+        let temp = tempdir()?;
+        let log_path = temp.path().join("MET-7.log");
+        fs::write(
+            &log_path,
+            concat!(
+                "plain text\n",
+                "{\"type\":\"thread.started\",\"thread_id\":\"thread-1\"}\n",
+                "{\"type\":\"thread.started\",\"thread_id\":\"thread-2\"}\n"
+            ),
+        )?;
+
+        assert_eq!(
+            super::parse_codex_thread_id_from_log(&log_path)?,
+            Some("thread-2".to_string())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parse_codex_token_usage_from_session_file_reads_total_usage() -> Result<()> {
+        let temp = tempdir()?;
+        let session_path = temp.path().join("rollout-thread-2.jsonl");
+        fs::write(
+            &session_path,
+            concat!(
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":120,\"cached_input_tokens\":30,\"output_tokens\":8,\"reasoning_output_tokens\":2}}}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":200,\"cached_input_tokens\":50,\"output_tokens\":11,\"reasoning_output_tokens\":4}}}}\n"
+            ),
+        )?;
+
+        assert_eq!(
+            super::parse_codex_token_usage_from_session_file(&session_path)?,
+            Some(TokenUsage {
+                input: Some(250),
+                output: Some(15),
+            })
+        );
+        Ok(())
+    }
+
+    fn listen_settings(required_labels: Option<Vec<&str>>) -> PlanningListenSettings {
+        PlanningListenSettings {
+            required_labels: required_labels
+                .map(|labels| labels.into_iter().map(str::to_string).collect::<Vec<_>>()),
+            ..PlanningListenSettings::default()
+        }
+    }
+
+    fn issue_with_labels(labels: &[&str]) -> IssueSummary {
+        IssueSummary {
+            id: "issue-1".to_string(),
+            identifier: "ENG-10211".to_string(),
+            title: "Listen labels".to_string(),
+            description: None,
+            url: "https://linear.app/issues/eng-10211".to_string(),
+            priority: None,
+            estimate: None,
+            updated_at: "2026-03-19T00:00:00Z".to_string(),
+            team: TeamRef {
+                id: "team-1".to_string(),
+                key: "ENG".to_string(),
+                name: "Engineering".to_string(),
+            },
+            project: None,
+            assignee: None,
+            labels: labels
+                .iter()
+                .enumerate()
+                .map(|(index, label)| LabelRef {
+                    id: format!("label-{index}"),
+                    name: (*label).to_string(),
+                })
+                .collect(),
+            comments: Vec::new(),
+            state: None,
+            attachments: Vec::new(),
+            parent: None,
+            children: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn required_label_skip_reason_allows_single_label_match() {
+        let issue = issue_with_labels(&["plan"]);
+
+        assert_eq!(
+            required_label_skip_reason(&listen_settings(Some(vec!["plan"])), &issue),
+            None
+        );
+    }
+
+    #[test]
+    fn required_label_skip_reason_allows_any_matching_label() {
+        let issue = issue_with_labels(&["bug", "urgent"]);
+
+        assert_eq!(
+            required_label_skip_reason(&listen_settings(Some(vec!["plan", "urgent"])), &issue),
+            None
+        );
+    }
+
+    #[test]
+    fn required_label_skip_reason_is_case_insensitive() {
+        let issue = issue_with_labels(&["Urgent"]);
+
+        assert_eq!(
+            required_label_skip_reason(&listen_settings(Some(vec!["urgent"])), &issue),
+            None
+        );
+    }
+
+    #[test]
+    fn required_label_skip_reason_ignores_empty_required_labels() {
+        let issue = issue_with_labels(&[]);
+
+        assert_eq!(
+            required_label_skip_reason(&listen_settings(Some(Vec::new())), &issue),
+            None
+        );
+    }
+
+    #[test]
+    fn required_label_skip_reason_ignores_unset_required_labels() {
+        let issue = issue_with_labels(&[]);
+
+        assert_eq!(
+            required_label_skip_reason(&listen_settings(None), &issue),
+            None
+        );
+    }
+
+    #[test]
+    fn required_label_skip_reason_reports_missing_any_match() {
+        let issue = issue_with_labels(&["bug"]);
+
+        assert_eq!(
+            required_label_skip_reason(&listen_settings(Some(vec!["plan", "urgent"])), &issue),
+            Some("missing any required label (`plan`, `urgent`)".to_string())
+        );
+    }
+
+    #[test]
+    fn dead_running_session_is_marked_blocked_and_stale() {
+        let mut session = AgentSession {
+            issue_id: Some("issue-1".to_string()),
+            issue_identifier: "ENG-10163".to_string(),
+            issue_title: "Listen cleanup".to_string(),
+            project_name: Some("MetaStack CLI".to_string()),
+            team_key: "MET".to_string(),
+            issue_url: "https://linear.app/issues/eng-10163".to_string(),
+            phase: SessionPhase::Running,
+            summary: "Running".to_string(),
+            brief_path: Some(".metastack/agents/briefs/ENG-10163.md".to_string()),
+            backlog_issue_identifier: Some("TECH-1".to_string()),
+            backlog_issue_title: Some("Backlog".to_string()),
+            backlog_path: Some(".metastack/backlog/TECH-1".to_string()),
+            workspace_path: Some("/tmp/ENG-10163".to_string()),
+            branch: Some("eng-10163".to_string()),
+            workpad_comment_id: Some("comment-1".to_string()),
+            updated_at_epoch_seconds: 1,
+            pid: Some(42_424),
+            session_id: Some("session-1".to_string()),
+            latest_resume_handle: None,
+            turns: Some(2),
+            tokens: TokenUsage::default(),
+            log_path: Some("logs/ENG-10163.log".to_string()),
+        };
+
+        mark_running_session_stale(&mut session, "ENG-10163", Path::new("fallback.log"), 42_424);
+
+        assert_eq!(session.phase, SessionPhase::Blocked);
+        assert_eq!(session.workspace_path.as_deref(), Some("/tmp/ENG-10163"));
+        assert_eq!(session.log_path.as_deref(), Some("logs/ENG-10163.log"));
+        assert!(session.summary.contains("Blocked | worker died"));
+        assert!(session.summary.contains("stale pid 42424"));
+        assert!(session.summary.contains("see logs/ENG-10163.log"));
     }
 
     #[test]
     fn loading_cycle_starts_empty_and_explains_initial_refresh() {
         let cycle = ListenCycleData::loading(
             "MET / MetaStack CLI".to_string(),
+            "all assignees".to_string(),
             ".metastack/agents/sessions/listen-state.json".to_string(),
         );
 
         assert_eq!(cycle.scope, "MET / MetaStack CLI");
+        assert_eq!(cycle.watch_scope, "all assignees");
         assert_eq!(cycle.claimed_this_cycle, 0);
         assert!(cycle.pending_issues.is_empty());
         assert!(cycle.sessions.is_empty());
@@ -2581,7 +3549,10 @@ mod tests {
 
     #[test]
     fn cycle_state_snapshot_refreshes_sessions_without_resetting_linear_data() {
-        let mut cycle = ListenCycleData::demo(Path::new("."));
+        let mut cycle = ListenCycleData::demo(
+            Path::new("."),
+            ".metastack/agents/sessions/listen-state.json".to_string(),
+        );
         let existing_pending_count = cycle.pending_issues.len();
         let existing_pending_identifier = cycle
             .pending_issues
@@ -2667,6 +3638,478 @@ mod tests {
         );
     }
 
+    #[test]
+    fn listen_scope_label_uses_effective_default_project_identity() {
+        assert_eq!(
+            listen_scope_label(Some("MET"), Some("project-default"), "project-default"),
+            "MET / project-default"
+        );
+    }
+
+    #[test]
+    fn listen_scope_label_falls_back_to_team_without_project_scope() {
+        assert_eq!(listen_scope_label(Some("MET"), None, "All projects"), "MET");
+        assert_eq!(listen_scope_label(None, None, "All projects"), "all teams");
+    }
+
+    #[test]
+    fn render_agent_prompt_includes_truncated_ticket_discussion_excerpt() {
+        let temp = tempdir().expect("temp dir should build");
+        let workspace = temp.path();
+        fs::create_dir_all(workspace.join(".metastack/backlog/MET-24/context"))
+            .expect("discussion dir should build");
+        fs::create_dir_all(workspace.join(".metastack")).expect("metastack dir should build");
+        fs::write(
+            workspace.join(".metastack/meta.json"),
+            r#"{
+  "sync": {
+    "discussion_prompt_char_limit": 80
+  }
+}
+"#,
+        )
+        .expect("meta should write");
+        fs::write(
+            workspace.join(".metastack/backlog/MET-24/context/ticket-discussion.md"),
+            "# Ticket Discussion\n\nOld details that should be truncated away.\n\nNewest discussion tail.",
+        )
+        .expect("discussion should write");
+
+        let issue = test_issue("MET-24");
+        let prompt = render_agent_prompt(&issue, workspace, "comment-24", Some(&issue), 1, 20);
+
+        assert!(prompt.contains("Discussion context:"));
+        assert!(prompt.contains("[truncated to most recent excerpt]"));
+        assert!(prompt.contains("Newest discussion tail."));
+        assert!(!prompt.contains("Old details that should be truncated away."));
+    }
+
+    fn test_issue(identifier: &str) -> IssueSummary {
+        IssueSummary {
+            id: format!("issue-{identifier}"),
+            identifier: identifier.to_string(),
+            title: "Attachment bootstrap".to_string(),
+            description: Some("Use uploaded docs as implementation context".to_string()),
+            url: format!("https://linear.app/issues/{identifier}"),
+            priority: Some(2),
+            estimate: None,
+            updated_at: "2026-03-14T16:00:00Z".to_string(),
+            team: TeamRef {
+                id: "team-1".to_string(),
+                key: "MET".to_string(),
+                name: "Metastack".to_string(),
+            },
+            project: None,
+            assignee: None,
+            labels: Vec::new(),
+            comments: Vec::new(),
+            state: None,
+            attachments: Vec::new(),
+            parent: None,
+            children: Vec::new(),
+        }
+    }
+
+    fn issue_with_assignee(identifier: &str, assignee: Option<(&str, &str)>) -> IssueSummary {
+        let mut issue = test_issue(identifier);
+        issue.assignee = assignee.map(|(id, name)| UserRef {
+            id: id.to_string(),
+            name: name.to_string(),
+            email: None,
+        });
+        issue
+    }
+
+    fn test_daemon(
+        scope: ListenAssignmentScope,
+        issue: IssueSummary,
+    ) -> Result<(tempfile::TempDir, AgentDaemon<ReassignmentClient>)> {
+        let temp = tempdir()?;
+        let repo = temp.path();
+        fs::create_dir_all(repo.join(".metastack"))?;
+        let store = ListenProjectStore::resolve(repo, None)?;
+        let service = LinearService::new(ReassignmentClient { issue }, Some("MET".to_string()));
+        let daemon = AgentDaemon {
+            root: repo.to_path_buf(),
+            store,
+            filters: IssueListFilters {
+                state: Some(TODO_STATE.to_string()),
+                limit: 25,
+                ..IssueListFilters::default()
+            },
+            max_pickups: 1,
+            linear_config: LinearConfig {
+                api_key: "token".to_string(),
+                api_url: "https://linear.example/graphql".to_string(),
+                default_team: Some("MET".to_string()),
+            },
+            app_config: AppConfig::default(),
+            planning_meta: PlanningMeta::default(),
+            worker_agent: None,
+            worker_model: None,
+            worker_reasoning: None,
+            listen_settings: PlanningListenSettings {
+                required_labels: None,
+                assignment_scope: Some(scope),
+                refresh_policy: Some(ListenRefreshPolicy::ReuseAndRefresh),
+                instructions_path: None,
+                poll_interval_seconds: None,
+            },
+            viewer: Some(UserRef {
+                id: "viewer-1".to_string(),
+                name: "Kames".to_string(),
+                email: Some("sudo@example.com".to_string()),
+            }),
+            service,
+        };
+        Ok((temp, daemon))
+    }
+
+    #[test]
+    fn viewer_only_scope_skips_unassigned_issues() -> Result<()> {
+        let (_temp, daemon) = test_daemon(
+            ListenAssignmentScope::ViewerOnly,
+            issue_with_assignee("MET-55", None),
+        )?;
+
+        assert_eq!(
+            daemon
+                .assignee_scope_skip_reason(&issue_with_assignee("MET-55", None))
+                .as_deref(),
+            Some("unassigned; only `Kames` is in scope")
+        );
+        assert_eq!(
+            daemon
+                .session_drop_reason(&issue_with_assignee("MET-55", None))
+                .as_deref(),
+            Some("session ended: ticket became unassigned")
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn viewer_only_scope_skips_foreign_assignees_but_allows_viewer() -> Result<()> {
+        let (_temp, daemon) = test_daemon(
+            ListenAssignmentScope::ViewerOnly,
+            issue_with_assignee("MET-56", Some(("viewer-2", "Someone Else"))),
+        )?;
+
+        assert_eq!(
+            daemon
+                .assignee_scope_skip_reason(&issue_with_assignee(
+                    "MET-56",
+                    Some(("viewer-2", "Someone Else"))
+                ))
+                .as_deref(),
+            Some("assigned to `Someone Else` instead of `Kames`")
+        );
+        assert_eq!(
+            daemon.assignee_scope_skip_reason(&issue_with_assignee(
+                "MET-57",
+                Some(("viewer-1", "Kames"))
+            )),
+            None
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn viewer_or_unassigned_scope_allows_unassigned_but_not_foreign_assignees() -> Result<()> {
+        let (_temp, daemon) = test_daemon(
+            ListenAssignmentScope::ViewerOrUnassigned,
+            issue_with_assignee("MET-58", None),
+        )?;
+
+        assert_eq!(
+            daemon.assignee_scope_skip_reason(&issue_with_assignee("MET-58", None)),
+            None
+        );
+        assert_eq!(
+            daemon
+                .assignee_scope_skip_reason(&issue_with_assignee(
+                    "MET-59",
+                    Some(("viewer-2", "Someone Else"))
+                ))
+                .as_deref(),
+            Some("assigned to `Someone Else` instead of `Kames`")
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn any_scope_does_not_skip_foreign_or_unassigned_issues() -> Result<()> {
+        let (_temp, daemon) = test_daemon(
+            ListenAssignmentScope::Any,
+            issue_with_assignee("MET-60", None),
+        )?;
+
+        assert_eq!(
+            daemon.assignee_scope_skip_reason(&issue_with_assignee("MET-60", None)),
+            None
+        );
+        assert_eq!(
+            daemon.assignee_scope_skip_reason(&issue_with_assignee(
+                "MET-61",
+                Some(("viewer-2", "Someone Else"))
+            )),
+            None
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn render_watch_scope_reports_effective_assignee_scope() {
+        let viewer = UserRef {
+            id: "viewer-1".to_string(),
+            name: "Kames".to_string(),
+            email: Some("sudo@example.com".to_string()),
+        };
+
+        assert_eq!(
+            crate::listen::render_watch_scope(ListenAssignmentScope::Any, Some(&viewer)),
+            "all assignees"
+        );
+        assert_eq!(
+            crate::listen::render_watch_scope(ListenAssignmentScope::ViewerOnly, Some(&viewer)),
+            "only Kames"
+        );
+        assert_eq!(
+            crate::listen::render_watch_scope(
+                ListenAssignmentScope::ViewerOrUnassigned,
+                Some(&viewer)
+            ),
+            "Kames + unassigned"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_sessions_marks_reassigned_issue_completed_after_turn_ends() -> Result<()> {
+        let temp = tempdir()?;
+        let repo = temp.path();
+        fs::create_dir_all(repo.join(".metastack"))?;
+        run_git(repo, &["init"])?;
+        run_git(repo, &["config", "user.email", "listen@example.com"])?;
+        run_git(repo, &["config", "user.name", "Listen Tests"])?;
+        fs::write(repo.join("README.md"), "# Demo\n")?;
+        run_git(repo, &["add", "README.md"])?;
+        run_git(repo, &["commit", "-m", "init"])?;
+
+        let workspace = repo.join("workspace");
+        fs::create_dir_all(&workspace)?;
+        let store = ListenProjectStore::resolve(repo, None)?;
+        let issue = reassigned_issue();
+        let client = ReassignmentClient {
+            issue: issue.clone(),
+        };
+        let service = LinearService::new(client, Some("MET".to_string()));
+        let daemon = AgentDaemon {
+            root: repo.to_path_buf(),
+            store,
+            filters: IssueListFilters {
+                state: Some(TODO_STATE.to_string()),
+                limit: 25,
+                ..IssueListFilters::default()
+            },
+            max_pickups: 1,
+            linear_config: LinearConfig {
+                api_key: "token".to_string(),
+                api_url: "https://linear.example/graphql".to_string(),
+                default_team: Some("MET".to_string()),
+            },
+            app_config: AppConfig::default(),
+            planning_meta: PlanningMeta::default(),
+            worker_agent: None,
+            worker_model: None,
+            worker_reasoning: None,
+            listen_settings: PlanningListenSettings {
+                required_labels: None,
+                assignment_scope: Some(ListenAssignmentScope::ViewerOrUnassigned),
+                refresh_policy: Some(ListenRefreshPolicy::ReuseAndRefresh),
+                instructions_path: None,
+                poll_interval_seconds: None,
+            },
+            viewer: Some(UserRef {
+                id: "viewer-1".to_string(),
+                name: "Kames".to_string(),
+                email: Some("sudo@example.com".to_string()),
+            }),
+            service,
+        };
+        let mut state = ListenState::from_sessions(vec![super::AgentSession {
+            issue_id: Some(issue.id.clone()),
+            issue_identifier: issue.identifier.clone(),
+            issue_title: issue.title.clone(),
+            project_name: issue.project.as_ref().map(|project| project.name.clone()),
+            team_key: issue.team.key.clone(),
+            issue_url: issue.url.clone(),
+            phase: SessionPhase::Running,
+            summary: "turn 1/20".to_string(),
+            brief_path: None,
+            backlog_issue_identifier: None,
+            backlog_issue_title: None,
+            backlog_path: None,
+            workspace_path: Some(workspace.display().to_string()),
+            branch: Some("met-88-reassigned".to_string()),
+            workpad_comment_id: Some("comment-88".to_string()),
+            updated_at_epoch_seconds: 1_773_575_000,
+            pid: None,
+            session_id: Some(issue.id.clone()),
+            turns: Some(1),
+            tokens: TokenUsage::default(),
+            log_path: None,
+            latest_resume_handle: None,
+        }]);
+        let mut notes = Vec::new();
+
+        daemon.reconcile_sessions(&mut state, &mut notes).await?;
+
+        assert_eq!(state.sessions.len(), 1);
+        assert_eq!(state.sessions[0].phase, SessionPhase::Completed);
+        assert_eq!(
+            state.sessions[0].summary,
+            "session ended: ticket reassigned"
+        );
+        assert!(
+            notes.iter().any(
+                |note| note.contains("Ended MET-88 session: session ended: ticket reassigned.")
+            ),
+            "expected reassignment note, got {notes:?}"
+        );
+
+        Ok(())
+    }
+
+    fn reassigned_issue() -> IssueSummary {
+        IssueSummary {
+            id: "issue-88".to_string(),
+            identifier: "MET-88".to_string(),
+            title: "Reassigned listener issue".to_string(),
+            description: Some("Reassigned during an active turn".to_string()),
+            url: "https://linear.app/issues/88".to_string(),
+            priority: Some(2),
+            estimate: None,
+            updated_at: "2026-03-14T16:00:00Z".to_string(),
+            team: crate::linear::TeamRef {
+                id: "team-1".to_string(),
+                key: "MET".to_string(),
+                name: "Metastack".to_string(),
+            },
+            project: Some(crate::linear::ProjectRef {
+                id: "project-1".to_string(),
+                name: "MetaStack CLI".to_string(),
+            }),
+            assignee: Some(UserRef {
+                id: "viewer-2".to_string(),
+                name: "Someone Else".to_string(),
+                email: Some("else@example.com".to_string()),
+            }),
+            labels: Vec::new(),
+            comments: Vec::new(),
+            state: Some(crate::linear::WorkflowState {
+                id: "state-2".to_string(),
+                name: "In Progress".to_string(),
+                kind: Some("started".to_string()),
+            }),
+            attachments: Vec::new(),
+            parent: None,
+            children: Vec::new(),
+        }
+    }
+
+    #[derive(Clone)]
+    struct ReassignmentClient {
+        issue: IssueSummary,
+    }
+
+    #[async_trait]
+    impl LinearClient for ReassignmentClient {
+        async fn list_projects(&self, _limit: usize) -> Result<Vec<ProjectSummary>> {
+            unreachable!("list_projects is not used in this test")
+        }
+
+        async fn list_users(&self, _limit: usize) -> Result<Vec<UserRef>> {
+            unreachable!("list_users is not used in this test")
+        }
+
+        async fn list_issues(&self, _limit: usize) -> Result<Vec<IssueSummary>> {
+            Ok(vec![self.issue.clone()])
+        }
+
+        async fn list_filtered_issues(
+            &self,
+            _filters: &IssueListFilters,
+        ) -> Result<Vec<IssueSummary>> {
+            Ok(vec![self.issue.clone()])
+        }
+
+        async fn list_issue_labels(&self, _team: Option<&str>) -> Result<Vec<LabelRef>> {
+            unreachable!("list_issue_labels is not used in this test")
+        }
+
+        async fn get_issue(&self, _issue_id: &str) -> Result<IssueSummary> {
+            Ok(self.issue.clone())
+        }
+
+        async fn list_teams(&self) -> Result<Vec<TeamSummary>> {
+            unreachable!("list_teams is not used in this test")
+        }
+
+        async fn viewer(&self) -> Result<UserRef> {
+            unreachable!("viewer is not used in this test")
+        }
+
+        async fn create_issue(&self, _request: IssueCreateRequest) -> Result<IssueSummary> {
+            unreachable!("create_issue is not used in this test")
+        }
+
+        async fn create_issue_label(&self, _request: IssueLabelCreateRequest) -> Result<LabelRef> {
+            unreachable!("create_issue_label is not used in this test")
+        }
+
+        async fn update_issue(
+            &self,
+            _issue_id: &str,
+            _request: IssueUpdateRequest,
+        ) -> Result<IssueSummary> {
+            unreachable!("update_issue is not used in this test")
+        }
+
+        async fn create_comment(&self, _issue_id: &str, _body: String) -> Result<IssueComment> {
+            unreachable!("create_comment is not used in this test")
+        }
+
+        async fn update_comment(&self, _comment_id: &str, _body: String) -> Result<IssueComment> {
+            unreachable!("update_comment is not used in this test")
+        }
+
+        async fn upload_file(
+            &self,
+            _filename: &str,
+            _content_type: &str,
+            _contents: Vec<u8>,
+        ) -> Result<String> {
+            unreachable!("upload_file is not used in this test")
+        }
+
+        async fn create_attachment(
+            &self,
+            _request: AttachmentCreateRequest,
+        ) -> Result<AttachmentSummary> {
+            unreachable!("create_attachment is not used in this test")
+        }
+
+        async fn delete_attachment(&self, _attachment_id: &str) -> Result<()> {
+            unreachable!("delete_attachment is not used in this test")
+        }
+
+        async fn download_file(&self, _url: &str) -> Result<Vec<u8>> {
+            unreachable!("download_file is not used in this test")
+        }
+    }
     fn run_git(repo: &std::path::Path, args: &[&str]) -> anyhow::Result<()> {
         let status = Command::new("git")
             .arg("-C")

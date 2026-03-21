@@ -2,11 +2,27 @@
 
 include!("support/common.rs");
 
+fn write_onboarded_config(
+    config_path: &Path,
+    config: impl AsRef<str>,
+) -> Result<(), Box<dyn Error>> {
+    fs::write(
+        config_path,
+        format!(
+            "{}\n[onboarding]\ncompleted = true\n",
+            config.as_ref().trim_end()
+        ),
+    )?;
+    Ok(())
+}
+
 #[test]
 fn context_show_displays_instructions_rules_and_repo_map() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
     fs::create_dir_all(repo_root.join("src"))?;
+    write_onboarded_config(&config_path, "")?;
     fs::create_dir_all(repo_root.join("instructions"))?;
     fs::write(
         repo_root.join("Cargo.toml"),
@@ -45,6 +61,7 @@ edition = "2024"
     )?;
 
     cli()
+        .env("METASTACK_CONFIG", &config_path)
         .args([
             "context",
             "show",
@@ -72,7 +89,9 @@ edition = "2024"
 fn context_show_works_without_repo_overlay_files() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
     fs::create_dir_all(repo_root.join("src"))?;
+    write_onboarded_config(&config_path, "")?;
     fs::write(
         repo_root.join("Cargo.toml"),
         r#"[package]
@@ -95,6 +114,7 @@ edition = "2024"
     )?;
 
     cli()
+        .env("METASTACK_CONFIG", &config_path)
         .args([
             "context",
             "show",
@@ -118,7 +138,9 @@ edition = "2024"
 fn context_map_renders_repo_summary() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
     fs::create_dir_all(repo_root.join("src"))?;
+    write_onboarded_config(&config_path, "")?;
     fs::write(
         repo_root.join("Cargo.toml"),
         r#"[package]
@@ -131,6 +153,7 @@ edition = "2024"
     fs::write(repo_root.join("src/main.rs"), "fn main() {}\n")?;
 
     cli()
+        .env("METASTACK_CONFIG", &config_path)
         .args([
             "context",
             "map",
@@ -150,10 +173,13 @@ edition = "2024"
 fn context_doctor_reports_missing_inputs() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
     fs::create_dir_all(&repo_root)?;
+    write_onboarded_config(&config_path, "")?;
     fs::write(repo_root.join("README.md"), "# Missing Context\n")?;
 
     cli()
+        .env("METASTACK_CONFIG", &config_path)
         .args([
             "context",
             "doctor",
@@ -176,9 +202,11 @@ fn context_doctor_succeeds_without_repo_overlay_files_when_required_inputs_exist
 -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
     let bin_dir = temp.path().join("bin");
     fs::create_dir_all(repo_root.join(".metastack/codebase"))?;
     fs::create_dir_all(&bin_dir)?;
+    write_onboarded_config(&config_path, "")?;
     fs::write(repo_root.join("README.md"), "# Context OK\n")?;
     write_minimal_planning_context(
         &repo_root,
@@ -213,6 +241,7 @@ fn context_doctor_succeeds_without_repo_overlay_files_when_required_inputs_exist
     let current_path = std::env::var("PATH")?;
 
     cli()
+        .env("METASTACK_CONFIG", &config_path)
         .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
         .args([
             "context",
@@ -254,7 +283,7 @@ clap = "4"
     )?;
     fs::write(repo_root.join("README.md"), "# Reload Demo\n")?;
     fs::write(repo_root.join("src/main.rs"), "fn main() {}\n")?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[agents]
@@ -354,7 +383,7 @@ clap = "4"
     )?;
     fs::write(repo_root.join("README.md"), "# Route Demo\n")?;
     fs::write(repo_root.join("src/main.rs"), "fn main() {}\n")?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[agents]

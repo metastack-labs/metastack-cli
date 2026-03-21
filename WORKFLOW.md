@@ -47,15 +47,23 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
 
 ## Default posture
 
+- Fresh installs may route normal `meta` commands into the shared install-scoped onboarding wizard before the requested command runs. `meta runtime config --replay-onboarding` and `meta config --replay-onboarding` rerun that same wizard, while plain `meta runtime config` / `meta config` stay available as the manual install-scoped editing flows after onboarding completes.
 - Agent-backed commands such as `meta plan`, `meta backlog tech`, `meta issues refine`, `meta scan`, and `meta listen` must derive their project/repository identity from the resolved command root for the current run.
+- `meta backlog plan` and `meta backlog tech` should resolve ticket defaults with the precedence `CLI override > repo override > global override > built-in behavior`, while zero-prompt runs may additionally reuse remembered repo-scoped project/team selections and `velocity_defaults` before the repo/global fallbacks.
 - Install-scoped agent defaults may be routed per command family or per command key via `meta runtime config`; agent-backed commands should resolve those route-aware defaults before falling back to repo-scoped or global defaults, while still honoring explicit CLI overrides for the active run.
+- Install-scoped `defaults.ui.vim_mode` defaults to off; when enabled it adds safe `h/j/k/l` aliases only on non-text-focused TUI controls, and search-first panes must keep literal text editing while query focus is active.
 - Built-in `codex` and `claude` runs use one shared provider adapter path and one precedence model for provider/model/reasoning resolution. Command output and dry-run paths should expose the resolved provider, model, reasoning, route key, and config source whenever that launch path is part of the ticket scope.
+- Multi-phase built-in command runs may capture a provider-native continuation handle and reuse it later in the same command run, but that continuation is run-scoped only: do not persist it under `.metastack/`, attach humans to it, or couple it to listen-worker session state.
+- `meta backlog improve` should keep interactive TTY runs inside one guided dashboard flow: analyze one issue at a time, classify it as `no_update_needed`, `ready_for_update`, `needs_planning`, or `needs_questions`, and require an explicit human accept/reject decision before any local or Linear mutation happens.
+- During `meta listen`, once the ticket branch is pushed the shared automation path creates or updates the matching branch PR as a draft, keeps the `metastack` label attached, and promotes that same PR to ready during the existing review handoff. Continuation runs must leave an already-ready PR unchanged.
 - Default scope is the full top-level repository directory for that root, including monorepos. Only narrow the scope when the user explicitly requests a subproject.
 - Planning, backlog creation, and code changes must stay within that target repository. Do not spill into sibling repositories or parent directories.
 - For `meta listen`, the provided workspace checkout is the only local write root for implementation, validation, and backlog updates, even though the repository identity still comes from the active project checkout.
+- Listener-created sibling clones under `<repo>-workspace/` are managed by `meta workspace`; install-scoped `meta listen sessions` commands manage only the stored listener state and logs.
 - Use `meta issues refine <ISSUE>` as the quality-improvement step after `meta plan` or `meta backlog tech` when an existing repo-scoped ticket needs a stronger rewrite before implementation.
 - `meta issues refine` is critique-only by default and should write immutable artifacts under `.metastack/backlog/<ISSUE>/artifacts/refinement/<RUN_ID>/` for every pass.
 - When `meta issues refine --apply` is used outside `meta listen`, update `.metastack/backlog/<ISSUE>/index.md` before mutating the Linear description so the local audit trail exists first.
+- `meta backlog tech` and `meta backlog sync pull` should preserve localized ticket context by rewriting markdown image references to local `artifacts/` paths, refreshing `artifacts/ticket-images.md`, and keeping `context/ticket-discussion.md` current for agent consumption.
 
 - Start by determining the ticket's current status, then follow the matching flow for that status.
 - Start every task by opening the tracking workpad comment and bringing it up to date before doing new implementation work.

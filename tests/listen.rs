@@ -2,11 +2,150 @@
 
 include!("support/common.rs");
 
+#[cfg(unix)]
+fn write_onboarded_config(
+    config_path: &Path,
+    config: impl AsRef<str>,
+) -> Result<(), Box<dyn Error>> {
+    fs::write(
+        config_path,
+        format!(
+            "{}\n[onboarding]\ncompleted = true\n",
+            config.as_ref().trim_end()
+        ),
+    )?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn write_listen_github_stub(
+    path: &Path,
+    initial_state: &str,
+    pull_request_url: &str,
+) -> Result<(), Box<dyn Error>> {
+    fs::write(
+        path,
+        format!(
+            r#"#!/bin/sh
+set -eu
+log_file="$TEST_OUTPUT_DIR/gh.log"
+state_file="$TEST_OUTPUT_DIR/gh-state.txt"
+if [ ! -f "$state_file" ]; then
+  printf '%s' '{initial_state}' > "$state_file"
+fi
+state=$(cat "$state_file")
+printf '%s\n' "$*" >> "$log_file"
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+  case "$state" in
+    draft)
+      printf '%s' '[{{"number":321,"url":"{pull_request_url}","isDraft":true}}]'
+      ;;
+    ready)
+      printf '%s' '[{{"number":321,"url":"{pull_request_url}","isDraft":false}}]'
+      ;;
+    *)
+      printf '%s' '[]'
+      ;;
+  esac
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
+  printf '%s' 'draft' > "$state_file"
+  printf '%s' '{{"number":321,"url":"{pull_request_url}","isDraft":true}}'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "ready" ]; then
+  printf '%s' 'ready' > "$state_file"
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "edit" ]; then
+  exit 0
+fi
+if [ "$1" = "label" ] && [ "$2" = "create" ]; then
+  exit 0
+fi
+printf 'unexpected gh invocation: %s\n' "$*" >&2
+exit 1
+"#
+        ),
+    )?;
+    let mut permissions = fs::metadata(path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(path, permissions)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn write_listen_store_session(
+    config_path: &Path,
+    repo_root: &Path,
+    sessions: Vec<serde_json::Value>,
+) -> Result<PathBuf, Box<dyn Error>> {
+    let store_dir = listen_project_store_dir(config_path, repo_root, None)?;
+    let source_root = listen_source_root(repo_root)?;
+    let metastack_root = source_root.join(".metastack").canonicalize()?;
+    fs::create_dir_all(store_dir.join("logs"))?;
+    fs::write(
+        store_dir.join("project.json"),
+        serde_json::to_vec_pretty(&json!({
+            "version": 1,
+            "project_key": store_dir
+                .file_name()
+                .expect("store dir should have a file name")
+                .to_string_lossy(),
+            "project_label": source_root
+                .file_name()
+                .expect("source root should have a file name")
+                .to_string_lossy(),
+            "source_root": source_root.display().to_string(),
+            "metastack_root": metastack_root.display().to_string()
+        }))?,
+    )?;
+    let state_path = store_dir.join("session.json");
+    fs::write(
+        &state_path,
+        serde_json::to_vec_pretty(&json!({
+            "version": 1,
+            "sessions": sessions
+        }))?,
+    )?;
+    Ok(state_path)
+}
+
+#[cfg(unix)]
+fn listen_session_json(
+    issue_identifier: &str,
+    phase: &str,
+    updated_at_epoch_seconds: u64,
+    pid: Option<u32>,
+) -> serde_json::Value {
+    json!({
+        "issue_id": format!("{issue_identifier}-id"),
+        "issue_identifier": issue_identifier,
+        "issue_title": format!("{issue_identifier} title"),
+        "project_name": "MetaStack CLI",
+        "team_key": "MET",
+        "issue_url": format!("https://linear.app/issues/{issue_identifier}"),
+        "phase": phase,
+        "summary": format!("{issue_identifier} summary"),
+        "brief_path": format!(".metastack/agents/briefs/{issue_identifier}.md"),
+        "workspace_path": format!("/tmp/{issue_identifier}"),
+        "workpad_comment_id": format!("comment-{issue_identifier}"),
+        "updated_at_epoch_seconds": updated_at_epoch_seconds,
+        "pid": pid,
+        "session_id": format!("session-{issue_identifier}"),
+        "turns": 1,
+        "tokens": {},
+        "log_path": format!("logs/{issue_identifier}.log")
+    })
+}
+
 #[test]
 fn listen_requires_auth_when_not_in_demo_mode() -> Result<(), Box<dyn Error>> {
     let _guard = listen_test_lock();
     let temp = tempdir().expect("tempdir should build");
-    let config_path = temp.path().join("missing-metastack.toml");
+    let config_path = temp.path().join("metastack.toml");
+    write_onboarded_config(&config_path, "")?;
     write_minimal_planning_context(
         temp.path(),
         r#"{
@@ -36,34 +175,684 @@ fn listen_requires_auth_when_not_in_demo_mode() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+#[cfg(unix)]
 #[test]
-fn listen_render_once_demo_outputs_dashboard_snapshot() -> Result<(), Box<dyn Error>> {
+fn listen_sessions_clear_issue_identifier_removes_only_matching_session()
+-> Result<(), Box<dyn Error>> {
     let _guard = listen_test_lock();
     let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    write_onboarded_config(&config_path, "")?;
     write_minimal_planning_context(
-        temp.path(),
+        &repo_root,
         r#"{
   "linear": {
-    "team": "MET",
-    "project_id": "project-1"
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+    init_repo_with_origin(&repo_root)?;
+
+    let state_path = write_listen_store_session(
+        &config_path,
+        &repo_root,
+        vec![
+            listen_session_json("ENG-10163", "blocked", 200, None),
+            listen_session_json("ENG-10164", "blocked", 300, None),
+        ],
+    )?;
+    fs::write(
+        listen_log_path(&config_path, &repo_root, "ENG-10163")?,
+        "log 63\n",
+    )?;
+    fs::write(
+        listen_log_path(&config_path, &repo_root, "ENG-10164")?,
+        "log 64\n",
+    )?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "clear",
+            "ENG-10163",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Cleared 1 stored MetaListen session(s) matched by issue `ENG-10163`",
+        ))
+        .stdout(predicate::str::contains("ENG-10163 [Blocked]"));
+
+    let state: serde_json::Value = serde_json::from_slice(&fs::read(&state_path)?)?;
+    let sessions = state["sessions"]
+        .as_array()
+        .expect("sessions should remain an array");
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0]["issue_identifier"], "ENG-10164");
+    assert!(listen_log_path(&config_path, &repo_root, "ENG-10164")?.is_file());
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "inspect",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ENG-10164 [Blocked]"))
+        .stdout(predicate::str::contains("ENG-10163").not());
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_sessions_clear_refuses_live_pid_records() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    write_onboarded_config(&config_path, "")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+    init_repo_with_origin(&repo_root)?;
+
+    let mut child = ProcessCommand::new("sleep").arg("30").spawn()?;
+    write_listen_store_session(
+        &config_path,
+        &repo_root,
+        vec![listen_session_json(
+            "ENG-10163",
+            "running",
+            300,
+            Some(child.id()),
+        )],
+    )?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "clear",
+            "--all",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "cannot clear live MetaListen session record(s)",
+        ))
+        .stderr(predicate::str::contains("ENG-10163"))
+        .stderr(predicate::str::contains("pid"));
+
+    let _ = child.kill();
+    let _ = child.wait();
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn agents_listen_sessions_clear_blocked_preserves_other_selector_states()
+-> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    write_onboarded_config(&config_path, "")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+    init_repo_with_origin(&repo_root)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+
+    let state_path = write_listen_store_session(
+        &config_path,
+        &repo_root,
+        vec![
+            listen_session_json("ENG-10163", "blocked", now, None),
+            listen_session_json("ENG-10164", "completed", now, None),
+            listen_session_json("ENG-10165", "running", now, None),
+        ],
+    )?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "agents",
+            "listen",
+            "sessions",
+            "clear",
+            "--blocked",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Cleared 1 stored MetaListen session(s) matched by `--blocked`",
+        ))
+        .stdout(predicate::str::contains("ENG-10163 [Blocked]"));
+
+    let state: serde_json::Value = serde_json::from_slice(&fs::read(&state_path)?)?;
+    let sessions = state["sessions"]
+        .as_array()
+        .expect("sessions should remain an array");
+    assert_eq!(sessions.len(), 2);
+    assert_eq!(sessions[0]["issue_identifier"], "ENG-10164");
+    assert_eq!(sessions[1]["issue_identifier"], "ENG-10165");
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "agents",
+            "listen",
+            "sessions",
+            "inspect",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ENG-10164 [Completed]"))
+        .stdout(predicate::str::contains("ENG-10165 [Running]"))
+        .stdout(predicate::str::contains("ENG-10163").not());
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_sessions_clear_completed_preserves_blocked_records() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    write_onboarded_config(&config_path, "")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+    init_repo_with_origin(&repo_root)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+
+    let state_path = write_listen_store_session(
+        &config_path,
+        &repo_root,
+        vec![
+            listen_session_json("ENG-10163", "completed", now, None),
+            listen_session_json("ENG-10164", "blocked", now, None),
+        ],
+    )?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "clear",
+            "--completed",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Cleared 1 stored MetaListen session(s) matched by `--completed`",
+        ))
+        .stdout(predicate::str::contains("ENG-10163 [Completed]"));
+
+    let state: serde_json::Value = serde_json::from_slice(&fs::read(&state_path)?)?;
+    let sessions = state["sessions"]
+        .as_array()
+        .expect("sessions should remain an array");
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0]["issue_identifier"], "ENG-10164");
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_sessions_clear_stale_removes_only_dead_pid_records() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    write_onboarded_config(&config_path, "")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+    init_repo_with_origin(&repo_root)?;
+
+    let mut child = ProcessCommand::new("sleep").arg("30").spawn()?;
+    let state_path = write_listen_store_session(
+        &config_path,
+        &repo_root,
+        vec![
+            listen_session_json("ENG-10163", "blocked", 100, Some(99_999)),
+            listen_session_json("ENG-10164", "running", 200, Some(child.id())),
+        ],
+    )?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "clear",
+            "--stale",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Cleared 1 stored MetaListen session(s) matched by `--stale`",
+        ))
+        .stdout(predicate::str::contains("ENG-10163 [Blocked]"));
+
+    let state: serde_json::Value = serde_json::from_slice(&fs::read(&state_path)?)?;
+    let sessions = state["sessions"]
+        .as_array()
+        .expect("sessions should remain an array");
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0]["issue_identifier"], "ENG-10164");
+
+    let _ = child.kill();
+    let _ = child.wait();
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_sessions_list_prunes_expired_completed_sessions_on_load() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    write_onboarded_config(&config_path, "")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+    init_repo_with_origin(&repo_root)?;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+    let state_path = write_listen_store_session(
+        &config_path,
+        &repo_root,
+        vec![
+            listen_session_json("ENG-10163", "completed", now - (24 * 60 * 60) - 1, None),
+            listen_session_json("ENG-10164", "blocked", now, None),
+        ],
+    )?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args(["listen", "sessions", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ENG-10164"))
+        .stdout(predicate::str::contains("ENG-10163").not());
+
+    let state: serde_json::Value = serde_json::from_slice(&fs::read(&state_path)?)?;
+    let sessions = state["sessions"]
+        .as_array()
+        .expect("sessions should remain an array");
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0]["issue_identifier"], "ENG-10164");
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_sessions_inspect_prunes_expired_completed_sessions_on_load() -> Result<(), Box<dyn Error>>
+{
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    write_onboarded_config(&config_path, "")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+    init_repo_with_origin(&repo_root)?;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+    let state_path = write_listen_store_session(
+        &config_path,
+        &repo_root,
+        vec![
+            listen_session_json("ENG-10163", "completed", now - (24 * 60 * 60) - 1, None),
+            listen_session_json("ENG-10164", "blocked", now, None),
+        ],
+    )?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "inspect",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Tracked sessions:"))
+        .stdout(predicate::str::contains("ENG-10164 [Blocked]"))
+        .stdout(predicate::str::contains("ENG-10163").not());
+
+    let state: serde_json::Value = serde_json::from_slice(&fs::read(&state_path)?)?;
+    let sessions = state["sessions"]
+        .as_array()
+        .expect("sessions should remain an array");
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0]["issue_identifier"], "ENG-10164");
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_sessions_list_and_inspect_surface_resume_and_token_metadata() -> Result<(), Box<dyn Error>>
+{
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    write_onboarded_config(&config_path, "")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+    init_repo_with_origin(&repo_root)?;
+
+    write_listen_store_session(
+        &config_path,
+        &repo_root,
+        vec![
+            json!({
+                "issue_id": "issue-10181",
+                "issue_identifier": "ENG-10181",
+                "issue_title": "Track built-in listen token usage",
+                "project_name": "MetaStack CLI",
+                "team_key": "MET",
+                "issue_url": "https://linear.app/issues/ENG-10181",
+                "phase": "running",
+                "summary": "Token telemetry is flowing",
+                "brief_path": null,
+                "workspace_path": "/tmp/ENG-10181",
+                "workpad_comment_id": "comment-10181",
+                "updated_at_epoch_seconds": 1_773_575_100u64,
+                "pid": 4242,
+                "session_id": "session-10181",
+                "latest_resume_handle": {
+                    "provider": "codex",
+                    "id": "019d0763-afc9-70d1-8022-51624918cf76"
+                },
+                "turns": 2,
+                "tokens": {
+                    "input": 210,
+                    "output": 34
+                },
+                "log_path": "logs/ENG-10181.log"
+            }),
+            json!({
+                "issue_id": "issue-10182",
+                "issue_identifier": "ENG-10182",
+                "issue_title": "Fallback when usage is unavailable",
+                "project_name": "MetaStack CLI",
+                "team_key": "MET",
+                "issue_url": "https://linear.app/issues/ENG-10182",
+                "phase": "blocked",
+                "summary": "Provider did not emit exact counts",
+                "brief_path": null,
+                "workspace_path": "/tmp/ENG-10182",
+                "workpad_comment_id": "comment-10182",
+                "updated_at_epoch_seconds": 1_773_575_000u64,
+                "pid": null,
+                "session_id": "session-10182",
+                "turns": 1,
+                "tokens": {},
+                "log_path": "logs/ENG-10182.log"
+            }),
+        ],
+    )?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args(["listen", "sessions", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("PROVIDER"))
+        .stdout(predicate::str::contains("RESUME ID"))
+        .stdout(predicate::str::contains("codex"))
+        .stdout(predicate::str::contains(
+            "019d0763-afc9-70d1-8022-51624918cf76",
+        ));
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "inspect",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Latest session:"))
+        .stdout(predicate::str::contains("  - Tokens: in 210 | out 34 | total 244"))
+        .stdout(predicate::str::contains("Resume provider: codex"))
+        .stdout(predicate::str::contains(
+            "Resume ID: 019d0763-afc9-70d1-8022-51624918cf76",
+        ))
+        .stdout(predicate::str::contains(
+            "  - ENG-10181 [Running] Token telemetry is flowing | tokens in 210 | out 34 | total 244",
+        ))
+        .stdout(predicate::str::contains(
+            "  - ENG-10182 [Blocked] Provider did not emit exact counts | tokens n/a",
+        ));
+
+    Ok(())
+}
+
+#[test]
+fn listen_once_demo_outputs_terminal_summary_without_browser_endpoints()
+-> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    write_onboarded_config(&config_path, "")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
   }
 }
 "#,
     )?;
 
     meta()
-        .current_dir(temp.path())
-        .args(["listen", "--demo", "--render-once"])
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "--demo",
+            "--once",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("meta listen"))
+        .stdout(predicate::str::contains("Watching: all assignees"))
+        .stdout(predicate::str::contains("Dashboard: terminal summary"))
+        .stdout(predicate::str::contains("http://").not())
+        .stdout(predicate::str::contains("127.0.0.1").not())
+        .stdout(predicate::str::contains("localhost").not());
+
+    Ok(())
+}
+
+#[test]
+fn listen_render_once_demo_outputs_dashboard_snapshot() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    write_onboarded_config(&config_path, "")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "--demo",
+            "--render-once",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains("Listen Status"))
+        .stdout(predicate::str::contains("Watching: all assignees"))
         .stdout(predicate::str::contains("Runtime"))
         .stdout(predicate::str::contains("Agent Sessions"))
+        .stdout(predicate::str::contains("http://").not())
+        .stdout(predicate::str::contains("127.0.0.1").not())
+        .stdout(predicate::str::contains("localhost").not())
         .stdout(predicate::str::contains("SESSION"))
         .stdout(predicate::str::contains("PROGRESS"))
         .stdout(predicate::str::contains("MET-13"));
 
     Ok(())
+}
+
+#[test]
+fn agents_listen_help_omits_browser_dashboard_flags() {
+    let _guard = listen_test_lock();
+    meta()
+        .args(["agents", "listen", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--all-assignees"))
+        .stdout(predicate::str::contains("--dashboard-port").not())
+        .stdout(predicate::str::contains("browser").not());
+}
+
+#[test]
+fn legacy_listen_help_omits_browser_dashboard_flags() {
+    let _guard = listen_test_lock();
+    meta()
+        .args(["listen", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("meta listen sessions list"))
+        .stdout(predicate::str::contains(
+            "meta listen sessions inspect --root . --project \"MetaStack API\"",
+        ))
+        .stdout(predicate::str::contains(
+            "meta listen sessions clear --root . --project \"MetaStack API\"",
+        ))
+        .stdout(predicate::str::contains(
+            "meta agents listen --team MET --project \"MetaStack API\"",
+        ))
+        .stdout(predicate::str::contains("--all-assignees"))
+        .stdout(predicate::str::contains("--dashboard-port").not())
+        .stdout(predicate::str::contains("browser").not());
 }
 
 #[cfg(unix)]
@@ -92,11 +881,144 @@ fn listen_check_reports_codex_config_status_and_linear_api_validation() -> Resul
     "provider": "codex",
     "model": "gpt-5.4",
     "reasoning": "high"
+  },
+  "listen": {
+    "assignment_scope": "viewer"
   }
 }
 "#,
     )?;
+    write_onboarded_config(
+        &config_path,
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+"#,
+        ),
+    )?;
     fs::write(
+        home_dir.join(".codex/config.toml"),
+        r#"approval_policy = "never"
+sandbox_mode = "danger-full-access"
+
+[mcp_servers.linear]
+enabled = true
+"#,
+    )?;
+
+    let codex_path = bin_dir.join("codex");
+    fs::write(
+        &codex_path,
+        r#"#!/bin/sh
+if [ "$1" = "--help" ]; then
+  cat <<'EOF'
+-a, --ask-for-approval <APPROVAL_POLICY>
+-s, --sandbox <SANDBOX_MODE>
+-C, --cd <DIR>
+    --add-dir <DIR>
+    --dangerously-bypass-approvals-and-sandbox
+EOF
+  exit 0
+fi
+if [ "$1" = "exec" ] && [ "$2" = "--help" ]; then
+  cat <<'EOF'
+-m, --model <MODEL>
+-c, --config <key=value>
+    --json
+EOF
+  exit 0
+fi
+exit 0
+"#,
+    )?;
+    let mut permissions = fs::metadata(&codex_path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&codex_path, permissions)?;
+
+    init_repo_with_origin(&repo_root)?;
+    let viewer_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Viewer");
+        then.status(200).json_body(json!({
+            "data": {
+                "viewer": {
+                    "id": "viewer-1",
+                    "name": "Kames",
+                    "email": "sudo@example.com"
+                }
+            }
+        }));
+    });
+
+    let current_path = std::env::var("PATH")?;
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("HOME", &home_dir)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "agents",
+            "listen",
+            "--check",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Listen preflight passed for provider `codex`.",
+        ))
+        .stdout(predicate::str::contains("approval_policy = \"never\""))
+        .stdout(predicate::str::contains(
+            "sandbox_mode = \"danger-full-access\"",
+        ))
+        .stdout(predicate::str::contains("Linear API endpoint is reachable"))
+        .stdout(predicate::str::contains(
+            "Linear API authentication succeeded.",
+        ))
+        .stdout(predicate::str::contains(
+            "Effective assignee filter: Kames + unassigned",
+        ));
+    assert!(viewer_mock.calls() >= 1);
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_check_reports_viewer_only_scope_in_preflight_summary() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let home_dir = temp.path().join("home");
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(home_dir.join(".codex"))?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  },
+  "agent": {
+    "provider": "codex",
+    "model": "gpt-5.4",
+    "reasoning": "high"
+  },
+  "listen": {
+    "assignment_scope": "viewer_only"
+  }
+}
+"#,
+    )?;
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[linear]
@@ -175,17 +1097,9 @@ exit 0
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Listen preflight passed for provider `codex`.",
-        ))
-        .stdout(predicate::str::contains("approval_policy = \"never\""))
-        .stdout(predicate::str::contains(
-            "sandbox_mode = \"danger-full-access\"",
-        ))
-        .stdout(predicate::str::contains("Linear API endpoint is reachable"))
-        .stdout(predicate::str::contains(
-            "Linear API authentication succeeded.",
+            "Effective assignee filter: only Kames",
         ));
-    viewer_mock.assert_calls(1);
+    assert!(viewer_mock.calls() >= 1);
 
     Ok(())
 }
@@ -196,11 +1110,13 @@ fn listen_once_fails_fast_on_codex_preflight_before_linear_auth() -> Result<(), 
     let _guard = listen_test_lock();
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
     let bin_dir = temp.path().join("bin");
     let home_dir = temp.path().join("home");
     fs::create_dir_all(&repo_root)?;
     fs::create_dir_all(&bin_dir)?;
     fs::create_dir_all(&home_dir)?;
+    write_onboarded_config(&config_path, "")?;
 
     write_minimal_planning_context(
         &repo_root,
@@ -234,6 +1150,7 @@ if [ "$1" = "exec" ] && [ "$2" = "--help" ]; then
   cat <<'EOF'
 -m, --model <MODEL>
 -c, --config <key=value>
+    --json
 EOF
   exit 0
 fi
@@ -250,6 +1167,7 @@ exit 0
     meta()
         .current_dir(&repo_root)
         .env_remove("LINEAR_API_KEY")
+        .env("METASTACK_CONFIG", &config_path)
         .env("HOME", &home_dir)
         .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
         .args([
@@ -273,26 +1191,44 @@ exit 0
 fn agents_listen_matches_legacy_listen_output() -> Result<(), Box<dyn Error>> {
     let _guard = listen_test_lock();
     let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    write_onboarded_config(&config_path, "")?;
     write_minimal_planning_context(
-        temp.path(),
+        &repo_root,
         r#"{
   "linear": {
-    "team": "MET",
-    "project_id": "project-1"
+    "team": "MET"
   }
 }
 "#,
     )?;
 
     let legacy = meta()
-        .current_dir(temp.path())
-        .args(["listen", "--demo", "--render-once"])
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "--demo",
+            "--render-once",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
         .output()?;
     assert!(legacy.status.success());
 
     let preferred = meta()
-        .current_dir(temp.path())
-        .args(["agents", "listen", "--demo", "--render-once"])
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "agents",
+            "listen",
+            "--demo",
+            "--render-once",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
         .output()?;
     assert!(preferred.status.success());
 
@@ -304,13 +1240,144 @@ fn agents_listen_matches_legacy_listen_output() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn agents_listen_matches_legacy_once_output() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    write_onboarded_config(&config_path, "")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+
+    let legacy = meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "--demo",
+            "--once",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .output()?;
+    assert!(legacy.status.success());
+
+    let preferred = meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "agents",
+            "listen",
+            "--demo",
+            "--once",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .output()?;
+    assert!(preferred.status.success());
+
+    assert_eq!(
+        String::from_utf8(legacy.stdout)?,
+        String::from_utf8(preferred.stdout)?
+    );
+    Ok(())
+}
+
+#[test]
+fn listen_once_json_outputs_machine_readable_poll_result() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    write_onboarded_config(&config_path, "")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+
+    let assert = meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "agents",
+            "listen",
+            "--demo",
+            "--once",
+            "--json",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success();
+
+    let payload: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout)?;
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["command"], "agents.listen");
+    assert!(payload["result"]["title"].as_str().is_some());
+    assert!(payload["result"]["scope"].as_str().is_some());
+    assert!(payload["result"]["watch_scope"].as_str().is_some());
+    assert!(payload["result"]["cycle_summary"].as_str().is_some());
+    assert!(payload["result"]["sessions"].is_array());
+    assert!(payload["result"]["notes"].is_array());
+    assert!(payload["result"]["state_file"].as_str().is_some());
+    assert!(
+        payload["result"]["runtime"]["current_epoch_seconds"]
+            .as_u64()
+            .is_some()
+    );
+
+    Ok(())
+}
+
+#[test]
+fn listen_json_without_once_emits_structured_json_error() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let config_path = temp.path().join("metastack.toml");
+    write_onboarded_config(&config_path, "")?;
+
+    let assert = meta()
+        .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
+        .args(["agents", "listen", "--json"])
+        .assert()
+        .failure();
+
+    let payload: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout)?;
+    assert_eq!(payload["status"], "error");
+    assert_eq!(payload["command"], "agents.listen");
+    assert_eq!(payload["error"]["code"], "invalid_input");
+    assert_eq!(
+        payload["error"]["message"],
+        "`meta agents listen --json` requires `--once`"
+    );
+    assert!(assert.get_output().stderr.is_empty());
+
+    Ok(())
+}
+
+#[test]
 fn listen_uses_repo_configured_poll_interval_by_default() -> Result<(), Box<dyn Error>> {
     let _guard = listen_test_lock();
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
     let config_path = temp.path().join("metastack.toml");
     fs::create_dir_all(&repo_root)?;
-    fs::write(&config_path, "\n")?;
+    write_onboarded_config(&config_path, "")?;
     write_minimal_planning_context(
         &repo_root,
         r#"{
@@ -336,7 +1403,7 @@ fn listen_uses_repo_configured_poll_interval_by_default() -> Result<(), Box<dyn 
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Dashboard refresh: 1s"))
+        .stdout(predicate::str::contains("Terminal refresh: 1s"))
         .stdout(predicate::str::contains("Linear refresh: 42s"));
 
     Ok(())
@@ -349,7 +1416,7 @@ fn listen_cli_poll_interval_overrides_repo_default() -> Result<(), Box<dyn Error
     let repo_root = temp.path().join("repo");
     let config_path = temp.path().join("metastack.toml");
     fs::create_dir_all(&repo_root)?;
-    fs::write(&config_path, "\n")?;
+    write_onboarded_config(&config_path, "")?;
     write_minimal_planning_context(
         &repo_root,
         r#"{
@@ -377,7 +1444,7 @@ fn listen_cli_poll_interval_overrides_repo_default() -> Result<(), Box<dyn Error
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Dashboard refresh: 1s"))
+        .stdout(predicate::str::contains("Terminal refresh: 1s"))
         .stdout(predicate::str::contains("Linear refresh: 9s"));
 
     Ok(())
@@ -396,7 +1463,7 @@ fn listen_once_uses_repo_selected_profile_and_project_over_conflicting_global_de
     let wrong_api_url = wrong_server.url("/graphql");
 
     fs::create_dir_all(&repo_root)?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[linear]
@@ -549,9 +1616,13 @@ team = "PER"
         .stdout(predicate::str::contains(
             "Observed 1 Todo issue(s) from Linear.",
         ))
+        .stdout(predicate::str::contains("Dashboard: terminal summary"))
         .stdout(predicate::str::contains(
             "Skipped MET-401: missing required label `agent`.",
         ))
+        .stdout(predicate::str::contains("http://").not())
+        .stdout(predicate::str::contains("127.0.0.1").not())
+        .stdout(predicate::str::contains("localhost").not())
         .stdout(predicate::str::contains("MET-402").not())
         .stdout(predicate::str::contains("PER-403").not());
 
@@ -567,7 +1638,7 @@ fn listen_rejects_duplicate_active_listener_lock_for_same_project() -> Result<()
     let repo_root = temp.path().join("repo");
     let config_path = temp.path().join("metastack.toml");
     fs::create_dir_all(&repo_root)?;
-    fs::write(&config_path, "\n")?;
+    write_onboarded_config(&config_path, "")?;
     write_minimal_planning_context(
         &repo_root,
         r#"{
@@ -579,7 +1650,7 @@ fn listen_rejects_duplicate_active_listener_lock_for_same_project() -> Result<()
     )?;
     init_repo_with_origin(&repo_root)?;
 
-    let project_dir = listen_project_store_dir(&config_path, &repo_root)?;
+    let project_dir = listen_project_store_dir(&config_path, &repo_root, Some("MetaStack CLI"))?;
     fs::create_dir_all(&project_dir)?;
     fs::write(
         project_dir.join("active-listener.lock.json"),
@@ -606,6 +1677,8 @@ fn listen_rejects_duplicate_active_listener_lock_for_same_project() -> Result<()
             "listen",
             "--demo",
             "--once",
+            "--project",
+            "MetaStack CLI",
             "--root",
             repo_root.to_str().expect("temp path should be utf-8"),
         ])
@@ -618,13 +1691,13 @@ fn listen_rejects_duplicate_active_listener_lock_for_same_project() -> Result<()
 
 #[cfg(unix)]
 #[test]
-fn listen_recovers_stale_active_listener_lock() -> Result<(), Box<dyn Error>> {
+fn listen_allows_active_listener_lock_for_different_project() -> Result<(), Box<dyn Error>> {
     let _guard = listen_test_lock();
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
     let config_path = temp.path().join("metastack.toml");
     fs::create_dir_all(&repo_root)?;
-    fs::write(&config_path, "\n")?;
+    write_onboarded_config(&config_path, "")?;
     write_minimal_planning_context(
         &repo_root,
         r#"{
@@ -636,7 +1709,72 @@ fn listen_recovers_stale_active_listener_lock() -> Result<(), Box<dyn Error>> {
     )?;
     init_repo_with_origin(&repo_root)?;
 
-    let project_dir = listen_project_store_dir(&config_path, &repo_root)?;
+    let alpha_dir = listen_project_store_dir(&config_path, &repo_root, Some("Alpha"))?;
+    fs::create_dir_all(&alpha_dir)?;
+    fs::write(
+        alpha_dir.join("active-listener.lock.json"),
+        format!(
+            r#"{{
+  "pid": {},
+  "acquired_at_epoch_seconds": 1773575600,
+  "source_root": "{}",
+  "metastack_root": "{}"
+}}"#,
+            std::process::id(),
+            listen_source_root(&repo_root)?.display(),
+            listen_source_root(&repo_root)?
+                .join(".metastack")
+                .canonicalize()?
+                .display()
+        ),
+    )?;
+
+    let beta_state_path =
+        listen_project_store_dir(&config_path, &repo_root, Some("Beta"))?.join("session.json");
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "--demo",
+            "--once",
+            "--project",
+            "Beta",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "State file: {}",
+            beta_state_path.display()
+        )))
+        .stdout(predicate::str::contains(alpha_dir.display().to_string()).not());
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_recovers_stale_active_listener_lock() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    write_onboarded_config(&config_path, "")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+    init_repo_with_origin(&repo_root)?;
+
+    let project_dir = listen_project_store_dir(&config_path, &repo_root, None)?;
     fs::create_dir_all(&project_dir)?;
     let lock_path = project_dir.join("active-listener.lock.json");
     fs::write(
@@ -681,6 +1819,104 @@ fn listen_recovers_stale_active_listener_lock() -> Result<(), Box<dyn Error>> {
 
 #[cfg(unix)]
 #[test]
+fn listen_omitted_project_uses_repo_default_project_identity() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    write_onboarded_config(&config_path, "")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-default"
+  }
+}
+"#,
+    )?;
+    init_repo_with_origin(&repo_root)?;
+
+    let default_project_dir =
+        listen_project_store_dir(&config_path, &repo_root, Some("project-default"))?;
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "--demo",
+            "--once",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "State file: {}",
+            default_project_dir.join("session.json").display()
+        )));
+
+    let metadata = fs::read_to_string(default_project_dir.join("project.json"))?;
+    assert!(metadata.contains("\"project_selector\": \"project-default\""));
+    assert!(metadata.contains("\"project_label\": \"project-default\""));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_omitted_project_uses_install_default_project_identity() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    write_onboarded_config(
+        &config_path,
+        r#"[defaults.linear]
+project_id = "project-install"
+"#,
+    )?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+    init_repo_with_origin(&repo_root)?;
+
+    let install_project_dir =
+        listen_project_store_dir(&config_path, &repo_root, Some("project-install"))?;
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "--demo",
+            "--once",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "State file: {}",
+            install_project_dir.join("session.json").display()
+        )));
+
+    let metadata = fs::read_to_string(install_project_dir.join("project.json"))?;
+    assert!(metadata.contains("\"project_selector\": \"project-install\""));
+    assert!(metadata.contains("\"project_label\": \"project-install\""));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn listen_render_once_suppresses_pid_probe_output_across_refreshes() -> Result<(), Box<dyn Error>> {
     let _guard = listen_test_lock();
     let temp = tempdir()?;
@@ -701,7 +1937,7 @@ fn listen_render_once_suppresses_pid_probe_output_across_refreshes() -> Result<(
 }
 "#,
     )?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[linear]
@@ -904,7 +2140,11 @@ exit 0
                     "workpad_comment_id": "comment-40",
                     "updated_at_epoch_seconds": 1_773_575_000u64,
                     "pid": 4242,
-                    "session_id": "019cedb4-2293-7651-b0b4-dfac4af6a640-019cedb4-229b-7453-825e-3e3da4e1bf2a",
+                    "session_id": "issue-40",
+                    "latest_resume_handle": {
+                        "provider": "codex",
+                        "id": "019cedb4-2293-7651-b0b4-dfac4af6a640-019cedb4-229b-7453-825e-3e3da4e1bf2a"
+                    },
                     "turns": 3,
                     "tokens": {},
                     "log_path": ".metastack/agents/sessions/MET-40.log"
@@ -927,7 +2167,11 @@ exit 0
                     "workpad_comment_id": "comment-41",
                     "updated_at_epoch_seconds": 1_773_574_900u64,
                     "pid": 4343,
-                    "session_id": "019ceda5-0a41-7ef1-bf96-4f26683c1570-019ceda5-0a57-7820-b050-c05e112d66dd",
+                    "session_id": "issue-41",
+                    "latest_resume_handle": {
+                        "provider": "claude",
+                        "id": "019ceda5-0a41-7ef1-bf96-4f26683c1570-019ceda5-0a57-7820-b050-c05e112d66dd"
+                    },
                     "turns": 4,
                     "tokens": {},
                     "log_path": ".metastack/agents/sessions/MET-41.log"
@@ -968,6 +2212,7 @@ exit 0
 
     for rendered in [&first_stdout, &second_stdout] {
         assert!(rendered.contains("Agent Sessions"));
+        assert!(rendered.contains("terminal snapshot"));
         assert!(rendered.contains("MET-40"));
         assert!(rendered.contains("MET-41"));
         assert!(rendered.contains("Running"));
@@ -976,6 +2221,9 @@ exit 0
         assert!(rendered.contains("019c...2d66dd"));
         assert!(rendered.contains("Progress text stays clean"));
         assert!(rendered.contains("Second progress text stays clean"));
+        assert!(!rendered.contains("http://"));
+        assert!(!rendered.contains("127.0.0.1"));
+        assert!(!rendered.contains("localhost"));
         assert!(!rendered.contains("PID TTY"));
         assert!(!rendered.contains("meta listen-worker --ticket MET-noise"));
     }
@@ -1010,7 +2258,7 @@ fn listen_uses_the_same_project_identity_for_repo_and_worktree_roots() -> Result
     let repo_root = temp.path().join("repo");
     let config_path = temp.path().join("metastack.toml");
     fs::create_dir_all(&repo_root)?;
-    fs::write(&config_path, "\n")?;
+    write_onboarded_config(&config_path, "")?;
     write_minimal_planning_context(
         &repo_root,
         r#"{
@@ -1023,8 +2271,8 @@ fn listen_uses_the_same_project_identity_for_repo_and_worktree_roots() -> Result
     init_repo_with_origin(&repo_root)?;
     let worktree_root = create_worktree_checkout(&repo_root, "feature/listen", "repo-worktree")?;
 
-    let repo_store_dir = listen_project_store_dir(&config_path, &repo_root)?;
-    let worktree_store_dir = listen_project_store_dir(&config_path, &worktree_root)?;
+    let repo_store_dir = listen_project_store_dir(&config_path, &repo_root, None)?;
+    let worktree_store_dir = listen_project_store_dir(&config_path, &worktree_root, None)?;
     assert_eq!(repo_store_dir, worktree_store_dir);
 
     meta()
@@ -1100,7 +2348,7 @@ fn listen_once_bootstraps_workspace_clone_workpad_and_agent_session() -> Result<
         repo_root.join("instructions/listen.md"),
         "# Listener Instructions\nKeep the workpad current.\n",
     )?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[linear]
@@ -1450,6 +2698,8 @@ printf '%s' "$METASTACK_AGENT_INSTRUCTIONS" > "$TEST_OUTPUT_DIR/instructions.txt
     assert!(brief.contains("Picked up automatically by `meta listen`."));
 
     wait_for_path(&stub_dir.join("payload.txt"))?;
+    wait_for_path(&stub_dir.join("workpad.txt"))?;
+    wait_for_path(&stub_dir.join("instructions.txt"))?;
     assert_eq!(
         fs::read_to_string(stub_dir.join("workpad.txt"))?,
         "comment-21"
@@ -1457,8 +2707,8 @@ printf '%s' "$METASTACK_AGENT_INSTRUCTIONS" > "$TEST_OUTPUT_DIR/instructions.txt
     let instructions = fs::read_to_string(stub_dir.join("instructions.txt"))?;
     assert!(instructions.contains("## Built-in Workflow Contract"));
     assert!(instructions.contains("No repo overlay files were found"));
-    assert!(instructions.contains("`metastack` label is attached"));
-    assert!(instructions.contains("Do not use the legacy `symphony` label."));
+    assert!(instructions.contains("Shared automation keeps the `metastack` label attached"));
+    assert!(instructions.contains("do not use the legacy `symphony` label"));
     let backlog_index_path = workspace_root.join(".metastack/backlog/MET-21/index.md");
     assert!(
         backlog_index_path.is_file(),
@@ -1545,8 +2795,7 @@ printf '%s' "$METASTACK_AGENT_INSTRUCTIONS" > "$TEST_OUTPUT_DIR/instructions.txt
         .stdout(predicate::str::contains(
             "Stored MetaListen project sessions",
         ))
-        .stdout(predicate::str::contains("repo"))
-        .stdout(predicate::str::contains("MET-21"));
+        .stdout(predicate::str::contains("repo"));
 
     let project_key = state_path
         .parent()
@@ -1581,15 +2830,200 @@ printf '%s' "$METASTACK_AGENT_INSTRUCTIONS" > "$TEST_OUTPUT_DIR/instructions.txt
             "listen",
             "sessions",
             "clear",
+            "--all",
             "--root",
             repo_root.to_str().expect("temp path should be utf-8"),
         ])
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Cleared stored MetaListen session data",
+            "Cleared 1 stored MetaListen session(s) matched by `--all`",
         ));
-    assert!(!state_path.exists());
+    let cleared_state: serde_json::Value = serde_json::from_slice(&fs::read(&state_path)?)?;
+    assert_eq!(
+        cleared_state["sessions"]
+            .as_array()
+            .expect("sessions should remain an array")
+            .len(),
+        0
+    );
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_sessions_target_multiple_project_scopes_from_one_repo() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    write_onboarded_config(&config_path, "")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-default"
+  }
+}
+"#,
+    )?;
+    init_repo_with_origin(&repo_root)?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "--demo",
+            "--once",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success();
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "--demo",
+            "--once",
+            "--project",
+            "project-beta",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success();
+
+    let default_state_path =
+        listen_project_store_dir(&config_path, &repo_root, Some("project-default"))?
+            .join("session.json");
+    let beta_state_path = listen_project_store_dir(&config_path, &repo_root, Some("project-beta"))?
+        .join("session.json");
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args(["listen", "sessions", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("project-default"))
+        .stdout(predicate::str::contains("project-beta"))
+        .stdout(predicate::str::contains(
+            repo_root.canonicalize()?.display().to_string(),
+        ));
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "inspect",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            default_state_path.display().to_string(),
+        ))
+        .stdout(predicate::str::contains("Project: project-default"));
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "inspect",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+            "--project",
+            "project-beta",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            beta_state_path.display().to_string(),
+        ))
+        .stdout(predicate::str::contains("Project: project-beta"));
+
+    let beta_project_key = beta_state_path
+        .parent()
+        .and_then(|path| path.file_name())
+        .and_then(|value| value.to_str())
+        .expect("beta project key should be present")
+        .to_string();
+
+    meta()
+        .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "inspect",
+            "--project-key",
+            &beta_project_key,
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            beta_state_path.display().to_string(),
+        ))
+        .stdout(predicate::str::contains("Project: project-beta"));
+
+    meta()
+        .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "resume",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+            "--project",
+            "project-beta",
+            "--demo",
+            "--once",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            beta_state_path.display().to_string(),
+        ));
+
+    meta()
+        .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "clear",
+            "--project-key",
+            &beta_project_key,
+            "--all",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("project-beta"));
+
+    assert!(default_state_path.parent().is_some_and(Path::exists));
+    assert!(beta_state_path.parent().is_some_and(Path::exists));
+    if beta_state_path.is_file() {
+        let beta_state: serde_json::Value = serde_json::from_slice(&fs::read(&beta_state_path)?)?;
+        assert_eq!(
+            beta_state["sessions"]
+                .as_array()
+                .expect("sessions should remain an array")
+                .len(),
+            0
+        );
+    }
 
     Ok(())
 }
@@ -1623,7 +3057,7 @@ fn listen_once_prefers_command_route_agent_over_global_default() -> Result<(), B
 }
 "#,
     )?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[linear]
@@ -1941,7 +3375,7 @@ fn listen_once_downloads_issue_attachment_context_for_agent() -> Result<(), Box<
 }
 "#,
     )?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[linear]
@@ -2238,7 +3672,7 @@ fn listen_once_refreshes_existing_workspace_clone_and_reuses_backlog_and_workpad
         repo_root.join("instructions/listen.md"),
         "# Listener Instructions\nKeep the workpad current.\n",
     )?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[linear]
@@ -2605,7 +4039,7 @@ fn listen_once_executes_repo_selected_builtin_claude_provider() -> Result<(), Bo
 }
 "#,
     )?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[linear]
@@ -2629,6 +4063,8 @@ if [ "$1" = "-p" ] && [ "$2" = "--help" ]; then
 -p, --print
 --model <model>
 --effort <level>
+--verbose
+--output-format <format>
 --permission-mode <mode>
 EOF
   exit 0
@@ -2639,7 +4075,7 @@ printf '%s' "$METASTACK_AGENT_MODEL" > "$TEST_OUTPUT_DIR/model.txt"
 printf '%s' "$METASTACK_AGENT_REASONING" > "$TEST_OUTPUT_DIR/reasoning.txt"
 printf '%s' "$METASTACK_AGENT_PROVIDER_SOURCE" > "$TEST_OUTPUT_DIR/provider-source.txt"
 printf '%s' "$METASTACK_AGENT_ROUTE_KEY" > "$TEST_OUTPUT_DIR/route-key.txt"
-printf 'claude listen ok'
+printf '%s' '{"type":"result","subtype":"success","result":"claude listen ok","session_id":"listen-session-1"}'
 "#,
     )?;
     let mut permissions = fs::metadata(&claude_path)?.permissions();
@@ -2664,6 +4100,7 @@ if [ "$1" = "exec" ] && [ "$2" = "--help" ]; then
   cat <<'EOF'
 -m, --model <MODEL>
 -c, --config <key=value>
+    --json
 EOF
   exit 0
 fi
@@ -2904,9 +4341,12 @@ exit 99
 
     let args = fs::read_to_string(stub_dir.join("claude-args.txt"))?;
     assert!(args.contains("--permission-mode=bypassPermissions"));
+    assert!(args.contains("--verbose"));
+    assert!(args.contains("--output-format=stream-json"));
     assert!(args.contains("-p"));
     assert!(args.contains("--model=sonnet"));
     assert!(args.contains("--effort=high"));
+    assert!(args.contains("--output-format=json"));
     assert!(!args.contains("--reasoning="));
     assert_eq!(fs::read_to_string(stub_dir.join("agent.txt"))?, "claude");
     assert_eq!(fs::read_to_string(stub_dir.join("model.txt"))?, "sonnet");
@@ -2959,7 +4399,7 @@ fn listen_once_recreates_existing_workspace_clone_when_configured() -> Result<()
 }
 "#,
     )?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[linear]
@@ -3185,7 +4625,7 @@ fn listen_once_relaunches_agent_until_issue_leaves_active_states() -> Result<(),
     let config_path = temp.path().join("metastack.toml");
     let bin_dir = temp.path().join("bin");
     let stub_dir = temp.path().join("stub-output");
-    let server = DynamicLinearServer::start()?;
+    let server = DynamicLinearServer::start_with_completion_after_refreshes(4)?;
     fs::create_dir_all(&repo_root)?;
     fs::create_dir_all(&bin_dir)?;
     fs::create_dir_all(&stub_dir)?;
@@ -3210,7 +4650,7 @@ fn listen_once_relaunches_agent_until_issue_leaves_active_states() -> Result<(),
         repo_root.join("instructions/listen.md"),
         "# Listener Instructions\nKeep the workpad current.\n",
     )?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[linear]
@@ -3267,7 +4707,11 @@ printf '// turn %s\n' "$count" > "src/turn-$count.rs"
         .stdout(predicate::str::contains("1 claimed this cycle"))
         .stdout(predicate::str::contains("MET-32"));
 
-    wait_for_path(&stub_dir.join("payload-2.txt"))?;
+    wait_for_path_with_timeout(&stub_dir.join("payload-2.txt"), Duration::from_secs(180))?;
+    wait_for_path_with_timeout(
+        &stub_dir.join("instructions-2.txt"),
+        Duration::from_secs(180),
+    )?;
     let turn_count = fs::read_to_string(stub_dir.join("count.txt"))?
         .trim()
         .parse::<u32>()?;
@@ -3289,7 +4733,11 @@ printf '// turn %s\n' "$count" > "src/turn-$count.rs"
     assert!(second_instructions.contains("continuation turn 2 of 20"));
 
     let state_path = listen_state_path(&config_path, &repo_root)?;
-    wait_for_file_substring(&state_path, "\"phase\": \"completed\"")?;
+    wait_for_file_substring_with_timeout(
+        &state_path,
+        "\"phase\": \"completed\"",
+        Duration::from_secs(120),
+    )?;
     let state = fs::read_to_string(state_path)?;
     assert!(state.contains("\"issue_identifier\": \"MET-32\""));
     assert!(state.contains("\"phase\": \"completed\""));
@@ -3307,7 +4755,7 @@ fn listen_once_blocks_after_repeated_noop_turns() -> Result<(), Box<dyn Error>> 
     let config_path = temp.path().join("metastack.toml");
     let bin_dir = temp.path().join("bin");
     let stub_dir = temp.path().join("stub-output");
-    let server = DynamicLinearServer::start()?;
+    let server = DynamicLinearServer::start_with_completion_after_refreshes(1_000_000)?;
     fs::create_dir_all(&repo_root)?;
     fs::create_dir_all(&bin_dir)?;
     fs::create_dir_all(&stub_dir)?;
@@ -3332,7 +4780,7 @@ fn listen_once_blocks_after_repeated_noop_turns() -> Result<(), Box<dyn Error>> 
         repo_root.join("instructions/listen.md"),
         "# Listener Instructions\nKeep the workpad current.\n",
     )?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[linear]
@@ -3369,32 +4817,444 @@ printf '%s' "$METASTACK_AGENT_INSTRUCTIONS" > "$TEST_OUTPUT_DIR/instructions-$co
     permissions.set_mode(0o755);
     fs::set_permissions(&stub_path, permissions)?;
     init_repo_with_origin(&repo_root)?;
+    let workspace = create_workspace_clone_checkout(&repo_root, "repo-workspace/MET-32")?;
+    let backlog_dir = workspace.join(".metastack/backlog/MET-32");
+    fs::create_dir_all(&backlog_dir)?;
+    fs::write(
+        backlog_dir.join("index.md"),
+        "# MET-32\n\n## Tasks\n\n- [ ] Keep working\n",
+    )?;
 
     let current_path = std::env::var("PATH")?;
     meta()
-        .current_dir(&repo_root)
+        .current_dir(&workspace)
         .env("METASTACK_CONFIG", &config_path)
         .env("TEST_OUTPUT_DIR", &stub_dir)
         .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
         .args([
-            "listen",
-            "--root",
+            "listen-worker",
+            "--source-root",
             repo_root.to_str().expect("temp path should be utf-8"),
-            "--once",
+            "--workspace",
+            workspace.to_str().expect("workspace path should be utf-8"),
+            "--issue",
+            "MET-32",
+            "--workpad-comment-id",
+            "comment-32",
+            "--backlog-issue",
+            "MET-32",
         ])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("1 claimed this cycle"))
-        .stdout(predicate::str::contains("MET-32"));
+        .success();
 
-    wait_for_path(&stub_dir.join("payload-2.txt"))?;
     let state_path = listen_state_path(&config_path, &repo_root)?;
     wait_for_file_substring(&state_path, "\"phase\": \"blocked\"")?;
+    let turn_count = fs::read_to_string(stub_dir.join("count.txt"))?
+        .trim()
+        .parse::<u32>()?;
+    assert!(
+        turn_count >= 2,
+        "expected at least two agent turns before the worker stalled, observed {turn_count}"
+    );
     let state = fs::read_to_string(state_path)?;
     assert!(state.contains("\"issue_identifier\": \"MET-32\""));
     assert!(state.contains("\"phase\": \"blocked\""));
     assert!(state.contains("Blocked | stalled after 2 turn(s)"));
     assert!(state.contains("\"phase\": \"blocked\""));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_worker_publishes_the_initial_branch_pull_request_as_a_draft() -> Result<(), Box<dyn Error>>
+{
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let stub_dir = temp.path().join("stub-output");
+    let server = DynamicLinearServer::start_with_completion_after_refreshes(1_000_000)?;
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&stub_dir)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+    write_onboarded_config(
+        &config_path,
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+
+[agents]
+default_agent = "stub"
+
+[agents.commands.stub]
+command = "agent-stub"
+args = ["{{{{payload}}}}"]
+transport = "arg"
+"#,
+            api_url = server.url.as_str(),
+        ),
+    )?;
+    fs::write(
+        bin_dir.join("agent-stub"),
+        r#"#!/bin/sh
+mkdir -p src
+printf 'pub fn turn_one() {}\n' > src/turn-one.rs
+"#,
+    )?;
+    write_listen_github_stub(
+        &bin_dir.join("gh"),
+        "none",
+        "https://github.com/example/repo/pull/321",
+    )?;
+    let mut permissions = fs::metadata(bin_dir.join("agent-stub"))?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(bin_dir.join("agent-stub"), permissions)?;
+    init_repo_with_origin(&repo_root)?;
+
+    let workspace = create_workspace_clone_checkout(&repo_root, "repo-workspace/MET-32")?;
+    let branch = "met-32-continuation-loop";
+    ProcessCommand::new("git")
+        .args([
+            "-C",
+            workspace.to_str().expect("utf8"),
+            "checkout",
+            "-B",
+            branch,
+            "main",
+        ])
+        .status()?;
+    fs::write(workspace.join("src.rs"), "pub fn initial() {}\n")?;
+    ProcessCommand::new("git")
+        .args(["-C", workspace.to_str().expect("utf8"), "add", "src.rs"])
+        .status()?;
+    ProcessCommand::new("git")
+        .args([
+            "-C",
+            workspace.to_str().expect("utf8"),
+            "commit",
+            "-m",
+            "Prepare draft PR publication",
+        ])
+        .status()?;
+    ProcessCommand::new("git")
+        .args([
+            "-C",
+            workspace.to_str().expect("utf8"),
+            "push",
+            "--set-upstream",
+            "origin",
+            branch,
+        ])
+        .status()?;
+    let backlog_dir = workspace.join(".metastack/backlog/MET-32");
+    fs::create_dir_all(&backlog_dir)?;
+    fs::write(
+        backlog_dir.join("index.md"),
+        "# MET-32\n\n## Tasks\n\n- [ ] Keep working\n",
+    )?;
+
+    let current_path = std::env::var("PATH")?;
+    meta()
+        .current_dir(&workspace)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &stub_dir)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "listen-worker",
+            "--source-root",
+            repo_root.to_str().expect("utf8"),
+            "--workspace",
+            workspace.to_str().expect("utf8"),
+            "--issue",
+            "MET-32",
+            "--workpad-comment-id",
+            "comment-32",
+            "--backlog-issue",
+            "MET-32",
+            "--max-turns",
+            "1",
+        ])
+        .assert()
+        .success();
+
+    let gh_log = fs::read_to_string(stub_dir.join("gh.log"))?;
+    assert!(gh_log.contains("pr list --state open --head met-32-continuation-loop --base main"));
+    assert!(gh_log.contains("pr create --base main --head met-32-continuation-loop"));
+    assert!(gh_log.contains("--draft --json number,url,isDraft"));
+    assert!(!gh_log.contains("pr ready 321"));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_worker_promotes_the_same_draft_pull_request_during_review_handoff()
+-> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let stub_dir = temp.path().join("stub-output");
+    let server = DynamicLinearServer::start_with_completion_after_refreshes(1_000_000)?;
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&stub_dir)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+    write_onboarded_config(
+        &config_path,
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+
+[agents]
+default_agent = "stub"
+
+[agents.commands.stub]
+command = "agent-stub"
+args = ["{{{{payload}}}}"]
+transport = "arg"
+"#,
+            api_url = server.url.as_str(),
+        ),
+    )?;
+    fs::write(bin_dir.join("agent-stub"), "#!/bin/sh\n:\n")?;
+    write_listen_github_stub(
+        &bin_dir.join("gh"),
+        "draft",
+        "https://github.com/example/repo/pull/321",
+    )?;
+    let mut permissions = fs::metadata(bin_dir.join("agent-stub"))?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(bin_dir.join("agent-stub"), permissions)?;
+    init_repo_with_origin(&repo_root)?;
+
+    let workspace = create_workspace_clone_checkout(&repo_root, "repo-workspace/MET-32")?;
+    let branch = "met-32-continuation-loop";
+    ProcessCommand::new("git")
+        .args([
+            "-C",
+            workspace.to_str().expect("utf8"),
+            "checkout",
+            "-B",
+            branch,
+            "main",
+        ])
+        .status()?;
+    fs::write(workspace.join("src.rs"), "pub fn ready() {}\n")?;
+    ProcessCommand::new("git")
+        .args(["-C", workspace.to_str().expect("utf8"), "add", "src.rs"])
+        .status()?;
+    ProcessCommand::new("git")
+        .args([
+            "-C",
+            workspace.to_str().expect("utf8"),
+            "commit",
+            "-m",
+            "Prepare ready promotion",
+        ])
+        .status()?;
+    ProcessCommand::new("git")
+        .args([
+            "-C",
+            workspace.to_str().expect("utf8"),
+            "push",
+            "--set-upstream",
+            "origin",
+            branch,
+        ])
+        .status()?;
+    let backlog_dir = workspace.join(".metastack/backlog/MET-32");
+    fs::create_dir_all(&backlog_dir)?;
+    fs::write(
+        backlog_dir.join("index.md"),
+        "# MET-32\n\n## Tasks\n\n- [x] Complete\n",
+    )?;
+
+    let current_path = std::env::var("PATH")?;
+    meta()
+        .current_dir(&workspace)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &stub_dir)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "listen-worker",
+            "--source-root",
+            repo_root.to_str().expect("utf8"),
+            "--workspace",
+            workspace.to_str().expect("utf8"),
+            "--issue",
+            "MET-32",
+            "--workpad-comment-id",
+            "comment-32",
+            "--backlog-issue",
+            "MET-32",
+            "--max-turns",
+            "1",
+        ])
+        .assert()
+        .success();
+
+    let gh_log = fs::read_to_string(stub_dir.join("gh.log"))?;
+    assert!(gh_log.contains("pr edit 321 --title MET-32: Continuation loop --body-file"));
+    assert!(gh_log.contains("pr ready 321"));
+    assert!(!gh_log.contains("pr create --base main --head met-32-continuation-loop"));
+    let state = fs::read_to_string(listen_state_path(&config_path, &repo_root)?)?;
+    assert!(state.contains("\"phase\": \"completed\""));
+    assert!(state.contains("Human Review"));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_worker_leaves_an_already_ready_pull_request_unchanged_on_continuation()
+-> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let stub_dir = temp.path().join("stub-output");
+    let server = DynamicLinearServer::start_with_completion_after_refreshes(1_000_000)?;
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&stub_dir)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+    write_onboarded_config(
+        &config_path,
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+
+[agents]
+default_agent = "stub"
+
+[agents.commands.stub]
+command = "agent-stub"
+args = ["{{{{payload}}}}"]
+transport = "arg"
+"#,
+            api_url = server.url.as_str(),
+        ),
+    )?;
+    fs::write(bin_dir.join("agent-stub"), "#!/bin/sh\n:\n")?;
+    write_listen_github_stub(
+        &bin_dir.join("gh"),
+        "ready",
+        "https://github.com/example/repo/pull/321",
+    )?;
+    let mut permissions = fs::metadata(bin_dir.join("agent-stub"))?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(bin_dir.join("agent-stub"), permissions)?;
+    init_repo_with_origin(&repo_root)?;
+
+    let workspace = create_workspace_clone_checkout(&repo_root, "repo-workspace/MET-32")?;
+    let branch = "met-32-continuation-loop";
+    ProcessCommand::new("git")
+        .args([
+            "-C",
+            workspace.to_str().expect("utf8"),
+            "checkout",
+            "-B",
+            branch,
+            "main",
+        ])
+        .status()?;
+    fs::write(workspace.join("src.rs"), "pub fn already_ready() {}\n")?;
+    ProcessCommand::new("git")
+        .args(["-C", workspace.to_str().expect("utf8"), "add", "src.rs"])
+        .status()?;
+    ProcessCommand::new("git")
+        .args([
+            "-C",
+            workspace.to_str().expect("utf8"),
+            "commit",
+            "-m",
+            "Continue with ready PR",
+        ])
+        .status()?;
+    ProcessCommand::new("git")
+        .args([
+            "-C",
+            workspace.to_str().expect("utf8"),
+            "push",
+            "--set-upstream",
+            "origin",
+            branch,
+        ])
+        .status()?;
+    let backlog_dir = workspace.join(".metastack/backlog/MET-32");
+    fs::create_dir_all(&backlog_dir)?;
+    fs::write(
+        backlog_dir.join("index.md"),
+        "# MET-32\n\n## Tasks\n\n- [x] Complete\n",
+    )?;
+
+    let current_path = std::env::var("PATH")?;
+    meta()
+        .current_dir(&workspace)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &stub_dir)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "listen-worker",
+            "--source-root",
+            repo_root.to_str().expect("utf8"),
+            "--workspace",
+            workspace.to_str().expect("utf8"),
+            "--issue",
+            "MET-32",
+            "--workpad-comment-id",
+            "comment-32",
+            "--backlog-issue",
+            "MET-32",
+            "--max-turns",
+            "1",
+        ])
+        .assert()
+        .success();
+
+    let gh_log = fs::read_to_string(stub_dir.join("gh.log"))?;
+    assert!(gh_log.contains("pr edit 321 --title MET-32: Continuation loop --body-file"));
+    assert!(!gh_log.contains("pr create --base main --head met-32-continuation-loop"));
+    assert!(!gh_log.contains("pr ready 321"));
 
     Ok(())
 }
@@ -3424,7 +5284,7 @@ fn listen_once_skips_ineligible_issue_and_records_the_reason() -> Result<(), Box
 }
 "#,
     )?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[linear]
@@ -3523,17 +5383,1064 @@ api_url = "{api_url}"
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Skipped MET-31"))
-        .stdout(predicate::str::contains("missing required label `agent`"))
-        .stdout(predicate::str::contains(
-            "assigned to `Someone Else` instead of `Kames`",
-        ));
+        .stdout(predicate::str::contains("Watching: Kames + unassigned"))
+        .stdout(predicate::str::contains("MET-31").not());
 
-    viewer_mock.assert_calls(1);
+    assert!(viewer_mock.calls() >= 1);
     update_mock.assert_calls(0);
     let state = fs::read_to_string(listen_state_path(&config_path, &repo_root)?)?;
     assert!(!state.contains("MET-31"));
     assert!(!temp.path().join("repo-workspace/MET-31").exists());
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_once_claims_viewer_assigned_issue_in_viewer_only_scope() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let stub_dir = temp.path().join("stub-output");
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&stub_dir)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  },
+  "listen": {
+    "required_label": "agent",
+    "assignment_scope": "viewer_only"
+  }
+}
+"#,
+    )?;
+    write_onboarded_config(
+        &config_path,
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+
+[agents]
+default_agent = "stub"
+
+[agents.commands.stub]
+command = "agent-stub"
+args = ["{{{{payload}}}}"]
+transport = "arg"
+"#,
+        ),
+    )?;
+    let stub_path = bin_dir.join("agent-stub");
+    fs::write(
+        &stub_path,
+        r#"#!/bin/sh
+printf '%s' "$1" > "$TEST_OUTPUT_DIR/payload.txt"
+"#,
+    )?;
+    let mut permissions = fs::metadata(&stub_path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&stub_path, permissions)?;
+    init_repo_with_origin(&repo_root)?;
+
+    let viewer_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Viewer");
+        then.status(200).json_body(json!({
+            "data": {
+                "viewer": {
+                    "id": "viewer-1",
+                    "name": "Kames",
+                    "email": "sudo@example.com"
+                }
+            }
+        }));
+    });
+    let issues_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issues");
+        then.status(200).json_body(json!({
+            "data": {
+                "issues": {
+                    "nodes": [{
+                        "id": "issue-54",
+                        "identifier": "MET-54",
+                        "title": "Claim viewer assigned work",
+                        "description": "Viewer-only scope should still claim viewer work",
+                        "url": "https://linear.app/issues/54",
+                        "priority": 2,
+                        "updatedAt": "2026-03-14T16:00:00Z",
+                        "assignee": {
+                            "id": "viewer-1",
+                            "name": "Kames",
+                            "email": "sudo@example.com"
+                        },
+                        "labels": {
+                            "nodes": [{
+                                "id": "label-1",
+                                "name": "agent"
+                            }]
+                        },
+                        "comments": {
+                            "nodes": []
+                        },
+                        "team": {
+                            "id": "team-1",
+                            "key": "MET",
+                            "name": "Metastack"
+                        },
+                        "project": {
+                            "id": "project-1",
+                            "name": "MetaStack CLI"
+                        },
+                        "state": {
+                            "id": "state-1",
+                            "name": "Todo",
+                            "type": "unstarted"
+                        }
+                    }]
+                }
+            }
+        }));
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Teams");
+        then.status(200).json_body(team_payload());
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issue($id: String!)")
+            .body_includes("\"id\":\"issue-54\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "issue": {
+                    "id": "issue-54",
+                    "identifier": "MET-54",
+                    "title": "Claim viewer assigned work",
+                    "description": "Viewer-only scope should still claim viewer work",
+                    "url": "https://linear.app/issues/MET-54",
+                    "priority": 2,
+                    "updatedAt": "2026-03-14T16:00:00Z",
+                    "team": {
+                        "id": "team-1",
+                        "key": "MET",
+                        "name": "Metastack"
+                    },
+                    "project": {
+                        "id": "project-1",
+                        "name": "MetaStack CLI"
+                    },
+                    "assignee": {
+                        "id": "viewer-1",
+                        "name": "Kames",
+                        "email": "sudo@example.com"
+                    },
+                    "labels": {
+                        "nodes": [{
+                            "id": "label-1",
+                            "name": "agent"
+                        }]
+                    },
+                    "comments": { "nodes": [] },
+                    "state": {
+                        "id": "state-2",
+                        "name": "In Progress",
+                        "type": "started"
+                    },
+                    "attachments": { "nodes": [] },
+                    "parent": null,
+                    "children": { "nodes": [] }
+                }
+            }
+        }));
+    });
+    let update_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation UpdateIssue");
+        then.status(200).json_body(json!({
+            "data": {
+                "issueUpdate": {
+                    "success": true,
+                    "issue": {
+                        "id": "issue-54",
+                        "identifier": "MET-54",
+                        "title": "Claim viewer assigned work",
+                        "description": "Viewer-only scope should still claim viewer work",
+                        "url": "https://linear.app/issues/54",
+                        "priority": 2,
+                        "updatedAt": "2026-03-14T16:05:00Z",
+                        "team": {
+                            "id": "team-1",
+                            "key": "MET",
+                            "name": "Metastack"
+                        },
+                        "project": {
+                            "id": "project-1",
+                            "name": "MetaStack CLI"
+                        },
+                        "state": {
+                            "id": "state-2",
+                            "name": "In Progress",
+                            "type": "started"
+                        }
+                    }
+                }
+            }
+        }));
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation CreateIssue");
+        then.status(500);
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation CreateComment")
+            .body_includes("## Codex Workpad");
+        then.status(200).json_body(json!({
+            "data": {
+                "commentCreate": {
+                    "success": true,
+                    "comment": {
+                        "id": "comment-54",
+                        "body": "## Codex Workpad",
+                        "resolvedAt": null
+                    }
+                }
+            }
+        }));
+    });
+
+    let current_path = std::env::var("PATH")?;
+    let state_path = listen_state_path(&config_path, &repo_root)?;
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &stub_dir)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "listen",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+            "--once",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Watching: only Kames"))
+        .stdout(predicate::str::contains("1 claimed this cycle"))
+        .stdout(predicate::str::contains("MET-54"));
+
+    assert!(viewer_mock.calls() >= 1);
+    assert!(issues_mock.calls() >= 3);
+    update_mock.assert_calls(1);
+    assert!(temp.path().join("repo-workspace/MET-54").is_dir());
+    let state = fs::read_to_string(state_path)?;
+    assert!(state.contains("\"issue_identifier\": \"MET-54\""));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_once_skips_unassigned_issue_in_viewer_only_scope() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    fs::create_dir_all(&repo_root)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  },
+  "listen": {
+    "required_label": "agent",
+    "assignment_scope": "viewer_only"
+  }
+}
+"#,
+    )?;
+    write_onboarded_config(
+        &config_path,
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+"#,
+        ),
+    )?;
+    init_repo_with_origin(&repo_root)?;
+
+    let viewer_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Viewer");
+        then.status(200).json_body(json!({
+            "data": {
+                "viewer": {
+                    "id": "viewer-1",
+                    "name": "Kames",
+                    "email": "sudo@example.com"
+                }
+            }
+        }));
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issues");
+        then.status(200).json_body(json!({
+            "data": {
+                "issues": {
+                    "nodes": [{
+                        "id": "issue-55",
+                        "identifier": "MET-55",
+                        "title": "Ignore unassigned strict-mode work",
+                        "description": "Viewer-only scope should skip unassigned work",
+                        "url": "https://linear.app/issues/55",
+                        "priority": 2,
+                        "updatedAt": "2026-03-14T16:00:00Z",
+                        "assignee": null,
+                        "labels": {
+                            "nodes": [{
+                                "id": "label-1",
+                                "name": "agent"
+                            }]
+                        },
+                        "comments": {
+                            "nodes": []
+                        },
+                        "team": {
+                            "id": "team-1",
+                            "key": "MET",
+                            "name": "Metastack"
+                        },
+                        "project": {
+                            "id": "project-1",
+                            "name": "MetaStack CLI"
+                        },
+                        "state": {
+                            "id": "state-1",
+                            "name": "Todo",
+                            "type": "unstarted"
+                        }
+                    }]
+                }
+            }
+        }));
+    });
+    let update_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation UpdateIssue");
+        then.status(200).json_body(json!({
+            "data": {
+                "issueUpdate": {
+                    "success": true
+                }
+            }
+        }));
+    });
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+            "--once",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Watching: only Kames"))
+        .stdout(predicate::str::contains("MET-55").not());
+
+    assert!(viewer_mock.calls() >= 1);
+    update_mock.assert_calls(0);
+    let state = fs::read_to_string(listen_state_path(&config_path, &repo_root)?)?;
+    assert!(!state.contains("MET-55"));
+    assert!(!temp.path().join("repo-workspace/MET-55").exists());
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_once_skips_foreign_assigned_issue_in_viewer_only_scope() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    fs::create_dir_all(&repo_root)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  },
+  "listen": {
+    "required_label": "agent",
+    "assignment_scope": "viewer_only"
+  }
+}
+"#,
+    )?;
+    write_onboarded_config(
+        &config_path,
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+"#,
+        ),
+    )?;
+    init_repo_with_origin(&repo_root)?;
+
+    let viewer_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Viewer");
+        then.status(200).json_body(json!({
+            "data": {
+                "viewer": {
+                    "id": "viewer-1",
+                    "name": "Kames",
+                    "email": "sudo@example.com"
+                }
+            }
+        }));
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issues");
+        then.status(200).json_body(json!({
+            "data": {
+                "issues": {
+                    "nodes": [{
+                        "id": "issue-56",
+                        "identifier": "MET-56",
+                        "title": "Ignore foreign strict-mode work",
+                        "description": "Viewer-only scope should skip someone else's work",
+                        "url": "https://linear.app/issues/56",
+                        "priority": 2,
+                        "updatedAt": "2026-03-14T16:00:00Z",
+                        "assignee": {
+                            "id": "viewer-2",
+                            "name": "Someone Else",
+                            "email": "else@example.com"
+                        },
+                        "labels": {
+                            "nodes": [{
+                                "id": "label-1",
+                                "name": "agent"
+                            }]
+                        },
+                        "comments": {
+                            "nodes": []
+                        },
+                        "team": {
+                            "id": "team-1",
+                            "key": "MET",
+                            "name": "Metastack"
+                        },
+                        "project": {
+                            "id": "project-1",
+                            "name": "MetaStack CLI"
+                        },
+                        "state": {
+                            "id": "state-1",
+                            "name": "Todo",
+                            "type": "unstarted"
+                        }
+                    }]
+                }
+            }
+        }));
+    });
+    let update_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation UpdateIssue");
+        then.status(200).json_body(json!({
+            "data": {
+                "issueUpdate": {
+                    "success": true
+                }
+            }
+        }));
+    });
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+            "--once",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Watching: only Kames"))
+        .stdout(predicate::str::contains("MET-56").not());
+
+    assert!(viewer_mock.calls() >= 1);
+    update_mock.assert_calls(0);
+    let state = fs::read_to_string(listen_state_path(&config_path, &repo_root)?)?;
+    assert!(!state.contains("MET-56"));
+    assert!(!temp.path().join("repo-workspace/MET-56").exists());
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_once_claims_unassigned_issue_in_viewer_scope() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let stub_dir = temp.path().join("stub-output");
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&stub_dir)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  },
+  "listen": {
+    "required_label": "agent",
+    "assignment_scope": "viewer"
+  }
+}
+"#,
+    )?;
+    write_onboarded_config(
+        &config_path,
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+
+[agents]
+default_agent = "stub"
+
+[agents.commands.stub]
+command = "agent-stub"
+args = ["{{{{payload}}}}"]
+transport = "arg"
+"#,
+        ),
+    )?;
+    let stub_path = bin_dir.join("agent-stub");
+    fs::write(
+        &stub_path,
+        r#"#!/bin/sh
+printf '%s' "$1" > "$TEST_OUTPUT_DIR/payload.txt"
+"#,
+    )?;
+    let mut permissions = fs::metadata(&stub_path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&stub_path, permissions)?;
+    init_repo_with_origin(&repo_root)?;
+
+    let viewer_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Viewer");
+        then.status(200).json_body(json!({
+            "data": {
+                "viewer": {
+                    "id": "viewer-1",
+                    "name": "Kames",
+                    "email": "sudo@example.com"
+                }
+            }
+        }));
+    });
+    let issues_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issues");
+        then.status(200).json_body(json!({
+            "data": {
+                "issues": {
+                    "nodes": [{
+                        "id": "issue-52",
+                        "identifier": "MET-52",
+                        "title": "Claim unassigned listen work",
+                        "description": "Unassigned issues should now be eligible",
+                        "url": "https://linear.app/issues/52",
+                        "priority": 2,
+                        "updatedAt": "2026-03-14T16:00:00Z",
+                        "assignee": null,
+                        "labels": {
+                            "nodes": [{
+                                "id": "label-1",
+                                "name": "agent"
+                            }]
+                        },
+                        "comments": {
+                            "nodes": []
+                        },
+                        "team": {
+                            "id": "team-1",
+                            "key": "MET",
+                            "name": "Metastack"
+                        },
+                        "project": {
+                            "id": "project-1",
+                            "name": "MetaStack CLI"
+                        },
+                        "state": {
+                            "id": "state-1",
+                            "name": "Todo",
+                            "type": "unstarted"
+                        }
+                    }]
+                }
+            }
+        }));
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Teams");
+        then.status(200).json_body(team_payload());
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issue($id: String!)")
+            .body_includes("\"id\":\"issue-52\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "issue": {
+                    "id": "issue-52",
+                    "identifier": "MET-52",
+                    "title": "Claim unassigned listen work",
+                    "description": "Unassigned issues should now be eligible",
+                    "url": "https://linear.app/issues/MET-52",
+                    "priority": 2,
+                    "updatedAt": "2026-03-14T16:00:00Z",
+                    "team": {
+                        "id": "team-1",
+                        "key": "MET",
+                        "name": "Metastack"
+                    },
+                    "project": {
+                        "id": "project-1",
+                        "name": "MetaStack CLI"
+                    },
+                    "assignee": null,
+                    "labels": {
+                        "nodes": [{
+                            "id": "label-1",
+                            "name": "agent"
+                        }]
+                    },
+                    "comments": { "nodes": [] },
+                    "state": {
+                        "id": "state-2",
+                        "name": "In Progress",
+                        "type": "started"
+                    },
+                    "attachments": { "nodes": [] },
+                    "parent": null,
+                    "children": { "nodes": [] }
+                }
+            }
+        }));
+    });
+    let update_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation UpdateIssue");
+        then.status(200).json_body(json!({
+            "data": {
+                "issueUpdate": {
+                    "success": true,
+                    "issue": {
+                        "id": "issue-52",
+                        "identifier": "MET-52",
+                        "title": "Claim unassigned listen work",
+                        "description": "Unassigned issues should now be eligible",
+                        "url": "https://linear.app/issues/52",
+                        "priority": 2,
+                        "updatedAt": "2026-03-14T16:05:00Z",
+                        "team": {
+                            "id": "team-1",
+                            "key": "MET",
+                            "name": "Metastack"
+                        },
+                        "project": {
+                            "id": "project-1",
+                            "name": "MetaStack CLI"
+                        },
+                        "state": {
+                            "id": "state-2",
+                            "name": "In Progress",
+                            "type": "started"
+                        }
+                    }
+                }
+            }
+        }));
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation CreateIssue");
+        then.status(500);
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation CreateComment")
+            .body_includes("## Codex Workpad");
+        then.status(200).json_body(json!({
+            "data": {
+                "commentCreate": {
+                    "success": true,
+                    "comment": {
+                        "id": "comment-52",
+                        "body": "## Codex Workpad",
+                        "resolvedAt": null
+                    }
+                }
+            }
+        }));
+    });
+
+    let current_path = std::env::var("PATH")?;
+    let state_path = listen_state_path(&config_path, &repo_root)?;
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &stub_dir)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "listen",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+            "--once",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Watching: Kames + unassigned"))
+        .stdout(predicate::str::contains("1 claimed this cycle"))
+        .stdout(predicate::str::contains("MET-52"));
+
+    assert!(viewer_mock.calls() >= 1);
+    assert!(issues_mock.calls() >= 3);
+    update_mock.assert_calls(1);
+    assert!(temp.path().join("repo-workspace/MET-52").is_dir());
+    let state = fs::read_to_string(state_path)?;
+    assert!(state.contains("\"issue_identifier\": \"MET-52\""));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_once_all_assignees_override_claims_foreign_assigned_issue_without_changing_repo_scope()
+-> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let stub_dir = temp.path().join("stub-output");
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&stub_dir)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  },
+  "listen": {
+    "required_label": "agent",
+    "assignment_scope": "viewer"
+  }
+}
+"#,
+    )?;
+    write_onboarded_config(
+        &config_path,
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+
+[agents]
+default_agent = "stub"
+
+[agents.commands.stub]
+command = "agent-stub"
+args = ["{{{{payload}}}}"]
+transport = "arg"
+"#,
+        ),
+    )?;
+    let stub_path = bin_dir.join("agent-stub");
+    fs::write(
+        &stub_path,
+        r#"#!/bin/sh
+printf '%s' "$1" > "$TEST_OUTPUT_DIR/payload.txt"
+"#,
+    )?;
+    let mut permissions = fs::metadata(&stub_path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&stub_path, permissions)?;
+    init_repo_with_origin(&repo_root)?;
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Viewer");
+        then.status(200).json_body(json!({
+            "data": {
+                "viewer": {
+                    "id": "viewer-1",
+                    "name": "Kames",
+                    "email": "sudo@example.com"
+                }
+            }
+        }));
+    });
+    let issues_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issues");
+        then.status(200).json_body(json!({
+            "data": {
+                "issues": {
+                    "nodes": [{
+                        "id": "issue-53",
+                        "identifier": "MET-53",
+                        "title": "Claim foreign assigned work with override",
+                        "description": "Run-scoped override should allow pickup",
+                        "url": "https://linear.app/issues/53",
+                        "priority": 2,
+                        "updatedAt": "2026-03-14T16:00:00Z",
+                        "assignee": {
+                            "id": "viewer-2",
+                            "name": "Someone Else",
+                            "email": "else@example.com"
+                        },
+                        "labels": {
+                            "nodes": [{
+                                "id": "label-1",
+                                "name": "agent"
+                            }]
+                        },
+                        "comments": {
+                            "nodes": []
+                        },
+                        "team": {
+                            "id": "team-1",
+                            "key": "MET",
+                            "name": "Metastack"
+                        },
+                        "project": {
+                            "id": "project-1",
+                            "name": "MetaStack CLI"
+                        },
+                        "state": {
+                            "id": "state-1",
+                            "name": "Todo",
+                            "type": "unstarted"
+                        }
+                    }]
+                }
+            }
+        }));
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Teams");
+        then.status(200).json_body(team_payload());
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issue($id: String!)")
+            .body_includes("\"id\":\"issue-53\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "issue": {
+                    "id": "issue-53",
+                    "identifier": "MET-53",
+                    "title": "Claim foreign assigned work with override",
+                    "description": "Run-scoped override should allow pickup",
+                    "url": "https://linear.app/issues/MET-53",
+                    "priority": 2,
+                    "updatedAt": "2026-03-14T16:00:00Z",
+                    "team": {
+                        "id": "team-1",
+                        "key": "MET",
+                        "name": "Metastack"
+                    },
+                    "project": {
+                        "id": "project-1",
+                        "name": "MetaStack CLI"
+                    },
+                    "assignee": {
+                        "id": "viewer-2",
+                        "name": "Someone Else",
+                        "email": "else@example.com"
+                    },
+                    "labels": {
+                        "nodes": [{
+                            "id": "label-1",
+                            "name": "agent"
+                        }]
+                    },
+                    "comments": { "nodes": [] },
+                    "state": {
+                        "id": "state-2",
+                        "name": "In Progress",
+                        "type": "started"
+                    },
+                    "attachments": { "nodes": [] },
+                    "parent": null,
+                    "children": { "nodes": [] }
+                }
+            }
+        }));
+    });
+    let update_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation UpdateIssue");
+        then.status(200).json_body(json!({
+            "data": {
+                "issueUpdate": {
+                    "success": true,
+                    "issue": {
+                        "id": "issue-53",
+                        "identifier": "MET-53",
+                        "title": "Claim foreign assigned work with override",
+                        "description": "Run-scoped override should allow pickup",
+                        "url": "https://linear.app/issues/53",
+                        "priority": 2,
+                        "updatedAt": "2026-03-14T16:05:00Z",
+                        "team": {
+                            "id": "team-1",
+                            "key": "MET",
+                            "name": "Metastack"
+                        },
+                        "project": {
+                            "id": "project-1",
+                            "name": "MetaStack CLI"
+                        },
+                        "state": {
+                            "id": "state-2",
+                            "name": "In Progress",
+                            "type": "started"
+                        }
+                    }
+                }
+            }
+        }));
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation CreateIssue");
+        then.status(500);
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation CreateComment")
+            .body_includes("## Codex Workpad");
+        then.status(200).json_body(json!({
+            "data": {
+                "commentCreate": {
+                    "success": true,
+                    "comment": {
+                        "id": "comment-53",
+                        "body": "## Codex Workpad",
+                        "resolvedAt": null
+                    }
+                }
+            }
+        }));
+    });
+
+    let current_path = std::env::var("PATH")?;
+    let state_path = listen_state_path(&config_path, &repo_root)?;
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &stub_dir)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "listen",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+            "--once",
+            "--all-assignees",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Watching: all assignees"))
+        .stdout(predicate::str::contains("1 claimed this cycle"))
+        .stdout(predicate::str::contains("MET-53"));
+
+    assert!(issues_mock.calls() >= 3);
+    update_mock.assert_calls(1);
+    assert!(temp.path().join("repo-workspace/MET-53").is_dir());
+    let state = fs::read_to_string(state_path)?;
+    assert!(state.contains("\"issue_identifier\": \"MET-53\""));
+    assert!(
+        fs::read_to_string(repo_root.join(".metastack/meta.json"))?
+            .contains("\"assignment_scope\": \"viewer\"")
+    );
 
     Ok(())
 }

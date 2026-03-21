@@ -2,13 +2,16 @@ use std::io;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers, MouseEvent, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use ratatui::backend::{CrosstermBackend, TestBackend};
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
@@ -16,6 +19,8 @@ use ratatui::{Frame, Terminal};
 
 use super::WorkflowState;
 use crate::tui::fields::{InputFieldState, SelectFieldState};
+use crate::tui::keybindings::KeybindingPolicy;
+use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph, wrapped_rows};
 
 #[derive(Debug, Clone)]
 pub struct IssueCreateFormContext {
@@ -39,6 +44,7 @@ pub struct IssueCreateFormOptions {
     pub width: u16,
     pub height: u16,
     pub actions: Vec<IssueCreateAction>,
+    pub vim_mode: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -112,11 +118,13 @@ const PRIORITY_OPTIONS: [PriorityOption; 5] = [
 
 #[derive(Debug, Clone)]
 struct IssueCreateApp {
+    keybindings: KeybindingPolicy,
     context: IssueCreateFormContext,
     step: CreateStep,
     step_focus: StatusPriorityFocus,
     title: InputFieldState,
     description: InputFieldState,
+    summary_scroll: ScrollState,
     state_field: SelectFieldState,
     priority_field: SelectFieldState,
     error: Option<String>,
@@ -128,6 +136,7 @@ pub fn run_issue_create_form(
     options: IssueCreateFormOptions,
 ) -> Result<IssueCreateFormExit> {
     let mut app = IssueCreateApp::new(context, prefill)?;
+    app.keybindings = KeybindingPolicy::new(options.vim_mode);
 
     if options.render_once {
         return render_once(app, options);
@@ -135,7 +144,7 @@ pub fn run_issue_create_form(
 
     let mut stdout = io::stdout();
     enable_raw_mode()?;
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let _cleanup = TerminalCleanup;
 
     let backend = CrosstermBackend::new(stdout);
@@ -147,11 +156,21 @@ pub fn run_issue_create_form(
         if event::poll(Duration::from_millis(250))? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    if let Some(exit) = app.handle_key(key) {
+                    let size = terminal.size()?;
+                    let viewport = step_input_viewport(size.into());
+                    if let Some(exit) = app.handle_key_in_viewport(key, viewport) {
                         return Ok(exit);
                     }
                 }
                 Event::Paste(text) => app.handle_paste(&text),
+                Event::Mouse(mouse) => {
+                    let size = terminal.size()?;
+                    let _ = app.handle_mouse_in_viewport(
+                        mouse,
+                        step_input_viewport(size.into()),
+                        summary_viewport(size.into()),
+                    );
+                }
                 _ => {}
             }
         }
@@ -230,30 +249,34 @@ fn render_step_list(frame: &mut Frame<'_>, app: &IssueCreateApp, area: ratatui::
 fn render_step_panel(frame: &mut Frame<'_>, app: &IssueCreateApp, area: ratatui::layout::Rect) {
     match app.step {
         CreateStep::Title => {
-            let rendered = app.title.render("Type the issue title...", true);
             let block = Block::default()
                 .borders(Borders::ALL)
                 .title("Step 1 of 3: Title [editing]")
                 .border_style(Style::default().add_modifier(Modifier::BOLD));
             let inner = block.inner(area);
-            let paragraph = Paragraph::new(rendered.text.clone())
-                .block(block)
-                .wrap(Wrap { trim: false });
+            let rendered = app.title.render_with_viewport(
+                "Type the issue title...",
+                true,
+                inner.width,
+                inner.height,
+            );
+            let paragraph = rendered.paragraph(block);
             frame.render_widget(paragraph, area);
             rendered.set_cursor(frame, inner);
         }
         CreateStep::Description => {
-            let rendered = app
-                .description
-                .render("Type the issue description...", true);
             let block = Block::default()
                 .borders(Borders::ALL)
                 .title("Step 2 of 3: Description [editing]")
                 .border_style(Style::default().add_modifier(Modifier::BOLD));
             let inner = block.inner(area);
-            let paragraph = Paragraph::new(rendered.text.clone())
-                .block(block)
-                .wrap(Wrap { trim: false });
+            let rendered = app.description.render_with_viewport(
+                "Type the issue description...",
+                true,
+                inner.width,
+                inner.height,
+            );
+            let paragraph = rendered.paragraph(block);
             frame.render_widget(paragraph, area);
             rendered.set_cursor(frame, inner);
         }
@@ -322,35 +345,9 @@ fn render_priorities(frame: &mut Frame<'_>, app: &IssueCreateApp, area: ratatui:
 }
 
 fn render_summary(frame: &mut Frame<'_>, app: &IssueCreateApp, area: ratatui::layout::Rect) {
-    let description = if app.description.value().trim().is_empty() {
-        "No description".to_string()
-    } else {
-        app.description
-            .value()
-            .lines()
-            .map(str::trim)
-            .collect::<Vec<_>>()
-            .join(" / ")
-    };
-    let summary = vec![
-        Line::from(format!(
-            "Title: {}",
-            if app.title.value().trim().is_empty() {
-                "Untitled issue"
-            } else {
-                app.title.value().trim()
-            }
-        )),
-        Line::from(format!("Description: {description}")),
-        Line::from(format!(
-            "State: {}",
-            app.selected_state_name().unwrap_or("Unassigned")
-        )),
-        Line::from(format!("Priority: {}", app.selected_priority_label())),
-    ];
-    let paragraph = Paragraph::new(Text::from(summary))
-        .block(Block::default().borders(Borders::ALL).title("Summary"))
-        .wrap(Wrap { trim: false });
+    let paragraph =
+        scrollable_paragraph(app.summary_text(), "Summary [scroll]", &app.summary_scroll)
+            .wrap(Wrap { trim: false });
     frame.render_widget(paragraph, area);
 }
 
@@ -358,7 +355,7 @@ fn render_footer(frame: &mut Frame<'_>, app: &IssueCreateApp, area: ratatui::lay
     let controls = match app.step {
         CreateStep::Title => "Type the title. Enter or Tab advances. Esc cancels the create flow.",
         CreateStep::Description => {
-            "Type the description. Enter advances. Shift+Enter inserts a newline. Tab advances. Shift+Tab goes back."
+            "Type the description. Up/Down and PgUp/PgDn/Home/End move through wrapped content. Shift+Enter inserts a newline. Mouse wheel scrolls when the description or summary pane is hovered. Enter advances. Tab advances. Shift+Tab goes back."
         }
         CreateStep::StatusPriority => {
             "Use Up/Down in the active list. Left/Right switches focus. Enter submits. Shift+Tab goes back."
@@ -394,18 +391,53 @@ impl IssueCreateApp {
             .collect();
 
         Ok(Self {
+            keybindings: KeybindingPolicy::new(false),
             context,
             step: CreateStep::Title,
             step_focus: StatusPriorityFocus::State,
             title: InputFieldState::new(prefill.title.unwrap_or_default()),
             description: InputFieldState::multiline(prefill.description.unwrap_or_default()),
+            summary_scroll: ScrollState::default(),
             state_field: SelectFieldState::new(state_options, selected_state),
             priority_field: SelectFieldState::new(priority_options, selected_priority),
             error: None,
         })
     }
 
+    #[cfg(test)]
     fn handle_key(&mut self, key: KeyEvent) -> Option<IssueCreateFormExit> {
+        self.handle_key_in_viewport(
+            key,
+            step_input_viewport(ratatui::layout::Rect::new(0, 0, 120, 24)),
+        )
+    }
+
+    fn handle_key_in_viewport(
+        &mut self,
+        key: KeyEvent,
+        viewport: ratatui::layout::Rect,
+    ) -> Option<IssueCreateFormExit> {
+        if self.step == CreateStep::StatusPriority {
+            if let Some(delta) = self.keybindings.vertical_delta(key) {
+                return self.apply_action(if delta < 0 {
+                    IssueCreateAction::Up
+                } else {
+                    IssueCreateAction::Down
+                });
+            }
+            if let Some(delta) = self.keybindings.horizontal_delta(key) {
+                return self.apply_action(if delta < 0 {
+                    IssueCreateAction::Left
+                } else {
+                    IssueCreateAction::Right
+                });
+            }
+        }
+
+        if self.handle_text_navigation_key(key, viewport) {
+            return None;
+        }
+
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 Some(IssueCreateFormExit::Cancelled)
@@ -415,7 +447,7 @@ impl IssueCreateApp {
                 None
             }
             KeyCode::Char(_) | KeyCode::Backspace => {
-                self.apply_text_key(key);
+                self.apply_text_key(key, viewport);
                 None
             }
             KeyCode::Up => self.apply_action(IssueCreateAction::Up),
@@ -428,6 +460,56 @@ impl IssueCreateApp {
             KeyCode::Esc => self.apply_action(IssueCreateAction::Esc),
             _ => None,
         }
+    }
+
+    fn handle_text_navigation_key(
+        &mut self,
+        key: KeyEvent,
+        viewport: ratatui::layout::Rect,
+    ) -> bool {
+        match key.code {
+            KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::PageUp
+            | KeyCode::PageDown
+            | KeyCode::Home
+            | KeyCode::End
+                if self.step != CreateStep::StatusPriority =>
+            {
+                self.apply_text_key(key, viewport);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn handle_mouse_in_viewport(
+        &mut self,
+        mouse: MouseEvent,
+        viewport: ratatui::layout::Rect,
+        summary_viewport: ratatui::layout::Rect,
+    ) -> bool {
+        if !matches!(
+            mouse.kind,
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+        ) {
+            return false;
+        }
+
+        if self.summary_scroll.apply_mouse_in_viewport(
+            mouse,
+            summary_viewport,
+            self.summary_content_rows(summary_viewport.width),
+        ) {
+            return true;
+        }
+
+        if self.step != CreateStep::Description {
+            return false;
+        }
+
+        self.description
+            .handle_mouse_scroll(mouse, viewport, viewport.width, viewport.height)
     }
 
     fn apply_action(&mut self, action: IssueCreateAction) -> Option<IssueCreateFormExit> {
@@ -496,14 +578,18 @@ impl IssueCreateApp {
         }
     }
 
-    fn apply_text_key(&mut self, key: KeyEvent) {
+    fn apply_text_key(&mut self, key: KeyEvent, viewport: ratatui::layout::Rect) {
         self.error = None;
         match self.step {
             CreateStep::Title => {
-                let _ = self.title.handle_key(key);
+                let _ = self
+                    .title
+                    .handle_key_with_viewport(key, viewport.width, viewport.height);
             }
             CreateStep::Description => {
-                let _ = self.description.handle_key(key);
+                let _ =
+                    self.description
+                        .handle_key_with_viewport(key, viewport.width, viewport.height);
             }
             CreateStep::StatusPriority => {}
         }
@@ -557,6 +643,90 @@ impl IssueCreateApp {
     fn selected_priority_label(&self) -> &'static str {
         PRIORITY_OPTIONS[self.priority_field.selected()].label
     }
+
+    fn summary_text(&self) -> Text<'static> {
+        let description = if self.description.value().trim().is_empty() {
+            "No description".to_string()
+        } else {
+            self.description.value().trim_end().to_string()
+        };
+        Text::from(vec![
+            Line::from(format!(
+                "Title: {}",
+                if self.title.value().trim().is_empty() {
+                    "Untitled issue"
+                } else {
+                    self.title.value().trim()
+                }
+            )),
+            Line::from(""),
+            Line::from("Description:"),
+            Line::from(""),
+            Line::from(description),
+            Line::from(""),
+            Line::from(format!(
+                "State: {}",
+                self.selected_state_name().unwrap_or("Unassigned")
+            )),
+            Line::from(format!("Priority: {}", self.selected_priority_label())),
+        ])
+    }
+
+    fn summary_content_rows(&self, width: u16) -> usize {
+        wrapped_rows(&plain_text(&self.summary_text()), width.max(1))
+    }
+}
+
+fn step_input_viewport(area: ratatui::layout::Rect) -> ratatui::layout::Rect {
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(0),
+            Constraint::Length(4),
+        ])
+        .split(area);
+    let body = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(24),
+            Constraint::Min(0),
+            Constraint::Length(34),
+        ])
+        .split(layout[1]);
+    let panel = body[1];
+    ratatui::layout::Rect::new(
+        panel.x.saturating_add(1),
+        panel.y.saturating_add(1),
+        panel.width.saturating_sub(2).max(1),
+        panel.height.saturating_sub(2).max(1),
+    )
+}
+
+fn summary_viewport(area: Rect) -> Rect {
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(0),
+            Constraint::Length(4),
+        ])
+        .split(area);
+    let body = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(24),
+            Constraint::Min(0),
+            Constraint::Length(34),
+        ])
+        .split(layout[1]);
+    let panel = body[2];
+    Rect::new(
+        panel.x.saturating_add(1),
+        panel.y.saturating_add(1),
+        panel.width.saturating_sub(2).max(1),
+        panel.height.saturating_sub(2).max(1),
+    )
 }
 
 impl CreateStep {
@@ -646,7 +816,7 @@ impl Drop for TerminalCleanup {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
         let mut stdout = io::stdout();
-        let _ = execute!(stdout, LeaveAlternateScreen);
+        let _ = execute!(stdout, DisableMouseCapture, LeaveAlternateScreen);
     }
 }
 
@@ -654,10 +824,11 @@ impl Drop for TerminalCleanup {
 mod tests {
     use super::{
         CreateStep, IssueCreateAction, IssueCreateApp, IssueCreateFormContext, IssueCreateFormExit,
-        IssueCreateFormPrefill,
+        IssueCreateFormPrefill, render_issue_create_form,
     };
     use crate::linear::WorkflowState;
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+    use ratatui::{Terminal, backend::TestBackend, layout::Rect};
 
     fn context() -> IssueCreateFormContext {
         IssueCreateFormContext {
@@ -677,6 +848,27 @@ mod tests {
                 },
             ],
         }
+    }
+
+    fn render_editor_viewport_snapshot(app: &IssueCreateApp, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("terminal should initialize");
+        terminal
+            .draw(|frame| render_issue_create_form(frame, app))
+            .expect("create form should render");
+        let area = super::step_input_viewport(ratatui::layout::Rect::new(0, 0, width, height));
+        let buffer = terminal.backend().buffer();
+        let mut lines = Vec::new();
+
+        for y in area.y..area.y.saturating_add(area.height) {
+            let mut line = String::new();
+            for x in area.x..area.x.saturating_add(area.width) {
+                line.push_str(buffer[(x, y)].symbol());
+            }
+            lines.push(line.trim_end().to_string());
+        }
+
+        lines.join("\n")
     }
 
     #[test]
@@ -774,5 +966,157 @@ mod tests {
         assert_eq!(exit, None);
         assert_eq!(app.description.value(), "");
         assert_eq!(app.step, CreateStep::StatusPriority);
+    }
+
+    #[test]
+    fn issue_create_app_page_down_moves_within_long_description() {
+        let mut app = IssueCreateApp::new(
+            context(),
+            IssueCreateFormPrefill {
+                title: Some("Add docs".to_string()),
+                description: Some(
+                    (1..=20)
+                        .map(|index| format!("line {index}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+                state: None,
+                priority: None,
+            },
+        )
+        .expect("app should build");
+        app.step = CreateStep::Description;
+        let _ = app
+            .description
+            .handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+
+        let before = app.description.cursor();
+        let exit = app.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+
+        assert_eq!(exit, None);
+        assert!(app.description.cursor() > before);
+    }
+
+    #[test]
+    fn issue_create_description_snapshot_scrolls_to_visible_bottom_rows() {
+        let mut app = IssueCreateApp::new(
+            context(),
+            IssueCreateFormPrefill {
+                title: Some("Add docs".to_string()),
+                description: Some(
+                    (1..=20)
+                        .map(|index| format!("CREATE-{index:02}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+                state: None,
+                priority: None,
+            },
+        )
+        .expect("app should build");
+        app.step = CreateStep::Description;
+
+        let exit = app.handle_key_in_viewport(
+            KeyEvent::new(KeyCode::End, KeyModifiers::NONE),
+            super::step_input_viewport(ratatui::layout::Rect::new(0, 0, 140, 16)),
+        );
+
+        assert_eq!(exit, None);
+
+        let snapshot = render_editor_viewport_snapshot(&app, 140, 16);
+        assert!(snapshot.contains("CREATE-20"));
+        assert!(!snapshot.contains("CREATE-01"));
+    }
+
+    #[test]
+    fn issue_create_description_up_down_stay_in_editor() {
+        let mut app = IssueCreateApp::new(
+            context(),
+            IssueCreateFormPrefill {
+                title: Some("Add docs".to_string()),
+                description: Some(
+                    (1..=20)
+                        .map(|index| format!("line {index}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+                state: None,
+                priority: None,
+            },
+        )
+        .expect("app should build");
+        app.step = CreateStep::Description;
+        let start_cursor = app.description.cursor();
+
+        let exit = app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+
+        assert!(exit.is_none());
+        assert_eq!(app.step, CreateStep::Description);
+        assert!(app.description.cursor() < start_cursor);
+    }
+
+    #[test]
+    fn issue_create_description_mouse_wheel_scrolls_only_when_description_is_active() {
+        let mut app = IssueCreateApp::new(
+            context(),
+            IssueCreateFormPrefill {
+                title: Some("Add docs".to_string()),
+                description: Some(
+                    (1..=20)
+                        .map(|index| format!("line {index}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+                state: None,
+                priority: None,
+            },
+        )
+        .expect("app should build");
+        let viewport = Rect::new(0, 0, 120, 8);
+        let mouse = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 2,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        assert!(!app.handle_mouse_in_viewport(mouse, viewport, Rect::new(40, 40, 10, 4)));
+        app.step = CreateStep::Description;
+        assert!(app.handle_mouse_in_viewport(mouse, viewport, Rect::new(40, 40, 10, 4)));
+        assert!(
+            app.description
+                .render_with_viewport("", true, viewport.width, viewport.height)
+                .scroll_offset
+                > 0
+        );
+    }
+
+    #[test]
+    fn issue_create_summary_mouse_wheel_scrolls_long_description_preview() {
+        let mut app = IssueCreateApp::new(
+            context(),
+            IssueCreateFormPrefill {
+                title: Some("Add docs".to_string()),
+                description: Some(
+                    (1..=40)
+                        .map(|index| format!("summary line {index}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+                state: None,
+                priority: None,
+            },
+        )
+        .expect("app should build");
+        let viewport = super::summary_viewport(Rect::new(0, 0, 120, 16));
+        let mouse = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: viewport.x.saturating_add(1),
+            row: viewport.y.saturating_add(1),
+            modifiers: KeyModifiers::NONE,
+        };
+
+        assert!(app.handle_mouse_in_viewport(mouse, Rect::new(0, 0, 40, 8), viewport));
+        assert!(app.summary_scroll.offset() > 0);
     }
 }

@@ -14,7 +14,7 @@ query Projects($first: Int!) {
       description
       url
       progress
-      teams {
+      teams(first: 10) {
         nodes {
           id
           key

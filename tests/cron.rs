@@ -3,6 +3,21 @@
 include!("support/common.rs");
 
 #[cfg(unix)]
+fn write_onboarded_config(
+    config_path: &std::path::Path,
+    config: impl AsRef<str>,
+) -> Result<(), Box<dyn Error>> {
+    fs::write(
+        config_path,
+        format!(
+            "{}\n[onboarding]\ncompleted = true\n",
+            config.as_ref().trim_end()
+        ),
+    )?;
+    Ok(())
+}
+
+#[cfg(unix)]
 fn prepend_path(bin_dir: &std::path::Path) -> Result<String, Box<dyn Error>> {
     let current_path = std::env::var("PATH")?;
     Ok(format!("{}:{}", bin_dir.display(), current_path))
@@ -12,9 +27,12 @@ fn prepend_path(bin_dir: &std::path::Path) -> Result<String, Box<dyn Error>> {
 #[test]
 fn cron_init_creates_a_markdown_job_template() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
+    let config_path = temp.path().join("metastack.toml");
+    write_onboarded_config(&config_path, "")?;
 
     cli()
         .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
         .args([
             "cron",
             "init",
@@ -42,17 +60,23 @@ fn cron_init_creates_a_markdown_job_template() -> Result<(), Box<dyn Error>> {
 #[test]
 fn cron_init_render_once_shows_dashboard_fields() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
+    let config_path = temp.path().join("metastack.toml");
+    write_onboarded_config(&config_path, "")?;
 
     cli()
         .current_dir(temp.path())
-        .args(["cron", "init", "--render-once"])
+        .env("METASTACK_CONFIG", &config_path)
+        .args(["cron", "init", "--render-once", "--width", "220"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Cron Init Dashboard"))
         .stdout(predicate::str::contains("Schedule preset: Every N minutes"))
         .stdout(predicate::str::contains("Agent prompt: <blank>"))
         .stdout(predicate::str::contains("Save: Create cron job"))
-        .stdout(predicate::str::contains("Execution contract:"));
+        .stdout(predicate::str::contains("Execution contract:"))
+        .stdout(predicate::str::contains("Prompt preview"))
+        .stdout(predicate::str::contains("mouse wheel scrolls the editor."))
+        .stdout(predicate::str::contains("Ctrl+V pastes text,"));
 
     Ok(())
 }
@@ -60,7 +84,9 @@ fn cron_init_render_once_shows_dashboard_fields() -> Result<(), Box<dyn Error>> 
 #[test]
 fn cron_init_render_once_prefills_existing_job_values() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
+    let config_path = temp.path().join("metastack.toml");
     fs::create_dir_all(temp.path().join(".metastack/cron"))?;
+    write_onboarded_config(&config_path, "")?;
     fs::write(
         temp.path().join(".metastack/cron/nightly.md"),
         r#"---
@@ -79,7 +105,8 @@ Review old output
 
     cli()
         .current_dir(temp.path())
-        .args(["cron", "init", "nightly", "--render-once"])
+        .env("METASTACK_CONFIG", &config_path)
+        .args(["cron", "init", "nightly", "--render-once", "--width", "220"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Name: nightly"))
@@ -93,12 +120,46 @@ Review old output
 }
 
 #[test]
-fn cron_init_no_interactive_writes_agent_prompt_fields() -> Result<(), Box<dyn Error>> {
+fn cron_init_render_once_prefills_prompt_and_rejection_help() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(temp.path().join(".metastack/cron"))?;
+    write_onboarded_config(&config_path, "")?;
+    fs::write(
+        temp.path().join(".metastack/cron/nightly.md"),
+        r#"---
+schedule: "0 * * * *"
+agent: "codex"
+---
+
+Review old output
+"#,
+    )?;
 
     cli()
         .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
+        .args(["cron", "init", "nightly", "--render-once", "--width", "220"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Agent prompt: Review old output"))
+        .stdout(predicate::str::contains("Prompt preview"))
+        .stdout(predicate::str::contains("Ctrl+V pastes text,"));
+
+    Ok(())
+}
+
+#[test]
+fn cron_init_no_interactive_writes_agent_prompt_fields() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let config_path = temp.path().join("metastack.toml");
+    write_onboarded_config(&config_path, "")?;
+
+    let assert = cli()
+        .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
         .args([
+            "runtime",
             "cron",
             "init",
             "nightly",
@@ -113,15 +174,59 @@ fn cron_init_no_interactive_writes_agent_prompt_fields() -> Result<(), Box<dyn E
             "Review the command output",
         ])
         .assert()
-        .success()
-        .stdout(predicate::str::contains(
-            "Created cron job template at .metastack/cron/nightly.md",
-        ));
+        .success();
+
+    let payload: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout)?;
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["command"], "runtime.cron.init");
+    assert_eq!(payload["result"]["status"], "created");
+    assert_eq!(payload["result"]["name"], "nightly");
+    assert_eq!(payload["result"]["path"], ".metastack/cron/nightly.md");
+    assert_eq!(payload["result"]["schedule"], "0 * * * *");
+    assert_eq!(payload["result"]["command"], "echo hello");
+    assert_eq!(payload["result"]["agent"], "codex");
 
     let contents = fs::read_to_string(temp.path().join(".metastack/cron/nightly.md"))?;
     assert!(contents.contains("agent: codex"));
     assert!(!contents.contains("prompt: Review the command output"));
     assert!(contents.contains("Review the command output"));
+
+    Ok(())
+}
+
+#[test]
+fn cron_init_no_interactive_missing_schedule_emits_structured_json_error()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let config_path = temp.path().join("metastack.toml");
+    write_onboarded_config(&config_path, "")?;
+
+    let assert = cli()
+        .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "runtime",
+            "cron",
+            "init",
+            "nightly",
+            "--no-interactive",
+            "--command",
+            "echo hello",
+        ])
+        .assert()
+        .failure();
+
+    let payload: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout)?;
+    assert_eq!(payload["status"], "error");
+    assert_eq!(payload["command"], "runtime.cron.init");
+    assert_eq!(payload["error"]["code"], "invalid_input");
+    assert!(
+        payload["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("`--schedule` is required")
+    );
+    assert!(assert.get_output().stderr.is_empty());
 
     Ok(())
 }
@@ -134,7 +239,7 @@ fn cron_run_executes_shell_command_and_agent_with_shared_context() -> Result<(),
     let stub_path = temp.path().join("cron-agent-stub");
 
     fs::create_dir_all(&output_dir)?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[agents]
@@ -246,7 +351,7 @@ fn cron_run_supports_agent_only_jobs_without_a_shell_command() -> Result<(), Box
     let stub_path = temp.path().join("cron-agent-stub");
 
     fs::create_dir_all(&output_dir)?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[agents]
@@ -328,7 +433,7 @@ fn cron_run_prefers_route_specific_agent_over_global_default() -> Result<(), Box
 
     fs::create_dir_all(&output_dir)?;
     fs::create_dir_all(&bin_dir)?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         r#"[agents]
 default_agent = "global-stub"
@@ -408,7 +513,7 @@ fn cron_run_reports_agent_failures_and_records_runtime_error() -> Result<(), Box
     let config_path = temp.path().join("metastack.toml");
     let stub_path = temp.path().join("cron-agent-stub");
 
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[agents]
@@ -472,9 +577,12 @@ exit 9
 #[test]
 fn cron_status_reports_known_jobs_while_stopped() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
+    let config_path = temp.path().join("metastack.toml");
+    write_onboarded_config(&config_path, "")?;
 
     cli()
         .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
         .args([
             "cron",
             "init",
@@ -489,6 +597,7 @@ fn cron_status_reports_known_jobs_while_stopped() -> Result<(), Box<dyn Error>> 
 
     cli()
         .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
         .args(["cron", "status"])
         .assert()
         .success()
@@ -503,13 +612,16 @@ fn cron_status_reports_known_jobs_while_stopped() -> Result<(), Box<dyn Error>> 
 #[test]
 fn cron_start_replaces_a_stale_pid_and_restarts_the_scheduler() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
+    let config_path = temp.path().join("metastack.toml");
     let runtime_dir = temp.path().join(".metastack/cron/.runtime");
     let pid_path = runtime_dir.join("scheduler.pid");
+    write_onboarded_config(&config_path, "")?;
     fs::create_dir_all(&runtime_dir)?;
     fs::write(&pid_path, "999999\n")?;
 
     let assert = meta()
         .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
         .args(["cron", "start", "--poll-interval-seconds", "1"])
         .assert()
         .success()
@@ -525,6 +637,7 @@ fn cron_start_replaces_a_stale_pid_and_restarts_the_scheduler() -> Result<(), Bo
 
     meta()
         .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
         .args(["cron", "stop"])
         .assert()
         .success()
@@ -539,9 +652,12 @@ fn cron_start_replaces_a_stale_pid_and_restarts_the_scheduler() -> Result<(), Bo
 #[test]
 fn cron_start_status_and_stop_manage_a_detached_scheduler() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
+    let config_path = temp.path().join("metastack.toml");
+    write_onboarded_config(&config_path, "")?;
 
     cli()
         .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
         .args([
             "cron",
             "init",
@@ -556,6 +672,7 @@ fn cron_start_status_and_stop_manage_a_detached_scheduler() -> Result<(), Box<dy
 
     meta()
         .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
         .args(["cron", "start", "--poll-interval-seconds", "1"])
         .assert()
         .success()
@@ -569,6 +686,7 @@ fn cron_start_status_and_stop_manage_a_detached_scheduler() -> Result<(), Box<dy
 
     meta()
         .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
         .args(["cron", "status"])
         .assert()
         .success()
@@ -579,6 +697,7 @@ fn cron_start_status_and_stop_manage_a_detached_scheduler() -> Result<(), Box<dy
 
     meta()
         .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
         .args(["cron", "stop"])
         .assert()
         .success()
@@ -595,6 +714,7 @@ fn cron_start_status_and_stop_manage_a_detached_scheduler() -> Result<(), Box<dy
 
     meta()
         .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
         .args(["cron", "status"])
         .assert()
         .success()

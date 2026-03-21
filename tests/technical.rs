@@ -3,6 +3,21 @@
 include!("support/common.rs");
 
 #[cfg(unix)]
+fn write_onboarded_config(
+    config_path: &Path,
+    config: impl AsRef<str>,
+) -> Result<(), Box<dyn Error>> {
+    fs::write(
+        config_path,
+        format!(
+            "{}\n[onboarding]\ncompleted = true\n",
+            config.as_ref().trim_end()
+        ),
+    )?;
+    Ok(())
+}
+
+#[cfg(unix)]
 #[test]
 fn technical_command_creates_a_child_issue_and_local_backlog_files() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
@@ -58,7 +73,7 @@ fn technical_command_creates_a_child_issue_and_local_backlog_files() -> Result<(
         repo_root.join(".metastack/backlog/_TEMPLATE/validation.md"),
         "# Validation\n\n- `meta backlog tech {{parent_identifier}}`\n- Generated on {{TODAY}}\n",
     )?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[agents]
@@ -115,53 +130,113 @@ JSON
     });
 
     server.mock(|when, then| {
+        let parent_issue_detail = serde_json::from_str::<serde_json::Value>(
+            &json!({
+                "data": {
+                    "issue": {
+                        "id": "parent-1",
+                        "identifier": "MET-35",
+                        "title": "Create the technical and sync commands",
+                        "description": "Context\n\nTechnical workflow.\n\n![diagram](http://127.0.0.1:0/images/issue-diagram.png)\n\n## Acceptance Criteria\n- Generate backlog docs from the template\n- Keep sync safe for the child ticket",
+                        "url": "https://linear.app/issues/MET-35",
+                        "priority": 2,
+                        "updatedAt": "2026-03-14T16:00:00Z",
+                        "team": {
+                            "id": "team-1",
+                            "key": "MET",
+                            "name": "Metastack"
+                        },
+                        "project": {
+                            "id": "project-1",
+                            "name": "MetaStack CLI"
+                        },
+                        "labels": { "nodes": [] },
+                        "comments": {
+                            "nodes": [{
+                                "id": "comment-1",
+                                "body": "Need parent art\n\n![comment-shot](REPLACE_COMMENT_IMAGE)",
+                                "createdAt": "2026-03-16T10:00:00Z",
+                                "user": {
+                                    "name": "Alice"
+                                },
+                                "resolvedAt": null
+                            }]
+                        },
+                        "state": {
+                            "id": "state-2",
+                            "name": "In Progress",
+                            "type": "started"
+                        },
+                        "attachments": { "nodes": [] },
+                        "parent": {
+                            "id": "meta-parent-1",
+                            "identifier": "MET-10",
+                            "title": "Parent context issue",
+                            "url": "https://linear.app/issues/MET-10",
+                            "description": "Parent issue context\n\n![parent-reference](REPLACE_PARENT_IMAGE)"
+                        },
+                        "children": { "nodes": [] }
+                    }
+                }
+            })
+            .to_string()
+            .replace(
+                "http://127.0.0.1:0/images/issue-diagram.png",
+                &server.url("/images/issue-diagram.png"),
+            )
+            .replace("REPLACE_COMMENT_IMAGE", &server.url("/images/comment-shot.jpg"))
+            .replace("REPLACE_PARENT_IMAGE", &server.url("/images/parent-reference.svg")),
+        )
+        .expect("parent issue detail should be valid json");
         when.method(POST)
             .path("/graphql")
             .body_includes("query Issue")
             .body_includes("\"id\":\"parent-1\"");
-        then.status(200).json_body(json!({
-            "data": {
-                "issue": issue_detail_node(
-                    "parent-1",
-                    "MET-35",
-                    "Create the technical and sync commands",
-                    "Context\n\nTechnical workflow.\n\n## Acceptance Criteria\n- Generate backlog docs from the template\n- Keep sync safe for the child ticket",
-                    Vec::new(),
-                    None,
-                )
-            }
-        }));
+        then.status(200).json_body(parent_issue_detail);
     });
 
     server.mock(|when, then| {
         when.method(POST)
             .path("/graphql")
-            .body_includes("query Issue")
-            .body_includes("\"id\":\"child-1\"");
+            .body_includes("query Issues");
         then.status(200).json_body(json!({
             "data": {
-                "issue": issue_detail_node(
-                    "child-1",
-                    "MET-36",
-                    "Technical: Create the technical and sync commands",
-                    "Technical child description",
-                    Vec::new(),
-                    Some(json!({
-                        "id": "parent-1",
-                        "identifier": "MET-35",
-                        "title": "Create the technical and sync commands",
-                        "url": "https://linear.app/issues/MET-35"
-                    })),
-                )
+                "issues": {
+                    "nodes": [child_issue.clone()]
+                }
             }
         }));
     });
-
     server.mock(|when, then| {
         when.method(POST)
             .path("/graphql")
             .body_includes("query Teams");
         then.status(200).json_body(team_payload());
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Projects");
+        then.status(200).json_body(json!({
+            "data": {
+                "projects": {
+                    "nodes": [{
+                        "id": "project-install",
+                        "name": "Install Project",
+                        "description": null,
+                        "url": "https://linear.app/projects/project-install",
+                        "progress": 0.5,
+                        "teams": {
+                            "nodes": [{
+                                "id": "team-1",
+                                "key": "MET",
+                                "name": "Metastack"
+                            }]
+                        }
+                    }]
+                }
+            }
+        }));
     });
 
     server.mock(|when, then| {
@@ -210,6 +285,7 @@ JSON
             .path("/graphql")
             .body_includes("mutation CreateIssue")
             .body_includes("\"parentId\":\"parent-1\"")
+            .body_includes("\"stateId\":\"state-backlog\"")
             .body_includes("\"labelIds\":[\"label-technical\"]")
             .body_includes("Agent-generated technical backlog");
         then.status(200).json_body(json!({
@@ -217,6 +293,26 @@ JSON
                 "issueCreate": {
                     "success": true,
                     "issue": child_issue
+                }
+            }
+        }));
+    });
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation CreateComment")
+            .body_includes("\"issueId\":\"child-1\"")
+            .body_includes("[harness-sync]");
+        then.status(200).json_body(json!({
+            "data": {
+                "commentCreate": {
+                    "success": true,
+                    "comment": {
+                        "id": "comment-sync-1",
+                        "body": "[harness-sync]\nupdated progress",
+                        "resolvedAt": null
+                    }
                 }
             }
         }));
@@ -245,6 +341,17 @@ JSON
         }));
     });
 
+    for path in [
+        "/images/issue-diagram.png",
+        "/images/comment-shot.jpg",
+        "/images/parent-reference.svg",
+    ] {
+        server.mock(move |when, then| {
+            when.method(GET).path(path);
+            then.status(200).body("image-bytes");
+        });
+    }
+
     for (index, file_name) in [
         "README.md",
         "checklist.md",
@@ -257,10 +364,15 @@ JSON
         "validation.md",
         "context/README.md",
         "context/context-note-template.md",
+        "context/ticket-discussion.md",
         "tasks/README.md",
         "tasks/workstream-template.md",
         "artifacts/README.md",
         "artifacts/artifact-template.md",
+        "artifacts/comment-1-comment-shot.jpg",
+        "artifacts/issue-diagram.png",
+        "artifacts/parent-parent-reference.svg",
+        "artifacts/ticket-images.md",
     ]
     .into_iter()
     .enumerate()
@@ -328,12 +440,13 @@ JSON
         });
     }
 
-    cli()
+    let assert = cli()
         .current_dir(&repo_root)
         .env("METASTACK_CONFIG", &config_path)
         .env("TEST_OUTPUT_DIR", &output_dir)
         .args([
             "technical",
+            "--no-interactive",
             "--api-key",
             "token",
             "--api-url",
@@ -341,11 +454,18 @@ JSON
             "MET-35",
         ])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("Pushed MET-36"))
-        .stdout(predicate::str::contains(
-            "Created technical sub-issue MET-36 under MET-35",
-        ));
+        .success();
+
+    let payload: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout)?;
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["command"], "backlog.tech");
+    assert_eq!(payload["result"]["child_issue"]["identifier"], "MET-36");
+    assert_eq!(payload["result"]["parent_issue"]["identifier"], "MET-35");
+    assert_eq!(
+        payload["result"]["backlog_path"],
+        ".metastack/backlog/MET-36"
+    );
+    assert_eq!(payload["result"]["cancelled"], false);
 
     let issue_dir = repo_root.join(".metastack/backlog/MET-36");
     let index = fs::read_to_string(issue_dir.join("index.md"))?;
@@ -357,6 +477,8 @@ JSON
     let validation = fs::read_to_string(issue_dir.join("validation.md"))?;
     let metadata = fs::read_to_string(issue_dir.join(".linear.json"))?;
     let payload = fs::read_to_string(output_dir.join("payload.txt"))?;
+    let ticket_images = fs::read_to_string(issue_dir.join("artifacts/ticket-images.md"))?;
+    let ticket_discussion = fs::read_to_string(issue_dir.join("context/ticket-discussion.md"))?;
 
     assert!(index.contains("Agent-generated technical backlog"));
     assert!(!index.contains("{{BACKLOG_TITLE}}"));
@@ -369,6 +491,16 @@ JSON
     assert!(validation.contains("meta backlog tech MET-35"));
     assert!(metadata.contains("\"identifier\": \"MET-36\""));
     assert!(metadata.contains("\"parent_identifier\": \"MET-35\""));
+    assert!(ticket_images.contains("| `issue-diagram.png` | diagram | Issue description |"));
+    assert!(
+        ticket_images
+            .contains("| `parent-parent-reference.svg` | parent-reference | Parent description |")
+    );
+    assert!(
+        ticket_images.contains("| `comment-1-comment-shot.jpg` | comment-shot | Need parent art |")
+    );
+    assert!(ticket_discussion.contains("### **Alice** (2026-03-16)"));
+    assert!(ticket_discussion.contains("![comment-shot](artifacts/comment-1-comment-shot.jpg)"));
     assert!(payload.contains("Parent Linear issue"));
     assert!(payload.contains("Create the technical and sync commands"));
     assert!(payload.contains("Injected workflow contract:"));
@@ -384,7 +516,39 @@ JSON
     assert!(payload.contains("## SCAN.md"));
     assert!(payload.contains("Selected acceptance criteria for this technical sub-ticket"));
     assert!(payload.contains("- Generate backlog docs from the template"));
+    assert!(payload.contains("Parent issue context:"));
+    assert!(payload.contains("Ticket discussion context:"));
+    assert!(payload.contains("Localized ticket images:"));
+    assert!(payload.contains("artifacts/issue-diagram.png"));
+    assert!(payload.contains("artifacts/parent-parent-reference.svg"));
+    assert!(payload.contains("Need parent art"));
     assert!(payload.contains("Repository directory snapshot"));
+
+    cli()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "sync",
+            "--api-key",
+            "token",
+            "--api-url",
+            &api_url,
+            "--render-once",
+            "--events",
+            "enter,enter,down,enter",
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "hint: `meta sync` is a compatibility alias; prefer `meta backlog sync`.",
+        ))
+        .stdout(predicate::str::contains("Backlog Search"))
+        .stdout(predicate::str::contains("Ready to push MET-36"))
+        .stdout(predicate::str::contains(
+            "Technical: Create the technical and sync commands",
+        ))
+        .stdout(predicate::str::contains("MET-35  Create the technical and sync commands").not());
+
     issue_labels_mock.assert_calls(1);
     create_issue_mock.assert_calls(1);
 
@@ -411,6 +575,7 @@ fn technical_command_requires_an_agent_to_generate_backlog_content() -> Result<(
 
     fs::create_dir_all(&repo_root)?;
     fs::create_dir_all(&empty_bin)?;
+    write_onboarded_config(&missing_config, "")?;
     write_minimal_planning_context(
         &repo_root,
         r#"{

@@ -8,7 +8,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use crossterm::event::{
-    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, KeyCode, KeyEventKind, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -22,7 +23,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use time::macros::format_description;
 use time::{OffsetDateTime, UtcOffset};
 
@@ -32,15 +33,27 @@ use crate::backlog::{
     TemplateContext, ensure_no_unresolved_placeholders, render_template_files, save_issue_metadata,
     write_rendered_backlog_item,
 };
-use crate::cli::{RunAgentArgs, SyncPushArgs, TechnicalArgs};
-use crate::config::{AGENT_ROUTE_BACKLOG_SPLIT, load_required_planning_meta};
+use crate::backlog_defaults::{
+    TechnicalTicketResolutionInput, TicketOptionOverrides, load_remembered_backlog_selection,
+    resolve_technical_ticket_defaults, save_remembered_backlog_selection,
+};
+use crate::cli::{RunAgentArgs, TechnicalArgs};
+use crate::config::{AGENT_ROUTE_BACKLOG_SPLIT, AppConfig, load_required_planning_meta};
 use crate::context::load_workflow_contract;
 use crate::fs::{PlanningPaths, canonicalize_existing_dir, display_path};
-use crate::linear::{IssueCreateSpec, IssueListFilters, IssueSummary};
+use crate::linear::browser::{
+    IssueSearchResult, render_issue_preview, render_issue_row, search_issues,
+};
+use crate::linear::{
+    IssueCreateSpec, IssueListFilters, IssueSummary, PreparedIssueContext, TicketDiscussionBudgets,
+    materialize_issue_context, prepare_issue_context, render_ticket_image_summary,
+};
+use crate::output::{MachineIssueSummary, render_json_success};
 use crate::progress::{LoadingPanelData, SPINNER_FRAMES, render_loading_panel};
 use crate::scaffold::{ensure_backlog_templates, ensure_planning_layout};
-use crate::sync_command::run_sync_push;
+use crate::sync_command::run_sync_push_for_issue;
 use crate::tui::fields::{InputFieldState, MultiSelectFieldState};
+use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph, wrapped_rows};
 use crate::{LinearCommandContext, load_linear_command_context};
 
 const ISSUE_PICKER_LIMIT: usize = 250;
@@ -62,6 +75,7 @@ struct TechnicalGeneratedBacklog {
     parent: IssueSummary,
     child_title: String,
     selected_acceptance_criteria: Vec<String>,
+    prepared_context: PreparedIssueContext,
     files: Vec<RenderedTemplateFile>,
 }
 
@@ -70,6 +84,8 @@ struct IssuePickerApp {
     query: InputFieldState,
     issues: Vec<IssueSummary>,
     selected: usize,
+    focus: IssuePickerFocus,
+    preview_scroll: ScrollState,
     error: Option<String>,
 }
 
@@ -77,6 +93,8 @@ struct IssuePickerApp {
 struct TechnicalReviewApp {
     generated: TechnicalGeneratedBacklog,
     selected_file: usize,
+    focus: TechnicalReviewFocus,
+    preview_scroll: ScrollState,
     error: Option<String>,
 }
 
@@ -95,6 +113,7 @@ struct LoadingApp {
 }
 
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 enum TechnicalStage {
     PickIssue(IssuePickerApp),
     SelectCriteria(AcceptanceCriteriaApp),
@@ -112,6 +131,7 @@ struct PendingTechnicalJob {
     previous_stage: Option<TechnicalRecoveryStage>,
 }
 
+#[allow(clippy::large_enum_variant)]
 enum TechnicalAction {
     None,
     SelectIssue(IssueSummary),
@@ -119,10 +139,23 @@ enum TechnicalAction {
     Confirm(TechnicalGeneratedBacklog),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IssuePickerFocus {
+    List,
+    Preview,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TechnicalReviewFocus {
+    Files,
+    Preview,
+}
+
 #[derive(Debug, Clone)]
 struct TechnicalGenerationRequest {
     parent: IssueSummary,
     selected_acceptance_criteria: Vec<String>,
+    discussion_budgets: TicketDiscussionBudgets,
 }
 
 #[derive(Debug, Clone)]
@@ -138,9 +171,64 @@ enum InteractiveTechnicalExit {
     Confirmed(TechnicalGeneratedBacklog),
 }
 
-pub async fn run_technical(args: &TechnicalArgs) -> Result<()> {
+#[derive(Debug, Clone)]
+pub(crate) struct TechnicalReport {
+    child: Option<IssueSummary>,
+    parent: Option<IssueSummary>,
+    backlog_path: Option<String>,
+    cancelled: bool,
+}
+
+impl TechnicalReport {
+    pub(crate) fn render(&self) -> String {
+        if self.cancelled {
+            return "Technical generation cancelled.".to_string();
+        }
+
+        match (&self.child, &self.parent, self.backlog_path.as_deref()) {
+            (Some(child), Some(parent), Some(backlog_path)) => format!(
+                "Created technical sub-issue {} under {} at {}.",
+                child.identifier, parent.identifier, backlog_path,
+            ),
+            _ => "Technical generation completed.".to_string(),
+        }
+    }
+
+    /// Render the technical-generation result in the standard machine-readable success envelope.
+    pub(crate) fn render_json(&self) -> Result<String> {
+        #[derive(Serialize)]
+        struct TechnicalResult {
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            child_issue: Option<MachineIssueSummary>,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            parent_issue: Option<MachineIssueSummary>,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            backlog_path: Option<String>,
+            cancelled: bool,
+        }
+
+        render_json_success(
+            "backlog.tech",
+            &TechnicalResult {
+                child_issue: self.child.as_ref().map(MachineIssueSummary::from),
+                parent_issue: self.parent.as_ref().map(MachineIssueSummary::from),
+                backlog_path: self.backlog_path.clone(),
+                cancelled: self.cancelled,
+            },
+        )
+    }
+}
+
+/// Create a technical child issue, materialize its local backlog packet, and sync attachments.
+///
+/// Returns an error when planning metadata is missing, the parent issue cannot be loaded,
+/// backlog generation fails, the Linear child issue cannot be created, or the initial child sync
+/// push cannot publish the generated managed files.
+pub async fn run_technical(args: &TechnicalArgs) -> Result<TechnicalReport> {
     let root = canonicalize_existing_dir(&args.client.root)?;
+    let app_config = AppConfig::load()?;
     let planning_meta = load_required_planning_meta(&root, "technical")?;
+    let discussion_budgets = resolve_ticket_discussion_budgets(&planning_meta);
     ensure_planning_layout(&root, false)?;
     ensure_backlog_templates(&root, false)?;
     let LinearCommandContext {
@@ -149,8 +237,14 @@ pub async fn run_technical(args: &TechnicalArgs) -> Result<()> {
         default_project_id,
     } = load_linear_command_context(&args.client, None)?;
     let can_launch_tui = io::stdin().is_terminal() && io::stdout().is_terminal();
+    let run_non_interactive = args.no_interactive || !can_launch_tui;
+    let remembered_selection = if run_non_interactive {
+        load_remembered_backlog_selection(&root)?
+    } else {
+        Default::default()
+    };
 
-    let generated = if can_launch_tui {
+    let generated = if !run_non_interactive {
         let initial_parent = match args.issue.as_ref() {
             Some(issue) => Some(service.load_issue(issue).await?),
             None => None,
@@ -168,10 +262,19 @@ pub async fn run_technical(args: &TechnicalArgs) -> Result<()> {
             Vec::new()
         };
 
-        match run_interactive_technical_session(&root, initial_parent, available_issues)? {
+        match run_interactive_technical_session(
+            &root,
+            initial_parent,
+            available_issues,
+            discussion_budgets,
+        )? {
             InteractiveTechnicalExit::Cancelled => {
-                println!("Technical generation cancelled.");
-                return Ok(());
+                return Ok(TechnicalReport {
+                    child: None,
+                    parent: None,
+                    backlog_path: None,
+                    cancelled: true,
+                });
             }
             InteractiveTechnicalExit::Confirmed(generated) => generated,
         }
@@ -182,28 +285,55 @@ pub async fn run_technical(args: &TechnicalArgs) -> Result<()> {
         let parent = service.load_issue(issue).await?;
         let selected_acceptance_criteria =
             extract_acceptance_criteria(parent.description.as_deref());
-        build_generated_backlog(&root, &parent, &selected_acceptance_criteria)?
+        build_generated_backlog(
+            &root,
+            &parent,
+            &selected_acceptance_criteria,
+            discussion_budgets,
+        )?
     };
 
+    let resolved_defaults = resolve_technical_ticket_defaults(
+        &app_config,
+        &planning_meta,
+        &remembered_selection,
+        &TechnicalTicketResolutionInput {
+            zero_prompt: run_non_interactive,
+            overrides: TicketOptionOverrides {
+                state: args.state.clone(),
+                priority: args.priority,
+                labels: args.labels.clone(),
+                assignee: args.assignee.clone(),
+            },
+            built_in_label: planning_meta.effective_technical_label(&app_config),
+        },
+        &generated.parent,
+    );
+    let assignee_id = service
+        .resolve_assignee_id(resolved_defaults.assignee.as_deref())
+        .await?;
     let child = service
         .create_issue(IssueCreateSpec {
-            team: Some(generated.parent.team.key.clone()),
+            team: resolved_defaults.team.clone(),
             title: generated.child_title.clone(),
             description: Some(rendered_index_contents(&generated.files)?),
-            project: None,
-            project_id: generated
-                .parent
-                .project
-                .as_ref()
-                .map(|project| project.id.clone()),
+            project: resolved_defaults.project.clone(),
+            project_id: resolved_defaults.project_id.clone(),
             parent_id: Some(generated.parent.id.clone()),
-            state: None,
-            priority: generated.parent.priority,
-            labels: vec![planning_meta.issue_labels.technical_label()],
+            state: resolved_defaults.state.clone(),
+            priority: resolved_defaults.priority,
+            assignee_id,
+            labels: resolved_defaults.labels.clone(),
         })
         .await?;
+    if let Err(error) = save_remembered_backlog_selection(&root, &child) {
+        eprintln!("warning: failed to persist remembered backlog defaults: {error}");
+    }
 
     let issue_dir = write_rendered_backlog_item(&root, &child.identifier, &generated.files)?;
+    let download_failures =
+        materialize_issue_context(&service, &issue_dir, &generated.prepared_context).await?;
+    log_ticket_image_download_failures(&child.identifier, &download_failures);
     save_issue_metadata(
         &issue_dir,
         &BacklogIssueMetadata {
@@ -219,34 +349,26 @@ pub async fn run_technical(args: &TechnicalArgs) -> Result<()> {
             local_hash: None,
             remote_hash: None,
             last_sync_at: None,
+            last_pulled_comment_ids: Vec::new(),
             managed_files: Vec::<ManagedFileRecord>::new(),
         },
     )?;
 
-    run_sync_push(
-        &args.client,
-        &SyncPushArgs {
-            issue: Some(child.identifier.clone()),
-            all: false,
-            update_description: false,
-        },
-    )
-    .await?;
+    run_sync_push_for_issue(&root, &service, &child, &issue_dir, args.no_interactive).await?;
 
-    println!(
-        "Created technical sub-issue {} under {} at {}.",
-        child.identifier,
-        generated.parent.identifier,
-        display_path(&issue_dir, &root),
-    );
-
-    Ok(())
+    Ok(TechnicalReport {
+        child: Some(child),
+        parent: Some(generated.parent),
+        backlog_path: Some(display_path(&issue_dir, &root)),
+        cancelled: false,
+    })
 }
 
 fn run_interactive_technical_session(
     root: &Path,
     initial_parent: Option<IssueSummary>,
     issues: Vec<IssueSummary>,
+    discussion_budgets: TicketDiscussionBudgets,
 ) -> Result<InteractiveTechnicalExit> {
     let mut app = if let Some(parent) = initial_parent {
         let criteria = extract_acceptance_criteria(parent.description.as_deref());
@@ -268,6 +390,7 @@ fn run_interactive_technical_session(
                 TechnicalGenerationRequest {
                     parent,
                     selected_acceptance_criteria: Vec::new(),
+                    discussion_budgets,
                 },
                 None,
             );
@@ -288,6 +411,8 @@ fn run_interactive_technical_session(
                 query: InputFieldState::default(),
                 issues,
                 selected: 0,
+                focus: IssuePickerFocus::List,
+                preview_scroll: ScrollState::default(),
                 error: None,
             }),
             pending: None,
@@ -296,7 +421,12 @@ fn run_interactive_technical_session(
 
     let mut stdout = io::stdout();
     enable_raw_mode()?;
-    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableBracketedPaste,
+        EnableMouseCapture
+    )?;
     let _cleanup = TerminalCleanup;
 
     let backend = CrosstermBackend::new(stdout);
@@ -323,12 +453,20 @@ fn run_interactive_technical_session(
                     }
 
                     let action = match &mut app.stage {
-                        TechnicalStage::PickIssue(picker) => handle_issue_picker_key(picker, key),
+                        TechnicalStage::PickIssue(picker) => handle_issue_picker_key(
+                            picker,
+                            key,
+                            issue_picker_preview_viewport(terminal.size()?.into()),
+                        ),
                         TechnicalStage::SelectCriteria(criteria) => {
-                            handle_acceptance_criteria_key(criteria, key)
+                            handle_acceptance_criteria_key(criteria, key, discussion_budgets)
                         }
                         TechnicalStage::Loading(_) => TechnicalAction::None,
-                        TechnicalStage::Review(review) => handle_technical_review_key(review, key),
+                        TechnicalStage::Review(review) => handle_technical_review_key(
+                            review,
+                            key,
+                            technical_review_preview_viewport(terminal.size()?.into()),
+                        ),
                     };
 
                     match action {
@@ -349,6 +487,7 @@ fn run_interactive_technical_session(
                                     TechnicalGenerationRequest {
                                         parent,
                                         selected_acceptance_criteria: Vec::new(),
+                                        discussion_budgets,
                                     },
                                     previous_stage,
                                 );
@@ -385,6 +524,37 @@ fn run_interactive_technical_session(
                         handle_issue_picker_paste(picker, &text);
                     }
                 }
+                Event::Mouse(mouse) => match &mut app.stage {
+                    TechnicalStage::PickIssue(picker)
+                        if picker.focus == IssuePickerFocus::Preview
+                            && matches!(
+                                mouse.kind,
+                                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                            ) =>
+                    {
+                        let viewport = issue_picker_preview_viewport(terminal.size()?.into());
+                        let _ = picker.preview_scroll.apply_mouse_in_viewport(
+                            mouse,
+                            viewport,
+                            picker.preview_content_rows(viewport.width.max(1)),
+                        );
+                    }
+                    TechnicalStage::Review(review)
+                        if review.focus == TechnicalReviewFocus::Preview
+                            && matches!(
+                                mouse.kind,
+                                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                            ) =>
+                    {
+                        let viewport = technical_review_preview_viewport(terminal.size()?.into());
+                        let _ = review.preview_scroll.apply_mouse_in_viewport(
+                            mouse,
+                            viewport,
+                            review.preview_content_rows(viewport.width.max(1)),
+                        );
+                    }
+                    _ => {}
+                },
                 _ => {}
             }
         }
@@ -394,33 +564,72 @@ fn run_interactive_technical_session(
 fn handle_issue_picker_key(
     app: &mut IssuePickerApp,
     key: crossterm::event::KeyEvent,
+    preview_viewport: Rect,
 ) -> TechnicalAction {
     match key.code {
+        KeyCode::Tab => {
+            app.focus = match app.focus {
+                IssuePickerFocus::List => IssuePickerFocus::Preview,
+                IssuePickerFocus::Preview => IssuePickerFocus::List,
+            };
+            app.error = None;
+            TechnicalAction::None
+        }
         KeyCode::Up => {
-            let filtered = filtered_issue_indices(app);
-            if filtered.is_empty() {
-                app.selected = 0;
-            } else if app.selected == 0 {
-                app.selected = filtered.len().saturating_sub(1);
+            if app.focus == IssuePickerFocus::Preview {
+                let _ = app.preview_scroll.apply_key_code_in_viewport(
+                    KeyCode::Up,
+                    preview_viewport,
+                    app.preview_content_rows(preview_viewport.width.max(1)),
+                );
             } else {
-                app.selected -= 1;
+                let filtered = search_results(app);
+                if filtered.is_empty() {
+                    app.selected = 0;
+                } else if app.selected == 0 {
+                    app.selected = filtered.len().saturating_sub(1);
+                } else {
+                    app.selected -= 1;
+                }
+                app.preview_scroll.reset();
             }
             app.error = None;
             TechnicalAction::None
         }
         KeyCode::Down => {
-            let filtered = filtered_issue_indices(app);
-            if filtered.is_empty() {
-                app.selected = 0;
+            if app.focus == IssuePickerFocus::Preview {
+                let _ = app.preview_scroll.apply_key_code_in_viewport(
+                    KeyCode::Down,
+                    preview_viewport,
+                    app.preview_content_rows(preview_viewport.width.max(1)),
+                );
             } else {
-                app.selected = (app.selected + 1) % filtered.len();
+                let filtered = search_results(app);
+                if filtered.is_empty() {
+                    app.selected = 0;
+                } else {
+                    app.selected = (app.selected + 1) % filtered.len();
+                }
+                app.preview_scroll.reset();
             }
             app.error = None;
             TechnicalAction::None
         }
+        KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End
+            if app.focus == IssuePickerFocus::Preview =>
+        {
+            let _ = app.preview_scroll.apply_key_in_viewport(
+                key,
+                preview_viewport,
+                app.preview_content_rows(preview_viewport.width.max(1)),
+            );
+            app.error = None;
+            TechnicalAction::None
+        }
         KeyCode::Enter => {
-            let filtered = filtered_issue_indices(app);
-            let Some(issue_index) = filtered.get(app.selected).copied() else {
+            let filtered = search_results(app);
+            let Some(issue_index) = filtered.get(app.selected).map(|result| result.issue_index)
+            else {
                 app.error = Some("No issues match the current search.".to_string());
                 return TechnicalAction::None;
             };
@@ -428,8 +637,9 @@ fn handle_issue_picker_key(
             TechnicalAction::SelectIssue(app.issues[issue_index].clone())
         }
         _ => {
-            if app.query.handle_key(key) {
+            if app.focus == IssuePickerFocus::List && app.query.handle_key(key) {
                 app.selected = 0;
+                app.preview_scroll.reset();
                 app.error = None;
             }
             TechnicalAction::None
@@ -438,8 +648,9 @@ fn handle_issue_picker_key(
 }
 
 fn handle_issue_picker_paste(app: &mut IssuePickerApp, text: &str) {
-    if app.query.paste(text) {
+    if app.focus == IssuePickerFocus::List && app.query.paste(text) {
         app.selected = 0;
+        app.preview_scroll.reset();
         app.error = None;
     }
 }
@@ -447,6 +658,7 @@ fn handle_issue_picker_paste(app: &mut IssuePickerApp, text: &str) {
 fn handle_acceptance_criteria_key(
     app: &mut AcceptanceCriteriaApp,
     key: crossterm::event::KeyEvent,
+    discussion_budgets: TicketDiscussionBudgets,
 ) -> TechnicalAction {
     match key.code {
         KeyCode::Enter => {
@@ -467,6 +679,7 @@ fn handle_acceptance_criteria_key(
             TechnicalAction::Generate(TechnicalGenerationRequest {
                 parent: app.parent.clone(),
                 selected_acceptance_criteria,
+                discussion_budgets,
             })
         }
         _ => {
@@ -481,26 +694,99 @@ fn handle_acceptance_criteria_key(
 fn handle_technical_review_key(
     app: &mut TechnicalReviewApp,
     key: crossterm::event::KeyEvent,
+    preview_viewport: Rect,
 ) -> TechnicalAction {
     match key.code {
+        KeyCode::Tab => {
+            app.focus = match app.focus {
+                TechnicalReviewFocus::Files => TechnicalReviewFocus::Preview,
+                TechnicalReviewFocus::Preview => TechnicalReviewFocus::Files,
+            };
+            app.error = None;
+            TechnicalAction::None
+        }
         KeyCode::Up => {
-            if app.selected_file == 0 {
+            if app.focus == TechnicalReviewFocus::Preview {
+                let _ = app.preview_scroll.apply_key_code_in_viewport(
+                    KeyCode::Up,
+                    preview_viewport,
+                    app.preview_content_rows(preview_viewport.width.max(1)),
+                );
+            } else if app.selected_file == 0 {
                 app.selected_file = app.generated.files.len().saturating_sub(1);
             } else {
                 app.selected_file -= 1;
+                app.preview_scroll.reset();
             }
             app.error = None;
             TechnicalAction::None
         }
         KeyCode::Down => {
-            if !app.generated.files.is_empty() {
+            if app.focus == TechnicalReviewFocus::Preview {
+                let _ = app.preview_scroll.apply_key_code_in_viewport(
+                    KeyCode::Down,
+                    preview_viewport,
+                    app.preview_content_rows(preview_viewport.width.max(1)),
+                );
+            } else if !app.generated.files.is_empty() {
                 app.selected_file = (app.selected_file + 1) % app.generated.files.len();
+                app.preview_scroll.reset();
             }
+            app.error = None;
+            TechnicalAction::None
+        }
+        KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End
+            if app.focus == TechnicalReviewFocus::Preview =>
+        {
+            let _ = app.preview_scroll.apply_key_in_viewport(
+                key,
+                preview_viewport,
+                app.preview_content_rows(preview_viewport.width.max(1)),
+            );
             app.error = None;
             TechnicalAction::None
         }
         KeyCode::Enter => TechnicalAction::Confirm(app.generated.clone()),
         _ => TechnicalAction::None,
+    }
+}
+
+impl IssuePickerApp {
+    fn preview_content_rows(&self, width: u16) -> usize {
+        let preview = search_results(self)
+            .get(self.selected)
+            .and_then(|result| {
+                self.issues.get(result.issue_index).map(|issue| {
+                    render_issue_preview(
+                        issue,
+                        Some(result),
+                        None,
+                        "_No Linear description was provided._",
+                    )
+                })
+            })
+            .unwrap_or_else(|| {
+                Text::from(vec![
+                    Line::from("Search results appear here."),
+                    Line::from(""),
+                    Line::from(
+                        "Type to narrow the ticket list, then press Enter to generate the technical backlog draft.",
+                    ),
+                ])
+            });
+        wrapped_rows(&plain_text(&preview), width.max(1))
+    }
+}
+
+impl TechnicalReviewApp {
+    fn preview_content_rows(&self, width: u16) -> usize {
+        let contents = self
+            .generated
+            .files
+            .get(self.selected_file)
+            .map(|file| file.contents.as_str())
+            .unwrap_or_default();
+        wrapped_rows(contents, width.max(1))
     }
 }
 
@@ -534,6 +820,7 @@ fn spawn_generation_job(
             &root,
             &request.parent,
             &request.selected_acceptance_criteria,
+            request.discussion_budgets,
         );
         let _ = sender.send(result);
     });
@@ -556,6 +843,8 @@ fn process_pending_generation(app: &mut TechnicalSessionApp) -> Result<()> {
                     app.stage = TechnicalStage::Review(TechnicalReviewApp {
                         generated,
                         selected_file: 0,
+                        focus: TechnicalReviewFocus::Files,
+                        preview_scroll: ScrollState::default(),
                         error: None,
                     });
                 }
@@ -609,7 +898,9 @@ fn build_generated_backlog(
     root: &Path,
     parent: &IssueSummary,
     selected_acceptance_criteria: &[String],
+    discussion_budgets: TicketDiscussionBudgets,
 ) -> Result<TechnicalGeneratedBacklog> {
+    let prepared_context = prepare_issue_context(parent, discussion_budgets);
     let child_title = format!("Technical: {}", parent.title);
     let template_files = render_template_files(
         root,
@@ -618,13 +909,13 @@ fn build_generated_backlog(
             parent_identifier: Some(parent.identifier.clone()),
             parent_title: Some(parent.title.clone()),
             parent_url: Some(parent.url.clone()),
-            parent_description: parent.description.clone(),
+            parent_description: prepared_context.issue.description.clone(),
             ..TemplateContext::default()
         },
     )?;
     let files = generate_backlog_files(
         root,
-        parent,
+        &prepared_context,
         &child_title,
         selected_acceptance_criteria,
         &template_files,
@@ -633,6 +924,7 @@ fn build_generated_backlog(
         parent: parent.clone(),
         child_title,
         selected_acceptance_criteria: selected_acceptance_criteria.to_vec(),
+        prepared_context,
         files,
     })
 }
@@ -647,14 +939,14 @@ fn rendered_index_contents(rendered_files: &[RenderedTemplateFile]) -> Result<St
 
 fn generate_backlog_files(
     root: &Path,
-    parent: &IssueSummary,
+    prepared_context: &PreparedIssueContext,
     child_title: &str,
     selected_acceptance_criteria: &[String],
     template_files: &[RenderedTemplateFile],
 ) -> Result<Vec<RenderedTemplateFile>> {
     let prompt = render_technical_prompt(
         root,
-        parent,
+        prepared_context,
         child_title,
         selected_acceptance_criteria,
         &slugify(child_title),
@@ -670,6 +962,7 @@ fn generate_backlog_files(
         model: None,
         reasoning: None,
         transport: None,
+        attachments: Vec::new(),
     })
     .with_context(|| {
         "meta backlog tech requires a configured local agent to generate backlog content from `.metastack/backlog/_TEMPLATE`"
@@ -682,7 +975,7 @@ fn generate_backlog_files(
 
 fn render_technical_prompt(
     root: &Path,
-    parent: &IssueSummary,
+    prepared_context: &PreparedIssueContext,
     child_title: &str,
     selected_acceptance_criteria: &[String],
     backlog_slug: &str,
@@ -711,6 +1004,22 @@ fn render_technical_prompt(
         })
         .collect::<Vec<_>>()
         .join("\n\n");
+    let parent = &prepared_context.issue;
+    let parent_description_block = parent
+        .description
+        .as_deref()
+        .unwrap_or("_No Linear description was provided._");
+    let parent_context_block = parent
+        .parent
+        .as_ref()
+        .and_then(|issue| issue.description.as_deref())
+        .unwrap_or("_No parent description was provided._");
+    let discussion_block = if prepared_context.prompt_discussion.trim().is_empty() {
+        "_No Linear comments were provided._".to_string()
+    } else {
+        prepared_context.prompt_discussion.clone()
+    };
+    let image_summary = render_ticket_image_summary(&prepared_context.images);
 
     Ok(format!(
         "You are generating a technical backlog item for the active repository.\n\n\
@@ -721,6 +1030,9 @@ Parent Linear issue:\n\
 - State: {}\n\
 - URL: {}\n\
 - Description:\n{}\n\n\
+Parent issue context:\n{}\n\n\
+Ticket discussion context:\n{}\n\n\
+Localized ticket images:\n{}\n\n\
 Derived backlog values:\n\
 - `BACKLOG_TITLE`: {}\n\
 - `BACKLOG_SLUG`: {}\n\
@@ -747,10 +1059,10 @@ Instructions:\n\
             .map(|state| state.name.as_str())
             .unwrap_or("Unknown"),
         parent.url,
-        parent
-            .description
-            .as_deref()
-            .unwrap_or("_No Linear description was provided._"),
+        parent_description_block,
+        parent_context_block,
+        discussion_block,
+        image_summary,
         child_title,
         backlog_slug,
         today,
@@ -759,6 +1071,35 @@ Instructions:\n\
         repository_snapshot,
         template_block,
     ))
+}
+
+fn resolve_ticket_discussion_budgets(
+    planning_meta: &crate::config::PlanningMeta,
+) -> TicketDiscussionBudgets {
+    TicketDiscussionBudgets {
+        prompt_chars: planning_meta
+            .linear
+            .ticket_context
+            .discussion_prompt_chars
+            .unwrap_or(TicketDiscussionBudgets::default().prompt_chars),
+        persisted_chars: planning_meta
+            .linear
+            .ticket_context
+            .discussion_persisted_chars
+            .unwrap_or(TicketDiscussionBudgets::default().persisted_chars),
+    }
+}
+
+fn log_ticket_image_download_failures(
+    identifier: &str,
+    failures: &[crate::linear::TicketImageDownloadFailure],
+) {
+    for failure in failures {
+        eprintln!(
+            "warning: failed to localize ticket image for {identifier}: {} from {} ({})",
+            failure.filename, failure.source_label, failure.error
+        );
+    }
 }
 
 fn validate_generated_files(
@@ -852,22 +1193,21 @@ fn render_issue_picker_frame(frame: &mut Frame<'_>, app: &IssuePickerApp) {
         .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
         .split(body[1]);
 
-    let rendered_query = app.query.render(
-        "Search by identifier, title, state, project, or description...",
-        true,
-    );
     let query_block = Block::default()
         .borders(Borders::ALL)
         .title("Select Parent Issue [search]")
         .border_style(Style::default().add_modifier(Modifier::BOLD));
     let query_inner = query_block.inner(body[0]);
-    let query = Paragraph::new(rendered_query.text.clone())
-        .block(query_block)
-        .wrap(Wrap { trim: false });
+    let rendered_query = app.query.render_with_width(
+        "Search by identifier, title, state, project, or description...",
+        true,
+        query_inner.width,
+    );
+    let query = rendered_query.paragraph(query_block);
     frame.render_widget(query, body[0]);
     rendered_query.set_cursor(frame, query_inner);
 
-    let filtered = filtered_issue_indices(app);
+    let filtered = search_results(app);
     let mut issue_state = ListState::default();
     issue_state.select(Some(app.selected.min(filtered.len().saturating_sub(1))));
     let issue_items = if filtered.is_empty() {
@@ -875,14 +1215,10 @@ fn render_issue_picker_frame(frame: &mut Frame<'_>, app: &IssuePickerApp) {
     } else {
         filtered
             .iter()
-            .filter_map(|index| app.issues.get(*index))
-            .map(|issue| {
-                let state = issue
-                    .state
-                    .as_ref()
-                    .map(|state| state.name.as_str())
-                    .unwrap_or("Unknown");
-                ListItem::new(format!("{}  {}  ({state})", issue.identifier, issue.title))
+            .filter_map(|result| {
+                app.issues
+                    .get(result.issue_index)
+                    .map(|issue| render_issue_row(issue, Some(result), None))
             })
             .collect::<Vec<_>>()
     };
@@ -898,8 +1234,16 @@ fn render_issue_picker_frame(frame: &mut Frame<'_>, app: &IssuePickerApp) {
 
     let preview = filtered
         .get(app.selected)
-        .and_then(|index| app.issues.get(*index))
-        .map(issue_picker_preview)
+        .and_then(|result| {
+            app.issues.get(result.issue_index).map(|issue| {
+                render_issue_preview(
+                    issue,
+                    Some(result),
+                    None,
+                    "_No Linear description was provided._",
+                )
+            })
+        })
         .unwrap_or_else(|| {
             Text::from(vec![
                 Line::from("Search results appear here."),
@@ -910,52 +1254,24 @@ fn render_issue_picker_frame(frame: &mut Frame<'_>, app: &IssuePickerApp) {
                 ),
             ])
         });
-    let preview = Paragraph::new(preview)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Issue Preview"),
-        )
-        .wrap(Wrap { trim: false });
+    let preview = scrollable_paragraph(
+        preview,
+        if app.focus == IssuePickerFocus::Preview {
+            "Issue Preview [focus]"
+        } else {
+            "Issue Preview"
+        },
+        &app.preview_scroll,
+    )
+    .wrap(Wrap { trim: false });
     frame.render_widget(preview, content[1]);
 
     render_footer(
         frame,
         layout[1],
         app.error.as_deref(),
-        "Type to fuzzy-search issues. Up/Down moves the selection. Enter generates the technical backlog draft. Esc cancels.",
+        "Type to search issues by identifier, title, state, project, or description. Tab switches between the issue list and preview. Up/Down moves the active pane, and PgUp/PgDn/Home/End or the mouse wheel scroll the preview when focused. Enter generates the technical backlog draft. Esc cancels.",
     );
-}
-
-fn issue_picker_preview(issue: &IssueSummary) -> Text<'static> {
-    Text::from(vec![
-        Line::from(format!("Identifier: {}", issue.identifier)),
-        Line::from(format!("Title: {}", issue.title)),
-        Line::from(format!(
-            "State: {}",
-            issue
-                .state
-                .as_ref()
-                .map(|state| state.name.clone())
-                .unwrap_or_else(|| "Unknown".to_string())
-        )),
-        Line::from(format!(
-            "Project: {}",
-            issue
-                .project
-                .as_ref()
-                .map(|project| project.name.clone())
-                .unwrap_or_else(|| "No project".to_string())
-        )),
-        Line::from(format!("URL: {}", issue.url)),
-        Line::from(""),
-        Line::from(
-            issue
-                .description
-                .clone()
-                .unwrap_or_else(|| "_No Linear description was provided._".to_string()),
-        ),
-    ])
 }
 
 fn render_acceptance_criteria_frame(frame: &mut Frame<'_>, app: &AcceptanceCriteriaApp) {
@@ -1094,30 +1410,35 @@ fn render_review_frame(frame: &mut Frame<'_>, app: &TechnicalReviewApp) {
         .map(|file| ListItem::new(file.relative_path.clone()))
         .collect::<Vec<_>>();
     let file_list = List::new(file_items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Generated Files"),
-        )
+        .block(Block::default().borders(Borders::ALL).title(
+            if app.focus == TechnicalReviewFocus::Files {
+                "Generated Files [focus]"
+            } else {
+                "Generated Files"
+            },
+        ))
         .highlight_style(Style::default().add_modifier(Modifier::BOLD))
         .highlight_symbol("> ");
     frame.render_stateful_widget(file_list, sidebar[1], &mut file_state);
 
     let selected_file = &app.generated.files[app.selected_file];
-    let preview = Paragraph::new(selected_file.contents.clone())
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(format!("Preview: {}", selected_file.relative_path)),
-        )
-        .wrap(Wrap { trim: false });
+    let preview = scrollable_paragraph(
+        selected_file.contents.clone(),
+        if app.focus == TechnicalReviewFocus::Preview {
+            format!("Preview: {} [focus]", selected_file.relative_path)
+        } else {
+            format!("Preview: {}", selected_file.relative_path)
+        },
+        &app.preview_scroll,
+    )
+    .wrap(Wrap { trim: false });
     frame.render_widget(preview, body[1]);
 
     render_footer(
         frame,
         layout[1],
         app.error.as_deref(),
-        "Up/Down moves between generated files. Enter creates the technical child issue and syncs the reviewed Markdown files. Esc cancels.",
+        "Tab switches between the file list and preview. Up/Down moves the active pane, and PgUp/PgDn/Home/End or the mouse wheel scroll the preview when focused. Enter creates the technical child issue and syncs the reviewed Markdown files. Esc cancels.",
     );
 }
 
@@ -1137,72 +1458,19 @@ fn render_loading_frame(frame: &mut Frame<'_>, app: &LoadingApp) {
     );
 }
 
-fn filtered_issue_indices(app: &IssuePickerApp) -> Vec<usize> {
-    let query = app.query.value().trim();
-    let mut matches = app
-        .issues
-        .iter()
-        .enumerate()
-        .filter_map(|(index, issue)| {
-            fuzzy_issue_score(issue, query).map(|score| (index, score, issue.identifier.clone()))
-        })
-        .collect::<Vec<_>>();
-
-    matches.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.2.cmp(&right.2)));
-
-    matches.into_iter().map(|(index, _, _)| index).collect()
-}
-
-fn fuzzy_issue_score(issue: &IssueSummary, query: &str) -> Option<i64> {
-    if query.is_empty() {
-        return Some(0);
-    }
-
-    let combined = [
-        issue.identifier.as_str(),
-        issue.title.as_str(),
-        issue.description.as_deref().unwrap_or(""),
-        issue
-            .state
-            .as_ref()
-            .map(|state| state.name.as_str())
-            .unwrap_or(""),
-        issue
-            .project
-            .as_ref()
-            .map(|project| project.name.as_str())
-            .unwrap_or(""),
-    ]
-    .join(" ");
-
-    fuzzy_text_score(&combined, query)
-}
-
-fn fuzzy_text_score(value: &str, query: &str) -> Option<i64> {
-    let haystack = value.to_ascii_lowercase();
-    let needle = query.to_ascii_lowercase();
-    if needle.is_empty() {
-        return Some(0);
-    }
-    if let Some(position) = haystack.find(&needle) {
-        return Some(1_000 - position as i64);
-    }
-
-    let mut score = 0i64;
-    let mut search_start = 0usize;
-    for ch in needle.chars() {
-        let relative = haystack[search_start..].find(ch)?;
-        score += 32 - relative as i64;
-        search_start += relative + ch.len_utf8();
-    }
-    Some(score)
+fn search_results(app: &IssuePickerApp) -> Vec<IssueSearchResult> {
+    search_issues(&app.issues, app.query.value().trim())
 }
 
 fn base_layout(frame: &mut Frame<'_>) -> Vec<Rect> {
+    base_layout_for_area(frame.area())
+}
+
+fn base_layout_for_area(area: Rect) -> Vec<Rect> {
     Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(4)])
-        .split(frame.area())
+        .constraints([Constraint::Min(0), Constraint::Length(5)])
+        .split(area)
         .to_vec()
 }
 
@@ -1547,8 +1815,41 @@ impl Drop for TerminalCleanup {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
         let mut stdout = io::stdout();
-        let _ = execute!(stdout, DisableBracketedPaste, LeaveAlternateScreen);
+        let _ = execute!(
+            stdout,
+            DisableMouseCapture,
+            DisableBracketedPaste,
+            LeaveAlternateScreen
+        );
     }
+}
+
+fn issue_picker_preview_viewport(area: Rect) -> Rect {
+    let layout = base_layout_for_area(area);
+    let content = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
+        .split(layout[0]);
+    Rect::new(
+        content[1].x.saturating_add(1),
+        content[1].y.saturating_add(1),
+        content[1].width.saturating_sub(2).max(1),
+        content[1].height.saturating_sub(2).max(1),
+    )
+}
+
+fn technical_review_preview_viewport(area: Rect) -> Rect {
+    let layout = base_layout_for_area(area);
+    let body = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
+        .split(layout[0]);
+    Rect::new(
+        body[1].x.saturating_add(1),
+        body[1].y.saturating_add(1),
+        body[1].width.saturating_sub(2).max(1),
+        body[1].height.saturating_sub(2).max(1),
+    )
 }
 
 #[cfg(test)]
@@ -1569,17 +1870,23 @@ fn snapshot(backend: &TestBackend) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        AcceptanceCriteriaApp, IssuePickerApp, LoadingApp, TechnicalGeneratedBacklog,
-        TechnicalReviewApp, extract_acceptance_criteria, filtered_issue_indices, fuzzy_text_score,
-        handle_issue_picker_paste, render_acceptance_criteria_frame, render_issue_picker_frame,
-        render_loading_frame, render_review_frame, render_technical_prompt, snapshot,
+        AcceptanceCriteriaApp, IssuePickerApp, IssuePickerFocus, LoadingApp,
+        TechnicalGeneratedBacklog, TechnicalReviewApp, TechnicalReviewFocus,
+        extract_acceptance_criteria, handle_issue_picker_paste, render_acceptance_criteria_frame,
+        render_issue_picker_frame, render_loading_frame, render_review_frame,
+        render_technical_prompt, search_results, snapshot,
     };
     use crate::backlog::RenderedTemplateFile;
     use crate::fs::PlanningPaths;
-    use crate::linear::{IssueSummary, ProjectRef, TeamRef, WorkflowState};
+    use crate::linear::{
+        IssueSummary, ProjectRef, TeamRef, TicketDiscussionBudgets, WorkflowState,
+        prepare_issue_context,
+    };
     use crate::tui::fields::{InputFieldState, MultiSelectFieldState};
+    use crate::tui::scroll::ScrollState;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
     use std::fs;
     use tempfile::tempdir;
 
@@ -1653,7 +1960,7 @@ mod tests {
     }
 
     #[test]
-    fn fuzzy_search_prefers_identifier_and_title_matches() {
+    fn picker_search_prefers_identifier_and_title_matches() {
         let picker = IssuePickerApp {
             query: InputFieldState::new("met-42 terminal"),
             issues: vec![
@@ -1661,11 +1968,19 @@ mod tests {
                 issue("MET-42", "Terminal experience", "Improve terminal flow"),
             ],
             selected: 0,
+            focus: IssuePickerFocus::List,
+            preview_scroll: ScrollState::default(),
             error: None,
         };
 
-        let filtered = filtered_issue_indices(&picker);
-        assert_eq!(filtered, vec![1]);
+        let filtered = search_results(&picker);
+        assert_eq!(
+            filtered
+                .iter()
+                .map(|result| result.issue_index)
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
     }
 
     #[test]
@@ -1681,12 +1996,15 @@ mod tests {
                 issue("MET-43", "Sync polish", "Refine sync previews."),
             ],
             selected: 0,
+            focus: IssuePickerFocus::List,
+            preview_scroll: ScrollState::default(),
             error: None,
         });
 
         assert!(snapshot.contains("Select Parent Issue [search]"));
         assert!(snapshot.contains("MET-42  Terminal experience"));
         assert!(snapshot.contains("Issue Preview"));
+        assert!(snapshot.contains("mouse wheel scroll the preview"));
     }
 
     #[test]
@@ -1699,6 +2017,8 @@ mod tests {
                 "Improve planning flow.",
             )],
             selected: 1,
+            focus: IssuePickerFocus::List,
+            preview_scroll: ScrollState::default(),
             error: Some("stale".to_string()),
         };
 
@@ -1723,6 +2043,14 @@ mod tests {
                     "The command generates backlog docs".to_string(),
                     "The docs stay in sync".to_string(),
                 ],
+                prepared_context: prepare_issue_context(
+                    &issue(
+                        "MET-35",
+                        "Create the technical command",
+                        "Parent description",
+                    ),
+                    TicketDiscussionBudgets::default(),
+                ),
                 files: vec![
                     RenderedTemplateFile {
                         relative_path: "index.md".to_string(),
@@ -1735,6 +2063,8 @@ mod tests {
                 ],
             },
             selected_file: 1,
+            focus: TechnicalReviewFocus::Files,
+            preview_scroll: ScrollState::default(),
             error: None,
         });
 
@@ -1745,6 +2075,48 @@ mod tests {
     }
 
     #[test]
+    fn review_preview_scrolls_to_bottom_of_long_file() {
+        let mut app = TechnicalReviewApp {
+            generated: TechnicalGeneratedBacklog {
+                parent: issue(
+                    "MET-35",
+                    "Create the technical command",
+                    "Parent description",
+                ),
+                child_title: "Technical: Create the technical command".to_string(),
+                selected_acceptance_criteria: vec!["The docs stay in sync".to_string()],
+                prepared_context: prepare_issue_context(
+                    &issue(
+                        "MET-35",
+                        "Create the technical command",
+                        "Parent description",
+                    ),
+                    TicketDiscussionBudgets::default(),
+                ),
+                files: vec![RenderedTemplateFile {
+                    relative_path: "specification.md".to_string(),
+                    contents: (1..=60)
+                        .map(|index| format!("technical preview line {index}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                }],
+            },
+            selected_file: 0,
+            focus: TechnicalReviewFocus::Preview,
+            preview_scroll: ScrollState::default(),
+            error: None,
+        };
+
+        let _ = app.preview_scroll.apply_key_code_in_viewport(
+            crossterm::event::KeyCode::End,
+            Rect::new(0, 0, 70, 20),
+            app.preview_content_rows(70),
+        );
+
+        assert!(app.preview_scroll.offset() > 0);
+    }
+
+    #[test]
     fn loading_snapshot_matches_plan_style() {
         let snapshot = render_loading_snapshot(&LoadingApp {
             message: "Generating technical backlog".to_string(),
@@ -1752,14 +2124,27 @@ mod tests {
             spinner_index: 2,
         });
 
-        assert!(snapshot.contains("- Generating technical backlog"));
+        assert!(snapshot.contains("[=== ] Generating technical backlog"));
         assert!(snapshot.contains("Agent Working [loading]"));
     }
 
     #[test]
-    fn fuzzy_text_score_supports_subsequence_matching() {
-        assert!(fuzzy_text_score("Terminal backlog generator", "tbg").is_some());
-        assert!(fuzzy_text_score("Terminal backlog generator", "zzz").is_none());
+    fn issue_picker_snapshot_shows_zero_results_state() {
+        let snapshot = render_picker_snapshot(&IssuePickerApp {
+            query: InputFieldState::new("zzz"),
+            issues: vec![issue(
+                "MET-42",
+                "Terminal experience",
+                "Improve planning flow.",
+            )],
+            selected: 0,
+            focus: IssuePickerFocus::List,
+            preview_scroll: ScrollState::default(),
+            error: None,
+        });
+
+        assert!(snapshot.contains("No issues match the current search."));
+        assert!(snapshot.contains("Search results appear here."));
     }
 
     #[test]
@@ -1817,14 +2202,18 @@ Ignored.
         fs::create_dir_all(root.join("src")).expect("src dir should be created");
         fs::write(paths.scan_path(), "# Scan\nCLI layout").expect("scan context should be written");
         fs::write(root.join("src/main.rs"), "fn main() {}\n").expect("repo file should be written");
-
-        let prompt = render_technical_prompt(
-            root,
+        let prepared_context = prepare_issue_context(
             &issue(
                 "MET-35",
                 "Create the technical command",
                 "## Acceptance Criteria\n- Render docs\n- Keep sync safe",
             ),
+            TicketDiscussionBudgets::default(),
+        );
+
+        let prompt = render_technical_prompt(
+            root,
+            &prepared_context,
             "Technical: Create the technical command",
             &["Render docs".to_string(), "Keep sync safe".to_string()],
             "technical-create-the-technical-command",

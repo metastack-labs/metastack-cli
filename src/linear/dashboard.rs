@@ -2,19 +2,27 @@ use std::io::{self, IsTerminal};
 use std::time::Duration;
 
 use anyhow::{Result, bail};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use ratatui::backend::{CrosstermBackend, TestBackend};
-use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Text};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::{Block, Borders, ListItem, ListState, Wrap};
 use ratatui::{Frame, Terminal};
 
+use super::browser::{
+    IssueSearchResult, empty_search_result, issue_state_label, render_issue_preview,
+    render_issue_row, search_issues,
+};
 use super::{DashboardData, IssueSummary};
+use crate::tui::fields::InputFieldState;
+use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph, wrapped_rows};
+use crate::tui::theme::{Tone, badge, empty_state, key_hints, list, panel_title, paragraph};
 
 #[derive(Debug, Clone)]
 pub struct DashboardOptions {
@@ -23,12 +31,17 @@ pub struct DashboardOptions {
     pub height: u16,
     pub actions: Vec<DashboardAction>,
     pub initial_state_filter: Option<String>,
+    pub vim_mode: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub enum DashboardAction {
     Up,
     Down,
+    PageUp,
+    PageDown,
+    Home,
+    End,
     Tab,
     Enter,
 }
@@ -38,6 +51,7 @@ enum Focus {
     Status,
     Estimate,
     Issues,
+    Preview,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,6 +72,7 @@ struct FilterOption<T> {
 struct DashboardApp {
     data: DashboardData,
     focus: Focus,
+    query: InputFieldState,
     status_options: Vec<FilterOption<Option<String>>>,
     estimate_options: Vec<FilterOption<EstimateFilter>>,
     status_index: usize,
@@ -65,9 +80,11 @@ struct DashboardApp {
     issue_index: usize,
     active_status: Option<String>,
     active_estimate: EstimateFilter,
+    preview_scroll: ScrollState,
 }
 
 pub fn run_dashboard(data: DashboardData, options: DashboardOptions) -> Result<Option<String>> {
+    let _ = options.vim_mode;
     if options.render_once {
         return render_once(data, options).map(Some);
     }
@@ -80,7 +97,7 @@ pub fn run_dashboard(data: DashboardData, options: DashboardOptions) -> Result<O
 
     let mut stdout = io::stdout();
     enable_raw_mode()?;
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let _cleanup = TerminalCleanup;
 
     let backend = CrosstermBackend::new(stdout);
@@ -90,16 +107,56 @@ pub fn run_dashboard(data: DashboardData, options: DashboardOptions) -> Result<O
     loop {
         terminal.draw(|frame| render_dashboard(frame, &app))?;
 
-        if event::poll(Duration::from_millis(250))?
-            && let Event::Key(key) = event::read()?
-            && key.kind == KeyEventKind::Press
-        {
-            match key.code {
-                KeyCode::Char('q') => break,
-                KeyCode::Up => app.apply(DashboardAction::Up),
-                KeyCode::Down => app.apply(DashboardAction::Down),
-                KeyCode::Tab => app.apply(DashboardAction::Tab),
-                KeyCode::Enter => app.apply(DashboardAction::Enter),
+        if event::poll(Duration::from_millis(250))? {
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
+                    KeyCode::Char('q') => break,
+                    KeyCode::Up => app.apply_in_viewport(
+                        DashboardAction::Up,
+                        preview_viewport(terminal.size()?.into()),
+                    ),
+                    KeyCode::Down => app.apply_in_viewport(
+                        DashboardAction::Down,
+                        preview_viewport(terminal.size()?.into()),
+                    ),
+                    KeyCode::PageUp => app.apply_in_viewport(
+                        DashboardAction::PageUp,
+                        preview_viewport(terminal.size()?.into()),
+                    ),
+                    KeyCode::PageDown => app.apply_in_viewport(
+                        DashboardAction::PageDown,
+                        preview_viewport(terminal.size()?.into()),
+                    ),
+                    KeyCode::Home => app.apply_in_viewport(
+                        DashboardAction::Home,
+                        preview_viewport(terminal.size()?.into()),
+                    ),
+                    KeyCode::End => app.apply_in_viewport(
+                        DashboardAction::End,
+                        preview_viewport(terminal.size()?.into()),
+                    ),
+                    KeyCode::Tab => app.apply_in_viewport(
+                        DashboardAction::Tab,
+                        preview_viewport(terminal.size()?.into()),
+                    ),
+                    KeyCode::Enter => app.apply_in_viewport(
+                        DashboardAction::Enter,
+                        preview_viewport(terminal.size()?.into()),
+                    ),
+                    _ => {
+                        let _ = app.handle_query_key(key);
+                    }
+                },
+                Event::Mouse(mouse)
+                    if app.focus == Focus::Preview
+                        && matches!(
+                            mouse.kind,
+                            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                        ) =>
+                {
+                    let viewport = preview_viewport(terminal.size()?.into());
+                    let _ = app.handle_preview_mouse(mouse, viewport);
+                }
                 _ => {}
             }
         }
@@ -113,7 +170,10 @@ fn render_once(data: DashboardData, options: DashboardOptions) -> Result<String>
     let mut terminal = Terminal::new(backend)?;
     let mut app = DashboardApp::new(data, options.initial_state_filter);
     for action in options.actions {
-        app.apply(action);
+        app.apply_in_viewport(
+            action,
+            preview_viewport(Rect::new(0, 0, options.width, options.height)),
+        );
     }
 
     terminal.draw(|frame| render_dashboard(frame, &app))?;
@@ -121,33 +181,77 @@ fn render_once(data: DashboardData, options: DashboardOptions) -> Result<String>
 }
 
 fn render_dashboard(frame: &mut Frame<'_>, app: &DashboardApp) {
+    let narrow = frame.area().width < 115;
     let outer = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(4), Constraint::Min(0)])
+        .constraints([
+            Constraint::Length(5),
+            Constraint::Length(3),
+            Constraint::Min(0),
+        ])
         .split(frame.area());
     let body = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(26),
-            Constraint::Percentage(34),
-            Constraint::Percentage(40),
-        ])
-        .split(outer[1]);
+        .direction(if narrow {
+            Direction::Vertical
+        } else {
+            Direction::Horizontal
+        })
+        .constraints(if narrow {
+            vec![
+                Constraint::Length(12),
+                Constraint::Percentage(44),
+                Constraint::Min(10),
+            ]
+        } else {
+            vec![
+                Constraint::Percentage(26),
+                Constraint::Percentage(34),
+                Constraint::Percentage(40),
+            ]
+        })
+        .split(outer[2]);
     let sidebar = Layout::default()
-        .direction(Direction::Vertical)
+        .direction(if narrow {
+            Direction::Horizontal
+        } else {
+            Direction::Vertical
+        })
         .constraints([Constraint::Percentage(52), Constraint::Percentage(48)])
         .split(body[0]);
 
-    let header = Paragraph::new(Text::from(vec![
-        Line::from(app.data.title.clone()),
-        Line::from(app.summary_line()),
-        Line::from(
-            "Keys: Tab changes focus, Up/Down moves selection, Enter applies sidebar filters, q exits",
-        ),
-    ]))
-    .wrap(Wrap { trim: true })
-    .block(Block::default().borders(Borders::ALL).title("Linear Issues"));
+    let header = paragraph(
+        Text::from(vec![
+            Line::from(app.data.title.clone()),
+            Line::from(app.summary_line()),
+            key_hints(&[
+                ("Type", "search"),
+                ("Tab", "focus"),
+                ("Up/Down", "move"),
+                ("PgUp/PgDn", "scroll preview"),
+                ("Wheel", "scroll preview"),
+                ("Enter", "apply"),
+                ("q", "exit"),
+            ]),
+        ]),
+        panel_title("Linear Issues", false),
+    );
     frame.render_widget(header, outer[0]);
+
+    let rendered_query = app.query.render(
+        "Search by identifier, title, state, project, or description...",
+        app.focus == Focus::Issues,
+    );
+    let query_block = Block::default()
+        .borders(Borders::ALL)
+        .title(if app.focus == Focus::Issues {
+            "Issue Search [active]"
+        } else {
+            "Issue Search"
+        });
+    let query_inner = query_block.inner(outer[1]);
+    let query = rendered_query.paragraph(query_block);
+    frame.render_widget(query, outer[1]);
+    rendered_query.set_cursor(frame, query_inner);
 
     render_filter_list(
         frame,
@@ -168,54 +272,52 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &DashboardApp) {
         |value| app.estimate_option_is_active(value),
     );
 
-    let filtered_issue_indices = app.filtered_issue_indices();
-    let issue_title = if app.focus == Focus::Issues {
-        format!(
-            "Issues [focus] ({}/{})",
-            filtered_issue_indices.len(),
-            app.data.issues.len()
-        )
-    } else {
+    let filtered_issue_results = app.visible_issue_results();
+    let issue_title = panel_title(
         format!(
             "Issues ({}/{})",
-            filtered_issue_indices.len(),
+            filtered_issue_results.len(),
             app.data.issues.len()
-        )
-    };
-    let issue_items = if filtered_issue_indices.is_empty() {
-        vec![ListItem::new("No issues match the current filters.")]
+        ),
+        app.focus == Focus::Issues,
+    );
+    let issue_items = if filtered_issue_results.is_empty() {
+        vec![ListItem::new(empty_state(
+            "No issues match the current search and filters.",
+            "Adjust the search query or sidebar filters to widen the result set.",
+        ))]
     } else {
-        filtered_issue_indices
+        filtered_issue_results
             .iter()
-            .filter_map(|index| app.data.issues.get(*index))
-            .map(render_issue_list_item)
+            .filter_map(|result| {
+                app.data
+                    .issues
+                    .get(result.issue_index)
+                    .map(|issue| render_issue_row(issue, Some(result), None))
+            })
             .collect::<Vec<_>>()
     };
     let mut issue_state = ListState::default();
-    if filtered_issue_indices.is_empty() {
+    if filtered_issue_results.is_empty() {
         issue_state.select(Some(0));
     } else {
-        issue_state.select(Some(app.issue_index.min(filtered_issue_indices.len() - 1)));
+        issue_state.select(Some(app.issue_index.min(filtered_issue_results.len() - 1)));
     }
-    let issue_list = List::new(issue_items)
-        .block(Block::default().borders(Borders::ALL).title(issue_title))
-        .highlight_style(Style::default().add_modifier(Modifier::BOLD))
-        .highlight_symbol("> ");
+    let issue_list = list(issue_items, issue_title);
     frame.render_stateful_widget(issue_list, body[1], &mut issue_state);
 
-    let preview = Paragraph::new(app.preview_text())
-        .wrap(Wrap { trim: false })
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Description Preview"),
-        );
+    let preview = scrollable_paragraph(
+        app.preview_text(),
+        panel_title("Description Preview", app.focus == Focus::Preview),
+        &app.preview_scroll,
+    )
+    .wrap(Wrap { trim: false });
     frame.render_widget(preview, body[2]);
 }
 
 fn render_filter_list<T, F>(
     frame: &mut Frame<'_>,
-    area: ratatui::layout::Rect,
+    area: Rect,
     title: &str,
     is_focused: bool,
     options: &[FilterOption<T>],
@@ -229,41 +331,24 @@ fn render_filter_list<T, F>(
     let items = options
         .iter()
         .map(|option| {
-            let prefix = if is_active(&option.value) {
-                "[x]"
+            let badge_label = if is_active(&option.value) {
+                "on"
             } else {
-                "[ ]"
+                "off"
             };
-            ListItem::new(format!("{prefix} {} ({})", option.label, option.count))
+            let badge_tone = if is_active(&option.value) {
+                Tone::Success
+            } else {
+                Tone::Muted
+            };
+            ListItem::new(Line::from(vec![
+                badge(badge_label, badge_tone),
+                Span::raw(format!(" {} ({})", option.label, option.count)),
+            ]))
         })
         .collect::<Vec<_>>();
-    let title = if is_focused {
-        format!("{title} [focus]")
-    } else {
-        title.to_string()
-    };
-    let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title(title))
-        .highlight_style(Style::default().add_modifier(Modifier::BOLD))
-        .highlight_symbol("> ");
+    let list = list(items, panel_title(title, is_focused));
     frame.render_stateful_widget(list, area, &mut state);
-}
-
-fn render_issue_list_item(issue: &IssueSummary) -> ListItem<'static> {
-    let detail = [
-        issue_state_label(issue),
-        issue_estimate_label(issue),
-        issue
-            .project
-            .as_ref()
-            .map(|project| project.name.clone())
-            .unwrap_or_else(|| "No project".to_string()),
-    ]
-    .join(" • ");
-    ListItem::new(Text::from(vec![
-        Line::from(format!("{}  {}", issue.identifier, issue.title)),
-        Line::from(detail),
-    ]))
 }
 
 impl DashboardApp {
@@ -277,6 +362,7 @@ impl DashboardApp {
         let mut app = Self {
             data,
             focus: Focus::Issues,
+            query: InputFieldState::default(),
             status_options,
             estimate_options,
             status_index: 0,
@@ -284,6 +370,7 @@ impl DashboardApp {
             issue_index: 0,
             active_status,
             active_estimate: EstimateFilter::All,
+            preview_scroll: ScrollState::default(),
         };
 
         app.status_index = app.selected_status_index();
@@ -292,15 +379,49 @@ impl DashboardApp {
         app
     }
 
+    #[cfg(test)]
     fn apply(&mut self, action: DashboardAction) {
+        self.apply_in_viewport(action, preview_viewport(Rect::new(0, 0, 120, 32)));
+    }
+
+    fn apply_in_viewport(&mut self, action: DashboardAction, preview_viewport: Rect) {
         match action {
-            DashboardAction::Up => self.move_selection(-1),
-            DashboardAction::Down => self.move_selection(1),
+            DashboardAction::Up => {
+                if self.focus == Focus::Preview {
+                    self.scroll_preview_line(-1, preview_viewport);
+                } else {
+                    self.move_selection(-1);
+                }
+            }
+            DashboardAction::Down => {
+                if self.focus == Focus::Preview {
+                    self.scroll_preview_line(1, preview_viewport);
+                } else {
+                    self.move_selection(1);
+                }
+            }
+            DashboardAction::PageUp => self.scroll_preview_page(-1, preview_viewport),
+            DashboardAction::PageDown => self.scroll_preview_page(1, preview_viewport),
+            DashboardAction::Home => {
+                if self.focus == Focus::Preview {
+                    self.preview_scroll.reset();
+                }
+            }
+            DashboardAction::End => {
+                if self.focus == Focus::Preview {
+                    let _ = self.preview_scroll.apply_key_code_in_viewport(
+                        KeyCode::End,
+                        preview_viewport,
+                        self.preview_content_rows(preview_viewport.width),
+                    );
+                }
+            }
             DashboardAction::Tab => {
                 self.focus = match self.focus {
                     Focus::Status => Focus::Estimate,
                     Focus::Estimate => Focus::Issues,
-                    Focus::Issues => Focus::Status,
+                    Focus::Issues => Focus::Preview,
+                    Focus::Preview => Focus::Status,
                 };
             }
             DashboardAction::Enter => self.apply_focus_selection(),
@@ -314,10 +435,24 @@ impl DashboardApp {
                 shift_index(&mut self.estimate_index, self.estimate_options.len(), delta)
             }
             Focus::Issues => {
-                let len = self.filtered_issue_indices().len();
+                let len = self.visible_issue_results().len();
                 shift_index(&mut self.issue_index, len, delta);
+                self.preview_scroll.reset();
             }
+            Focus::Preview => {}
         }
+    }
+
+    fn handle_query_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        if self.focus != Focus::Issues {
+            return false;
+        }
+        if self.query.handle_key(key) {
+            self.issue_index = 0;
+            self.preview_scroll.reset();
+            return true;
+        }
+        false
     }
 
     fn apply_focus_selection(&mut self) {
@@ -326,15 +461,17 @@ impl DashboardApp {
                 if let Some(option) = self.status_options.get(self.status_index) {
                     self.active_status = option.value.clone();
                     self.clamp_issue_index();
+                    self.preview_scroll.reset();
                 }
             }
             Focus::Estimate => {
                 if let Some(option) = self.estimate_options.get(self.estimate_index) {
                     self.active_estimate = option.value.clone();
                     self.clamp_issue_index();
+                    self.preview_scroll.reset();
                 }
             }
-            Focus::Issues => {}
+            Focus::Issues | Focus::Preview => {}
         }
     }
 
@@ -345,6 +482,18 @@ impl DashboardApp {
             .enumerate()
             .filter(|(_, issue)| self.matches_status(issue) && self.matches_estimate(issue))
             .map(|(index, _)| index)
+            .collect()
+    }
+
+    fn visible_issue_results(&self) -> Vec<IssueSearchResult> {
+        let filtered = self.filtered_issue_indices();
+        if self.query.value().trim().is_empty() {
+            return filtered.into_iter().map(empty_search_result).collect();
+        }
+
+        search_issues(&self.data.issues, self.query.value().trim())
+            .into_iter()
+            .filter(|result| filtered.contains(&result.issue_index))
             .collect()
     }
 
@@ -365,48 +514,33 @@ impl DashboardApp {
         }
     }
 
-    fn selected_issue(&self) -> Option<&IssueSummary> {
-        self.filtered_issue_indices()
-            .get(self.issue_index)
-            .and_then(|index| self.data.issues.get(*index))
-    }
-
     fn preview_text(&self) -> Text<'static> {
-        let Some(issue) = self.selected_issue() else {
+        let results = self.visible_issue_results();
+        let Some(selected_result) = results.get(self.issue_index) else {
             return Text::from(vec![
-                Line::from("No issues match the current filters."),
-                Line::from("Adjust the sidebar filters to widen the result set."),
+                Line::from("No issues match the current search and filters."),
+                Line::from("Adjust the search query or sidebar filters to widen the result set."),
             ]);
         };
-
-        Text::from(vec![
-            Line::from(format!("{}  {}", issue.identifier, issue.title)),
-            Line::from(format!("State: {}", issue_state_label(issue))),
-            Line::from(format!("Estimate: {}", issue_estimate_label(issue))),
-            Line::from(format!(
-                "Project: {}",
-                issue
-                    .project
-                    .as_ref()
-                    .map(|project| project.name.as_str())
-                    .unwrap_or("No project")
-            )),
-            Line::from(format!("Updated: {}", issue.updated_at)),
-            Line::from(""),
-            Line::from(
-                issue
-                    .description
-                    .clone()
-                    .unwrap_or_else(|| "No description provided.".to_string()),
-            ),
-        ])
+        let issue = &self.data.issues[selected_result.issue_index];
+        render_issue_preview(
+            issue,
+            Some(selected_result),
+            None,
+            "No description provided.",
+        )
     }
 
     fn summary_line(&self) -> String {
         format!(
-            "Visible issues: {}/{} | Status: {} | Estimate: {}",
-            self.filtered_issue_indices().len(),
+            "Visible issues: {}/{} | Search: {} | Status: {} | Estimate: {}",
+            self.visible_issue_results().len(),
             self.data.issues.len(),
+            if self.query.value().trim().is_empty() {
+                "all".to_string()
+            } else {
+                format!("\"{}\"", self.query.value().trim())
+            },
             self.active_status.as_deref().unwrap_or("All statuses"),
             match &self.active_estimate {
                 EstimateFilter::All => "All estimates".to_string(),
@@ -430,6 +564,51 @@ impl DashboardApp {
             .unwrap_or(0)
     }
 
+    fn preview_content_rows(&self, width: u16) -> usize {
+        wrapped_rows(&plain_text(&self.preview_text()), width.max(1))
+    }
+
+    fn scroll_preview_line(&mut self, delta: isize, viewport: Rect) {
+        let key = if delta.is_negative() {
+            KeyCode::Up
+        } else {
+            KeyCode::Down
+        };
+        let _ = self.preview_scroll.apply_key_code_in_viewport(
+            key,
+            viewport,
+            self.preview_content_rows(viewport.width.max(1)),
+        );
+    }
+
+    fn scroll_preview_page(&mut self, delta: isize, viewport: Rect) {
+        if self.focus != Focus::Preview {
+            return;
+        }
+        let key = if delta.is_negative() {
+            crossterm::event::KeyEvent::from(KeyCode::PageUp)
+        } else {
+            crossterm::event::KeyEvent::from(KeyCode::PageDown)
+        };
+        let _ = self.preview_scroll.apply_key_in_viewport(
+            key,
+            viewport,
+            self.preview_content_rows(viewport.width.max(1)),
+        );
+    }
+
+    fn handle_preview_mouse(
+        &mut self,
+        mouse: crossterm::event::MouseEvent,
+        viewport: Rect,
+    ) -> bool {
+        self.preview_scroll.apply_mouse_in_viewport(
+            mouse,
+            viewport,
+            self.preview_content_rows(viewport.width.max(1)),
+        )
+    }
+
     fn status_option_is_active(&self, value: &Option<String>) -> bool {
         self.active_status == *value
     }
@@ -439,7 +618,7 @@ impl DashboardApp {
     }
 
     fn clamp_issue_index(&mut self) {
-        let len = self.filtered_issue_indices().len();
+        let len = self.visible_issue_results().len();
         if len == 0 {
             self.issue_index = 0;
         } else {
@@ -521,20 +700,6 @@ fn match_status_option(options: &[FilterOption<Option<String>>], state: &str) ->
     })
 }
 
-fn issue_state_label(issue: &IssueSummary) -> String {
-    issue
-        .state
-        .as_ref()
-        .map(|state| state.name.clone())
-        .unwrap_or_else(|| "Unknown".to_string())
-}
-
-fn issue_estimate_label(issue: &IssueSummary) -> String {
-    issue_estimate_key(issue)
-        .map(|value| format!("{value} pts"))
-        .unwrap_or_else(|| "No estimate".to_string())
-}
-
 fn issue_estimate_key(issue: &IssueSummary) -> Option<String> {
     issue.estimate.map(format_estimate)
 }
@@ -596,14 +761,58 @@ impl Drop for TerminalCleanup {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
         let mut stdout = io::stdout();
-        let _ = execute!(stdout, LeaveAlternateScreen);
+        let _ = execute!(stdout, DisableMouseCapture, LeaveAlternateScreen);
     }
+}
+
+fn preview_viewport(area: Rect) -> Rect {
+    let narrow = area.width < 115;
+    let outer = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(5),
+            Constraint::Length(3),
+            Constraint::Min(0),
+        ])
+        .split(area);
+    let body = Layout::default()
+        .direction(if narrow {
+            Direction::Vertical
+        } else {
+            Direction::Horizontal
+        })
+        .constraints(if narrow {
+            vec![
+                Constraint::Length(12),
+                Constraint::Percentage(44),
+                Constraint::Min(10),
+            ]
+        } else {
+            vec![
+                Constraint::Percentage(26),
+                Constraint::Percentage(34),
+                Constraint::Percentage(40),
+            ]
+        })
+        .split(outer[2]);
+
+    Rect::new(
+        body[2].x.saturating_add(1),
+        body[2].y.saturating_add(1),
+        body[2].width.saturating_sub(2).max(1),
+        body[2].height.saturating_sub(2).max(1),
+    )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{DashboardAction, DashboardApp, EstimateFilter, Focus};
+    use super::{
+        DashboardAction, DashboardApp, DashboardOptions, EstimateFilter, Focus, preview_viewport,
+        run_dashboard,
+    };
     use crate::linear::DashboardData;
+    use crate::tui::fields::InputFieldState;
+    use ratatui::layout::Rect;
 
     #[test]
     fn dashboard_state_applies_status_and_estimate_filters() {
@@ -611,6 +820,8 @@ mod tests {
 
         assert_eq!(visible_issue_ids(&app), vec!["MET-11", "MET-12"]);
 
+        app.apply(DashboardAction::Tab);
+        assert_eq!(app.focus, Focus::Preview);
         app.apply(DashboardAction::Tab);
         assert_eq!(app.focus, Focus::Status);
         app.apply(DashboardAction::Down);
@@ -636,10 +847,74 @@ mod tests {
         assert_eq!(visible_issue_ids(&app), vec!["MET-11"]);
     }
 
+    #[test]
+    fn dashboard_search_filters_visible_issue_results() {
+        let mut app = DashboardApp::new(DashboardData::demo(), None);
+        app.query = InputFieldState::new("tests");
+
+        assert_eq!(visible_issue_ids(&app), vec!["MET-12"]);
+    }
+
+    #[test]
+    fn dashboard_search_zero_results_updates_preview_copy() {
+        let mut app = DashboardApp::new(DashboardData::demo(), None);
+        app.query = InputFieldState::new("zzz");
+
+        assert!(visible_issue_ids(&app).is_empty());
+        assert!(
+            format!("{:?}", app.preview_text())
+                .contains("No issues match the current search and filters.")
+        );
+    }
+
+    #[test]
+    fn dashboard_render_once_surfaces_empty_state_in_narrow_layout() {
+        let snapshot = run_dashboard(
+            DashboardData {
+                title: "Linear dashboard".to_string(),
+                issues: Vec::new(),
+            },
+            DashboardOptions {
+                render_once: true,
+                width: 96,
+                height: 30,
+                actions: Vec::new(),
+                initial_state_filter: None,
+                vim_mode: false,
+            },
+        )
+        .expect("render once should succeed")
+        .expect("snapshot should be returned");
+
+        assert!(snapshot.contains("No issues match the current search and filters."));
+        assert!(
+            snapshot
+                .contains("Adjust the search query or sidebar filters to widen the result set.")
+        );
+    }
+
+    #[test]
+    fn dashboard_preview_scrolls_to_overflowed_description() {
+        let mut data = DashboardData::demo();
+        data.issues[0].description = Some(
+            (1..=24)
+                .map(|index| format!("preview line {index}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        let viewport = preview_viewport(Rect::new(0, 0, 120, 20));
+        let mut app = DashboardApp::new(data, None);
+        app.apply_in_viewport(DashboardAction::Tab, viewport);
+        app.apply_in_viewport(DashboardAction::End, viewport);
+
+        assert_eq!(app.focus, Focus::Preview);
+        assert!(app.preview_scroll.offset() > 0);
+    }
+
     fn visible_issue_ids(app: &DashboardApp) -> Vec<&str> {
-        app.filtered_issue_indices()
+        app.visible_issue_results()
             .into_iter()
-            .filter_map(|index| app.data.issues.get(index))
+            .filter_map(|result| app.data.issues.get(result.issue_index))
             .map(|issue| issue.identifier.as_str())
             .collect()
     }

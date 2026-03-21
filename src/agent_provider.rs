@@ -5,7 +5,9 @@ use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 
 use anyhow::{Context, Result, bail};
+use serde_json::Value;
 
+use crate::agents::AgentTokenUsage;
 use crate::config::{AgentCommandConfig, PromptTransport, normalize_agent_name};
 use crate::fs::canonicalize_existing_dir;
 
@@ -39,8 +41,13 @@ pub trait BuiltinProviderAdapter: Sync {
         launch_args: &[String],
         working_dir: Option<&Path>,
         context: BuiltinInvocationContext,
+        transport: PromptTransport,
+        capture_output: bool,
+        continuation: Option<&str>,
     ) -> Result<Vec<String>>;
     fn validate_command_args(&self, command_args: &[String]) -> Result<()>;
+    fn parse_capture_output(&self, raw_stdout: &str) -> Result<BuiltinCaptureOutput>;
+    fn is_invalid_resume_error(&self, message: &str) -> bool;
 
     fn command_definition(&self) -> AgentCommandConfig {
         AgentCommandConfig {
@@ -49,6 +56,13 @@ pub trait BuiltinProviderAdapter: Sync {
             transport: self.transport(),
         }
     }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BuiltinCaptureOutput {
+    pub response_text: Option<String>,
+    pub continuation: Option<String>,
+    pub usage: Option<AgentTokenUsage>,
 }
 
 const REASONING_LOW: BuiltinReasoningOption = BuiltinReasoningOption {
@@ -168,6 +182,9 @@ impl BuiltinProviderAdapter for CodexProviderAdapter {
         launch_args: &[String],
         working_dir: Option<&Path>,
         context: BuiltinInvocationContext,
+        transport: PromptTransport,
+        capture_output: bool,
+        continuation: Option<&str>,
     ) -> Result<Vec<String>> {
         let mut args = match context {
             BuiltinInvocationContext::Listen => {
@@ -192,7 +209,33 @@ impl BuiltinProviderAdapter for CodexProviderAdapter {
             }
         }
 
-        args.extend(launch_args.to_vec());
+        let prompt_arg = if transport == PromptTransport::Arg {
+            launch_args.last().cloned()
+        } else {
+            None
+        };
+        let exec_args_end = launch_args
+            .len()
+            .saturating_sub(usize::from(prompt_arg.is_some()));
+        let exec_args = launch_args
+            .get(1..exec_args_end)
+            .unwrap_or_default()
+            .to_vec();
+
+        args.push("exec".to_string());
+        if continuation.is_some() {
+            args.push("resume".to_string());
+        }
+        if capture_output {
+            args.push("--json".to_string());
+        }
+        args.extend(exec_args);
+        if let Some(continuation) = continuation {
+            args.push(continuation.to_string());
+        }
+        if let Some(prompt_arg) = prompt_arg {
+            args.push(prompt_arg);
+        }
         Ok(args)
     }
 
@@ -270,10 +313,103 @@ impl BuiltinProviderAdapter for CodexProviderAdapter {
                         &["-c, --config <key=value>", "--config <key=value>"],
                     )][..],
                 ),
+                (
+                    exec_args.iter().any(|arg| arg == "--json"),
+                    "exec machine-readable flags",
+                    &[FlagSupport::new("--json", &["--json"])][..],
+                ),
             ],
         )?;
 
         Ok(())
+    }
+
+    fn parse_capture_output(&self, raw_stdout: &str) -> Result<BuiltinCaptureOutput> {
+        let mut response_text = None;
+        let mut continuation = None;
+        let mut usage = None;
+
+        for line in raw_stdout
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+        {
+            let value = match serde_json::from_str::<Value>(line) {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+            merge_usage(&mut usage, extract_usage_from_value(&value));
+            match value
+                .get("type")
+                .and_then(Value::as_str)
+                .or_else(|| value.get("method").and_then(Value::as_str))
+            {
+                Some("thread.started") => {
+                    continuation = value
+                        .get("thread_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                }
+                Some("thread/started") => {
+                    continuation = value
+                        .get("params")
+                        .and_then(|params| {
+                            params
+                                .get("thread_id")
+                                .or_else(|| params.get("threadId"))
+                                .or_else(|| params.get("id"))
+                        })
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .or(continuation);
+                }
+                Some("item.completed") => {
+                    let item = value.get("item").unwrap_or(&Value::Null);
+                    if item.get("type").and_then(Value::as_str) == Some("agent_message") {
+                        response_text = item
+                            .get("text")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                            .or(response_text);
+                    }
+                }
+                Some("item/completed") => {
+                    let item = value
+                        .get("params")
+                        .and_then(|params| params.get("item"))
+                        .unwrap_or(&Value::Null);
+                    if item
+                        .get("type")
+                        .and_then(Value::as_str)
+                        .is_some_and(|kind| {
+                            kind.eq_ignore_ascii_case("agent_message")
+                                || kind.eq_ignore_ascii_case("agentMessage")
+                        })
+                    {
+                        response_text = item
+                            .get("text")
+                            .or_else(|| item.get("content"))
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                            .or(response_text);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        Ok(BuiltinCaptureOutput {
+            response_text,
+            continuation,
+            usage,
+        })
+    }
+
+    fn is_invalid_resume_error(&self, message: &str) -> bool {
+        let lower = message.to_ascii_lowercase();
+        lower.contains("could not find thread")
+            || lower.contains("no session found")
+            || lower.contains("unknown session")
     }
 }
 
@@ -306,12 +442,41 @@ impl BuiltinProviderAdapter for ClaudeProviderAdapter {
         launch_args: &[String],
         _working_dir: Option<&Path>,
         context: BuiltinInvocationContext,
+        transport: PromptTransport,
+        capture_output: bool,
+        continuation: Option<&str>,
     ) -> Result<Vec<String>> {
         let mut args = Vec::new();
         if context == BuiltinInvocationContext::Listen {
             args.push("--permission-mode=bypassPermissions".to_string());
+            args.push("--verbose".to_string());
+            args.push("--output-format=stream-json".to_string());
         }
-        args.extend(launch_args.to_vec());
+        let prompt_arg = if transport == PromptTransport::Arg {
+            launch_args.last().cloned()
+        } else {
+            None
+        };
+        let option_args_end = launch_args
+            .len()
+            .saturating_sub(usize::from(prompt_arg.is_some()));
+        args.push("-p".to_string());
+        if capture_output {
+            args.push("--output-format=json".to_string());
+        }
+        args.extend(
+            launch_args
+                .get(1..option_args_end)
+                .unwrap_or_default()
+                .to_vec(),
+        );
+        if let Some(continuation) = continuation {
+            args.push("--resume".to_string());
+            args.push(continuation.to_string());
+        }
+        if let Some(prompt_arg) = prompt_arg {
+            args.push(prompt_arg);
+        }
         Ok(args)
     }
 
@@ -336,6 +501,21 @@ impl BuiltinProviderAdapter for ClaudeProviderAdapter {
                     &[FlagSupport::new("--effort", &["--effort <level>"])][..],
                 ),
                 (
+                    command_args.iter().any(|arg| arg == "--verbose"),
+                    "verbose flags",
+                    &[FlagSupport::new("--verbose", &["--verbose"])][..],
+                ),
+                (
+                    command_args
+                        .iter()
+                        .any(|arg| arg.starts_with("--output-format=")),
+                    "output-format flags",
+                    &[FlagSupport::new(
+                        "--output-format",
+                        &["--output-format <format>"],
+                    )][..],
+                ),
+                (
                     command_args.iter().any(|arg| {
                         arg == "--permission-mode" || arg.starts_with("--permission-mode=")
                     }),
@@ -348,10 +528,137 @@ impl BuiltinProviderAdapter for ClaudeProviderAdapter {
             ],
         )
     }
+
+    fn parse_capture_output(&self, raw_stdout: &str) -> Result<BuiltinCaptureOutput> {
+        let trimmed = raw_stdout.trim();
+        let mut response_text = None;
+        let mut continuation = None;
+        let mut usage = None;
+        let mut parsed_any = false;
+
+        for line in trimmed
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+        {
+            let value = match serde_json::from_str::<Value>(line) {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+            parsed_any = true;
+            merge_usage(&mut usage, extract_usage_from_value(&value));
+            response_text = match value.get("result") {
+                Some(Value::String(text)) => Some(text.clone()),
+                Some(value) => Some(
+                    serde_json::to_string(value)
+                        .context("failed to serialize Claude structured result payload")?,
+                ),
+                None => response_text,
+            };
+            continuation = value
+                .get("session_id")
+                .or_else(|| value.get("sessionId"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or(continuation);
+        }
+
+        if !parsed_any {
+            let value: Value = serde_json::from_str(trimmed)
+                .context("failed to parse Claude `--output-format=json` response")?;
+            merge_usage(&mut usage, extract_usage_from_value(&value));
+            response_text = match value.get("result") {
+                Some(Value::String(text)) => Some(text.clone()),
+                Some(value) => Some(
+                    serde_json::to_string(value)
+                        .context("failed to serialize Claude structured result payload")?,
+                ),
+                None => None,
+            };
+            continuation = value
+                .get("session_id")
+                .or_else(|| value.get("sessionId"))
+                .and_then(Value::as_str)
+                .map(str::to_string);
+        }
+
+        Ok(BuiltinCaptureOutput {
+            response_text,
+            continuation,
+            usage,
+        })
+    }
+
+    fn is_invalid_resume_error(&self, message: &str) -> bool {
+        let lower = message.to_ascii_lowercase();
+        lower.contains("no conversation found with session id")
+            || lower.contains("--resume requires a valid session id")
+    }
 }
 
 static CODEX_PROVIDER: CodexProviderAdapter = CodexProviderAdapter;
 static CLAUDE_PROVIDER: ClaudeProviderAdapter = ClaudeProviderAdapter;
+
+fn extract_usage_from_value(value: &Value) -> Option<AgentTokenUsage> {
+    fn parse_u64(value: &Value) -> Option<u64> {
+        value
+            .as_u64()
+            .or_else(|| {
+                value
+                    .as_i64()
+                    .filter(|number| *number >= 0)
+                    .map(|number| number as u64)
+            })
+            .or_else(|| value.as_str().and_then(|text| text.parse::<u64>().ok()))
+    }
+
+    fn extract_direct_usage(value: &Value) -> Option<AgentTokenUsage> {
+        let input = [
+            "inputTokens",
+            "input_tokens",
+            "promptTokens",
+            "prompt_tokens",
+        ]
+        .into_iter()
+        .find_map(|key| value.get(key).and_then(parse_u64));
+        let output = [
+            "outputTokens",
+            "output_tokens",
+            "completionTokens",
+            "completion_tokens",
+        ]
+        .into_iter()
+        .find_map(|key| value.get(key).and_then(parse_u64));
+        (input.is_some() || output.is_some()).then_some(AgentTokenUsage { input, output })
+    }
+
+    if let Some(usage) = extract_direct_usage(value) {
+        return Some(usage);
+    }
+
+    match value {
+        Value::Array(values) => values.iter().find_map(extract_usage_from_value),
+        Value::Object(map) => map.values().find_map(extract_usage_from_value),
+        _ => None,
+    }
+}
+
+fn merge_usage(existing: &mut Option<AgentTokenUsage>, update: Option<AgentTokenUsage>) {
+    let Some(update) = update else {
+        return;
+    };
+    match existing {
+        Some(existing) => {
+            if update.input.is_some() {
+                existing.input = update.input;
+            }
+            if update.output.is_some() {
+                existing.output = update.output;
+            }
+        }
+        None => *existing = Some(update),
+    }
+}
 
 pub fn builtin_provider_adapter(name: &str) -> Option<&'static dyn BuiltinProviderAdapter> {
     match normalize_agent_name(name).as_str() {
@@ -531,4 +838,151 @@ fn cached_help_output(command: &str, help_args: &[&str]) -> Result<String> {
         .map_err(|_| anyhow::anyhow!("built-in CLI help cache lock is poisoned"))?;
     cache_guard.insert(cache_key, help_output.clone());
     Ok(help_output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        BuiltinInvocationContext, BuiltinProviderAdapter, ClaudeProviderAdapter,
+        CodexProviderAdapter,
+    };
+    use crate::agents::AgentTokenUsage;
+    use crate::config::PromptTransport;
+
+    #[test]
+    fn codex_capture_command_args_use_resume_json_and_preserve_prompt_order() {
+        let adapter = CodexProviderAdapter;
+        let args = adapter
+            .prepare_command_args(
+                &[
+                    "exec".to_string(),
+                    "--model=gpt-5.4".to_string(),
+                    "-c".to_string(),
+                    "reasoning.effort=\"high\"".to_string(),
+                    "plan the work".to_string(),
+                ],
+                None,
+                BuiltinInvocationContext::Planning,
+                PromptTransport::Arg,
+                true,
+                Some("thread-1"),
+            )
+            .expect("codex args should render");
+
+        assert_eq!(args[0], "--sandbox");
+        assert!(args.contains(&"exec".to_string()));
+        assert!(args.contains(&"resume".to_string()));
+        assert!(args.contains(&"--json".to_string()));
+        assert!(args.contains(&"thread-1".to_string()));
+        assert_eq!(args.last().map(String::as_str), Some("plan the work"));
+    }
+
+    #[test]
+    fn codex_capture_output_extracts_last_agent_message_and_thread_id() {
+        let adapter = CodexProviderAdapter;
+        let parsed = adapter
+            .parse_capture_output(
+                r#"{"type":"thread.started","thread_id":"thread-123"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"type":"agent_message","text":"{\"questions\":[]}"}}"#,
+            )
+            .expect("codex output should parse");
+
+        assert_eq!(parsed.response_text.as_deref(), Some(r#"{"questions":[]}"#));
+        assert_eq!(parsed.continuation.as_deref(), Some("thread-123"));
+        assert_eq!(parsed.usage, None);
+    }
+
+    #[test]
+    fn codex_capture_output_extracts_usage_from_method_notifications() {
+        let adapter = CodexProviderAdapter;
+        let parsed = adapter
+            .parse_capture_output(
+                r#"{"method":"thread/started","params":{"id":"thread-456"}}
+{"method":"thread/tokenUsage/updated","params":{"tokenUsage":{"inputTokens":321,"outputTokens":123}}}
+{"method":"item/completed","params":{"item":{"type":"agentMessage","text":"done"}}}"#,
+            )
+            .expect("codex output should parse");
+
+        assert_eq!(parsed.response_text.as_deref(), Some("done"));
+        assert_eq!(parsed.continuation.as_deref(), Some("thread-456"));
+        assert_eq!(
+            parsed.usage,
+            Some(AgentTokenUsage {
+                input: Some(321),
+                output: Some(123),
+            })
+        );
+    }
+
+    #[test]
+    fn claude_capture_command_args_use_json_and_resume_flags() {
+        let adapter = ClaudeProviderAdapter;
+        let args = adapter
+            .prepare_command_args(
+                &[
+                    "-p".to_string(),
+                    "--model=haiku".to_string(),
+                    "--effort=low".to_string(),
+                    "plan the work".to_string(),
+                ],
+                None,
+                BuiltinInvocationContext::Planning,
+                PromptTransport::Arg,
+                true,
+                Some("session-123"),
+            )
+            .expect("claude args should render");
+
+        assert_eq!(args[0], "-p");
+        assert!(args.contains(&"--output-format=json".to_string()));
+        assert!(args.contains(&"--resume".to_string()));
+        assert!(args.contains(&"session-123".to_string()));
+        assert_eq!(args.last().map(String::as_str), Some("plan the work"));
+    }
+
+    #[test]
+    fn claude_capture_output_extracts_result_and_session_id() {
+        let adapter = ClaudeProviderAdapter;
+        let parsed = adapter
+            .parse_capture_output(
+                r#"{"type":"result","subtype":"success","result":"{\"questions\":[]}","session_id":"session-123"}"#,
+            )
+            .expect("claude output should parse");
+
+        assert_eq!(parsed.response_text.as_deref(), Some(r#"{"questions":[]}"#));
+        assert_eq!(parsed.continuation.as_deref(), Some("session-123"));
+        assert_eq!(parsed.usage, None);
+    }
+
+    #[test]
+    fn claude_capture_output_extracts_usage_from_json_lines() {
+        let adapter = ClaudeProviderAdapter;
+        let parsed = adapter
+            .parse_capture_output(
+                r#"{"type":"message_start","message":{"usage":{"input_tokens":210}}}
+{"type":"message_delta","usage":{"output_tokens":34}}
+{"type":"result","subtype":"success","result":"{\"summary\":\"ok\"}","session_id":"session-456"}"#,
+            )
+            .expect("claude output should parse");
+
+        assert_eq!(parsed.response_text.as_deref(), Some(r#"{"summary":"ok"}"#));
+        assert_eq!(parsed.continuation.as_deref(), Some("session-456"));
+        assert_eq!(
+            parsed.usage,
+            Some(AgentTokenUsage {
+                input: Some(210),
+                output: Some(34),
+            })
+        );
+    }
+
+    #[test]
+    fn claude_invalid_resume_detection_is_narrow() {
+        let adapter = ClaudeProviderAdapter;
+        assert!(adapter.is_invalid_resume_error(
+            "No conversation found with session ID: 550e8400-e29b-41d4-a716-446655440000"
+        ));
+        assert!(!adapter.is_invalid_resume_error("permission denied"));
+    }
 }

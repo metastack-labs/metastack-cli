@@ -35,6 +35,9 @@ That target is the same gate used by `.github/workflows/quality.yml` on pull req
 - `cargo test`
 - `cargo test --test release_artifacts`
 
+The interactive planning integration proof in `tests/plan.rs` shells out to `expect`, so local
+`make quality` runs also require that binary on `PATH` in addition to the Rust toolchain.
+
 The final focused test is the release-verification proof. It exercises `scripts/release-artifacts.sh` with stub builders and verifies the expected archive names, `SHA256SUMS` layout, and extracted `meta --version` output without requiring a full cross-platform packaging host.
 
 ## One-Time Prerequisites
@@ -134,6 +137,26 @@ Smoke test the latest-path installer contract:
 curl -fsSL https://raw.githubusercontent.com/metastack-systems/metastack-cli/main/scripts/install-meta.sh | sh
 meta --version
 ```
+
+Smoke test the in-place self-update contract for release installs:
+
+```bash
+meta upgrade --check
+meta upgrade --dry-run
+meta upgrade
+```
+
+Smoke test the advanced version-management path:
+
+```bash
+meta upgrade --version 0.2.0 --dry-run
+meta upgrade --version 0.3.0-rc.1 --prerelease
+meta upgrade --version 0.1.0 --allow-downgrade
+```
+
+`meta upgrade` only mutates standalone GitHub Release installs. Cargo installs and source-checkout
+builds are intentionally refused with explicit remediation text because those origins are safer to
+upgrade through their original build/install flows.
 
 ## Rollback And Yanked Releases
 

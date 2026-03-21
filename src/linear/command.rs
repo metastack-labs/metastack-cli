@@ -3,7 +3,7 @@ use std::io::IsTerminal;
 use anyhow::{Result, anyhow};
 
 use crate::cli::{DashboardCommandArgs, IssueCommands, LinearClientArgs, ProjectsCommands};
-use crate::config::{LinearConfig, LinearConfigOverrides, PlanningMeta};
+use crate::config::{AppConfig, LinearConfig, LinearConfigOverrides, PlanningMeta};
 use crate::fs::canonicalize_existing_dir;
 use crate::linear::create::{
     IssueCreateAction, IssueCreateFormContext, IssueCreateFormExit, IssueCreateFormOptions,
@@ -19,6 +19,7 @@ use crate::linear::{
     IssueSummary, LinearService, ProjectListFilters, ReqwestLinearClient, render_issue_summary,
     render_issues_list_output, render_projects_table, run_issue_refine_command,
 };
+use crate::output::{MachineIssueSummary, render_json_success};
 
 pub(crate) async fn run_projects_command(
     client_args: &LinearClientArgs,
@@ -56,6 +57,7 @@ pub(crate) async fn run_issues_command(
     cli_default_team: Option<String>,
     command: IssueCommands,
 ) -> Result<()> {
+    let app_config = AppConfig::load()?;
     let LinearCommandContext {
         service,
         default_team,
@@ -76,6 +78,7 @@ pub(crate) async fn run_issues_command(
                     project_id: applied_project_id.clone(),
                     project: list_args.project.clone(),
                     state: list_args.state.clone(),
+                    assignee: crate::linear::IssueAssigneeFilter::Any,
                     limit: list_args.limit,
                 })
                 .await?;
@@ -103,6 +106,7 @@ pub(crate) async fn run_issues_command(
                         .map(DashboardAction::from)
                         .collect(),
                     initial_state_filter: list_args.state,
+                    vim_mode: app_config.vim_mode_enabled(),
                 };
 
                 if let Some(snapshot) = run_dashboard(data, options)? {
@@ -148,11 +152,25 @@ pub(crate) async fn run_issues_command(
                         parent_id: None,
                         state: create_args.state,
                         priority: create_args.priority,
+                        assignee_id: None,
                         labels: Vec::new(),
                     })
                     .await?;
 
-                println!("{}", render_issue_summary("Created issue", &issue));
+                #[derive(serde::Serialize)]
+                struct IssueMutationResult {
+                    issue: MachineIssueSummary,
+                }
+
+                println!(
+                    "{}",
+                    render_json_success(
+                        "linear.issues.create",
+                        &IssueMutationResult {
+                            issue: MachineIssueSummary::from(&issue),
+                        },
+                    )?
+                );
             } else {
                 let selected_team = service
                     .load_issue_create_team(create_args.team.clone().or(default_team.clone()))
@@ -182,6 +200,7 @@ pub(crate) async fn run_issues_command(
                             .into_iter()
                             .map(IssueCreateAction::from)
                             .collect(),
+                        vim_mode: app_config.vim_mode_enabled(),
                     },
                 )?;
 
@@ -201,6 +220,7 @@ pub(crate) async fn run_issues_command(
                                 parent_id: None,
                                 state: values.state,
                                 priority: values.priority,
+                                assignee_id: None,
                                 labels: Vec::new(),
                             })
                             .await?;
@@ -220,10 +240,26 @@ pub(crate) async fn run_issues_command(
                         project: edit_args.project,
                         state: edit_args.state,
                         priority: edit_args.priority,
+                        estimate: None,
+                        labels: None,
+                        parent_identifier: None,
                     })
                     .await?;
 
-                println!("{}", render_issue_summary("Updated issue", &issue));
+                #[derive(serde::Serialize)]
+                struct IssueMutationResult {
+                    issue: MachineIssueSummary,
+                }
+
+                println!(
+                    "{}",
+                    render_json_success(
+                        "linear.issues.edit",
+                        &IssueMutationResult {
+                            issue: MachineIssueSummary::from(&issue),
+                        },
+                    )?
+                );
             } else {
                 let edit_context = service.load_issue_edit_context(&edit_args.issue).await?;
                 let existing_issue = edit_context.issue;
@@ -265,6 +301,7 @@ pub(crate) async fn run_issues_command(
                             .into_iter()
                             .map(IssueEditAction::from)
                             .collect(),
+                        vim_mode: app_config.vim_mode_enabled(),
                     },
                 )?;
 
@@ -285,6 +322,9 @@ pub(crate) async fn run_issues_command(
                                 project: edit_args.project,
                                 state: changed_state(&existing_issue, values.state.as_deref()),
                                 priority: changed_priority(&existing_issue, values.priority),
+                                estimate: None,
+                                labels: None,
+                                parent_identifier: None,
                             })
                             .await?;
 
@@ -306,6 +346,7 @@ pub(crate) async fn run_dashboard_command(
     cli_default_team: Option<String>,
     dashboard_args: DashboardCommandArgs,
 ) -> Result<()> {
+    let app_config = AppConfig::load()?;
     let LinearCommandContext {
         service,
         default_team,
@@ -340,6 +381,7 @@ pub(crate) async fn run_dashboard_command(
             .map(DashboardAction::from)
             .collect(),
         initial_state_filter: None,
+        vim_mode: app_config.vim_mode_enabled(),
     };
 
     if let Some(snapshot) = run_dashboard(data, options)? {
@@ -360,6 +402,7 @@ pub(crate) fn load_linear_command_context(
     cli_default_team: Option<String>,
 ) -> Result<LinearCommandContext> {
     let root = canonicalize_existing_dir(&client_args.root)?;
+    let app_config = AppConfig::load()?;
     let planning_meta = PlanningMeta::load(&root)?;
     let config = LinearConfig::new_with_root(
         Some(&root),
@@ -371,7 +414,7 @@ pub(crate) fn load_linear_command_context(
         },
     )?;
     let default_team = config.default_team.clone();
-    let default_project_id = planning_meta.linear.project_id.clone();
+    let default_project_id = planning_meta.effective_project_id(&app_config);
     let client = ReqwestLinearClient::new(config)?;
     let service = LinearService::new(client, default_team.clone());
 

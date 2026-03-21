@@ -28,7 +28,14 @@ struct DoctorReport {
 pub fn run_context_command(args: &ContextArgs) -> Result<String> {
     match &args.command {
         ContextCommands::Show(show_args) => run_context_show(show_args),
-        ContextCommands::Scan(scan_args) => Ok(run_scan(scan_args)?.render()),
+        ContextCommands::Scan(scan_args) => {
+            let report = run_scan(scan_args)?;
+            if scan_args.json {
+                report.render_json()
+            } else {
+                Ok(report.render())
+            }
+        }
         ContextCommands::Reload(reload_args) => run_context_reload(reload_args),
         ContextCommands::Map(map_args) => run_context_map(map_args),
         ContextCommands::Doctor(doctor_args) => run_context_doctor(doctor_args),
@@ -155,6 +162,7 @@ fn run_context_reload(args: &ContextReloadArgs) -> Result<String> {
     let report = run_scan_for_route(
         &ScanArgs {
             root: args.root.root.clone(),
+            json: false,
         },
         AGENT_ROUTE_CONTEXT_RELOAD,
     )?;

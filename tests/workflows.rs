@@ -2,13 +2,62 @@
 
 include!("support/common.rs");
 
+fn ensure_workflow_test_config(config_path: &Path) -> Result<(), Box<dyn Error>> {
+    let onboarding_block = "[onboarding]\ncompleted = true\n";
+    let updated = match fs::read_to_string(config_path) {
+        Ok(existing) => {
+            if existing.contains("[onboarding]") {
+                existing
+            } else if existing.trim().is_empty() {
+                onboarding_block.to_string()
+            } else {
+                format!("{onboarding_block}\n{existing}")
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => onboarding_block.to_string(),
+        Err(error) => return Err(Box::new(error)),
+    };
+
+    fs::write(config_path, updated)?;
+    Ok(())
+}
+
+fn workflow_test_command(
+    mut command: Command,
+    repo_root: &Path,
+    config_path: &Path,
+) -> Result<Command, Box<dyn Error>> {
+    ensure_workflow_test_config(config_path)?;
+    command.current_dir(repo_root);
+    command.env("METASTACK_CONFIG", config_path);
+    Ok(command)
+}
+
+trait WorkflowCommandExt {
+    fn workflow_repo(self, repo_root: &Path, config_path: &Path)
+    -> Result<Command, Box<dyn Error>>;
+}
+
+impl WorkflowCommandExt for Command {
+    fn workflow_repo(
+        self,
+        repo_root: &Path,
+        config_path: &Path,
+    ) -> Result<Command, Box<dyn Error>> {
+        workflow_test_command(self, repo_root, config_path)
+    }
+}
+
 #[test]
 fn workflows_list_shows_builtin_playbooks() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
     fs::create_dir_all(&repo_root)?;
+    ensure_workflow_test_config(&config_path)?;
 
     cli()
+        .env("METASTACK_CONFIG", &config_path)
         .args([
             "workflows",
             "list",
@@ -30,9 +79,12 @@ fn workflows_list_shows_builtin_playbooks() -> Result<(), Box<dyn Error>> {
 fn workflows_explain_describes_ticket_implementation_contract() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
     fs::create_dir_all(&repo_root)?;
+    ensure_workflow_test_config(&config_path)?;
 
     cli()
+        .env("METASTACK_CONFIG", &config_path)
         .args([
             "workflows",
             "explain",
@@ -76,6 +128,7 @@ default_model = "gpt-5.4"
 default_reasoning = "low"
 "#,
     )?;
+    ensure_workflow_test_config(&config_path)?;
 
     cli()
         .env("METASTACK_CONFIG", &config_path)
@@ -149,6 +202,7 @@ EOF
 fi
 if [ "$1" = "exec" ] && [ "$2" = "--help" ]; then
   cat <<'EOF'
+-j, --json
 -m, --model <MODEL>
 -c, --config <key=value>
 EOF
@@ -158,7 +212,8 @@ printf '%s\n' "$@" > "$TEST_OUTPUT_DIR/args.txt"
 printf '%s' "$METASTACK_AGENT_NAME" > "$TEST_OUTPUT_DIR/agent.txt"
 printf '%s' "$METASTACK_AGENT_MODEL" > "$TEST_OUTPUT_DIR/model.txt"
 printf '%s' "$METASTACK_AGENT_REASONING" > "$TEST_OUTPUT_DIR/reasoning.txt"
-printf 'codex builtin ok'
+printf '%s\n' '{"type":"thread.started","thread_id":"workflow-thread"}'
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"codex builtin ok"}}'
 "#,
     )?;
     let mut permissions = fs::metadata(&stub_path)?.permissions();
@@ -167,7 +222,7 @@ printf 'codex builtin ok'
 
     let current_path = std::env::var("PATH")?;
     meta()
-        .current_dir(&repo_root)
+        .workflow_repo(&repo_root, &config_path)?
         .env("METASTACK_CONFIG", &config_path)
         .env("TEST_OUTPUT_DIR", &stub_dir)
         .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
@@ -189,6 +244,7 @@ printf 'codex builtin ok'
     assert!(args.contains("--ask-for-approval"));
     assert!(args.contains("never"));
     assert!(args.contains("exec"));
+    assert!(args.contains("--json"));
     assert!(args.contains("--model=gpt-5.4"));
     assert!(args.contains("-c"));
     assert!(args.contains("reasoning.effort=\"medium\""));
@@ -247,6 +303,7 @@ if [ "$1" = "-p" ] && [ "$2" = "--help" ]; then
 -p, --print
 --model <model>
 --effort <level>
+--output-format <format>
 --permission-mode <mode>
 EOF
   exit 0
@@ -255,7 +312,7 @@ printf '%s\n' "$@" > "$TEST_OUTPUT_DIR/args.txt"
 printf '%s' "$METASTACK_AGENT_NAME" > "$TEST_OUTPUT_DIR/agent.txt"
 printf '%s' "$METASTACK_AGENT_MODEL" > "$TEST_OUTPUT_DIR/model.txt"
 printf '%s' "$METASTACK_AGENT_REASONING" > "$TEST_OUTPUT_DIR/reasoning.txt"
-printf 'claude builtin ok'
+printf '%s' '{"type":"result","subtype":"success","result":"claude builtin ok","session_id":"workflow-session"}'
 "#,
     )?;
     let mut permissions = fs::metadata(&stub_path)?.permissions();
@@ -264,7 +321,7 @@ printf 'claude builtin ok'
 
     let current_path = std::env::var("PATH")?;
     meta()
-        .current_dir(&repo_root)
+        .workflow_repo(&repo_root, &config_path)?
         .env("METASTACK_CONFIG", &config_path)
         .env("TEST_OUTPUT_DIR", &stub_dir)
         .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
@@ -282,6 +339,7 @@ printf 'claude builtin ok'
 
     let args = fs::read_to_string(stub_dir.join("args.txt"))?;
     assert!(args.contains("-p"));
+    assert!(args.contains("--output-format=json"));
     assert!(args.contains("--model=sonnet"));
     assert!(args.contains("--effort=high"));
     assert!(!args.contains("--reasoning="));
@@ -354,7 +412,7 @@ printf 'unexpected launch'
 
     let current_path = std::env::var("PATH")?;
     meta()
-        .current_dir(&repo_root)
+        .workflow_repo(&repo_root, &config_path)?
         .env("METASTACK_CONFIG", &config_path)
         .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
         .args([
@@ -438,6 +496,7 @@ if [ "$1" = "-p" ] && [ "$2" = "--help" ]; then
 -p, --print
 --model <model>
 --effort <level>
+--output-format <format>
 --permission-mode <mode>
 EOF
   exit 0
@@ -449,7 +508,7 @@ printf '%s' "$METASTACK_AGENT_REASONING" > "$TEST_OUTPUT_DIR/reasoning.txt"
 printf '%s' "$METASTACK_AGENT_PROVIDER_SOURCE" > "$TEST_OUTPUT_DIR/provider-source.txt"
 printf '%s' "$METASTACK_AGENT_MODEL_SOURCE" > "$TEST_OUTPUT_DIR/model-source.txt"
 printf '%s' "$METASTACK_AGENT_REASONING_SOURCE" > "$TEST_OUTPUT_DIR/reasoning-source.txt"
-printf 'claude override ok'
+printf '%s' '{"type":"result","subtype":"success","result":"claude override ok","session_id":"workflow-session"}'
 "#,
     )?;
     let mut permissions = fs::metadata(&stub_path)?.permissions();
@@ -458,7 +517,7 @@ printf 'claude override ok'
 
     let current_path = std::env::var("PATH")?;
     meta()
-        .current_dir(&repo_root)
+        .workflow_repo(&repo_root, &config_path)?
         .env("METASTACK_CONFIG", &config_path)
         .env("TEST_OUTPUT_DIR", &stub_dir)
         .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
@@ -478,6 +537,7 @@ printf 'claude override ok'
 
     let args = fs::read_to_string(stub_dir.join("args.txt"))?;
     assert!(args.contains("-p"));
+    assert!(args.contains("--output-format=json"));
     assert!(args.contains("--model=sonnet"));
     assert!(!args.contains("--model=gpt-5.4"));
     assert!(!args.contains("--reasoning="));
@@ -620,7 +680,7 @@ printf 'workflow stub ok'
 
     let current_path = std::env::var("PATH")?;
     meta()
-        .current_dir(&repo_root)
+        .workflow_repo(&repo_root, &config_path)?
         .env("METASTACK_CONFIG", &config_path)
         .env("TEST_OUTPUT_DIR", &stub_dir)
         .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
@@ -775,7 +835,7 @@ printf 'workflow route stub ok'
 
     let current_path = std::env::var("PATH")?;
     meta()
-        .current_dir(&repo_root)
+        .workflow_repo(&repo_root, &config_path)?
         .env("METASTACK_CONFIG", &config_path)
         .env("TEST_OUTPUT_DIR", &stub_dir)
         .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
@@ -809,7 +869,9 @@ printf 'workflow route stub ok'
 fn unsupported_provider_model_combination_returns_actionable_error() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
     fs::create_dir_all(repo_root.join(".metastack/workflows"))?;
+    ensure_workflow_test_config(&config_path)?;
     fs::write(
         repo_root.join(".metastack/workflows/invalid-provider.md"),
         r#"---
@@ -823,7 +885,7 @@ Validate provider/model compatibility.
     )?;
 
     meta()
-        .current_dir(&repo_root)
+        .workflow_repo(&repo_root, &config_path)?
         .args([
             "workflows",
             "run",
