@@ -999,7 +999,11 @@ fn validate_front_matter(
     Ok(())
 }
 
-fn validate_step(step: &CronStepDefinition, path: &Path, seen_ids: &BTreeSet<String>) -> Result<()> {
+fn validate_step(
+    step: &CronStepDefinition,
+    path: &Path,
+    seen_ids: &BTreeSet<String>,
+) -> Result<()> {
     for target in &step.guardrails.mutates {
         if !step
             .guardrails
