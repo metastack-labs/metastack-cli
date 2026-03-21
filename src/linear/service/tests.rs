@@ -445,3 +445,39 @@ async fn upsert_workpad_comment_updates_existing_active_comment() {
     assert_eq!(updates.len(), 1);
     assert_eq!(updates[0].0, "comment-active");
 }
+
+#[tokio::test]
+async fn update_issue_fields_adds_labels_without_dropping_existing_ones() {
+    let mut detailed_issue = issue("MET-11", "Todo", Some("project-1"), "MetaStack CLI");
+    detailed_issue.labels = vec![label("label-plan", "plan")];
+    let client = FakeLinearClient {
+        issues: vec![issue("MET-11", "Todo", Some("project-1"), "MetaStack CLI")],
+        all_issues: vec![issue("MET-11", "Todo", Some("project-1"), "MetaStack CLI")],
+        issue_detail: Some(detailed_issue),
+        issue_labels: vec![label("label-plan", "plan"), label("label-refine", "refine")],
+        teams: vec![team("MET", &[("state-1", "Todo")])],
+        updated_issue: Some(issue("MET-11", "Todo", Some("project-1"), "MetaStack CLI")),
+        ..FakeLinearClient::default()
+    };
+    let service = LinearService::new(client.clone(), Some("MET".to_string()));
+
+    service
+        .update_issue_fields(
+            "MET-11",
+            Some("Updated description".to_string()),
+            None,
+            &["refine".to_string()],
+        )
+        .await
+        .expect("field update should succeed");
+
+    let updates = client.update_requests.lock().expect("mutex poisoned");
+    let (_, request) = updates
+        .first()
+        .expect("an update request should be recorded");
+    assert_eq!(request.description.as_deref(), Some("Updated description"));
+    assert_eq!(
+        request.label_ids.as_deref(),
+        Some(&["label-plan".to_string(), "label-refine".to_string()][..])
+    );
+}

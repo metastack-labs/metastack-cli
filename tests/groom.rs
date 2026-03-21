@@ -3,13 +3,17 @@
 include!("support/common.rs");
 
 #[test]
-fn backlog_groom_report_creates_missing_packets_and_reports_findings() -> Result<(), Box<dyn Error>>
-{
+fn backlog_groom_report_mode_scaffolds_missing_packets_and_prints_findings()
+-> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
     let server = MockServer::start();
     let api_url = server.url("/graphql");
+    fs::create_dir_all(&repo_root)?;
+
     write_minimal_planning_context(
-        temp.path(),
+        &repo_root,
         r#"{
   "linear": {
     "team": "MET",
@@ -18,137 +22,86 @@ fn backlog_groom_report_creates_missing_packets_and_reports_findings() -> Result
 }
 "#,
     )?;
+    fs::write(
+        &config_path,
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+team = "MET"
+"#
+        ),
+    )?;
 
-    server.mock(|when, then| {
+    let issues_mock = server.mock(|when, then| {
         when.method(POST)
             .path("/graphql")
+            .header("authorization", "token")
             .body_includes("query Issues")
             .body_includes("\"project\":{\"id\":{\"eq\":\"project-1\"}}");
         then.status(200).json_body(json!({
             "data": {
                 "issues": {
-                    "nodes": [
-                        {
-                            "id": "issue-1",
-                            "identifier": "MET-51",
-                            "title": "Improve backlog sync status output",
-                            "description": "Short note",
-                            "url": "https://linear.app/issues/MET-51",
-                            "priority": 2,
-                            "updatedAt": "2026-03-19T16:00:00Z",
-                            "team": {
-                                "id": "team-1",
-                                "key": "MET",
-                                "name": "Metastack"
-                            },
-                            "project": {
-                                "id": "project-1",
-                                "name": "MetaStack CLI"
-                            },
-                            "labels": { "nodes": [] },
-                            "comments": { "nodes": [] },
-                            "state": {
-                                "id": "state-1",
-                                "name": "Todo",
-                                "type": "unstarted"
-                            },
-                            "attachments": { "nodes": [] },
-                            "parent": null,
-                            "children": { "nodes": [] }
+                    "nodes": [{
+                        "id": "issue-11",
+                        "identifier": "MET-11",
+                        "title": "Tighten backlog ticket quality",
+                        "description": "Short stub.",
+                        "url": "https://linear.app/metastack-labs/issue/MET-11",
+                        "priority": 2,
+                        "estimate": null,
+                        "updatedAt": "2026-03-19T16:00:00Z",
+                        "team": {
+                            "id": "team-1",
+                            "key": "MET",
+                            "name": "Metastack"
                         },
-                        {
-                            "id": "issue-2",
-                            "identifier": "MET-52",
-                            "title": "Improve backlog sync status outputs",
-                            "description": "# Acceptance Criteria\n\n- [ ] Preserve current layout\n- [ ] Keep snapshots stable\n",
-                            "url": "https://linear.app/issues/MET-52",
-                            "priority": 2,
-                            "updatedAt": "2026-03-18T16:00:00Z",
-                            "team": {
-                                "id": "team-1",
-                                "key": "MET",
-                                "name": "Metastack"
-                            },
-                            "project": {
-                                "id": "project-1",
-                                "name": "MetaStack CLI"
-                            },
-                            "labels": { "nodes": [] },
-                            "comments": { "nodes": [] },
-                            "state": {
-                                "id": "state-2",
-                                "name": "In Progress",
-                                "type": "started"
-                            },
-                            "attachments": { "nodes": [] },
-                            "parent": null,
-                            "children": { "nodes": [] }
+                        "project": {
+                            "id": "project-1",
+                            "name": "MetaStack CLI"
+                        },
+                        "assignee": null,
+                        "labels": {
+                            "nodes": []
+                        },
+                        "state": {
+                            "id": "state-backlog",
+                            "name": "Backlog",
+                            "type": "backlog"
+                        },
+                        "attachments": {
+                            "nodes": []
                         }
-                    ]
-                }
-            }
-        }));
-    });
-
-    let update_issue_mock = server.mock(|when, then| {
-        when.method(POST)
-            .path("/graphql")
-            .body_includes("mutation UpdateIssue");
-        then.status(200).json_body(json!({
-            "data": {
-                "issueUpdate": {
-                    "success": true,
-                    "issue": issue_node(
-                        "issue-1",
-                        "MET-51",
-                        "Improve backlog sync status output",
-                        "Short note",
-                        "state-1",
-                        "Todo",
-                    )
+                    }],
+                    "pageInfo": {
+                        "hasNextPage": false,
+                        "endCursor": null
+                    }
                 }
             }
         }));
     });
 
     cli()
-        .current_dir(temp.path())
-        .args([
-            "backlog",
-            "groom",
-            "--api-key",
-            "token",
-            "--api-url",
-            &api_url,
-        ])
+        .env("METASTACK_CONFIG", &config_path)
+        .current_dir(&repo_root)
+        .args(["backlog", "groom"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Backlog grooming report"))
-        .stdout(predicate::str::contains("MET-51"))
-        .stdout(predicate::str::contains("[refine]"))
-        .stdout(predicate::str::contains("[rescan-required]"))
-        .stdout(predicate::str::contains("MET-52"))
-        .stdout(predicate::str::contains("[merge]"))
-        .stdout(predicate::str::contains(
-            "created 2 missing local packet(s)",
-        ));
+        .stdout(predicate::str::contains("Backlog groom report for `project-1`"))
+        .stdout(predicate::str::contains("Mode: report"))
+        .stdout(predicate::str::contains("MET-11  Tighten backlog ticket quality"))
+        .stdout(predicate::str::contains("refine:"))
+        .stdout(predicate::str::contains("rescan-required:"))
+        .stdout(predicate::str::contains("Local packets created: 1"));
 
-    assert!(
-        temp.path()
-            .join(".metastack/backlog/MET-51/index.md")
-            .is_file()
+    issues_mock.assert_calls(1);
+    assert!(repo_root.join(".metastack/backlog/MET-11").is_dir());
+    assert!(repo_root.join(".metastack/backlog/MET-11/.linear.json").is_file());
+    assert_eq!(
+        fs::read_to_string(repo_root.join(".metastack/backlog/MET-11/index.md"))?,
+        "Short stub."
     );
-    assert!(
-        temp.path()
-            .join(".metastack/backlog/MET-51/.linear.json")
-            .is_file()
-    );
-    assert!(
-        temp.path()
-            .join(".metastack/backlog/MET-52/index.md")
-            .is_file()
-    );
-    update_issue_mock.assert_calls(0);
 
     Ok(())
 }

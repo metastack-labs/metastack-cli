@@ -150,7 +150,7 @@ The preferred public surface is domain-first. Legacy top-level commands such as 
 
 | Command family | Use it for |
 | --- | --- |
-| `meta backlog` | Plan, create technical backlog children, and sync backlog work for the current repository |
+| `meta backlog` | Plan, groom, create technical backlog children, and sync backlog work for the current repository |
 | `meta linear` | Browse, create, edit, refine, and dashboard Linear work |
 | `meta agents` | Run the unattended listener and reusable workflow playbooks |
 | `meta context` | Inspect, map, doctor, scan, or reload the effective agent context |
@@ -654,10 +654,11 @@ meta backlog groom --api-key "$LINEAR_API_KEY" --apply
 
 Notes:
 
-- report mode is the default; it scans repo-scoped Linear issues, categorizes findings as `refine`, `merge`, `split`, `archive`, or `rescan-required`, and creates any missing `.metastack/backlog/<ISSUE>/` packet structure without mutating Linear
-- scan drift is part of the report: missing local packets, non-`synced` packet baselines, and packets or repo scan context older than the latest Linear update are surfaced as `rescan-required`
+- report mode is the default; it scans repo-scoped Linear issues, categorizes findings as `refine`, `merge`, `split`, `archive`, or `rescan-required`, and scaffolds any missing `.metastack/backlog/<ISSUE>/` packet structure without mutating Linear
+- scan drift is part of the report: missing local packets, missing `.linear.json` metadata, missing sync baselines, and packets older than the latest Linear update are surfaced as `rescan-required`
 - apply mode only performs explicit Linear issue description, label, and state updates, and prints each mutated issue identifier plus the changed field names
-- apply mode adds maintenance labels such as `backlog-refine`, `backlog-merge`, `backlog-split`, and `backlog-rescan`; archive recommendations move the issue into the first matching team state among `Archive`, `Archived`, `Canceled`, or `Cancelled`
+- apply mode skips issues flagged `rescan-required` and adds category labels such as `refine`, `merge`, `split`, and `archive` before applying any description or state fixups
+- archive recommendations move the issue into the first team state that matches `Archive`, `Archived`, or a `canceled` workflow state when one exists
 
 ### `linear issues`, `linear projects`, and `dashboard`
 
