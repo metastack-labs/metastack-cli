@@ -890,6 +890,7 @@ fn listen_sessions_inspect_surfaces_structured_detail_fields() -> Result<(), Box
         .assert()
         .success()
         .stdout(predicate::str::contains("Detail status: available"))
+        .stdout(predicate::str::contains("Detail PR: draft #321"))
         .stdout(predicate::str::contains(
             "Detail PR URL: https://github.com/metastack-labs/metastack-cli/pull/321",
         ))
@@ -1048,6 +1049,7 @@ fn listen_sessions_inspect_surfaces_detail_pr_ref_without_url() -> Result<(), Bo
         .assert()
         .success()
         .stdout(predicate::str::contains("Detail status: available"))
+        .stdout(predicate::str::contains("Detail PR: draft #482"))
         .stdout(predicate::str::contains("Detail PR Ref: #482"))
         .stdout(predicate::str::contains("Detail PR URL").not());
 

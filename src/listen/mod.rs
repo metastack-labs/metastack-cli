@@ -2250,6 +2250,10 @@ fn append_session_inspect_detail_lines(lines: &mut Vec<String>, detail: &ListenS
         "  - Detail excerpts: {}",
         detail.log_excerpts.len()
     ));
+    lines.push(format!(
+        "  - Detail PR: {}",
+        detail.pull_request.compact_label()
+    ));
 
     if let Some(url) = detail.pull_request.url.as_deref() {
         lines.push(format!("  - Detail PR URL: {url}"));
