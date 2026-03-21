@@ -299,6 +299,8 @@ fn build_release_packet(
         .map(|entry| entry.identifier.clone())
         .collect::<BTreeSet<_>>();
     let dependency_map = infer_dependencies(backlog, live_issues, &identifiers);
+    let external_dependency_signals =
+        infer_external_dependency_signals(backlog, live_issues, &identifiers);
     let dependency_cycles = find_dependency_cycles(&dependency_map);
     let dependents = build_dependents(&dependency_map);
     let ordered = topological_order(backlog, live_issues, &dependency_map);
@@ -369,13 +371,17 @@ fn build_release_packet(
                 identifier
             ));
         }
-        if dependencies
-            .iter()
-            .any(|dependency| !identifiers.contains(dependency))
+        if let Some(external_dependencies) = external_dependency_signals.get(identifier)
+            && !external_dependencies.is_empty()
         {
             risks.push(format!(
-                "{} references dependency signals outside the selected backlog scope.",
-                identifier
+                "{} references dependency signals outside the selected backlog scope: {}.",
+                identifier,
+                external_dependencies
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
         }
 
@@ -740,6 +746,49 @@ fn infer_dependencies(
     dependency_map
 }
 
+fn infer_external_dependency_signals(
+    backlog: &[LocalBacklogEntry],
+    live_issues: &BTreeMap<String, IssueSummary>,
+    identifiers: &BTreeSet<String>,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let mut external_dependency_map = BTreeMap::<String, BTreeSet<String>>::new();
+
+    for entry in backlog {
+        let mut dependencies = BTreeSet::new();
+
+        if let Some(issue) = live_issues.get(&entry.identifier) {
+            if let Some(parent) = &issue.parent
+                && !identifiers.contains(&parent.identifier)
+            {
+                dependencies.insert(parent.identifier.clone());
+            }
+        }
+
+        for note in &entry.notes {
+            collect_external_dependency_mentions(
+                &note.contents,
+                &entry.identifier,
+                identifiers,
+                &mut dependencies,
+            );
+        }
+        if let Some(issue) = live_issues.get(&entry.identifier)
+            && let Some(description) = issue.description.as_deref()
+        {
+            collect_external_dependency_mentions(
+                description,
+                &entry.identifier,
+                identifiers,
+                &mut dependencies,
+            );
+        }
+
+        external_dependency_map.insert(entry.identifier.clone(), dependencies);
+    }
+
+    external_dependency_map
+}
+
 fn collect_dependency_mentions(
     contents: &str,
     current_identifier: &str,
@@ -765,6 +814,54 @@ fn collect_dependency_mentions(
             }
         }
     }
+}
+
+fn collect_external_dependency_mentions(
+    contents: &str,
+    current_identifier: &str,
+    identifiers: &BTreeSet<String>,
+    dependencies: &mut BTreeSet<String>,
+) {
+    for raw_line in contents.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let lowered = line.to_ascii_lowercase();
+        if !DEPENDENCY_HINTS.iter().any(|hint| lowered.contains(hint)) {
+            continue;
+        }
+
+        for identifier in extract_issue_identifiers(line) {
+            if identifier == current_identifier || identifiers.contains(&identifier) {
+                continue;
+            }
+            dependencies.insert(identifier);
+        }
+    }
+}
+
+fn extract_issue_identifiers(contents: &str) -> BTreeSet<String> {
+    contents
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != '-')
+        .filter_map(normalize_issue_identifier)
+        .collect()
+}
+
+fn normalize_issue_identifier(token: &str) -> Option<String> {
+    let normalized = token.trim_matches('-').to_ascii_uppercase();
+    let (prefix, suffix) = normalized.rsplit_once('-')?;
+    if prefix.is_empty()
+        || suffix.is_empty()
+        || !suffix.chars().all(|character| character.is_ascii_digit())
+        || !prefix
+            .chars()
+            .all(|character| character.is_ascii_uppercase() || character.is_ascii_digit())
+    {
+        return None;
+    }
+
+    Some(normalized)
 }
 
 fn find_dependency_cycles(dependency_map: &BTreeMap<String, BTreeSet<String>>) -> Vec<Vec<String>> {
@@ -1135,6 +1232,28 @@ mod tests {
         });
         let backlog = vec![local_entry("MET-10"), entry];
         let map = infer_dependencies(
+            &backlog,
+            &BTreeMap::new(),
+            &backlog
+                .iter()
+                .map(|entry| entry.identifier.clone())
+                .collect::<BTreeSet<_>>(),
+        );
+
+        assert_eq!(
+            map.get("MET-11").cloned().unwrap_or_default(),
+            BTreeSet::from(["MET-10".to_string()])
+        );
+    }
+
+    #[test]
+    fn external_dependency_mentions_are_preserved_for_risk_reporting() {
+        let mut entry = local_entry("MET-11");
+        entry.notes.push(BacklogNote {
+            contents: "This rollout is blocked by met-10 before MET-11 can ship.".to_string(),
+        });
+        let backlog = vec![entry];
+        let map = infer_external_dependency_signals(
             &backlog,
             &BTreeMap::new(),
             &backlog

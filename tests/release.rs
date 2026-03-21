@@ -605,3 +605,66 @@ fn release_reports_cyclic_dependency_signals_as_risks() -> Result<(), Box<dyn Er
 
     Ok(())
 }
+
+#[cfg(unix)]
+#[test]
+fn release_reports_external_dependencies_outside_selected_scope() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+    write_backlog_issue(&repo_root, "MET-10", "Lay release foundations", None)?;
+    write_backlog_issue(
+        &repo_root,
+        "MET-11",
+        "Ship release batching UX",
+        Some("blocked by MET-10"),
+    )?;
+    write_backlog_issue(&repo_root, "MET-12", "Add stretch automation", None)?;
+    fs::write(&config_path, "")?;
+
+    cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "backlog",
+            "release",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--name",
+            "subset-risk",
+            "--issue",
+            "MET-11",
+            "--issue",
+            "MET-12",
+            "--batch-size",
+            "1",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "outside the selected backlog scope: MET-10",
+        ));
+
+    let markdown = fs::read_to_string(
+        repo_root
+            .join(".metastack/releases/subset-risk")
+            .join("index.md"),
+    )?;
+    assert!(markdown.contains(
+        "MET-11 references dependency signals outside the selected backlog scope: MET-10."
+    ));
+
+    Ok(())
+}
