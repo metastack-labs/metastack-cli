@@ -893,9 +893,9 @@ default_reasoning = "medium"
         .stdout(predicate::str::contains("Plan follow-ups"))
         .stdout(predicate::str::contains("Plan mode"))
         .stdout(predicate::str::contains("Fast single-ticket"))
-        .stdout(predicate::str::contains("Fast questions"))
-        .stdout(predicate::str::contains("Plan label"))
-        .stdout(predicate::str::contains("Tech label"));
+        .stdout(predicate::str::contains("Fast plan questions"))
+        .stdout(predicate::str::contains("14. Plan label"))
+        .stdout(predicate::str::contains("15. Tech label"));
 
     Ok(())
 }
@@ -1084,7 +1084,7 @@ default_model = "gpt-5.4"
         .stdout(predicate::str::contains("Meta Setup"))
         .stdout(predicate::str::contains("agent-ticket-needing-extra-room"))
         .stdout(predicate::str::contains(
-            "docs/instructions/with/a/very/long/path/li",
+            "docs/instructions/with/a/very/long/path/",
         ))
         .stdout(predicate::str::contains("sten.md"))
         .stdout(predicate::str::contains("planning-with-a-long-label"))
