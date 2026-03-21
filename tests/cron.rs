@@ -24,6 +24,15 @@ fn prepend_path(bin_dir: &std::path::Path) -> Result<String, Box<dyn Error>> {
 }
 
 #[cfg(unix)]
+fn run_state_files(root: &std::path::Path) -> Result<Vec<std::path::PathBuf>, Box<dyn Error>> {
+    let mut paths = fs::read_dir(root.join(".metastack/cron/.runtime/runs"))?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .collect::<Vec<_>>();
+    paths.sort();
+    Ok(paths)
+}
+
+#[cfg(unix)]
 #[test]
 fn cron_init_creates_a_markdown_job_template() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
@@ -293,11 +302,11 @@ fi
         .current_dir(temp.path())
         .env("METASTACK_CONFIG", &config_path)
         .env("TEST_OUTPUT_DIR", &output_dir)
-        .args(["cron", "run", "nightly"])
+        .args(["runtime", "cron", "run", "nightly"])
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Ran cron job `nightly` successfully.",
+            "Ran cron workflow `nightly` successfully as `nightly-",
         ));
 
     let canonical_root = fs::canonicalize(temp.path())?;
@@ -322,9 +331,9 @@ fi
     assert!(prompt.contains("Inspect the command output"));
     assert!(prompt.contains("## Cron Execution Context"));
     assert!(prompt.contains("Command exit code: 0"));
-    assert_eq!(
-        fs::read_to_string(output_dir.join("log-path.txt"))?,
-        ".metastack/cron/.runtime/logs/nightly.log"
+    assert!(
+        fs::read_to_string(output_dir.join("log-path.txt"))?
+            .starts_with(".metastack/cron/.runtime/logs/nightly-")
     );
     assert_eq!(
         fs::read_to_string(output_dir.join("provider-source.txt"))?,
@@ -334,12 +343,12 @@ fi
         fs::read_to_string(output_dir.join("route-key.txt"))?,
         "runtime.cron.prompt"
     );
-    let runtime_log = fs::read_to_string(
-        temp.path()
-            .join(".metastack/cron/.runtime/logs/nightly.log"),
-    )?;
+    let runtime_log_path = fs::read_to_string(output_dir.join("log-path.txt"))?;
+    assert!(runtime_log_path.starts_with(".metastack/cron/.runtime/logs/nightly-"));
+    let runtime_log = fs::read_to_string(temp.path().join(runtime_log_path.trim()))?;
     assert!(runtime_log.contains("Resolved provider: stub"));
     assert!(runtime_log.contains("Resolved route key: runtime.cron.prompt"));
+    assert_eq!(run_state_files(temp.path())?.len(), 1);
 
     Ok(())
 }
@@ -400,11 +409,11 @@ printf '%s' "$METASTACK_CRON_JOB_COMMAND_EXIT_CODE" > "$TEST_OUTPUT_DIR/command-
         .current_dir(temp.path())
         .env("METASTACK_CONFIG", &config_path)
         .env("TEST_OUTPUT_DIR", &output_dir)
-        .args(["cron", "run", "nightly"])
+        .args(["runtime", "cron", "run", "nightly"])
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Ran cron job `nightly` successfully.",
+            "Ran cron workflow `nightly` successfully as `nightly-",
         ));
 
     assert_eq!(fs::read_to_string(output_dir.join("command.txt"))?, "");
@@ -493,11 +502,11 @@ printf '%s' "$1" > "$TEST_OUTPUT_DIR/route.txt"
         .env("PATH", prepend_path(&bin_dir)?)
         .env("METASTACK_CONFIG", &config_path)
         .env("TEST_OUTPUT_DIR", &output_dir)
-        .args(["cron", "run", "nightly"])
+        .args(["runtime", "cron", "run", "nightly"])
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Ran cron job `nightly` successfully.",
+            "Ran cron workflow `nightly` successfully as `nightly-",
         ));
 
     assert!(output_dir.join("route.txt").is_file());
@@ -556,17 +565,28 @@ exit 9
     cli()
         .current_dir(temp.path())
         .env("METASTACK_CONFIG", &config_path)
-        .args(["cron", "run", "nightly"])
+        .args(["runtime", "cron", "run", "nightly"])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "cron job `nightly` failed: agent `stub` exited unsuccessfully (9)",
+            "cron workflow `nightly` failed in run `nightly-",
+        ))
+        .stderr(predicate::str::contains(
+            "agent `stub` exited unsuccessfully (9)",
         ));
 
     let state = fs::read_to_string(temp.path().join(".metastack/cron/.runtime/scheduler.json"))?;
+    let run_state_path = run_state_files(temp.path())?
+        .into_iter()
+        .next()
+        .ok_or_else(|| std::io::Error::other("missing run state file"))?;
+    let run_state: serde_json::Value = serde_json::from_str(&fs::read_to_string(&run_state_path)?)?;
     let log = fs::read_to_string(
-        temp.path()
-            .join(".metastack/cron/.runtime/logs/nightly.log"),
+        temp.path().join(
+            run_state["log_path"]
+                .as_str()
+                .ok_or_else(|| std::io::Error::other("missing log path"))?,
+        ),
     )?;
     assert!(state.contains("agent `stub` exited unsuccessfully (9)"));
     assert!(log.contains("agent phase start"));
@@ -719,6 +739,459 @@ fn cron_start_status_and_stop_manage_a_detached_scheduler() -> Result<(), Box<dy
         .assert()
         .success()
         .stdout(predicate::str::contains("Cron scheduler: stopped"));
+
+    Ok(())
+}
+
+#[test]
+fn cron_list_prefers_repository_definitions_over_install_scoped_duplicates()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let config_path = temp.path().join("metastack.toml");
+    let install_dir = temp.path().join("data/cron");
+    let repo_dir = temp.path().join(".metastack/cron");
+    write_onboarded_config(&config_path, "")?;
+    fs::create_dir_all(&install_dir)?;
+    fs::create_dir_all(&repo_dir)?;
+
+    fs::write(
+        install_dir.join("shared.md"),
+        r#"---
+schedule: "5 * * * *"
+steps:
+  - id: install
+    type: shell
+    command: "echo install"
+---
+"#,
+    )?;
+    fs::write(
+        repo_dir.join("shared.md"),
+        r#"---
+schedule: "0 * * * *"
+steps:
+  - id: repo
+    type: shell
+    command: "echo repo"
+---
+"#,
+    )?;
+
+    cli()
+        .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
+        .args(["runtime", "cron", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("- shared [valid] enabled"))
+        .stdout(predicate::str::contains("source: repository"))
+        .stdout(predicate::str::contains("file: .metastack/cron/shared.md"))
+        .stdout(predicate::str::contains("schedule: 0 * * * *"))
+        .stdout(predicate::str::contains("steps: 1"));
+
+    cli()
+        .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
+        .args(["runtime", "cron", "validate"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Validated 1 cron workflow definition(s) successfully.",
+        ));
+
+    Ok(())
+}
+
+#[test]
+fn cron_validate_rejects_forward_when_references() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let config_path = temp.path().join("metastack.toml");
+    write_onboarded_config(&config_path, "")?;
+    fs::create_dir_all(temp.path().join(".metastack/cron"))?;
+    fs::write(
+        temp.path().join(".metastack/cron/invalid-when.md"),
+        r#"---
+schedule: "0 * * * *"
+mode: workflow
+steps:
+  - id: deploy
+    type: shell
+    command: "printf deploy"
+    when:
+      step: approve
+      exists: true
+  - id: approve
+    type: approval
+    approval_message: "Approve deploy"
+---
+"#,
+    )?;
+
+    cli()
+        .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
+        .args(["runtime", "cron", "validate"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "references unknown or later step `approve` in `when.step`",
+        ));
+
+    Ok(())
+}
+
+#[test]
+fn cron_validate_rejects_ambiguous_when_conditions() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let config_path = temp.path().join("metastack.toml");
+    write_onboarded_config(&config_path, "")?;
+    fs::create_dir_all(temp.path().join(".metastack/cron"))?;
+    fs::write(
+        temp.path().join(".metastack/cron/ambiguous-when.md"),
+        r#"---
+schedule: "0 * * * *"
+mode: workflow
+steps:
+  - id: prep
+    type: shell
+    command: "printf prep"
+  - id: deploy
+    type: shell
+    command: "printf deploy"
+    when:
+      step: prep
+      equals: "ready"
+      exists: true
+---
+"#,
+    )?;
+
+    cli()
+        .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
+        .args(["runtime", "cron", "validate"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "must set only one of `when.equals`, `when.not_equals`, or `when.exists`",
+        ));
+
+    Ok(())
+}
+
+#[test]
+fn cron_run_waits_for_approval_and_approve_resumes_the_run() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let config_path = temp.path().join("metastack.toml");
+    write_onboarded_config(&config_path, "")?;
+    fs::create_dir_all(temp.path().join(".metastack/cron"))?;
+    fs::write(
+        temp.path().join(".metastack/cron/review.md"),
+        r#"---
+schedule: "0 * * * *"
+mode: workflow
+steps:
+  - id: prep
+    type: shell
+    command: "printf prep > prep.txt"
+  - id: approval
+    type: approval
+    approval_message: "Approve release packaging"
+  - id: finalize
+    type: shell
+    command: "printf done > done.txt"
+---
+"#,
+    )?;
+
+    let run_output = cli()
+        .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
+        .args(["runtime", "cron", "run", "review"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Cron workflow `review` is waiting for approval in run `review-",
+        ));
+
+    let run_state_path = run_state_files(temp.path())?
+        .into_iter()
+        .next()
+        .ok_or_else(|| std::io::Error::other("missing run state file"))?;
+    let run_state: serde_json::Value = serde_json::from_str(&fs::read_to_string(&run_state_path)?)?;
+    let run_id = run_state["run_id"]
+        .as_str()
+        .ok_or_else(|| std::io::Error::other("missing run id"))?
+        .to_string();
+
+    cli()
+        .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
+        .args(["runtime", "cron", "approvals", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(&run_id))
+        .stdout(predicate::str::contains("Approve release packaging"));
+
+    cli()
+        .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
+        .args(["runtime", "cron", "approve", &run_id, "--note", "ship it"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Ran cron workflow `review` successfully as `review-",
+        ));
+
+    assert_eq!(fs::read_to_string(temp.path().join("prep.txt"))?, "prep");
+    assert_eq!(fs::read_to_string(temp.path().join("done.txt"))?, "done");
+    let updated_run: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&run_state_path)?)?;
+    assert_eq!(updated_run["status"], "succeeded");
+    assert_eq!(updated_run["steps"][1]["output"]["status"], "approved");
+    assert_eq!(updated_run["steps"][1]["output"]["note"], "ship it");
+    let _ = run_output;
+
+    Ok(())
+}
+
+#[test]
+fn cron_reject_marks_waiting_run_as_rejected() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let config_path = temp.path().join("metastack.toml");
+    write_onboarded_config(&config_path, "")?;
+    fs::create_dir_all(temp.path().join(".metastack/cron"))?;
+    fs::write(
+        temp.path().join(".metastack/cron/review.md"),
+        r#"---
+schedule: "0 * * * *"
+steps:
+  - id: approval
+    type: approval
+    approval_message: "Approve release packaging"
+---
+"#,
+    )?;
+
+    cli()
+        .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
+        .args(["runtime", "cron", "run", "review"])
+        .assert()
+        .success();
+
+    let run_state_path = run_state_files(temp.path())?
+        .into_iter()
+        .next()
+        .ok_or_else(|| std::io::Error::other("missing run state file"))?;
+    let run_state: serde_json::Value = serde_json::from_str(&fs::read_to_string(&run_state_path)?)?;
+    let run_id = run_state["run_id"]
+        .as_str()
+        .ok_or_else(|| std::io::Error::other("missing run id"))?
+        .to_string();
+
+    cli()
+        .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "runtime",
+            "cron",
+            "reject",
+            &run_id,
+            "--reason",
+            "not ready",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Rejected cron workflow run"));
+
+    let updated_run: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&run_state_path)?)?;
+    assert_eq!(updated_run["status"], "rejected");
+    assert_eq!(updated_run["steps"][0]["output"]["reason"], "not ready");
+
+    Ok(())
+}
+
+#[test]
+fn cron_resume_reuses_completed_steps_after_a_failed_run() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let config_path = temp.path().join("metastack.toml");
+    write_onboarded_config(&config_path, "")?;
+    fs::create_dir_all(temp.path().join(".metastack/cron"))?;
+    let workflow_path = temp.path().join(".metastack/cron/resume.md");
+    fs::write(
+        &workflow_path,
+        r#"---
+schedule: "0 * * * *"
+retry:
+  max_attempts: 1
+steps:
+  - id: first
+    type: shell
+    command: "count=$(cat first-count.txt 2>/dev/null || echo 0); count=$((count + 1)); printf '%s' \"$count\" > first-count.txt"
+  - id: second
+    type: shell
+    command: "exit 1"
+---
+"#,
+    )?;
+
+    cli()
+        .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
+        .args(["runtime", "cron", "run", "resume"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "cron workflow `resume` failed in run `resume-",
+        ));
+
+    let run_state_path = run_state_files(temp.path())?
+        .into_iter()
+        .next()
+        .ok_or_else(|| std::io::Error::other("missing run state file"))?;
+    let failed_run: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&run_state_path)?)?;
+    let run_id = failed_run["run_id"]
+        .as_str()
+        .ok_or_else(|| std::io::Error::other("missing run id"))?
+        .to_string();
+    assert_eq!(
+        fs::read_to_string(temp.path().join("first-count.txt"))?,
+        "1"
+    );
+
+    fs::write(
+        &workflow_path,
+        r#"---
+schedule: "0 * * * *"
+retry:
+  max_attempts: 1
+steps:
+  - id: first
+    type: shell
+    command: "count=$(cat first-count.txt 2>/dev/null || echo 0); count=$((count + 1)); printf '%s' \"$count\" > first-count.txt"
+  - id: second
+    type: shell
+    command: "printf done > second.txt"
+---
+"#,
+    )?;
+
+    cli()
+        .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
+        .args(["runtime", "cron", "resume", &run_id])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Ran cron workflow `resume` successfully as `resume-",
+        ));
+
+    assert_eq!(
+        fs::read_to_string(temp.path().join("first-count.txt"))?,
+        "1"
+    );
+    assert_eq!(fs::read_to_string(temp.path().join("second.txt"))?, "done");
+    let resumed_run: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&run_state_path)?)?;
+    assert_eq!(resumed_run["status"], "succeeded");
+    assert_eq!(resumed_run["steps"][0]["attempt_count"], 1);
+    assert_eq!(resumed_run["steps"][1]["attempt_count"], 2);
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn cron_resume_rejects_runs_still_marked_running() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let config_path = temp.path().join("metastack.toml");
+    write_onboarded_config(&config_path, "")?;
+    fs::create_dir_all(temp.path().join(".metastack/cron/.runtime/runs"))?;
+
+    let now = chrono::Utc::now().to_rfc3339();
+    fs::write(
+        temp.path()
+            .join(".metastack/cron/.runtime/runs/running-demo.json"),
+        format!(
+            r#"{{
+  "version": 1,
+  "run_id": "running-demo",
+  "job_name": "demo",
+  "definition_path": ".metastack/cron/demo.md",
+  "source": {{
+    "kind": "repository",
+    "label": "repository",
+    "path": ".metastack/cron"
+  }},
+  "trigger": "manual",
+  "status": "running",
+  "created_at": "{now}",
+  "updated_at": "{now}",
+  "started_at": "{now}",
+  "retry": {{
+    "max_attempts": 1,
+    "backoff_seconds": 0
+  }},
+  "log_path": ".metastack/cron/.runtime/logs/running-demo.log",
+  "steps": [],
+  "attempts": []
+}}"#
+        ),
+    )?;
+
+    cli()
+        .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
+        .args(["runtime", "cron", "resume", "running-demo"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "is still marked as running; wait for it to finish or restart the scheduler to reconcile it before resuming",
+        ));
+
+    Ok(())
+}
+
+#[test]
+fn cron_validate_accepts_shipped_sample_workflows() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let config_path = temp.path().join("metastack.toml");
+    let repo_cron_dir = temp.path().join(".metastack/cron/samples");
+    write_onboarded_config(&config_path, "")?;
+    fs::create_dir_all(&repo_cron_dir)?;
+
+    let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    fs::copy(
+        repo_root.join("src/artifacts/cron/linear-triage-sample.md"),
+        repo_cron_dir.join("linear-triage-sample.md"),
+    )?;
+    fs::copy(
+        repo_root.join("src/artifacts/cron/github-pr-review-sample.md"),
+        repo_cron_dir.join("github-pr-review-sample.md"),
+    )?;
+
+    cli()
+        .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
+        .args(["runtime", "cron", "validate"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Validated 2 cron workflow definition(s) successfully.",
+        ));
+
+    cli()
+        .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
+        .args(["runtime", "cron", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("linear-triage-sample"))
+        .stdout(predicate::str::contains("github-pr-review-sample"))
+        .stdout(predicate::str::contains("disabled"));
 
     Ok(())
 }

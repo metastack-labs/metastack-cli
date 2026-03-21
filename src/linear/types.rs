@@ -69,6 +69,47 @@ pub struct IssueLink {
     pub description: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub enum IssueRelationType {
+    #[serde(rename = "blocks")]
+    Blocks,
+    #[serde(rename = "duplicate")]
+    Duplicate,
+    #[serde(rename = "related")]
+    Related,
+    #[serde(rename = "similar")]
+    Similar,
+}
+
+impl IssueRelationType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Blocks => "blocks",
+            Self::Duplicate => "duplicate",
+            Self::Related => "related",
+            Self::Similar => "similar",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IssueRelationSummary {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub relation_type: IssueRelationType,
+    pub issue: IssueLink,
+    pub related_issue: IssueLink,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IssueDependencySnapshot {
+    pub issue: IssueSummary,
+    #[serde(default)]
+    pub relations: Vec<IssueRelationSummary>,
+    #[serde(default, rename = "inverse_relations")]
+    pub inverse_relations: Vec<IssueRelationSummary>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectSummary {
     pub id: String,
@@ -222,6 +263,20 @@ pub struct IssueUpdateRequest {
     pub estimate: Option<f64>,
     pub label_ids: Option<Vec<String>>,
     pub parent_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct IssueRelationCreateRequest {
+    pub relation_type: IssueRelationType,
+    pub issue_id: String,
+    pub related_issue_id: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct IssueRelationUpdateRequest {
+    pub relation_type: Option<IssueRelationType>,
+    pub issue_id: Option<String>,
+    pub related_issue_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]

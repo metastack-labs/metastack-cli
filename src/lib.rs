@@ -2,6 +2,7 @@ mod agent_provider;
 mod agents;
 mod backlog;
 mod backlog_defaults;
+mod backlog_dependencies;
 mod backlog_improve;
 mod backlog_spec;
 mod cli;
@@ -10,6 +11,7 @@ mod config_command;
 mod context;
 mod cron;
 mod cron_dashboard;
+mod doctor;
 mod fs;
 mod github_pr;
 mod linear;
@@ -44,6 +46,7 @@ use anyhow::{Result, bail};
 use clap::Parser;
 use clap::error::ErrorKind;
 
+use crate::backlog_dependencies::run_backlog_dependencies;
 use crate::backlog_improve::run_backlog_improve;
 use crate::backlog_spec::{BacklogSpecOutput, run_backlog_spec};
 use crate::cli::{
@@ -56,6 +59,7 @@ use crate::config::ListenAssignmentScope;
 use crate::config_command::{ConfigAction, ConfigCommandOutput, run_config};
 use crate::context::run_context_command;
 use crate::cron::run_cron;
+use crate::doctor::run_doctor;
 use crate::linear::create::IssueCreateAction;
 use crate::linear::dashboard::DashboardAction;
 use crate::linear::edit::IssueEditAction;
@@ -165,6 +169,9 @@ async fn dispatch(cli: Cli) -> Result<()> {
             }
             BacklogCommands::Improve(args) => {
                 run_backlog_improve(&args).await?;
+            }
+            BacklogCommands::Dependencies(args) => {
+                run_backlog_dependencies(&args).await?;
             }
             BacklogCommands::Tech(args) => {
                 let report = run_technical(&args).await?;
@@ -499,6 +506,9 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 .await?;
             }
         },
+        Command::Doctor(args) => {
+            run_doctor(&args).await?;
+        }
         Command::ListenWorker(args) => {
             run_listen_worker(&args).await?;
         }
@@ -559,7 +569,10 @@ fn command_bypasses_onboarding(cli: &Cli) -> bool {
     matches!(
         &cli.command,
         Command::Runtime(args) if matches!(&args.command, RuntimeCommands::Config(_))
-    ) || matches!(&cli.command, Command::Config(_) | Command::Upgrade(_))
+    ) || matches!(
+        &cli.command,
+        Command::Config(_) | Command::Upgrade(_) | Command::Doctor(_)
+    )
 }
 
 fn command_label(cli: &Cli) -> String {
@@ -586,6 +599,7 @@ fn command_label(cli: &Cli) -> String {
         Command::ListenWorker(_) => "meta listen-worker".to_string(),
         Command::Scaffold(_) => "meta scaffold".to_string(),
         Command::Upgrade(_) => "meta upgrade".to_string(),
+        Command::Doctor(_) => "meta doctor".to_string(),
     }
 }
 

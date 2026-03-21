@@ -5,7 +5,8 @@ use reqwest::Client;
 use crate::config::LinearConfig;
 use crate::linear::{
     AttachmentCreateRequest, AttachmentSummary, IssueComment, IssueCreateRequest,
-    IssueLabelCreateRequest, IssueListFilters, IssueSummary, IssueUpdateRequest, LabelRef,
+    IssueDependencySnapshot, IssueLabelCreateRequest, IssueListFilters, IssueRelationCreateRequest,
+    IssueRelationSummary, IssueRelationUpdateRequest, IssueSummary, IssueUpdateRequest, LabelRef,
     ProjectSummary, TeamSummary, UserRef,
 };
 
@@ -31,6 +32,18 @@ pub trait LinearClient: Send + Sync {
     async fn list_filtered_issues(&self, filters: &IssueListFilters) -> Result<Vec<IssueSummary>>;
     async fn list_issue_labels(&self, team: Option<&str>) -> Result<Vec<LabelRef>>;
     async fn get_issue(&self, issue_id: &str) -> Result<IssueSummary>;
+    async fn get_issue_dependency_snapshot(
+        &self,
+        issue_id: &str,
+    ) -> Result<IssueDependencySnapshot> {
+        self.get_issue(issue_id)
+            .await
+            .map(|issue| IssueDependencySnapshot {
+                issue,
+                relations: Vec::new(),
+                inverse_relations: Vec::new(),
+            })
+    }
     async fn list_teams(&self) -> Result<Vec<TeamSummary>>;
     async fn viewer(&self) -> Result<UserRef>;
     async fn create_issue(&self, request: IssueCreateRequest) -> Result<IssueSummary>;
@@ -40,6 +53,19 @@ pub trait LinearClient: Send + Sync {
         issue_id: &str,
         request: IssueUpdateRequest,
     ) -> Result<IssueSummary>;
+    async fn create_issue_relation(
+        &self,
+        _request: IssueRelationCreateRequest,
+    ) -> Result<IssueRelationSummary> {
+        anyhow::bail!("issue relation mutations are not supported by this Linear client")
+    }
+    async fn update_issue_relation(
+        &self,
+        _relation_id: &str,
+        _request: IssueRelationUpdateRequest,
+    ) -> Result<IssueRelationSummary> {
+        anyhow::bail!("issue relation mutations are not supported by this Linear client")
+    }
     async fn create_comment(&self, issue_id: &str, body: String) -> Result<IssueComment>;
     async fn update_comment(&self, comment_id: &str, body: String) -> Result<IssueComment>;
     async fn upload_file(
@@ -103,6 +129,13 @@ impl LinearClient for ReqwestLinearClient {
         self.get_issue_resource(issue_id).await
     }
 
+    async fn get_issue_dependency_snapshot(
+        &self,
+        issue_id: &str,
+    ) -> Result<IssueDependencySnapshot> {
+        self.get_issue_dependency_snapshot_resource(issue_id).await
+    }
+
     async fn list_teams(&self) -> Result<Vec<TeamSummary>> {
         self.list_teams_resource().await
     }
@@ -125,6 +158,22 @@ impl LinearClient for ReqwestLinearClient {
         request: IssueUpdateRequest,
     ) -> Result<IssueSummary> {
         self.update_issue_resource(issue_id, request).await
+    }
+
+    async fn create_issue_relation(
+        &self,
+        request: IssueRelationCreateRequest,
+    ) -> Result<IssueRelationSummary> {
+        self.create_issue_relation_resource(request).await
+    }
+
+    async fn update_issue_relation(
+        &self,
+        relation_id: &str,
+        request: IssueRelationUpdateRequest,
+    ) -> Result<IssueRelationSummary> {
+        self.update_issue_relation_resource(relation_id, request)
+            .await
     }
 
     async fn create_comment(&self, issue_id: &str, body: String) -> Result<IssueComment> {

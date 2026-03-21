@@ -28,7 +28,7 @@ Most planning tools split work across issue trackers, docs, scripts, and ad hoc 
 - `meta runtime config` saves install-scoped Linear and agent defaults.
 - `meta runtime setup` bootstraps the repo and saves repo-scoped defaults under `.metastack/`.
 - `meta context scan` turns the codebase into reusable planning context.
-- `meta backlog spec`, `meta backlog plan`, `meta backlog improve`, `meta backlog tech`, `meta linear issues refine`, and `meta agents workflows` generate structured backlog work.
+- `meta backlog spec`, `meta backlog plan`, `meta backlog improve`, `meta backlog dependencies`, `meta backlog tech`, `meta linear issues refine`, and `meta agents workflows` generate structured backlog work.
 - `meta merge` batches open GitHub PRs into one isolated aggregate merge run and publish step.
 - `meta linear ...` and `meta backlog sync` keep Linear and local files aligned.
 - `meta agents review` audits GitHub PRs with one-shot review or a listener/dashboard for `metastack`-labeled PRs, with optional remediation PR creation.
@@ -183,7 +183,7 @@ The preferred public surface is domain-first. Legacy top-level commands such as 
 
 | Command family | Use it for |
 | --- | --- |
-| `meta backlog` | Plan, create technical backlog children, and sync backlog work for the current repository |
+| `meta backlog` | Plan, analyze dependencies, create technical backlog children, and sync backlog work for the current repository |
 | `meta linear` | Browse, create, edit, refine, and dashboard Linear work |
 | `meta agents` | Run the unattended listener and reusable workflow playbooks |
 | `meta context` | Inspect, map, doctor, scan, or reload the effective agent context |
@@ -645,6 +645,7 @@ Use these flags when an outer agent or shell wrapper needs deterministic non-int
 | Command | Promptless mode | JSON selector | Machine output behavior |
 | --- | --- | --- | --- |
 | `meta backlog plan` | `--no-interactive` | implicit in `--no-interactive` | success and failure emit JSON |
+| `meta backlog dependencies` | n/a | `--json` | success and failure emit JSON |
 | `meta backlog tech` | `--no-interactive` | implicit in `--no-interactive` | success and failure emit JSON |
 | `meta backlog sync <subcommand>` | `--no-interactive` | `--json` or implicit in `--no-interactive` | direct subcommands emit JSON |
 | `meta linear issues create` | `--no-interactive` | implicit in `--no-interactive` | success and failure emit JSON |
@@ -668,6 +669,7 @@ This matrix is the contract for agent callers deciding whether to drive a comman
 | Command | `--no-interactive` | `--json` | `--render-once` |
 | --- | --- | --- | --- |
 | `meta backlog plan` | required for promptless runs; implies JSON | n/a | not supported |
+| `meta backlog dependencies` | n/a | supported | not supported |
 | `meta backlog tech` | required for promptless runs; implies JSON | n/a | not supported |
 | `meta backlog sync status` | optional | supported | supported on dashboard form (`meta backlog sync --render-once`) |
 | `meta backlog sync link` | optional for scripting; requires explicit selectors | supported and implied by `--no-interactive` | not supported |
@@ -698,10 +700,16 @@ Create repository-local cron jobs as Markdown plus YAML front matter, then super
 meta runtime cron init
 meta runtime cron init nightly --no-interactive --schedule "0 * * * *" --command "cargo test" --prompt "Review the latest test output and fix any failures"
 meta runtime cron --root target/cli-proof/cron init nightly --no-interactive --schedule "0 * * * *" --command "cargo test"
+meta runtime cron list
+meta runtime cron validate
 meta runtime cron status
 meta runtime cron start
 meta runtime cron stop
 meta runtime cron run nightly
+meta runtime cron approvals
+meta runtime cron approve <RUN_ID> --note "ship it"
+meta runtime cron reject <RUN_ID> --reason "not ready"
+meta runtime cron resume <RUN_ID>
 ```
 
 Legacy alias: `meta cron`
@@ -710,18 +718,20 @@ Machine mode:
 
 - `meta runtime cron init --no-interactive ...` now emits structured JSON by default
 - `meta runtime cron init --json ...` forces JSON without changing the rest of the command contract
+- `meta runtime cron list --json`, `validate --json`, and `approvals --json` emit structured inspection output
 - `--render-once` stays a text snapshot path for the dashboard and is separate from machine JSON output
 
 Side effects:
 
 - ensures `.metastack/cron/` exists
 - creates `.metastack/cron/<NAME>.md` job definitions
-- runs the shell command first when configured, then the optional agent in the same working directory
-- creates `.metastack/cron/.runtime/` on demand for scheduler state and logs
+- discovers workflow definitions from the install-scoped data root first, then overrides them by name with repo-scoped definitions under `.metastack/cron/`
+- creates `.metastack/cron/.runtime/` on demand for scheduler state, per-run logs, and persisted run-state JSON under `.metastack/cron/.runtime/runs/`
+- persists approval checkpoints, retry history, and resumable step state for every workflow run
 
 In the interactive cron editor, the prompt field submits on `Enter`, inserts a newline on `Shift+Enter`, and supports `Up`/`Down`, `PgUp`/`PgDn`, `Home`/`End`, plus mouse-wheel scrolling to keep long wrapped prompts reachable.
 
-Cron job files use this shape:
+Legacy single-step cron job files still work:
 
 ```md
 ---
@@ -736,6 +746,40 @@ enabled: true
 
 Review the command output and update the repository when needed.
 ```
+
+Explicit workflow files use the same Markdown wrapper but can declare durable steps, retries, and approval checkpoints:
+
+```md
+---
+schedule: "0 * * * *"
+mode: workflow
+enabled: false
+retry:
+  max_attempts: 2
+  backoff_seconds: 5
+steps:
+  - id: collect
+    type: shell
+    command: "cargo test"
+  - id: summarize
+    type: agent
+    agent: "codex"
+    prompt: "Review the collected test output and summarize failures."
+  - id: approval
+    type: approval
+    approval_message: "Approve opening follow-up issues for the failing tests."
+  - id: follow_up
+    type: cli
+    command: "linear"
+    args: ["issues", "list", "--state", "Todo"]
+    guardrails:
+      allow: ["linear"]
+      mutates: []
+---
+Operator notes and runbook text live in the Markdown body.
+```
+
+Use `meta runtime cron validate` before starting the daemon when you are editing workflow files, `meta runtime cron approvals` to inspect paused runs, and `meta runtime cron approve|reject|resume` to move persisted runs forward without replaying completed steps. Shipped disabled-by-default examples live under [`src/artifacts/cron/`](src/artifacts/cron/README.md).
 
 ### `backlog plan`
 
@@ -873,6 +917,34 @@ Side effects:
 - in the interactive dashboard, keeps local and remote changes gated behind an explicit human decision for each issue
 - keeps the default flow proposal-only, without mutating `.metastack/backlog/<ISSUE>/index.md` or the Linear issue
 - with `--apply`, writes the local artifact trail first, then updates `.metastack/backlog/<ISSUE>/index.md` when the proposal includes a description rewrite, and finally pushes the proposed metadata/content updates back to Linear
+
+### `backlog dependencies`
+
+Map deterministic dependency proposals across the current repository backlog without rewriting issue descriptions:
+
+```bash
+meta backlog dependencies --root .
+meta backlog dependencies --root . --json
+meta backlog dependencies --root . --fetch --json
+meta backlog dependencies --root . --fetch --apply --yes
+```
+
+`meta backlog dependencies` reads the local `.metastack/backlog/` packets first, extracts explicit issue references from the backlog markdown, and proposes parent, `blockedBy`, and `related` relationships plus a rollout order for the repository backlog. The default analysis is local-only so the command works from checked-in backlog packets without talking to Linear.
+
+Pass `--fetch` when you want the proposal enriched with current Linear parent and issue-relation metadata. In that mode the command also computes an apply preview that distinguishes no-op rows from relationship changes that would be created or updated remotely.
+
+Machine mode:
+
+- `meta backlog dependencies --json` emits the analyzed backlog items, proposed relationships, warnings, rollout waves, and parallel workstreams in one stable JSON envelope
+- `meta backlog dependencies --fetch --apply --yes --json` emits the same analysis plus the applied change list after the Linear mutations complete
+
+Side effects:
+
+- scans every local backlog packet under `.metastack/backlog/`, ignoring `_TEMPLATE`
+- distinguishes hard blockers from soft sequencing fallbacks and reports parallelizable waves
+- detects circular and conflicting dependency chains and surfaces them as warnings instead of applying an invalid ordering
+- with `--apply`, prints a dry-run preview first and requires confirmation unless `--yes` is present
+- with `--apply`, mutates only the proposed parent and issue-relation edges in Linear; unrelated issue descriptions and attachments remain untouched
 
 ### `issues refine`
 
