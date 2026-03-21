@@ -285,7 +285,7 @@ JSON
             .path("/graphql")
             .body_includes("mutation CreateIssue")
             .body_includes("\"parentId\":\"parent-1\"")
-            .body_includes("\"stateId\":\"state-backlog\"")
+            .body_includes("\"stateId\":\"state-2\"")
             .body_includes("\"labelIds\":[\"label-technical\"]")
             .body_includes("Agent-generated technical backlog");
         then.status(200).json_body(json!({

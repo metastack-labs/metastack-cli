@@ -195,6 +195,7 @@ pub(crate) fn resolve_technical_ticket_defaults(
                     })
                     .flatten()
             })
+            .or_else(|| parent.state.as_ref().map(|s| s.name.clone()))
             .or_else(|| normalized(planning_meta.backlog.default_state.clone()))
             .or_else(|| normalized(app_config.backlog.default_state.clone()))
             .or_else(|| Some(DEFAULT_BACKLOG_STATE.to_string())),
@@ -496,6 +497,237 @@ mod tests {
         assert_eq!(resolved.project_id.as_deref(), Some("project-memory"));
         assert_eq!(resolved.state.as_deref(), Some("Started"));
         assert_eq!(resolved.assignee.as_deref(), Some("viewer"));
+    }
+
+    #[test]
+    fn technical_state_inherits_parent_status() {
+        let app_config = AppConfig {
+            backlog: BacklogSettings {
+                default_state: Some("Global Default".to_string()),
+                ..BacklogSettings::default()
+            },
+            ..AppConfig::default()
+        };
+        let planning_meta = PlanningMeta {
+            backlog: BacklogSettings {
+                default_state: Some("Repo Default".to_string()),
+                ..BacklogSettings::default()
+            },
+            ..PlanningMeta::default()
+        };
+        let parent = IssueSummary {
+            id: "parent-1".to_string(),
+            identifier: "MET-1".to_string(),
+            title: "Parent".to_string(),
+            description: None,
+            url: "https://linear.app/MET-1".to_string(),
+            priority: None,
+            estimate: None,
+            updated_at: "2026-03-19T00:00:00Z".to_string(),
+            team: TeamRef {
+                id: "team-1".to_string(),
+                key: "MET".to_string(),
+                name: "Metastack".to_string(),
+            },
+            project: None,
+            assignee: None,
+            labels: Vec::new(),
+            comments: Vec::new(),
+            state: Some(crate::linear::WorkflowState {
+                id: "state-in-progress".to_string(),
+                name: "In Progress".to_string(),
+                kind: Some("started".to_string()),
+            }),
+            attachments: Vec::new(),
+            parent: None,
+            children: Vec::new(),
+        };
+
+        let resolved = resolve_technical_ticket_defaults(
+            &app_config,
+            &planning_meta,
+            &RememberedBacklogSelection::default(),
+            &TechnicalTicketResolutionInput {
+                zero_prompt: false,
+                overrides: TicketOptionOverrides::default(),
+                built_in_label: "technical".to_string(),
+            },
+            &parent,
+        );
+
+        assert_eq!(
+            resolved.state.as_deref(),
+            Some("In Progress"),
+            "child ticket should inherit parent status"
+        );
+    }
+
+    #[test]
+    fn technical_state_explicit_override_beats_parent() {
+        let app_config = AppConfig::default();
+        let planning_meta = PlanningMeta::default();
+        let parent = IssueSummary {
+            id: "parent-1".to_string(),
+            identifier: "MET-1".to_string(),
+            title: "Parent".to_string(),
+            description: None,
+            url: "https://linear.app/MET-1".to_string(),
+            priority: None,
+            estimate: None,
+            updated_at: "2026-03-19T00:00:00Z".to_string(),
+            team: TeamRef {
+                id: "team-1".to_string(),
+                key: "MET".to_string(),
+                name: "Metastack".to_string(),
+            },
+            project: None,
+            assignee: None,
+            labels: Vec::new(),
+            comments: Vec::new(),
+            state: Some(crate::linear::WorkflowState {
+                id: "state-in-progress".to_string(),
+                name: "In Progress".to_string(),
+                kind: Some("started".to_string()),
+            }),
+            attachments: Vec::new(),
+            parent: None,
+            children: Vec::new(),
+        };
+
+        let resolved = resolve_technical_ticket_defaults(
+            &app_config,
+            &planning_meta,
+            &RememberedBacklogSelection::default(),
+            &TechnicalTicketResolutionInput {
+                zero_prompt: false,
+                overrides: TicketOptionOverrides {
+                    state: Some("Todo".to_string()),
+                    ..TicketOptionOverrides::default()
+                },
+                built_in_label: "technical".to_string(),
+            },
+            &parent,
+        );
+
+        assert_eq!(
+            resolved.state.as_deref(),
+            Some("Todo"),
+            "explicit override should take precedence over parent status"
+        );
+    }
+
+    #[test]
+    fn technical_state_falls_back_to_config_when_parent_has_no_state() {
+        let app_config = AppConfig::default();
+        let planning_meta = PlanningMeta {
+            backlog: BacklogSettings {
+                default_state: Some("Triage".to_string()),
+                ..BacklogSettings::default()
+            },
+            ..PlanningMeta::default()
+        };
+        let parent = IssueSummary {
+            id: "parent-1".to_string(),
+            identifier: "MET-1".to_string(),
+            title: "Parent".to_string(),
+            description: None,
+            url: "https://linear.app/MET-1".to_string(),
+            priority: None,
+            estimate: None,
+            updated_at: "2026-03-19T00:00:00Z".to_string(),
+            team: TeamRef {
+                id: "team-1".to_string(),
+                key: "MET".to_string(),
+                name: "Metastack".to_string(),
+            },
+            project: None,
+            assignee: None,
+            labels: Vec::new(),
+            comments: Vec::new(),
+            state: None,
+            attachments: Vec::new(),
+            parent: None,
+            children: Vec::new(),
+        };
+
+        let resolved = resolve_technical_ticket_defaults(
+            &app_config,
+            &planning_meta,
+            &RememberedBacklogSelection::default(),
+            &TechnicalTicketResolutionInput {
+                zero_prompt: false,
+                overrides: TicketOptionOverrides::default(),
+                built_in_label: "technical".to_string(),
+            },
+            &parent,
+        );
+
+        assert_eq!(
+            resolved.state.as_deref(),
+            Some("Triage"),
+            "should fall back to repo config when parent has no state"
+        );
+    }
+
+    #[test]
+    fn plan_state_uses_repo_config_before_global() {
+        let app_config = AppConfig {
+            backlog: BacklogSettings {
+                default_state: Some("Global State".to_string()),
+                ..BacklogSettings::default()
+            },
+            ..AppConfig::default()
+        };
+        let planning_meta = PlanningMeta {
+            backlog: BacklogSettings {
+                default_state: Some("Repo State".to_string()),
+                ..BacklogSettings::default()
+            },
+            ..PlanningMeta::default()
+        };
+
+        let resolved = resolve_plan_ticket_defaults(
+            &app_config,
+            &planning_meta,
+            &RememberedBacklogSelection::default(),
+            &PlanTicketResolutionInput {
+                zero_prompt: false,
+                explicit_team: None,
+                explicit_project: None,
+                overrides: TicketOptionOverrides::default(),
+                built_in_label: "plan".to_string(),
+                generated_priority: None,
+            },
+        );
+
+        assert_eq!(
+            resolved.state.as_deref(),
+            Some("Repo State"),
+            "repo-scoped default should override global default"
+        );
+    }
+
+    #[test]
+    fn plan_state_falls_back_to_builtin_when_no_config() {
+        let resolved = resolve_plan_ticket_defaults(
+            &AppConfig::default(),
+            &PlanningMeta::default(),
+            &RememberedBacklogSelection::default(),
+            &PlanTicketResolutionInput {
+                zero_prompt: false,
+                explicit_team: None,
+                explicit_project: None,
+                overrides: TicketOptionOverrides::default(),
+                built_in_label: "plan".to_string(),
+                generated_priority: None,
+            },
+        );
+
+        assert_eq!(
+            resolved.state.as_deref(),
+            Some(DEFAULT_BACKLOG_STATE),
+            "should fall back to built-in Backlog when no config is set"
+        );
     }
 
     #[test]

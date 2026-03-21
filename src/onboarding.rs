@@ -66,6 +66,7 @@ enum OnboardingStep {
     ApiKey,
     Team,
     Project,
+    DefaultIssueStatus,
     ListenLabel,
     AssignmentScope,
     RefreshPolicy,
@@ -77,12 +78,13 @@ enum OnboardingStep {
 }
 
 impl OnboardingStep {
-    fn all() -> [Self; 12] {
+    fn all() -> [Self; 13] {
         [
             Self::Welcome,
             Self::ApiKey,
             Self::Team,
             Self::Project,
+            Self::DefaultIssueStatus,
             Self::ListenLabel,
             Self::AssignmentScope,
             Self::RefreshPolicy,
@@ -117,6 +119,7 @@ impl OnboardingStep {
             Self::ApiKey => "Linear key",
             Self::Team => "Default team",
             Self::Project => "Default project",
+            Self::DefaultIssueStatus => "Issue status",
             Self::ListenLabel => "Listen label",
             Self::AssignmentScope => "Assignee scope",
             Self::RefreshPolicy => "Refresh policy",
@@ -162,9 +165,11 @@ struct OnboardingApp {
     refresh_policy: SelectFieldState,
     team: SelectFieldState,
     project: FilterableSelectFieldState,
+    issue_status: SelectFieldState,
     team_ids: Vec<String>,
     project_ids: Vec<String>,
     all_projects: Vec<ProjectSummary>,
+    all_teams: Vec<TeamSummary>,
     validation_state: ValidationState,
     review_scroll: ScrollState,
     error: Option<String>,
@@ -175,6 +180,7 @@ struct OnboardingSubmission {
     api_key: String,
     team_key: String,
     project_id: Option<String>,
+    default_issue_status: Option<String>,
     listen_label: Option<String>,
     assignment_scope: ListenAssignmentScope,
     refresh_policy: ListenRefreshPolicy,
@@ -184,6 +190,7 @@ struct OnboardingSubmission {
     technical_label: Option<String>,
 }
 
+#[allow(clippy::large_enum_variant)]
 enum DashboardExit {
     Cancelled,
     Submitted(OnboardingSubmission),
@@ -296,9 +303,14 @@ impl OnboardingApp {
             ),
             team: SelectFieldState::new(vec!["Validate Linear auth first".to_string()], 0),
             project: FilterableSelectFieldState::new(vec!["Choose a team first".to_string()]),
+            issue_status: SelectFieldState::new(
+                vec!["Leave unset (defaults to Backlog)".to_string()],
+                issue_status_index_from_config(app_config.backlog.default_state.as_deref(), &[]),
+            ),
             team_ids: Vec::new(),
             project_ids: Vec::new(),
             all_projects: Vec::new(),
+            all_teams: Vec::new(),
             validation_state: ValidationState::Idle,
             review_scroll: ScrollState::default(),
             error: None,
@@ -333,6 +345,7 @@ impl OnboardingApp {
             OnboardingStep::ApiKey => self.api_key.handle_key(key),
             OnboardingStep::Team => self.team.handle_key(key),
             OnboardingStep::Project => self.project.handle_key(key),
+            OnboardingStep::DefaultIssueStatus => self.issue_status.handle_key(key),
             OnboardingStep::ListenLabel => self.listen_label.handle_key(key),
             OnboardingStep::AssignmentScope => self.assignment_scope.handle_key(key),
             OnboardingStep::RefreshPolicy => self.refresh_policy.handle_key(key),
@@ -383,6 +396,24 @@ impl OnboardingApp {
         self.project_ids = project_ids;
     }
 
+    fn sync_issue_status_options(&mut self, preferred: Option<&str>) {
+        let Some(team_key) = self.team_ids.get(self.team.selected()) else {
+            self.issue_status =
+                SelectFieldState::new(vec!["Leave unset (defaults to Backlog)".to_string()], 0);
+            return;
+        };
+        let states: Vec<&str> = self
+            .all_teams
+            .iter()
+            .find(|t| t.key == *team_key)
+            .map(|t| t.states.iter().map(|s| s.name.as_str()).collect())
+            .unwrap_or_default();
+        let mut options = vec!["Leave unset (defaults to Backlog)".to_string()];
+        options.extend(states.iter().map(|s| (*s).to_string()));
+        let selected = issue_status_index_from_config(preferred, &states);
+        self.issue_status = SelectFieldState::new(options, selected);
+    }
+
     fn spinner_tick(&mut self) {
         if let ValidationState::Loading { spinner_index } = &mut self.validation_state {
             *spinner_index = spinner_index.wrapping_add(1);
@@ -415,10 +446,16 @@ impl OnboardingApp {
             bail!("Linear authentication must succeed before onboarding can finish");
         }
 
+        let default_issue_status = match self.issue_status.selected() {
+            0 => None,
+            _ => self.issue_status.selected_label().map(str::to_string),
+        };
+
         Ok(OnboardingSubmission {
             api_key,
             team_key,
             project_id,
+            default_issue_status,
             listen_label: normalize_optional(self.listen_label.value()),
             assignment_scope: match self.assignment_scope.selected() {
                 1 => ListenAssignmentScope::ViewerOrUnassigned,
@@ -467,8 +504,12 @@ fn run_dashboard(mut app: OnboardingApp, app_config: &AppConfig) -> Result<Dashb
                             );
                             app.team_ids =
                                 catalog.teams.iter().map(|team| team.key.clone()).collect();
+                            app.all_teams = catalog.teams;
                             app.all_projects = catalog.projects;
                             app.sync_project_options();
+                            app.sync_issue_status_options(
+                                app_config.backlog.default_state.as_deref(),
+                            );
                             app.error = None;
                             app.step = OnboardingStep::Team;
                         }
@@ -533,6 +574,7 @@ fn run_dashboard(mut app: OnboardingApp, app_config: &AppConfig) -> Result<Dashb
         if handled {
             if app.step == OnboardingStep::Team {
                 app.sync_project_options();
+                app.sync_issue_status_options(None);
             }
             continue;
         }
@@ -561,6 +603,7 @@ fn run_dashboard(mut app: OnboardingApp, app_config: &AppConfig) -> Result<Dashb
                         app.error = Some("Select a validated Linear team first.".to_string());
                     } else {
                         app.sync_project_options();
+                        app.sync_issue_status_options(None);
                         app.step = OnboardingStep::Project;
                     }
                 }
@@ -627,6 +670,7 @@ async fn save_submission(config: &mut AppConfig, submitted: OnboardingSubmission
         .unwrap_or_else(|| DEFAULT_LINEAR_API_URL.to_string());
     config.linear.team = Some(submitted.team_key.clone());
     config.defaults.linear.project_id = submitted.project_id.clone();
+    config.backlog.default_state = submitted.default_issue_status;
     config.defaults.listen.required_label = submitted.listen_label.clone();
     config.defaults.listen.assignment_scope = Some(submitted.assignment_scope);
     config.defaults.listen.refresh_policy = Some(submitted.refresh_policy);
@@ -774,6 +818,12 @@ fn step_copy(app: &OnboardingApp) -> Vec<Line<'static>> {
                 "The saved value is the canonical Linear project ID, which matches existing project resolution behavior.",
             ),
         ],
+        OnboardingStep::DefaultIssueStatus => vec![
+            Line::from("Choose the default Linear workflow status for new standalone issues."),
+            Line::from(
+                "Leave unset to use the built-in default (Backlog). Child tickets inherit their parent's status instead.",
+            ),
+        ],
         OnboardingStep::ListenLabel => vec![
             Line::from("This label gates which Todo tickets `meta listen` picks up by default."),
             Line::from(
@@ -887,6 +937,9 @@ fn render_right_panel(frame: &mut Frame<'_>, app: &OnboardingApp, area: Rect) {
         OnboardingStep::Project => {
             render_filterable_select_panel(frame, area, "Default project", &app.project)
         }
+        OnboardingStep::DefaultIssueStatus => {
+            render_select_panel(frame, area, "Default issue status", &app.issue_status)
+        }
         OnboardingStep::ListenLabel => render_input_panel(
             frame,
             area,
@@ -935,7 +988,10 @@ fn render_right_panel(frame: &mut Frame<'_>, app: &OnboardingApp, area: Rect) {
 
 fn render_footer(frame: &mut Frame<'_>, app: &OnboardingApp, area: Rect) {
     let controls = match app.step {
-        OnboardingStep::Team | OnboardingStep::AssignmentScope | OnboardingStep::RefreshPolicy => {
+        OnboardingStep::Team
+        | OnboardingStep::AssignmentScope
+        | OnboardingStep::RefreshPolicy
+        | OnboardingStep::DefaultIssueStatus => {
             "Up/Down move • Enter accepts • Shift+Tab goes back • Esc cancels"
         }
         OnboardingStep::Project => {
@@ -970,6 +1026,10 @@ fn review_lines(app: &OnboardingApp) -> Vec<Line<'static>> {
         summary_line(
             "Default project",
             app.project.selected_label().unwrap_or("unset"),
+        ),
+        summary_line(
+            "Issue status",
+            app.issue_status.selected_label().unwrap_or("unset"),
         ),
         summary_line("Listen label", summarize_input(&app.listen_label, "unset")),
         summary_line(
@@ -1125,6 +1185,20 @@ fn normalize_optional(value: &str) -> Option<String> {
 
 fn normalize_required(value: &str, label: &str) -> Result<String> {
     normalize_optional(value).ok_or_else(|| anyhow!("{label} is required"))
+}
+
+/// Returns the `SelectFieldState` index for the configured default issue status.
+///
+/// Index 0 is always "Leave unset", so actual workflow state names start at index 1.
+fn issue_status_index_from_config(configured: Option<&str>, states: &[&str]) -> usize {
+    let Some(name) = configured else {
+        return 0;
+    };
+    states
+        .iter()
+        .position(|s| s.eq_ignore_ascii_case(name))
+        .map(|i| i + 1) // offset by 1 for "Leave unset" at index 0
+        .unwrap_or(0)
 }
 
 fn parse_optional_u64(

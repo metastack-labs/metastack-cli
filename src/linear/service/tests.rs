@@ -251,6 +251,81 @@ async fn create_issue_passes_resolved_assignee_id() {
 }
 
 #[tokio::test]
+async fn create_standalone_issue_sends_none_state_when_not_provided() {
+    let client = FakeLinearClient {
+        teams: vec![team("MET", &[("state-1", "Backlog"), ("state-2", "Todo")])],
+        ..FakeLinearClient::default()
+    };
+    let service = LinearService::new(client.clone(), None);
+
+    service
+        .create_issue(IssueCreateSpec {
+            team: Some("MET".to_string()),
+            title: "No explicit state".to_string(),
+            description: None,
+            project: None,
+            project_id: None,
+            parent_id: None,
+            state: None,
+            priority: None,
+            assignee_id: None,
+            labels: Vec::new(),
+        })
+        .await
+        .expect("create issue should succeed");
+
+    let requests = client.create_requests.lock().expect("mutex poisoned");
+    assert_eq!(
+        requests[0].state_id, None,
+        "state_id should be None when no state is provided"
+    );
+    assert_eq!(
+        requests[0].parent_id, None,
+        "standalone issue has no parent"
+    );
+}
+
+#[tokio::test]
+async fn create_child_issue_sends_parent_id_and_state() {
+    let client = FakeLinearClient {
+        teams: vec![team(
+            "MET",
+            &[("state-1", "Backlog"), ("state-2", "In Progress")],
+        )],
+        ..FakeLinearClient::default()
+    };
+    let service = LinearService::new(client.clone(), None);
+
+    service
+        .create_issue(IssueCreateSpec {
+            team: Some("MET".to_string()),
+            title: "Child ticket".to_string(),
+            description: None,
+            project: None,
+            project_id: None,
+            parent_id: Some("parent-issue-id".to_string()),
+            state: Some("In Progress".to_string()),
+            priority: None,
+            assignee_id: None,
+            labels: Vec::new(),
+        })
+        .await
+        .expect("create issue should succeed");
+
+    let requests = client.create_requests.lock().expect("mutex poisoned");
+    assert_eq!(
+        requests[0].parent_id.as_deref(),
+        Some("parent-issue-id"),
+        "child issue should have parent_id set"
+    );
+    assert_eq!(
+        requests[0].state_id.as_deref(),
+        Some("state-2"),
+        "child issue state should be resolved to the correct state_id"
+    );
+}
+
+#[tokio::test]
 async fn resolve_assignee_id_supports_viewer_user_ids_names_and_emails() {
     let client = FakeLinearClient::default();
     let service = LinearService::new(client, Some("MET".to_string()));

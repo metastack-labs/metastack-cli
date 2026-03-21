@@ -294,7 +294,7 @@ Legacy alias: `meta config`
 The persisted config can store:
 
 - install-scoped Linear API key/default team values
-- install-scoped backlog ticket defaults under `[backlog]`, including `default_assignee`, `default_state`, `default_priority`, additive `default_labels`, and zero-prompt `velocity_defaults`
+- install-scoped backlog ticket defaults under `[backlog]`, including `default_assignee`, `default_state` (the default Linear workflow status for new standalone issues), `default_priority`, additive `default_labels`, and zero-prompt `velocity_defaults`
 - install-scoped onboarding completion state
 - install-scoped Linear API key/default team/default project values
 - install-scoped global defaults for listen label, listen assignment scope, listen refresh policy, listen poll interval, plan follow-up limit, and plan/technical issue labels
@@ -495,6 +495,9 @@ Precedence is consistent across the CLI:
 
 - Linear-backed commands use `CLI flag override -> install-scoped repo auth -> repo .metastack/meta.json/profile -> global config -> LINEAR_* environment fallback`
 - Agent-backed launches use `CLI override -> repo .metastack/meta.json -> global config`
+- Default issue status for standalone tickets resolves as `CLI --state override -> velocity_defaults.state (zero-prompt) -> repo backlog.default_state -> global backlog.default_state -> built-in "Backlog"`. Child tickets created by `meta backlog tech` inherit the parent issue's status instead of using the configured default; explicit `--state` overrides still take precedence.
+- `meta linear issues create` also resolves the default issue status from repo and global config when no `--state` flag is provided.
+- The CLI is read-only for workflow state selection: onboarding and config pickers query existing states from the Linear team but cannot create new ones. If a configured `default_state` does not match any state on the target team, the command fails with a clear error. Create new workflow states in the Linear UI first. See [`docs/linear-workflow-state-creation.md`](docs/linear-workflow-state-creation.md) for the full decision.
 
 ### `merge`
 
@@ -773,7 +776,7 @@ The command requires a configured local agent, or one of the built-in supported 
 
 `meta backlog tech` uses the same repo-root scope contract as `meta backlog plan`: the agent sees the active repository identity derived from the resolved root, defaults work to the top-level repository directory, and should only produce a narrower technical backlog item when the user explicitly requested a subproject.
 
-`meta backlog tech` also accepts `--no-interactive`, `--state`, `--priority`, repeated `--label`, and `--assignee`. The command now defaults child ticket state to `Backlog` when no override is configured, preserves the parent issue's project and priority over config defaults unless an explicit CLI override is passed, and persists the final project/team selection for later zero-prompt runs in the install-scoped data directory.
+`meta backlog tech` also accepts `--no-interactive`, `--state`, `--priority`, repeated `--label`, and `--assignee`. Child tickets inherit their parent issue's workflow status by default. When the parent has no status or an explicit `--state` override is passed, the command falls back to the configured default (repo > global > built-in `Backlog`). Parent issue project and priority are preserved over config defaults unless an explicit CLI override is passed, and the final project/team selection is persisted for later zero-prompt runs in the install-scoped data directory.
 
 In machine mode, `meta backlog tech --no-interactive <ISSUE>` emits the created child issue, parent issue, and local backlog path as JSON. Missing-input failures also emit structured JSON.
 
