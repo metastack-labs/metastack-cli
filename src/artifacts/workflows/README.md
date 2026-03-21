@@ -83,3 +83,6 @@ meta agents workflows run <NAME> --no-interactive --param key=value --output pat
 
 The fallback keeps the existing promptless execution contract and only overwrites an existing
 output file when `--overwrite` is supplied.
+
+For deterministic TUI proofs, `--render-once --events ...` can script the wizard into review,
+edit, and save states without entering the live terminal loop.

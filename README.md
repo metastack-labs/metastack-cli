@@ -603,6 +603,7 @@ Deterministic fallback rules:
 - The fallback path still requires explicit `--param key=value` pairs for all required inputs.
 - `--output <PATH>` saves the generated Markdown artifact directly.
 - `--render-once` prints a deterministic snapshot of the wizard for snapshot-style tests.
+- `--render-once --events ...` scripts wizard, review, edit, and save transitions for deterministic TUI proofs.
 
 Reference:
 

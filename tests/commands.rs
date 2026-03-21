@@ -151,6 +151,7 @@ fn agents_workflows_run_help_describes_tui_first_and_fallback_flags() {
         ))
         .stdout(predicate::str::contains("--no-interactive"))
         .stdout(predicate::str::contains("--render-once"))
+        .stdout(predicate::str::contains("--events"))
         .stdout(predicate::str::contains("--output"))
         .stdout(predicate::str::contains("--overwrite"));
 }
@@ -168,6 +169,7 @@ fn agents_workflow_alias_run_help_routes_to_workflows_command() {
             "Use --no-interactive with explicit --param key=value pairs for scripts and CI.",
         ))
         .stdout(predicate::str::contains("--render-once"))
+        .stdout(predicate::str::contains("--events"))
         .stdout(predicate::str::contains("--output"));
 }
 

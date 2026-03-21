@@ -27,7 +27,8 @@ use crate::agents::{
     render_invocation_diagnostics, resolve_agent_invocation_for_planning, run_agent_capture,
 };
 use crate::cli::{
-    LinearClientArgs, RunAgentArgs, WorkflowCommands, WorkflowRunArgs, WorkflowsArgs,
+    LinearClientArgs, RunAgentArgs, WorkflowCommands, WorkflowRunArgs, WorkflowRunEventArg,
+    WorkflowsArgs,
 };
 use crate::config::{
     AGENT_ROUTE_AGENTS_WORKFLOWS_RUN, AppConfig, PlanningMeta, is_no_agent_selected_error,
@@ -165,6 +166,7 @@ struct WorkflowRunApp {
     markdown_editor: InputFieldState,
     artifact: Option<WorkflowArtifact>,
     overwrite: bool,
+    preferred_output: Option<PathBuf>,
     save_message: Option<String>,
     error: Option<String>,
 }
@@ -266,17 +268,22 @@ async fn run_workflow_tui(
     provided_params: BTreeMap<String, String>,
 ) -> Result<String> {
     let app_config = AppConfig::load()?;
+    let resolved_output = args
+        .output
+        .as_ref()
+        .map(|output| resolve_output_path(&root, output))
+        .transpose()?;
     let mut app = WorkflowRunApp::new(
         &root,
         workflow,
         provided_params,
-        args.output.clone(),
+        resolved_output,
         args.overwrite,
         app_config.vim_mode_enabled(),
     );
 
     if args.render_once {
-        return app.render_once(args.width, args.height);
+        return render_workflow_snapshot(root, args, &mut app).await;
     }
 
     let mut stdout = io::stdout();
@@ -299,49 +306,11 @@ async fn run_workflow_tui(
 
         match event::read().context("failed to read workflow TUI input")? {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
-                match app.handle_key(key)? {
-                    WorkflowUiCommand::None => {}
-                    WorkflowUiCommand::Cancel => return Ok("Workflow run canceled.".to_string()),
-                    WorkflowUiCommand::Generate => {
-                        let prepared =
-                            match prepare_workflow_run(&root, &app.workflow, args, app.values())
-                                .await
-                            {
-                                Ok(prepared) => prepared,
-                                Err(error) => {
-                                    app.set_error(error.to_string());
-                                    continue;
-                                }
-                            };
-                        match execute_prepared_workflow(&root, &prepared) {
-                            Ok(artifact) => app.enter_review(artifact),
-                            Err(error) => app.set_error(error.to_string()),
-                        }
-                    }
-                    WorkflowUiCommand::Save { overwrite } => {
-                        let Some(output) = app.requested_output_path(&root)? else {
-                            continue;
-                        };
-                        match save_artifact(&output, app.artifact_markdown()?, overwrite) {
-                            Ok(SaveDecision::NeedsOverwrite) => {
-                                app.screen = WorkflowRunScreen::ConfirmOverwrite;
-                                app.set_error(format!(
-                                    "`{}` already exists. Confirm overwrite to replace it.",
-                                    display_path(&output, &root)
-                                ));
-                            }
-                            Ok(decision) => {
-                                let message = render_saved_artifact_message(
-                                    &app.workflow,
-                                    &root,
-                                    &output,
-                                    decision,
-                                );
-                                return Ok(message);
-                            }
-                            Err(error) => app.set_error(error.to_string()),
-                        }
-                    }
+                let command = app.handle_key(key)?;
+                if let Some(message) =
+                    apply_workflow_ui_command(&root, args, &mut app, command, false).await?
+                {
+                    return Ok(message);
                 }
             }
             Event::Paste(text) => {
@@ -356,6 +325,26 @@ async fn run_workflow_tui(
             _ => {}
         }
     }
+}
+
+async fn render_workflow_snapshot(
+    root: PathBuf,
+    args: &WorkflowRunArgs,
+    app: &mut WorkflowRunApp,
+) -> Result<String> {
+    let backend = TestBackend::new(args.width, args.height);
+    let mut terminal =
+        Terminal::new(backend).context("failed to create workflow snapshot terminal")?;
+
+    for event in &args.events {
+        let command = apply_render_once_event(app, *event)?;
+        apply_workflow_ui_command(&root, args, app, command, true).await?;
+    }
+
+    terminal
+        .draw(|frame| render_workflow_run(frame, app))
+        .context("failed to draw workflow snapshot")?;
+    Ok(snapshot(terminal.backend()))
 }
 
 async fn prepare_workflow_run(
@@ -830,8 +819,9 @@ impl WorkflowRunApp {
             })
             .collect::<Vec<_>>();
 
-        let default_output =
-            output.unwrap_or_else(|| default_output_path(root, &workflow, &provided_params));
+        let default_output = output
+            .clone()
+            .unwrap_or_else(|| default_output_path(root, &workflow, &provided_params));
 
         Self {
             workflow,
@@ -845,19 +835,10 @@ impl WorkflowRunApp {
             markdown_editor: InputFieldState::multiline(String::new()),
             artifact: None,
             overwrite,
+            preferred_output: output,
             save_message: None,
             error: None,
         }
-    }
-
-    fn render_once(self, width: u16, height: u16) -> Result<String> {
-        let backend = TestBackend::new(width, height);
-        let mut terminal =
-            Terminal::new(backend).context("failed to create workflow snapshot terminal")?;
-        terminal
-            .draw(|frame| render_workflow_run(frame, &self))
-            .context("failed to draw workflow snapshot")?;
-        Ok(snapshot(terminal.backend()))
     }
 
     fn values(&self) -> BTreeMap<String, String> {
@@ -883,7 +864,11 @@ impl WorkflowRunApp {
 
     fn enter_review(&mut self, artifact: WorkflowArtifact) {
         self.markdown_editor = InputFieldState::multiline(artifact.markdown.clone());
-        self.save_path_input = InputFieldState::new(artifact.default_output.display().to_string());
+        let save_path = self
+            .preferred_output
+            .clone()
+            .unwrap_or_else(|| artifact.default_output.clone());
+        self.save_path_input = InputFieldState::new(save_path.display().to_string());
         self.artifact = Some(artifact);
         self.screen = WorkflowRunScreen::Review;
         self.review_focus = ReviewFocus::Artifact;
@@ -1173,6 +1158,88 @@ impl WorkflowRunApp {
         }
 
         lines.join("\n")
+    }
+}
+
+fn apply_render_once_event(
+    app: &mut WorkflowRunApp,
+    event: WorkflowRunEventArg,
+) -> Result<WorkflowUiCommand> {
+    let key = match event {
+        WorkflowRunEventArg::Enter => KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        WorkflowRunEventArg::Tab => KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+        WorkflowRunEventArg::BackTab => KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT),
+        WorkflowRunEventArg::Esc => KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        WorkflowRunEventArg::Edit => KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
+        WorkflowRunEventArg::Save => KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+        WorkflowRunEventArg::AcceptEdit => KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+    };
+    app.handle_key(key)
+}
+
+async fn apply_workflow_ui_command(
+    root: &Path,
+    args: &WorkflowRunArgs,
+    app: &mut WorkflowRunApp,
+    command: WorkflowUiCommand,
+    snapshot_mode: bool,
+) -> Result<Option<String>> {
+    match command {
+        WorkflowUiCommand::None => Ok(None),
+        WorkflowUiCommand::Cancel => {
+            if snapshot_mode {
+                app.save_message = Some("Workflow run canceled.".to_string());
+                Ok(None)
+            } else {
+                Ok(Some("Workflow run canceled.".to_string()))
+            }
+        }
+        WorkflowUiCommand::Generate => {
+            let prepared = match prepare_workflow_run(root, &app.workflow, args, app.values()).await
+            {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    app.set_error(error.to_string());
+                    return Ok(None);
+                }
+            };
+            match execute_prepared_workflow(root, &prepared) {
+                Ok(artifact) => app.enter_review(artifact),
+                Err(error) => app.set_error(error.to_string()),
+            }
+            Ok(None)
+        }
+        WorkflowUiCommand::Save { overwrite } => {
+            let Some(output) = app.requested_output_path(root)? else {
+                return Ok(None);
+            };
+            match save_artifact(&output, app.artifact_markdown()?, overwrite) {
+                Ok(SaveDecision::NeedsOverwrite) => {
+                    app.screen = WorkflowRunScreen::ConfirmOverwrite;
+                    app.set_error(format!(
+                        "`{}` already exists. Confirm overwrite to replace it.",
+                        display_path(&output, root)
+                    ));
+                    Ok(None)
+                }
+                Ok(decision) => {
+                    let message =
+                        render_saved_artifact_message(&app.workflow, root, &output, decision);
+                    if snapshot_mode {
+                        app.screen = WorkflowRunScreen::Review;
+                        app.error = None;
+                        app.save_message = Some(message);
+                        Ok(None)
+                    } else {
+                        Ok(Some(message))
+                    }
+                }
+                Err(error) => {
+                    app.set_error(error.to_string());
+                    Ok(None)
+                }
+            }
+        }
     }
 }
 

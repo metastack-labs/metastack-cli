@@ -61,6 +61,7 @@ const WORKFLOW_RUN_HELP: &str = "\
 Interactive mode:
   TTY runs open a guided wizard, then land on a review/export dashboard.
   Use --render-once for deterministic wizard snapshots in tests.
+  Use --events to script render-once snapshots through review, edit, and save states.
 
 Non-interactive mode:
   Use --no-interactive with explicit --param key=value pairs for scripts and CI.
@@ -494,6 +495,9 @@ pub struct WorkflowRunArgs {
     /// Render the workflow wizard once to an in-memory buffer and print the snapshot.
     #[arg(long, conflicts_with_all = ["no_interactive", "dry_run"])]
     pub render_once: bool,
+    /// Apply scripted TUI events before printing a `--render-once` snapshot.
+    #[arg(long, value_enum, value_delimiter = ',', requires = "render_once")]
+    pub events: Vec<WorkflowRunEventArg>,
     /// Snapshot width when `--render-once` is set.
     #[arg(long, default_value_t = 120, requires = "render_once")]
     pub width: u16,
@@ -512,6 +516,17 @@ pub struct WorkflowRunArgs {
     /// Default Linear team key used for workflow-triggered issue lookups.
     #[arg(long)]
     pub team: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum WorkflowRunEventArg {
+    Enter,
+    Tab,
+    BackTab,
+    Esc,
+    Edit,
+    Save,
+    AcceptEdit,
 }
 
 #[derive(Debug, Clone, Args)]

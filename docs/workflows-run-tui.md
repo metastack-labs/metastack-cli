@@ -11,6 +11,7 @@ The deterministic fallback remains available for scripts, CI, and tests via `--n
 - Interactive path:
   - Triggered when stdin and stdout are TTYs and `--no-interactive` is not set.
   - `--render-once` also forces the TUI path, but renders one deterministic snapshot instead of entering the live terminal loop.
+  - `--render-once --events ...` applies scripted key flows before the snapshot so tests can prove review, edit, and save states without a live TTY.
 - Non-interactive path:
   - Triggered when `--no-interactive` is set.
   - Also used automatically when the command runs without a TTY and `--render-once` is not set.
@@ -53,6 +54,10 @@ The deterministic fallback remains available for scripts, CI, and tests via `--n
   - `e` enters multiline edit mode
   - `s` opens the save-path prompt
   - `Esc` exits without saving
+- Snapshot automation:
+  - `--events enter` advances the wizard and generates on the last step
+  - `--events edit,accept-edit` proves the edit accept path
+  - `--events save,enter` proves save and overwrite prompt behavior
 
 ## Edit Mode
 
