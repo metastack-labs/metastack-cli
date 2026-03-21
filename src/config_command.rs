@@ -199,7 +199,7 @@ fn render_summary(view: &ConfigViewData, include_path: bool) -> String {
             .defaults
             .listen
             .assignment_scope
-            .map(|s| format!("{s:?}"))
+            .map(assignee_scope_label)
             .unwrap_or_else(|| "unset".to_string())
     ));
     lines.push(format!(
@@ -400,6 +400,18 @@ fn assignee_scope_options() -> Vec<String> {
         "Only issues assigned to the authenticated viewer".to_string(),
         "Viewer-assigned issues plus unassigned issues".to_string(),
     ]
+}
+
+fn assignee_scope_label(scope: ListenAssignmentScope) -> String {
+    match scope {
+        ListenAssignmentScope::Any => "Any eligible issue".to_string(),
+        ListenAssignmentScope::ViewerOnly => {
+            "Only issues assigned to the authenticated viewer".to_string()
+        }
+        ListenAssignmentScope::ViewerOrUnassigned => {
+            "Viewer-assigned issues plus unassigned issues".to_string()
+        }
+    }
 }
 
 fn assignee_scope_index(scope: ListenAssignmentScope) -> usize {
@@ -2861,7 +2873,7 @@ mod tests {
 
     use super::{
         AdvancedRoutingApp, ConfigApp, ConfigStep, ConfigViewData, assignee_scope_options,
-        summary_viewport,
+        render_summary, summary_viewport,
     };
     use crate::config::{
         AgentSettings, AppConfig, InstallDefaults, InstallListenSettings, InstallUiSettings,
@@ -2967,6 +2979,29 @@ mod tests {
 
         assert!(handled);
         assert!(app.summary_scroll.offset() > 0);
+    }
+
+    #[test]
+    fn config_render_summary_uses_semantic_assignee_scope_label() {
+        let view = ConfigViewData {
+            config_path: PathBuf::from("/tmp/metastack-config.toml"),
+            app_config: AppConfig {
+                defaults: InstallDefaults {
+                    listen: InstallListenSettings {
+                        assignment_scope: Some(ListenAssignmentScope::ViewerOnly),
+                        ..InstallListenSettings::default()
+                    },
+                    ..InstallDefaults::default()
+                },
+                ..AppConfig::default()
+            },
+            detected_agents: Vec::new(),
+        };
+
+        let summary = render_summary(&view, false);
+
+        assert!(summary.contains("Install listen assignee scope: Only issues assigned to the authenticated viewer"));
+        assert!(!summary.contains("Install listen assignee scope: ViewerOnly"));
     }
 
     #[test]
