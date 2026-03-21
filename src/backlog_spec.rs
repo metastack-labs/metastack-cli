@@ -508,7 +508,7 @@ impl BacklogSpecApp {
         match &mut self.stage {
             SpecStage::Request(app) => match key.code {
                 KeyCode::Esc => return Ok(Some(InteractiveExit::Cancelled)),
-                KeyCode::Enter => {
+                KeyCode::Enter if !key.modifiers.contains(KeyModifiers::SHIFT) => {
                     let request = app.request.value().trim();
                     if request.is_empty() {
                         app.error = Some(
@@ -549,7 +549,7 @@ impl BacklogSpecApp {
                         app.error = None;
                     }
                 }
-                KeyCode::Enter => {
+                KeyCode::Enter if !key.modifiers.contains(KeyModifiers::SHIFT) => {
                     let follow_ups = collect_follow_up_answers(&app.questions)?;
                     next = NextStep::StartGeneration(app.request.clone(), follow_ups);
                 }
@@ -1351,6 +1351,7 @@ fn render_questions_frame(frame: &mut Frame<'_>, app: &QuestionsApp) {
         key_hints(&[
             ("Up/Down", "select question"),
             ("Enter", "generate"),
+            ("Shift+Enter", "newline"),
             ("Esc", "back"),
         ]),
     ]))
@@ -1580,5 +1581,71 @@ mod tests {
                 .is_ok()
         );
         assert!(ensure_required_headings("# Overview\n\n## GOALS").is_err());
+    }
+
+    #[test]
+    fn shift_enter_keeps_request_stage_open_and_inserts_newline() {
+        let mut app = BacklogSpecApp::new(
+            SpecMode::Create,
+            PathBuf::from(".metastack/SPEC.md"),
+            None,
+            Some("Line 1".to_string()),
+            Vec::new(),
+        );
+
+        let exit = app
+            .handle_key(
+                Path::new("."),
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT),
+                &None,
+                &None,
+                &None,
+            )
+            .expect("shift+enter should not fail");
+
+        assert!(exit.is_none());
+        match &app.stage {
+            SpecStage::Request(request) => assert_eq!(request.request.value(), "Line 1\n"),
+            other => panic!("expected request stage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn shift_enter_keeps_question_stage_open_and_inserts_newline() {
+        let mut app = BacklogSpecApp {
+            mode: SpecMode::Create,
+            spec_path: PathBuf::from(".metastack/SPEC.md"),
+            existing_spec: None,
+            prefilled_answers: Vec::new(),
+            stage: SpecStage::Questions(QuestionsApp {
+                mode: SpecMode::Create,
+                request: "Draft a repo-local spec".to_string(),
+                questions: vec![QuestionAnswer {
+                    question: "What is the primary user?".to_string(),
+                    answer: InputFieldState::multiline("CLI maintainers"),
+                }],
+                selected: 0,
+                error: None,
+            }),
+            pending: None,
+        };
+
+        let exit = app
+            .handle_key(
+                Path::new("."),
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT),
+                &None,
+                &None,
+                &None,
+            )
+            .expect("shift+enter should not fail");
+
+        assert!(exit.is_none());
+        match &app.stage {
+            SpecStage::Questions(questions) => {
+                assert_eq!(questions.questions[0].answer.value(), "CLI maintainers\n");
+            }
+            other => panic!("expected questions stage, got {other:?}"),
+        }
     }
 }
