@@ -1,6 +1,6 @@
 
 <div align="center">
-  <h1>MetaStack CLI</h1>
+  <h1>Intuition Org Harness</h1>
   <p><strong>Linear-native planning, repo context, and local agent automation from one CLI.</strong></p>
   <p>Create backlog items, sync planning files, run reusable workflows, and supervise unattended ticket execution without leaving the terminal.</p>
   <p>
@@ -28,10 +28,11 @@ Most planning tools split work across issue trackers, docs, scripts, and ad hoc 
 - `meta runtime config` saves install-scoped Linear and agent defaults.
 - `meta runtime setup` bootstraps the repo and saves repo-scoped defaults under `.metastack/`.
 - `meta context scan` turns the codebase into reusable planning context.
-- `meta backlog plan`, `meta backlog tech`, `meta linear issues refine`, and `meta agents workflows` generate structured backlog work.
+- `meta backlog plan`, `meta backlog improve`, `meta backlog tech`, `meta linear issues refine`, and `meta agents workflows` generate structured backlog work.
 - `meta merge` batches open GitHub PRs into one isolated aggregate merge run and publish step.
 - `meta linear ...` and `meta backlog sync` keep Linear and local files aligned.
 - `meta agents listen` runs unattended ticket execution in dedicated workspace clones instead of your source checkout.
+- `meta workspace` inventories and cleans those sibling listener workspace clones after the listener finishes.
 
 ## Install `meta` During Development
 
@@ -42,6 +43,9 @@ cargo install --path . --force
 ```
 
 This will install the `meta` command to your Cargo bin directory, which is typically `~/.cargo/bin`.
+
+Cargo installs are intentionally not self-updatable with `meta upgrade`. Use the GitHub Release
+installer below when you want secure in-place updates.
 
 ## Install `meta` From Source
 
@@ -74,6 +78,32 @@ After installation:
 
 ```bash
 meta --help
+```
+
+Check whether a newer stable GitHub Release is available for the installed binary:
+
+```bash
+meta upgrade --check
+```
+
+Preview the verified replacement plan without mutating the install:
+
+```bash
+meta upgrade --dry-run
+```
+
+Apply the latest stable GitHub Release in place:
+
+```bash
+meta upgrade
+```
+
+Advanced version-management path:
+
+```bash
+meta upgrade --version 0.2.0 --dry-run
+meta upgrade --version 0.3.0-rc.1 --prerelease
+meta upgrade --version 0.1.0 --allow-downgrade
 ```
 
 ## Quick Start
@@ -157,6 +187,14 @@ The preferred public surface is domain-first. Legacy top-level commands such as 
 | `meta runtime` | Configure install-scoped and repo-scoped defaults and supervise cron jobs |
 | `meta dashboard` | Open Linear, agents, team, or ops-oriented dashboard views |
 | `meta merge` | Discover open GitHub PRs, batch them in a one-shot dashboard, and publish one aggregate PR |
+| `meta workspace` | List, clean, and prune sibling listener workspace clones under the fixed workspace root |
+| `meta upgrade` | Check and apply verified GitHub Release self-updates for release installs on macOS/Linux |
+
+## Interactive TUI Scrolling
+
+Long-form editors and preview panes in the terminal UI now share one scrolling model. When a multiline editor or preview has focus, `Up`, `Down`, `PgUp`, `PgDn`, `Home`, and `End` move within the wrapped content, and mouse-wheel scrolling applies to the focused pane instead of leaking into surrounding lists or forms.
+
+This applies to flows such as `meta backlog plan`, `meta linear issues create`, `meta linear issues edit`, `meta dashboard linear`, `meta backlog tech`, `meta merge`, and related preview-driven dashboards that render long descriptions or generated file content.
 
 ## Build From Source
 
@@ -183,6 +221,7 @@ A typical end-to-end loop looks like this:
 5. Use `meta linear ...`, `meta dashboard ...`, or `meta backlog sync` to coordinate with Linear.
 6. Use `meta merge` when you want to batch open GitHub PRs in one isolated aggregate merge run.
 7. Use `meta agents listen` when you want unattended ticket execution inside a dedicated workspace clone.
+8. Use `meta workspace` when you want to inspect or clean those listener-created clones later.
 
 ## Example Flows
 
@@ -232,10 +271,17 @@ meta runtime config --json
 meta runtime config --api-key lin_api_work
 meta runtime config --default-profile work
 meta runtime config --default-agent codex --default-model gpt-5.4 --default-reasoning medium
+meta runtime config --default-assignee viewer --default-state Backlog --default-priority 2 --default-label platform --default-label cli
+meta runtime config --velocity-project "MetaStack CLI" --velocity-state Backlog --velocity-auto-assign viewer
+meta runtime config --vim-mode enabled
+meta runtime config --merge-validation-repair-attempts 8
+meta runtime config --merge-validation-transient-retry-attempts 2
+meta runtime config --merge-publication-retry-attempts 6
 meta runtime config --route backlog --route-agent claude --route-model opus
 meta runtime config --route backlog.plan --route-agent codex --route-model gpt-5.3-codex
 meta runtime config --clear-route backlog.plan
 meta runtime config --advanced-routing
+meta runtime config --replay-onboarding
 ```
 
 Legacy alias: `meta config`
@@ -248,9 +294,15 @@ Legacy alias: `meta config`
 The persisted config can store:
 
 - install-scoped Linear API key/default team values
+- install-scoped backlog ticket defaults under `[backlog]`, including `default_assignee`, `default_state`, `default_priority`, additive `default_labels`, and zero-prompt `velocity_defaults`
+- install-scoped onboarding completion state
+- install-scoped Linear API key/default team/default project values
+- install-scoped global defaults for listen label, listen assignment scope, listen refresh policy, listen poll interval, plan follow-up limit, and plan/technical issue labels
+- install-scoped UI defaults under `[defaults.ui]`, including `vim_mode = true|false` for safe `h/j/k/l` navigation aliases
 - named global Linear profiles under `[linear.profiles.<name>]`
 - an optional global `linear.default_profile`
 - global default provider/model/reasoning values for the built-in `codex` / `claude` catalog
+- install-scoped merge defaults under `[merge]`, including validation repair, transient retry, and publication retry caps for `meta merge`
 - advanced family-level agent routing under `[agents.routing.families.<family>]`
 - advanced command-level agent routing under `[agents.routing.commands."<route>"]`
 
@@ -264,9 +316,21 @@ Agent-backed routes resolve install-scoped settings in this order:
 For an individual run, explicit CLI flags still win over the routed defaults:
 `--agent`/`--provider` first, then `--model`, then `--reasoning`.
 
+First-run behavior:
+
+- a fresh install routes normal `meta` commands into the shared onboarding wizard before the requested command runs
+- `meta runtime setup` / `meta setup` are also intercepted until install onboarding completes, then return to being the manual repo-scoped editing flows
+- `meta runtime config --replay-onboarding` and `meta config --replay-onboarding` rerun the same wizard for debugging or refreshes
+- plain `meta runtime config` / `meta config` remain the manual install-scoped editing dashboards after onboarding
+
 For the built-in providers, `--reasoning`, `default_reasoning`, and `route_reasoning` are validated
 against the selected provider/model catalog instead of being accepted as free text. The dashboards
 now render reasoning as a select field tied to the current provider/model choice.
+
+When `vim_mode` is enabled, supported TUIs add `h/j/k/l` aliases only while a non-text control is
+focused. Search bars, single-line inputs, and multiline editors continue to insert literal
+characters, and search-first dashboards require leaving query focus before vim navigation takes
+over.
 
 Built-in reasoning options shipped in-repo:
 
@@ -289,6 +353,7 @@ Supported route families:
 Supported command route keys:
 
 - `backlog.plan`
+- `backlog.improve`
 - `backlog.split`
 - `context.scan`
 - `context.reload`
@@ -314,6 +379,22 @@ default_agent = "codex"
 default_model = "gpt-5.4"
 default_reasoning = "medium"
 
+[backlog]
+default_assignee = "viewer"
+default_state = "Backlog"
+default_priority = 2
+default_labels = ["platform", "cli"]
+
+[backlog.velocity_defaults]
+project = "MetaStack CLI"
+state = "Backlog"
+auto_assign = "viewer"
+
+[merge]
+validation_repair_attempts = 6
+validation_transient_retry_attempts = 3
+publication_retry_attempts = 5
+
 [agents.routing.families.backlog]
 provider = "claude"
 model = "opus"
@@ -334,12 +415,48 @@ meta runtime setup --json
 meta runtime setup --team MET --project "MetaStack CLI"
 meta runtime setup --api-key lin_api_repo --team MET --project "MetaStack CLI"
 meta runtime setup --provider codex --model gpt-5.4 --reasoning medium
-meta runtime setup --listen-label agent --assignment-scope viewer --refresh-policy reuse-and-refresh
+meta runtime setup --listen-label agent --assignment-scope viewer-only --refresh-policy reuse-and-refresh
+meta runtime setup --default-assignee viewer --default-state Todo --default-priority 3 --default-label platform
+meta runtime setup --velocity-project "MetaStack CLI" --velocity-state Backlog --velocity-auto-assign viewer
 ```
+
+### `upgrade`
+
+Inspect or apply GitHub Release self-updates for supported macOS/Linux release installs:
+
+```bash
+meta upgrade --check
+meta upgrade --dry-run
+meta upgrade
+meta upgrade --version 0.2.0 --dry-run
+meta upgrade --version 0.3.0-rc.1 --prerelease
+meta upgrade --version 0.1.0 --allow-downgrade
+```
+
+Default behavior resolves the latest stable GitHub Release for the running platform, verifies the
+selected archive against the published `SHA256SUMS`, stages extraction outside the live install
+path, and replaces the installed `meta` binary only after verification succeeds.
+
+`meta upgrade` refuses Cargo installs and source-checkout builds because those origins are not safe
+to mutate in place. Reinstall from GitHub Releases when you want an install that can self-update.
+
+Use `--check` to inspect the latest stable release without mutating the current install. Use
+`--dry-run` to resolve the same release and print the planned replacement path without swapping the
+binary. The advanced path keeps the default UX strict while still allowing pinned versions,
+prerelease opt-in, and deliberate downgrades with explicit flags.
 
 Legacy alias: `meta setup`
 
 `meta runtime setup` is safe to rerun in an existing checkout. It creates `.metastack/` when needed, seeds `.metastack/backlog/_TEMPLATE/` from the canonical Markdown tree shipped in `src/artifacts/BACKLOG_TEMPLATE`, lets the setup flow inherit shared Linear auth or save a project-specific Linear API key in install-scoped CLI config when a project needs its own token, validates any repo-selected profiles and built-in provider/model/reasoning combinations against the install-scoped catalog, resolves `--project <NAME>` to a canonical Linear project ID before saving, and writes repo defaults only to `.metastack/meta.json`.
+
+Repo setup dashboards automatically honor the install-scoped `vim_mode` toggle from `meta runtime config`, but only for non-text controls such as select lists. Title, label, path, and prompt fields keep literal `h/j/k/l` editing behavior.
+
+For listen setup, use `assignment_scope = "viewer_only"` to watch only issues assigned to the authenticated viewer, or `assignment_scope = "viewer_or_unassigned"` to also admit unassigned tickets. Existing repo config that still stores the legacy value `assignment_scope = "viewer"` continues to load as `viewer_or_unassigned` for compatibility. Use `meta agents listen --all-assignees` when a single run should ignore assignee scope without mutating repo setup.
+Promoted repo-aware settings now resolve as `CLI override -> repo default -> install default` for the shared team/project, listen label/scope/refresh/poll interval, interactive plan follow-up limit, and plan/technical issue labels. Repo-scoped `.metastack/meta.json` still overrides the install-scoped defaults saved by onboarding.
+
+For listen setup, `assignment_scope = "viewer"` now means `viewer + unassigned` for unattended listen runs. Use `meta agents listen --all-assignees` when a single run should ignore assignee scope without mutating repo setup.
+
+For listen setup, use `assignment_scope = "viewer_only"` to watch only issues assigned to the authenticated viewer, or `assignment_scope = "viewer_or_unassigned"` to also admit unassigned tickets. Existing repo config that still stores the legacy value `assignment_scope = "viewer"` continues to load as `viewer_or_unassigned` for compatibility. Use `meta agents listen --all-assignees` when a single run should ignore assignee scope without mutating repo setup.
 
 For unattended `meta agents listen` runs, setup should be paired with a provider preflight:
 
@@ -396,16 +513,20 @@ meta merge --json
 meta merge
 meta merge --render-once --events space,down,space,enter
 meta merge --no-interactive --pull-request 101 --pull-request 102 --validate "make quality"
+meta merge --resume-run 20260320T150254Z
 ```
 
 Behavior summary:
 
 - `--json` emits the resolved GitHub repository metadata plus the open PR list used by the dashboard and planner.
-- Plain `meta merge` opens a one-shot dashboard that lets you select multiple PRs, review the selected batch summary, launch immediately, then stay in a live progress screen until the merge run succeeds or fails.
+- Plain `meta merge` opens a one-shot dashboard that lets you select multiple PRs, review the selected batch summary, scroll the focused preview pane with `Up`/`Down`, `PgUp`/`PgDn`, `Home`/`End`, or the mouse wheel when it overflows, launch immediately, then stay in a live progress screen until the merge run succeeds or fails.
 - `--render-once` prints a deterministic dashboard snapshot for tests and proofs.
 - `--no-interactive` skips the dashboard and runs the selected `--pull-request` values directly while printing textual phase updates to stdout.
+- `--resume-run <RUN_ID>` reuses an existing aggregate branch and run artifact directory under `.metastack/merge-runs/<RUN_ID>/`, revalidates the preserved workspace, repushes the branch, and updates the aggregate PR instead of starting from scratch.
 - `--validate <COMMAND>` overrides the post-merge validation commands. When omitted, `meta merge` prefers `make quality` when the repo Makefile exposes that target, otherwise `make all`, otherwise `cargo test` for Rust repositories.
-- Publication is gated on those validation commands succeeding. When validation fails, `meta merge` invokes the configured merge agent inside the isolated workspace, commits any repair edits onto the aggregate branch, and reruns validation. The run only stops without publication after the bounded repair loop is exhausted or validation execution itself cannot proceed.
+- Validation now narrows repeated failures before rerunning the full suite. When `make quality` reports a specific Rust test or clippy failure, `meta merge` first reruns the exact failing target, fingerprints the failure, and stops treating the same signature as transient once it repeats. That avoids wasting loops on deterministic failures that only looked flaky on the first pass.
+- Validation is no longer a hard publication gate. When validation stays red after bounded automated recovery, `meta merge` still pushes the aggregate branch, creates or updates the aggregate PR, and records the unresolved validation status in both the run artifacts and the PR body so repair work can continue without restarting the batch.
+- Push and aggregate PR publication retry on transient remote errors, and the install-scoped merge knobs now cover all three control points: `[merge].validation_repair_attempts`, `[merge].validation_transient_retry_attempts`, and `[merge].publication_retry_attempts`.
 - Both interactive and non-interactive runs publish the same major phases: workspace preparation, plan generation, merge application, validation, push, and PR publication. Merge application also records finer-grained per-PR substeps such as the active pull request and whether conflict assistance ran.
 
 Each run writes local audit artifacts under `.metastack/merge-runs/<RUN_ID>/`, including:
@@ -469,6 +590,7 @@ Inspect and refresh the effective context that agent-backed runs consume:
 meta context show
 meta context map
 meta context doctor
+meta context scan --json
 meta context reload
 ```
 
@@ -476,6 +598,57 @@ meta context reload
 - `map` prints a repo-map style summary derived from the live repository tree
 - `doctor` reports missing or stale inputs such as `.metastack/meta.json`, repo rules, instructions files, and generated codebase docs
 - `reload` re-runs the context refresh path used by `meta scan`
+- `scan --json` runs the scan pipeline without a terminal snapshot and emits a JSON report describing the refreshed codebase context plus the written and removed files
+
+### Machine-readable Command Contract
+
+Use these flags when an outer agent or shell wrapper needs deterministic non-interactive behavior:
+
+| Command | Promptless mode | JSON selector | Machine output behavior |
+| --- | --- | --- | --- |
+| `meta backlog plan` | `--no-interactive` | implicit in `--no-interactive` | success and failure emit JSON |
+| `meta backlog tech` | `--no-interactive` | implicit in `--no-interactive` | success and failure emit JSON |
+| `meta backlog sync <subcommand>` | `--no-interactive` | `--json` or implicit in `--no-interactive` | direct subcommands emit JSON |
+| `meta linear issues create` | `--no-interactive` | implicit in `--no-interactive` | success and failure emit JSON |
+| `meta linear issues edit` | `--no-interactive` | implicit in `--no-interactive` | success and failure emit JSON |
+| `meta linear issues refine` | n/a | `--json` | success and failure emit JSON |
+| `meta context scan` | n/a | `--json` | success and failure emit JSON |
+| `meta agents listen --once` | headless | `--json` | emits one poll-cycle JSON payload |
+| `meta runtime cron init` | `--no-interactive` | `--json` or implicit in `--no-interactive` | success and failure emit JSON |
+
+Notes:
+
+- Mutation commands default to structured JSON when `--no-interactive` is active.
+- `--render-once` remains a terminal snapshot mode, not a machine-output mode, and conflicts with `--json`, `--no-interactive`, or `--once` where those modes overlap.
+- Machine-readable failures use one stable top-level shape: `status`, `command`, and `error { code, message, context? }`.
+
+### `--json` / `--no-interactive` / `--render-once` Matrix
+
+This matrix is the contract for agent callers deciding whether to drive a command as JSON, as a promptless mutation, or as a text snapshot:
+
+| Command | `--no-interactive` | `--json` | `--render-once` |
+| --- | --- | --- | --- |
+| `meta backlog plan` | required for promptless runs; implies JSON | n/a | not supported |
+| `meta backlog tech` | required for promptless runs; implies JSON | n/a | not supported |
+| `meta backlog sync status` | optional | supported | supported on dashboard form (`meta backlog sync --render-once`) |
+| `meta backlog sync link` | optional for scripting; requires explicit selectors | supported and implied by `--no-interactive` | not supported |
+| `meta backlog sync pull` | optional for scripting; requires explicit selectors | supported and implied by `--no-interactive` | not supported |
+| `meta backlog sync push` | optional for scripting; requires explicit selectors | supported and implied by `--no-interactive` | not supported |
+| `meta linear issues create` | required for promptless runs; implies JSON | n/a | supported for the create form |
+| `meta linear issues edit` | required for promptless runs; implies JSON | n/a | supported for the edit form |
+| `meta linear issues refine` | not needed; command is already headless | supported | not supported |
+| `meta context scan` | not needed; command is already headless | supported | not supported |
+| `meta agents listen --once` | not needed; `--once` is the headless poll mode | supported only with `--once`; returns one poll cycle | supported separately as a text dashboard snapshot |
+| `meta runtime cron init` | required for promptless writes; implies JSON | supported | supported as a text dashboard snapshot |
+| `meta runtime config` | not needed | supported | supported |
+| `meta merge` | required for promptless execution with explicit PR selection | supported | supported |
+
+Rules:
+
+- Prefer `--no-interactive` for any mutation command that would otherwise prompt for missing input.
+- Prefer `--json` for read-only or already-headless flows such as `meta context scan`, `meta linear issues refine`, and `meta agents listen --once`.
+- Use `--render-once` only when a text snapshot of the TUI is useful for humans or snapshot-style tests; it is not part of the machine JSON contract.
+- Where both modes exist, `--render-once` is mutually exclusive with `--json`, `--no-interactive`, and `--once` because snapshot output is a separate text contract.
 
 ### `runtime cron`
 
@@ -484,6 +657,7 @@ Create repository-local cron jobs as Markdown plus YAML front matter, then super
 ```bash
 meta runtime cron init
 meta runtime cron init nightly --no-interactive --schedule "0 * * * *" --command "cargo test" --prompt "Review the latest test output and fix any failures"
+meta runtime cron --root target/cli-proof/cron init nightly --no-interactive --schedule "0 * * * *" --command "cargo test"
 meta runtime cron status
 meta runtime cron start
 meta runtime cron stop
@@ -492,6 +666,12 @@ meta runtime cron run nightly
 
 Legacy alias: `meta cron`
 
+Machine mode:
+
+- `meta runtime cron init --no-interactive ...` now emits structured JSON by default
+- `meta runtime cron init --json ...` forces JSON without changing the rest of the command contract
+- `--render-once` stays a text snapshot path for the dashboard and is separate from machine JSON output
+
 Side effects:
 
 - ensures `.metastack/cron/` exists
@@ -499,7 +679,7 @@ Side effects:
 - runs the shell command first when configured, then the optional agent in the same working directory
 - creates `.metastack/cron/.runtime/` on demand for scheduler state and logs
 
-In the interactive cron editor, the prompt field submits on `Enter` and inserts a newline on `Shift+Enter`.
+In the interactive cron editor, the prompt field submits on `Enter`, inserts a newline on `Shift+Enter`, and supports `Up`/`Down`, `PgUp`/`PgDn`, `Home`/`End`, plus mouse-wheel scrolling to keep long wrapped prompts reachable.
 
 Cron job files use this shape:
 
@@ -524,15 +704,47 @@ Turn a planning request into one or more Linear backlog issues:
 ```bash
 meta backlog plan
 meta backlog plan --no-interactive --request "Plan a dashboard for feature intake" --answer "Use the existing TUI patterns" --answer "Split the work into multiple tickets"
+meta backlog plan --fast
+meta backlog plan --fast --multi --questions 1
+meta backlog plan --fast --no-interactive --request "Plan the onboarding rewrite"
+meta backlog plan ENG-10144
+meta backlog plan ENG-10144 --velocity
 ```
 
 Legacy alias: `meta plan`
 
 In a TTY, `meta backlog plan` opens one persistent ratatui planning session to capture the request, collect follow-up answers, and review the generated ticket breakdown before creating Backlog issues in Linear.
 
-Multiline request and follow-up editors submit on `Enter`; use `Shift+Enter` when you need to insert a newline without advancing the workflow.
+Fast mode keeps the same downstream issue creation path but switches the interaction model to a single pass. When `--fast` is active, the command captures the request, optionally asks at most one round of follow-up questions, prompts once for `Anything Else To Add?`, streams the draft preview while the agent is still generating it, and then shows an approve-or-reject review screen. Fast review intentionally removes merge groups, skip states, and regeneration controls.
 
-For deterministic automation, pass `--no-interactive` with `--request` and repeated `--answer` values.
+Within one `meta backlog plan` run, the shared agent runtime now reuses a built-in Codex or Claude session across follow-up generation, ticket generation, and interactive revisions when the provider returns a resume handle. That continuation is run-scoped only: the command does not persist planning sessions under `.metastack/` or share them with listen workers.
+
+Multiline request and follow-up editors submit on `Enter`; use `Shift+Enter` when you need to insert a newline without advancing the workflow. Focused editors also support `Up`/`Down`, `PgUp`/`PgDn`, `Home`/`End`, and mouse-wheel scrolling so long wrapped prompts and follow-up answers stay editable after they overflow the visible pane.
+
+For deterministic automation, pass `--no-interactive` with `--request` and repeated `--answer` values. In zero-prompt mode (`--no-interactive` or no TTY), backlog planning resolves ticket defaults in this order: explicit flags, remembered project/team for the canonical repo root, repo `backlog.velocity_defaults`, global `backlog.velocity_defaults`, repo defaults from `.metastack/meta.json`, global defaults from `config.toml`, then built-in behavior. Generated plan priority still wins over config priority unless you pass `--priority`.
+
+Fast planning adds three mode-specific controls:
+
+- `--fast` enables the single-pass planning flow. Repo or install config can also enable it by default with `plan.default_mode = "fast"`.
+- `--multi` only applies in fast mode and overrides the default single-ticket shape so the agent may emit multiple issues.
+- `--questions <N>` only applies in fast mode and caps the one-round follow-up phase. `0` skips fast Q&A entirely.
+
+Fast mode defaults to a single ticket unless you pass `--multi` or disable that preference through repo/install config with `plan.fast_single_ticket = false`. The follow-up cap resolves in the same precedence order as other plan defaults: explicit CLI flag, repo config, install config, then built-in default. Fast non-interactive runs do not accept `--answer`; they go straight from `--request` to generation so the flow stays single-pass.
+
+Machine mode:
+
+- `meta backlog plan --no-interactive ...` emits created or reshaped issue data as JSON instead of text
+- missing-input and other machine-mode failures also emit JSON with `error.code`, `error.message`, and optional `error.context`
+- the old harness `intuition product "desc" --velocity` maps to `meta backlog plan --no-interactive --request "desc" --answer "..."`
+- the old harness `intuition product "desc" --velocity --dry-run` maps to `meta backlog plan --no-interactive --request "desc" --answer "..." --dry-run`
+
+`meta backlog plan` also accepts `--state`, `--priority`, repeated `--label`, and `--assignee`. Built-in `plan` labeling remains mandatory and additive, so config labels and explicit labels are appended rather than replacing it.
+
+`meta backlog plan <IDENTIFIER>` reshapes an existing Linear issue in place instead of creating a new one. The command loads the current issue context, asks the configured planning agent for a stronger rewrite, and then updates the same ticket through `issueUpdate`.
+
+Interactive reshape runs print a before/after diff preview and require confirmation before the update. Pass `--velocity` to skip that preview and auto-apply the rewrite. Reshape mode preserves assignee, labels, project, state, cycle, and priority, updates or creates the active `## Codex Workpad` comment, and intentionally leaves local `.metastack/backlog/<ISSUE>/` files unchanged in this slice.
+
+`--fast`, `--multi`, and `--questions` do not apply to reshape mode. The command rejects those combinations instead of silently changing reshape behavior.
 
 The planning prompt is repo-scoped by default: it derives the active project identity from the resolved repository root, plans for the full repository directory, and asks the agent to create backlog issues only for that repository unless the user explicitly narrows the request to a subproject.
 
@@ -561,6 +773,16 @@ The command requires a configured local agent, or one of the built-in supported 
 
 `meta backlog tech` uses the same repo-root scope contract as `meta backlog plan`: the agent sees the active repository identity derived from the resolved root, defaults work to the top-level repository directory, and should only produce a narrower technical backlog item when the user explicitly requested a subproject.
 
+`meta backlog tech` also accepts `--no-interactive`, `--state`, `--priority`, repeated `--label`, and `--assignee`. The command now defaults child ticket state to `Backlog` when no override is configured, preserves the parent issue's project and priority over config defaults unless an explicit CLI override is passed, and persists the final project/team selection for later zero-prompt runs in the install-scoped data directory.
+
+In machine mode, `meta backlog tech --no-interactive <ISSUE>` emits the created child issue, parent issue, and local backlog path as JSON. Missing-input failures also emit structured JSON.
+
+In a TTY, the parent-issue picker now uses the shared Linear issue browser:
+
+- type to search by identifier, title, state, project, or description
+- matching is case-insensitive and ranks exact identifiers first, then identifier prefixes and exact token matches, then broader substring matches
+- shared semantic styling highlights identifiers, titles, state, priority, project, and preview metadata while you review the selected parent issue
+
 Side effects:
 
 - ensures `.metastack/backlog/_TEMPLATE/` exists
@@ -570,6 +792,31 @@ Side effects:
 - writes the generated backlog item to `.metastack/backlog/<NEW_ISSUE_ID>/`
 - uses `.metastack/backlog/<NEW_ISSUE_ID>/index.md` as the Linear issue description
 - uploads the remaining managed backlog files as Linear attachments
+
+### `backlog improve`
+
+Review repo-scoped backlog issues for issue hygiene gaps before execution:
+
+```bash
+meta backlog improve
+meta backlog improve --mode basic
+meta backlog improve ENG-10144 --mode advanced
+meta backlog improve ENG-10144 --mode advanced --apply
+```
+
+`meta backlog improve` is the repo-scoped backlog triage pass for existing backlog issues. Use it when you want to scan the current backlog for missing labels, weak titles/descriptions, missing acceptance criteria, absent priority or estimate, and parent-child structure opportunities. The default `basic` mode stays conservative and focuses on metadata hygiene. `advanced` mode can rewrite issue content more deeply and propose or apply an existing parent issue when the repository backlog clearly supports that structure.
+
+In a TTY, the command now stays inside one guided dashboard flow after issue selection. For each issue, the configured agent classifies the ticket into one of four states: `no_update_needed`, `ready_for_update`, `needs_planning`, or `needs_questions`. The engineer then explicitly accepts, skips, or rejects that recommendation before the command moves on. The decision panel always shows the primary `Enter` action for the current ticket, plus explicit `skip` and `reject` paths. When the agent needs direct follow-up answers, the dashboard captures them inline, reruns the same issue review, and only offers an apply path once the recommendation is concrete enough to mutate local backlog content or Linear.
+
+Use `meta linear issues refine` when you already know which issue needs a critique/rewrite and the main goal is improving the issue description itself. Use `meta backlog improve` when you want a backlog-quality sweep that evaluates whether existing repo-scoped backlog issues are ready for execution.
+
+Side effects:
+
+- scans either explicit issue identifiers or repo-scoped issues in the configured backlog state
+- writes `original.md`, `issue.json`, `local-index.md` when present, `proposal.json`, `proposal.md`, and `summary.json` under `.metastack/backlog/<ISSUE>/artifacts/improvement/<RUN_ID>/`
+- in the interactive dashboard, keeps local and remote changes gated behind an explicit human decision for each issue
+- keeps the default flow proposal-only, without mutating `.metastack/backlog/<ISSUE>/index.md` or the Linear issue
+- with `--apply`, writes the local artifact trail first, then updates `.metastack/backlog/<ISSUE>/index.md` when the proposal includes a description rewrite, and finally pushes the proposed metadata/content updates back to Linear
 
 ### `issues refine`
 
@@ -585,6 +832,11 @@ meta issues refine MET-35 --apply
 
 Pass `--apply` only when you want to promote the final rewrite into `.metastack/backlog/<ISSUE>/index.md` and then push that rewritten description back to Linear. The command always writes the local before/after snapshots first so the refinement run stays auditable even if the remote mutation fails.
 
+Machine mode:
+
+- `meta linear issues refine --json ...` emits structured findings, artifact paths, and apply-state details
+- failure paths also use the same structured JSON envelope as the other machine-facing commands
+
 Side effects:
 
 - validates that every requested issue matches the configured repo team/project scope
@@ -595,7 +847,7 @@ Side effects:
 
 ### `backlog sync`
 
-Browse issues from the repo default Linear project, then pull or push the selected backlog item without leaving the terminal:
+Browse backlog entries from local `.metastack/backlog/`, hydrate linked rows from Linear, and pull or push the selected linked entry without leaving the terminal:
 
 ```bash
 meta backlog sync --api-key "$LINEAR_API_KEY"
@@ -614,7 +866,10 @@ Legacy alias: `meta sync`
 
 Side effects:
 
-- bare `meta backlog sync` opens a ratatui issue browser scoped by `.metastack/meta.json` `linear.project_id`
+- bare `meta backlog sync` opens a ratatui backlog-entry dashboard sourced from local `.metastack/backlog/` state
+- the dashboard starts with query focus; finish editing the search, then press `Tab` or `Enter` to move into the backlog list
+- linked dashboard rows hydrate the mapped Linear issue from `.linear.json`, while unlinked rows stay visible with explicit `unlinked` state
+- unlinked dashboard rows are local-only until you run `meta backlog sync link <ISSUE> --entry <SLUG>`
 - `link` associates an existing `.metastack/backlog/<ENTRY>/` directory with a Linear issue by writing `.linear.json`
 - `link` prompts for an unlinked backlog entry in a TTY when `--entry <SLUG>` is omitted
 - `link --pull` immediately hydrates the linked entry from Linear after writing metadata
@@ -622,16 +877,32 @@ Side effects:
 - `status` resolves only local change state by default; pass `--fetch` to check the current Linear issue and surface `remote-ahead` or `diverged`
 - `pull` refreshes `.metastack/backlog/<ISSUE_ID>/index.md` from the Linear description
 - `pull` restores CLI-managed attachment files into the same directory when present
-- `pull` persists `.linear.json`, including `local_hash`, `remote_hash`, and `last_sync_at` alongside the existing issue metadata
+- `pull` re-downloads every markdown image referenced by the issue description, parent description, and Linear comments into `.metastack/backlog/<ISSUE_ID>/artifacts/`
+- `pull` writes `.metastack/backlog/<ISSUE_ID>/artifacts/ticket-images.md` as a localized-image manifest
+- `pull` writes `.metastack/backlog/<ISSUE_ID>/context/ticket-discussion.md` with chronological author-attributed comment context
+- `pull` filters generated workpad and `[harness-sync]` comments out of the persisted discussion context and stores `last_pulled_comment_ids` in `.metastack/backlog/<ISSUE_ID>/.linear.json`
+- `pull` logs per-image download failures without failing the overall sync
+- `pull` uses raw `Authorization: <LINEAR_API_KEY>` only for `uploads.linear.app` image downloads; other hosts are fetched without that special auth header
+- `pull` reuses previously localized ticket images when the same generated artifact path is still current
+- `pull` persists `.metastack/backlog/<ISSUE_ID>/.linear.json`, including `local_hash`, `remote_hash`, `last_sync_at`, and `last_pulled_comment_ids` alongside the existing issue metadata
 - when `pull` sees a `remote-ahead` or `diverged` packet, it shows a diff between the local `index.md` and the incoming Linear description before any files are overwritten
 - in a TTY, `pull` asks for confirmation before overwriting local backlog content; in non-interactive runs it exits non-zero instead of silently replacing changed files
 - `pull --all` walks every linked backlog entry sequentially and prints a synced/skipped/error summary
 - `push` replaces only CLI-managed attachments by default, leaving unrelated Linear attachments untouched
+- `push` parses `.metastack/backlog/<ISSUE_ID>/checklist.md` when present and upserts a single `[harness-sync]` Linear comment with per-milestone and overall completion status
 - `push` leaves the Linear issue description unchanged unless you pass `--update-description`
 - `push --update-description` refuses to overwrite the Linear description when the stored baselines resolve to `remote-ahead` or `diverged`
 - `push --all` walks every linked backlog entry sequentially, respects `--update-description`, and exits non-zero when any entry fails
 - during `meta listen`, `push --update-description` is blocked for the active ticket so the primary issue description stays untouched
 - pass `--no-interactive` with `link`, `pull`, or `push` when scripting; in that mode every required selector must be explicit
+- direct subcommands emit JSON when `--no-interactive` is active; `status` also supports explicit `--json`
+- `.metastack/meta.json` optionally accepts `sync.discussion_file_char_limit` and `sync.discussion_prompt_char_limit` to tune the persisted discussion file budget and the `meta listen` prompt excerpt budget
+
+The sync dashboard and render-once snapshot now include a shared issue search bar plus each issue's local sync state:
+
+- type while the issue list is focused to search by identifier, title, state, project, or description
+- matching is case-insensitive and ranks exact identifiers first, then identifier prefixes and exact token matches, then broader substring matches
+- the shared browser highlights matches in issue rows and previews and keeps sync-specific actions on the right-hand side
 
 The sync dashboard and render-once snapshot also show each issue's local sync state:
 
@@ -641,7 +912,7 @@ The sync dashboard and render-once snapshot also show each issue's local sync st
 - `diverged`: both local backlog files and the Linear issue changed since the last stored baseline
 - `unlinked`: the local packet is missing or the existing `.linear.json` predates hash baselines
 
-Local hashes are derived deterministically from tracked files under `.metastack/backlog/<ISSUE>/`. Dotfiles, including `.linear.json`, are excluded so repeat no-op syncs remain `synced`.
+Local hashes are derived deterministically from tracked files under `.metastack/backlog/<ISSUE>/`. Dotfiles, including `.linear.json`, are excluded, and generated discussion/image artifacts stay local-only so repeat no-op syncs remain `synced`.
 
 ### `linear issues`, `linear projects`, and `dashboard`
 
@@ -666,9 +937,12 @@ Legacy aliases: `meta issues`, `meta projects`, `meta dashboard`
 Notes:
 
 - `meta linear issues list` opens an interactive issue browser unless you pass `--json`
+- `meta linear issues list`, `meta dashboard linear`, and `meta dashboard team` share the same free-text search behavior when the issue list is focused: type to search by identifier, title, state, project, or description, with exact identifiers ranked ahead of broader matches
+- the shared Linear dashboards keep their existing filters, and the search query narrows the visible issue set after those filters are applied
 - `meta linear issues create` and `meta linear issues edit` open ratatui workflows when stdin/stdout are attached to a TTY
-- In the interactive create/edit forms, multiline descriptions advance on `Enter` and insert a newline on `Shift+Enter`
-- `meta linear issues refine` is non-interactive, uses the configured local agent, and defaults to critique-only unless you pass `--apply`
+- `meta linear issues create --no-interactive ...` and `meta linear issues edit --no-interactive ...` emit structured JSON instead of text
+- In the interactive create/edit forms, multiline descriptions advance on `Enter`, insert a newline on `Shift+Enter`, and support `Up`/`Down`, `PgUp`/`PgDn`, `Home`/`End`, plus mouse-wheel scrolling while the description pane is focused; the summary/review sidebar also scrolls with the mouse wheel when long descriptions overflow
+- `meta linear issues refine` is non-interactive, uses the configured local agent, defaults to critique-only unless you pass `--apply`, and emits machine-readable results when `--json` is set
 - `meta dashboard linear` is the preferred Linear dashboard path; bare `meta dashboard` remains a compatibility alias during migration
 
 Required auth:
@@ -679,23 +953,31 @@ Required auth:
 
 ### `agents listen`
 
-Run the unattended agent daemon. The listener watches Todo issues, applies repo-scoped label and assignee filters, moves newly claimed work to `In Progress`, prepares a per-ticket standalone clone under a sibling `-workspace` directory, bootstraps a `## Codex Workpad` comment on the Linear issue, downloads issue attachments into a local attachment-context manifest under `.metastack/agents/issue-context/<TICKET>/`, and launches a supervised listen worker inside that workspace. The worker re-runs the configured local agent with Symphony-inspired first-turn and continuation prompts while the ticket stays active, but it now stops once a turn leaves meaningful local workspace progress and attempts to move the issue into a review-style state instead of burning all 20 turns on the same in-progress work.
+Run the unattended agent daemon. The listener watches Todo issues, applies repo-scoped label and assignee filters, moves newly claimed work to `In Progress`, prepares a per-ticket standalone clone under a sibling `-workspace` directory, bootstraps a `## Codex Workpad` comment on the Linear issue, downloads issue attachments into a local attachment-context manifest under `.metastack/agents/issue-context/<TICKET>/`, and launches a supervised listen worker inside that workspace. The worker re-runs the configured local agent with Symphony-inspired first-turn and continuation prompts while the ticket stays active, but it now stops once a turn leaves meaningful local workspace progress and attempts to move the issue into a review-style state instead of burning all 20 turns on the same in-progress work. When the ticket branch is pushed, shared automation creates or updates that branch PR as a draft, keeps the `metastack` label attached, and promotes the same PR to ready for review during the existing review handoff without demoting an already-ready PR on continuation.
+
+With repo setup `assignment_scope = "viewer_only"`, listen watches only Todo issues assigned to the authenticated viewer. Use `assignment_scope = "viewer_or_unassigned"` to also watch unassigned Todo issues, or `--all-assignees` to disable assignee filtering for just the active run.
 
 Legacy alias: `meta listen`
 
 `meta agents listen` keeps the same repository identity as the source checkout, but the worker prompt is anchored to the provided workspace checkout as the only local write scope. Implementation, validation, and local backlog updates must stay inside that workspace for the active repository unless the issue explicitly asks for a narrower subproject.
 
-The live dashboard refreshes locally every second so session-state changes stay visible, while the configured listen poll interval continues to control how often Linear is queried.
+The live terminal dashboard refreshes locally every second so session-state changes stay visible, while the configured listen poll interval continues to control how often Linear is queried. Steady-state listen runs stay entirely in the terminal TUI, `--render-once` emits a terminal snapshot, and `--once --json` emits one machine-readable poll-cycle payload without going through the ratatui snapshot path.
 
+When built-in `codex` or `claude` workers emit structured usage telemetry, `meta agents listen` accumulates session-level input and output tokens across repeated turns and renders both per-session and runtime rollups as `in`, `out`, and `total`. When exact counts are unavailable, the dashboard and textual summaries continue to show `n/a`.
+When install-scoped `vim_mode` is enabled, the listen dashboard also accepts `h` / `l` as aliases
+for the existing left/right view-switching controls.
 Examples:
 
 ```bash
 meta agents listen --demo --render-once
 meta agents listen --check --root .
+meta agents listen --team MET --once
+meta agents listen --check --root . --all-assignees
 meta agents listen --team MET --project "MetaStack CLI" --once
+meta agents listen --team MET --project "MetaStack API"
+meta agents listen --team MET --project "MetaStack CLI" --once --all-assignees
 meta agents listen --team MET --project "MetaStack CLI"
-meta agents listen --team MET --project "MetaStack CLI" --dashboard-port 4050
-meta runtime setup --listen-label agent --assignment-scope viewer --refresh-policy reuse-and-refresh
+meta runtime setup --listen-label agent --assignment-scope viewer-only --refresh-policy reuse-and-refresh
 ```
 
 Listen prerequisites:
@@ -710,6 +992,7 @@ sandbox_mode = "danger-full-access"
 - Codex: remove `[mcp_servers.linear]` from the Codex config or disable it; the preflight warns when Linear MCP is detected.
 - Claude: `claude` must be on `PATH`, and `ANTHROPIC_API_KEY` should be unset for unattended subscription-backed runs.
 - `meta agents listen --check --root .` runs the same startup preflight, including Linear reachability/auth validation, without starting the daemon.
+- `--check` also prints the effective assignee filter, for example `only Kames`, `Kames + unassigned`, or `all assignees`.
 
 Outputs:
 
@@ -720,7 +1003,7 @@ Outputs:
 - install-scoped MetaListen state under the global MetaStack data root, keyed by the canonical
   source project `.metastack` root
 - install-scoped MetaListen logs under the same project store
-- a live browser dashboard on `http://127.0.0.1:<dashboard-port>/` in steady-state mode
+- a live terminal dashboard in steady-state mode, or a render-once terminal snapshot when requested
 
 When `$METASTACK_CONFIG` points to a custom config file, the listener store lives under that
 config file's parent `data/` directory. Otherwise the default install-scoped root is derived from
@@ -737,14 +1020,55 @@ meta listen sessions clear
 meta listen sessions resume --project-key <PROJECT_KEY> --once
 ```
 
+`meta listen sessions ...` manages the install-scoped listener store only. It does not inventory or delete the sibling workspace clones themselves.
+
+### `workspace`
+
+Manage the sibling listener workspace clones created by `meta agents listen`. These commands always resolve the workspace root from the repository root with the fixed sibling convention:
+
+- `<parent>/<repo>-workspace/`
+
+That root is intentionally not configurable in this backlog, and TTL-based or automatic pruning is intentionally out of scope.
+
+Examples:
+
+```bash
+meta workspace list --root .
+meta workspace clean ENG-10175 --root .
+meta workspace clean --target-only --root .
+meta workspace clean --target-only ENG-10175 --root .
+meta workspace prune --dry-run --root .
+meta workspace prune --root .
+```
+
+Behavior:
+
+- `meta workspace list` prints one row per ticket clone with the ticket directory name, branch, disk usage, last modified timestamp, local git safety state, Linear state, and optional GitHub PR state.
+- Done or Cancelled tickets are marked as safe removal candidates in the list output.
+- GitHub PR enrichment is optional. When `gh` auth is unavailable, `list` and `prune` still succeed and mark PR data as unavailable while continuing from Linear completion state alone.
+- `meta workspace clean <TICKET>` deletes one clone after confirmation unless `--force` is passed, and it always reports dirty or ahead safety signals before removal.
+- `meta workspace clean --target-only` removes `target/` directories across all listener clones by default, or narrows to one ticket when a ticket identifier is also supplied.
+- `meta workspace prune --dry-run` previews every clone, whether it would be removed or kept, why, and the estimated reclaimed space.
+- `meta workspace prune` removes clones whose Linear tickets are Done or Cancelled, keeps clones with open PRs when PR data is available, skips clones with unpushed commits, and prints a final `Removed N clones, freed X GB. Kept M clones.` summary.
+- Clone deletion also removes only the matching ticket-scoped MetaListen session entry and per-ticket log artifact from the install-scoped project store, leaving unrelated sessions for the same repository intact.
+
+For built-in `codex` and `claude` listen workers, the install-scoped `session.json` state now keeps
+the latest provider-native manual resume target separately from the Linear issue identity. The
+dashboard `SESSION` column renders only the compact provider-native handle, while
+`meta listen sessions list` and `meta listen sessions inspect` surface the latest provider plus the
+full resume ID so operators can copy the correct `codex` or `claude` resume target directly.
+Capture is latest-only and silent best effort: new listen turns overwrite the stored provider/ID
+when capture succeeds, and leave those fields empty when it does not. Older stored records are not
+backfilled.
+
 Reference:
 
 - [`docs/agent-daemon.md`](docs/agent-daemon.md)
 
-Linear commands also read repo-scoped defaults from `.metastack/meta.json`, plus optional project-specific Linear auth stored in install-scoped CLI config for the current repo root. Repo defaults should store the canonical Linear project ID; `meta setup --project <NAME>` resolves names to IDs before saving, while older name-based values are still resolved at read time for compatibility. `meta listen` also reads the optional required label, assignee filter, instructions file, and default poll interval from `.metastack/meta.json`, while interactive `meta plan` reads the optional `plan.interactive_follow_up_questions` override there and `meta plan` / `meta backlog tech` resolve the repo-scoped issue-label defaults to real Linear label IDs before issue creation, falling back to `plan` / `technical` when unset. During `meta setup` saves, metastack checks that the effective listen, plan, and technical labels exist on the selected team and creates any missing team labels so later issue creation stays deterministic. When `meta linear issues list` returns no rows, it prints the applied filters so hidden repo defaults are visible.
+Linear commands also read repo-scoped defaults from `.metastack/meta.json`, plus optional project-specific Linear auth stored in install-scoped CLI config for the current repo root. Repo defaults should store the canonical Linear project ID; `meta setup --project <NAME>` resolves names to IDs before saving, while older name-based values are still resolved at read time for compatibility. When repo values are absent, MetaStack falls back to install-scoped onboarding defaults for the default project, listen label, listen assignment scope, listen refresh policy, listen poll interval, interactive plan follow-up question limit, and plan/technical issue labels. `meta listen` also reads the optional `listen.required_labels` filter list, assignee filter, instructions file, and default poll interval from `.metastack/meta.json`; legacy `listen.required_label` values still load for compatibility, but new saves persist the list form and accept comma-separated labels in `meta runtime setup`. An issue is eligible when any configured listen label matches one of its Linear labels case-insensitively. Canonical assignee-scope values are `any`, `viewer_only`, and `viewer_or_unassigned`, while the legacy value `viewer` still loads as `viewer_or_unassigned` for compatibility. `--all-assignees` provides a run-scoped opt-out without changing repo config. Interactive `meta plan` reads the optional `plan.interactive_follow_up_questions` override there and `meta plan` / `meta backlog tech` resolve the repo-scoped issue-label defaults to real Linear label IDs before issue creation, falling back to `plan` / `technical` when unset. Backlog ticket creation also merges optional global and repo `[backlog]` defaults with the contract `CLI override > repo override > global override > built-in behavior`; zero-prompt runs additionally consult remembered project/team selections and `velocity_defaults` before the repo/global fallbacks. The optional `linear.ticket_context.discussion_prompt_chars` and `linear.ticket_context.discussion_persisted_chars` settings control the comment-character budgets used for agent-facing and persisted `context/ticket-discussion.md` output. During `meta setup` saves and onboarding saves, MetaStack checks that the effective listen, plan, technical, and required listen labels exist on the selected team and creates any missing team labels so later issue creation stays deterministic. When `meta linear issues list` returns no rows, it prints the applied filters so hidden defaults remain visible.
 ## Agent Configuration
 
-Agent-backed commands use stable route keys so different workflows can resolve different defaults from the same install-scoped config. `meta backlog plan`, `meta backlog split`, `meta context scan`, `meta context reload`, `meta linear issues refine`, `meta agents workflows run`, `meta runtime cron run`, `meta agents listen`, and `meta merge run` all resolve provider/model/reasoning in this order:
+Agent-backed commands use stable route keys so different workflows can resolve different defaults from the same install-scoped config. `meta backlog plan`, `meta backlog improve`, `meta backlog split`, `meta context scan`, `meta context reload`, `meta linear issues refine`, `meta agents workflows run`, `meta runtime cron run`, `meta agents listen`, and `meta merge run` all resolve provider/model/reasoning in this order:
 
 1. explicit CLI overrides such as `--agent`, `--provider`, `--model`, and `--reasoning`
 2. command route override
@@ -756,10 +1080,13 @@ Workflow playbooks can still declare a built-in provider, but that value is now 
 
 The built-in provider adapters are the single source of truth for metadata and launch behavior. They run `codex exec` and `claude -p`, pass `--model=<value>` automatically when a model is configured, validate reasoning against the selected provider/model, and expose resolution diagnostics before launch. Before spawning a built-in provider, the CLI now checks the installed shell help surface for the emitted flags and fails fast with the resolved provider/model/reasoning plus the exact attempted command if the local binary has drifted. Codex reasoning is passed as `-c reasoning.effort="<value>"`; Claude reasoning is passed as `--effort=<value>`.
 
+For capture-oriented non-interactive runs such as `meta backlog plan`, the runtime requests machine-readable built-in output, unwraps the final assistant text before returning it to the caller, captures provider-native session IDs, and can resume the next phase inside the same command. If a resumed built-in launch fails with a narrow invalid-resume signal, the runtime clears that handle and retries the phase once as a fresh launch.
+
 Sandbox and permission handling depends on the command path:
 
 - `meta agents listen` uses unrestricted execution for built-in providers so unattended workers can run validation, git/GitHub flows, and Linear updates. Codex uses `--dangerously-bypass-approvals-and-sandbox`; Claude uses `--permission-mode=bypassPermissions`.
-- `meta context scan`, `meta backlog plan`, `meta backlog split`, `meta linear issues refine`, workflow runs, merge flows, and cron prompts keep the built-in Codex adapter on `--sandbox workspace-write --ask-for-approval never`.
+- `meta agents listen` also enables machine-readable provider output for built-in workers so the listener can capture the latest provider-native manual resume ID. Codex listen runs use `codex exec --json`, and Claude listen runs use `claude -p --verbose --output-format=stream-json`.
+- `meta context scan`, `meta backlog plan`, `meta backlog improve`, `meta backlog split`, `meta linear issues refine`, workflow runs, merge flows, and cron prompts keep the built-in Codex adapter on `--sandbox workspace-write --ask-for-approval never`.
 
 Listen startup now runs a provider preflight before polling Linear, and worker pickup reruns it inside the workspace before the first agent turn. Codex checks require a readable `~/.codex/config.toml` with `approval_policy = "never"` and `sandbox_mode = "danger-full-access"` and warn when `[mcp_servers.linear]` is configured. Claude checks require `claude` on `PATH` and fail fast when `ANTHROPIC_API_KEY` is set. Both providers also validate that the resolved built-in launch command exposes the required unrestricted mode for unattended listen runs.
 
@@ -819,6 +1146,9 @@ make quality
 - `cargo clippy --all-targets --all-features -- -D warnings`
 - `cargo test`
 - `cargo test --test release_artifacts`
+
+The interactive planning integration proof in `tests/plan.rs` shells out to `expect`, so local
+`make quality` runs also require that binary on `PATH` in addition to Rust.
 
 The focused `release_artifacts` proof keeps the GitHub Release packaging contract explicit in the root gate by verifying the release-script archive names, `SHA256SUMS`, and extracted `meta --version` output.
 

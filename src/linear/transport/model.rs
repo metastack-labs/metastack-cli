@@ -39,6 +39,11 @@ pub(super) struct ProjectsPayload {
 }
 
 #[derive(Debug, Deserialize)]
+pub(super) struct UsersPayload {
+    pub(super) users: Connection<UserRef>,
+}
+
+#[derive(Debug, Deserialize)]
 pub(super) struct IssuesPayload {
     pub(super) issues: Connection<IssueNode>,
 }
@@ -62,6 +67,11 @@ pub(super) struct ViewerPayload {
 #[derive(Debug, Deserialize)]
 pub(super) struct IssueByIdPayload {
     pub(super) issue: Option<IssueNode>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct IssueCommentsPayload {
+    pub(super) issue: Option<IssueCommentsNode>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -110,6 +120,12 @@ pub(super) struct UploadPayload {
 pub(super) struct IssueMutationNode {
     pub(super) success: bool,
     pub(super) issue: Option<IssueNode>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct IssueCommentsNode {
+    #[serde(default)]
+    pub(super) comments: Option<Connection<CommentNode>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -221,6 +237,8 @@ pub(super) struct IssueLinkNode {
     pub(super) identifier: String,
     pub(super) title: String,
     pub(super) url: String,
+    #[serde(default)]
+    pub(super) description: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -229,7 +247,16 @@ pub(super) struct CommentNode {
     pub(super) id: String,
     pub(super) body: String,
     #[serde(default)]
+    pub(super) created_at: Option<String>,
+    #[serde(default)]
+    pub(super) user: Option<CommentUserNode>,
+    #[serde(default)]
     pub(super) resolved_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct CommentUserNode {
+    pub(super) name: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -297,6 +324,8 @@ impl From<CommentNode> for IssueComment {
         Self {
             id: value.id,
             body: value.body,
+            created_at: value.created_at,
+            user_name: value.user.map(|user| user.name),
             resolved_at: value.resolved_at,
         }
     }
@@ -321,6 +350,7 @@ impl From<IssueLinkNode> for IssueLink {
             identifier: value.identifier,
             title: value.title,
             url: value.url,
+            description: value.description,
         }
     }
 }

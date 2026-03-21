@@ -4,7 +4,10 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
 use cron::Schedule;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers, MouseEvent, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -12,14 +15,16 @@ use crossterm::terminal::{
 use ratatui::backend::{CrosstermBackend, TestBackend};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Text};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::{Block, Borders, ListItem, ListState};
 use ratatui::{Frame, Terminal};
 
 use crate::tui::fields::{InputFieldState, SelectFieldState};
+use crate::tui::theme::{Tone, badge, key_hints, list, panel_title, paragraph};
 
 const NONE_AGENT_LABEL: &str = "None";
 const ENABLED_OPTIONS: [&str; 2] = ["Enabled", "Disabled"];
+const CRON_PROMPT_ATTACHMENT_REJECTION: &str = "image attachments are not supported for saved cron prompts yet; paste text or a path after persistence support lands";
 
 #[derive(Debug, Clone)]
 pub(crate) struct CronInitFormContext {
@@ -45,6 +50,7 @@ pub(crate) struct CronInitFormOptions {
     pub(crate) width: u16,
     pub(crate) height: u16,
     pub(crate) actions: Vec<CronInitAction>,
+    pub(crate) vim_mode: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -134,6 +140,7 @@ pub(crate) fn run_cron_init_form(
     options: CronInitFormOptions,
 ) -> Result<CronInitFormExit> {
     let mut app = CronInitApp::new(context, prefill);
+    let _ = options.vim_mode;
 
     if options.render_once {
         return render_once(app, options);
@@ -141,7 +148,7 @@ pub(crate) fn run_cron_init_form(
 
     let mut stdout = io::stdout();
     enable_raw_mode()?;
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let _cleanup = TerminalCleanup;
 
     let backend = CrosstermBackend::new(stdout);
@@ -153,11 +160,25 @@ pub(crate) fn run_cron_init_form(
         if event::poll(Duration::from_millis(250))? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    if let Some(exit) = app.handle_key(key) {
+                    if let Some(exit) = app.handle_key_in_viewport(
+                        key,
+                        prompt_editor_viewport(terminal.size()?.into()),
+                    ) {
                         return Ok(exit);
                     }
                 }
                 Event::Paste(text) => app.handle_paste(&text),
+                Event::Mouse(mouse)
+                    if matches!(
+                        mouse.kind,
+                        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                    ) =>
+                {
+                    let _ = app.handle_prompt_mouse(
+                        mouse,
+                        prompt_editor_viewport(terminal.size()?.into()),
+                    );
+                }
                 _ => {}
             }
         }
@@ -169,7 +190,10 @@ fn render_once(mut app: CronInitApp, options: CronInitFormOptions) -> Result<Cro
     let mut terminal = Terminal::new(backend)?;
 
     for action in options.actions {
-        app.apply_action(action);
+        app.apply_action(
+            action,
+            prompt_editor_viewport(Rect::new(0, 0, options.width, options.height)),
+        );
     }
 
     terminal.draw(|frame| render_cron_init_form(frame, &app))?;
@@ -177,26 +201,46 @@ fn render_once(mut app: CronInitApp, options: CronInitFormOptions) -> Result<Cro
 }
 
 fn render_cron_init_form(frame: &mut Frame<'_>, app: &CronInitApp) {
+    let narrow = frame.area().width < 110;
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
+            Constraint::Length(if narrow { 5 } else { 4 }),
             Constraint::Min(0),
             Constraint::Length(4),
         ])
         .split(frame.area());
     let body = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(52), Constraint::Percentage(48)])
+        .direction(if narrow {
+            Direction::Vertical
+        } else {
+            Direction::Horizontal
+        })
+        .constraints(if narrow {
+            vec![Constraint::Percentage(42), Constraint::Percentage(58)]
+        } else {
+            vec![Constraint::Percentage(52), Constraint::Percentage(48)]
+        })
         .split(layout[1]);
 
-    let header = Paragraph::new(Text::from(vec![
-        Line::from("Cron Init Dashboard"),
-        Line::from(
-            "Configure a schedule preset, an optional shell command, and an optional recurring agent prompt.",
-        ),
-    ]))
-    .block(Block::default().borders(Borders::ALL).title("meta cron init"));
+    let header = paragraph(
+        Text::from(vec![
+            Line::from(vec![
+                badge("cron", Tone::Accent),
+                Span::raw(" Cron Init Dashboard"),
+            ]),
+            Line::from(
+                "Configure a schedule preset, an optional shell command, and an optional recurring agent prompt.",
+            ),
+            key_hints(&[
+                ("Tab", "next field"),
+                ("Shift+Tab", "previous"),
+                ("Ctrl-S", "save"),
+                ("Esc", "cancel"),
+            ]),
+        ]),
+        panel_title("meta cron init", false),
+    );
     frame.render_widget(header, layout[0]);
 
     render_form_fields(frame, app, body[0]);
@@ -211,17 +255,24 @@ fn render_form_fields(frame: &mut Frame<'_>, app: &CronInitApp, area: Rect) {
     let items = CronField::all()
         .iter()
         .map(|field| {
-            ListItem::new(Line::from(format!(
-                "{}: {}",
-                field.label(),
-                app.field_value(*field)
-            )))
+            ListItem::new(Line::from(vec![
+                badge(
+                    if *field == app.focus {
+                        "active"
+                    } else {
+                        "field"
+                    },
+                    if *field == app.focus {
+                        Tone::Accent
+                    } else {
+                        Tone::Muted
+                    },
+                ),
+                Span::raw(format!(" {}: {}", field.label(), app.field_value(*field))),
+            ]))
         })
         .collect::<Vec<_>>();
-    let fields = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title("Fields"))
-        .highlight_style(Style::default().add_modifier(Modifier::BOLD))
-        .highlight_symbol("> ");
+    let fields = list(items, panel_title("Fields", true));
     frame.render_stateful_widget(fields, area, &mut state);
 }
 
@@ -242,41 +293,43 @@ fn render_preview(frame: &mut Frame<'_>, app: &CronInitApp, area: Rect) {
         (_, Some(_)) => "Prompt set, but no agent selected".to_string(),
         _ => "Disabled until a prompt is provided".to_string(),
     };
-    let preview = Paragraph::new(Text::from(vec![
-        Line::from(format!(
-            "Job file: .metastack/cron/{}.md",
-            if app.name.value().trim().is_empty() {
-                "<name>"
-            } else {
-                app.name.value().trim()
-            }
-        )),
-        Line::from(format!("Generated schedule: {schedule_summary}")),
-        Line::from(format!(
-            "Command: {}",
-            empty_placeholder(app.command.value(), "<optional>")
-        )),
-        Line::from(format!("Agent phase: {agent_summary}")),
-        Line::from(format!(
-            "Working directory: {}",
-            empty_placeholder(app.working_directory.value(), ".")
-        )),
-        Line::from(format!(
-            "Timeout / shell: {}s via {}",
-            empty_placeholder(app.timeout_seconds.value(), "900"),
-            empty_placeholder(app.shell.value(), "/bin/sh")
-        )),
-        Line::from(format!(
-            "Enabled: {}",
-            app.enabled.selected_label().unwrap_or("Enabled")
-        )),
-    ]))
-    .block(Block::default().borders(Borders::ALL).title("Preview"))
-    .wrap(Wrap { trim: false });
+    let preview = paragraph(
+        Text::from(vec![
+            Line::from(format!(
+                "Job file: .metastack/cron/{}.md",
+                if app.name.value().trim().is_empty() {
+                    "<name>"
+                } else {
+                    app.name.value().trim()
+                }
+            )),
+            Line::from(format!("Generated schedule: {schedule_summary}")),
+            Line::from(format!(
+                "Command: {}",
+                empty_placeholder(app.command.value(), "<optional>")
+            )),
+            Line::from(format!("Agent phase: {agent_summary}")),
+            Line::from(format!(
+                "Working directory: {}",
+                empty_placeholder(app.working_directory.value(), ".")
+            )),
+            Line::from(format!(
+                "Timeout / shell: {}s via {}",
+                empty_placeholder(app.timeout_seconds.value(), "900"),
+                empty_placeholder(app.shell.value(), "/bin/sh")
+            )),
+            Line::from(format!(
+                "Enabled: {}",
+                app.enabled.selected_label().unwrap_or("Enabled")
+            )),
+        ]),
+        panel_title("Preview", false),
+    )
+    .wrap(ratatui::widgets::Wrap { trim: false });
     frame.render_widget(preview, sections[0]);
 
-    let active_help = Paragraph::new(Text::from(vec![
-        Line::from(app.focus.help_text()),
+    let details = paragraph(Text::from(vec![
+        Line::from(app.focus.help_text().to_string()),
         Line::from(""),
         Line::from("Execution contract:"),
         Line::from(
@@ -287,28 +340,56 @@ fn render_preview(frame: &mut Frame<'_>, app: &CronInitApp, area: Rect) {
             "- The agent receives cron execution context through METASTACK_CRON_* env vars and an augmented prompt.",
         ),
         Line::from(""),
-        Line::from("Prompt preview:"),
-        Line::from(empty_placeholder(app.prompt.value(), "<blank>")),
-    ]))
-    .block(Block::default().borders(Borders::ALL).title("Details"))
-    .wrap(Wrap { trim: false });
-    frame.render_widget(active_help, sections[1]);
+        Line::from("Prompt editor:"),
+        Line::from(
+            "When Agent prompt is active, Up/Down and PgUp/PgDn/Home/End stay inside the wrapped prompt, and the mouse wheel scrolls the editor.",
+        ),
+    ]), panel_title("Details", false))
+    .wrap(ratatui::widgets::Wrap { trim: false });
+    let prompt_sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(9), Constraint::Min(0)])
+        .split(sections[1]);
+    frame.render_widget(details, prompt_sections[0]);
+
+    let prompt_active = app.focus == CronField::Prompt;
+    let prompt_block = Block::default()
+        .borders(Borders::ALL)
+        .title(if prompt_active {
+            "Prompt [editing]"
+        } else {
+            "Prompt preview"
+        })
+        .border_style(if prompt_active {
+            Style::default().add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        });
+    let prompt_inner = prompt_block.inner(prompt_sections[1]);
+    let rendered_prompt = app.prompt.render_with_viewport(
+        "<blank>",
+        prompt_active,
+        prompt_inner.width,
+        prompt_inner.height,
+    );
+    let prompt = rendered_prompt.paragraph(prompt_block);
+    frame.render_widget(prompt, prompt_sections[1]);
+    rendered_prompt.set_cursor(frame, prompt_inner);
 }
 
 fn render_footer(frame: &mut Frame<'_>, app: &CronInitApp, area: Rect) {
-    let footer = Paragraph::new(Text::from(vec![
+    let footer_message = app
+        .error
+        .clone()
+        .unwrap_or_else(|| "Ready to create the cron job.".to_string());
+    let footer = paragraph(Text::from(vec![
         Line::from("Tab/Shift+Tab or Up/Down moves between fields. Left/Right changes selections."),
         Line::from(
-            "Type to edit text fields. Enter creates the job from any row. In Prompt, Shift+Enter inserts a newline. Ctrl+S also creates the job. Esc cancels.",
+            "Type to edit text fields. Enter creates the job from any row. In Prompt, Shift+Enter inserts a newline; Up/Down and PgUp/PgDn/Home/End move through wrapped content; mouse wheel scrolls the editor. Ctrl+V pastes text, but image attachments are rejected until saved-prompt persistence exists. Esc cancels.",
         ),
-        Line::from(
-            app.error
-                .as_deref()
-                .unwrap_or("Ready to create the cron job."),
-        ),
-    ]))
-    .block(Block::default().borders(Borders::ALL).title("Controls"))
-    .wrap(Wrap { trim: false });
+        Line::from(footer_message),
+    ]), panel_title("Controls", false))
+    .wrap(ratatui::widgets::Wrap { trim: false });
     frame.render_widget(footer, area);
 }
 
@@ -346,7 +427,10 @@ impl CronInitApp {
             custom_schedule: InputFieldState::new(schedule_prefill.custom_schedule),
             command: InputFieldState::new(prefill.command.unwrap_or_default()),
             agent: SelectFieldState::new(agent_options, default_agent_index),
-            prompt: InputFieldState::multiline(prefill.prompt.unwrap_or_default()),
+            prompt: InputFieldState::multiline_rejecting_prompt_attachments(
+                prefill.prompt.unwrap_or_default(),
+                CRON_PROMPT_ATTACHMENT_REJECTION,
+            ),
             working_directory: InputFieldState::new(
                 prefill.working_directory.unwrap_or_else(|| ".".to_string()),
             ),
@@ -365,7 +449,11 @@ impl CronInitApp {
         }
     }
 
-    fn handle_key(&mut self, key: KeyEvent) -> Option<CronInitFormExit> {
+    fn handle_key_in_viewport(
+        &mut self,
+        key: KeyEvent,
+        prompt_viewport: Rect,
+    ) -> Option<CronInitFormExit> {
         self.error = None;
 
         match key.code {
@@ -386,6 +474,14 @@ impl CronInitApp {
                 self.previous_field();
                 return None;
             }
+            KeyCode::Up | KeyCode::Down if self.focus == CronField::Prompt => {
+                let _ = self.prompt.handle_key_with_viewport(
+                    key,
+                    prompt_viewport.width.saturating_sub(2).max(1),
+                    prompt_viewport.height.saturating_sub(2).max(1),
+                );
+                return None;
+            }
             KeyCode::Up => {
                 self.previous_field();
                 return None;
@@ -394,14 +490,46 @@ impl CronInitApp {
                 self.next_field();
                 return None;
             }
+            KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End
+                if self.focus == CronField::Prompt =>
+            {
+                let _ = self.prompt.handle_key_with_viewport(
+                    key,
+                    prompt_viewport.width.saturating_sub(2).max(1),
+                    prompt_viewport.height.saturating_sub(2).max(1),
+                );
+                return None;
+            }
             KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 return self.submit();
+            }
+            KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if self.focus == CronField::Prompt {
+                    match self.prompt.paste_clipboard_with_prompt_attachments() {
+                        Ok(_) => self.error = None,
+                        Err(error) => self.error = Some(error.to_string()),
+                    }
+                }
+                return None;
             }
             _ => {}
         }
 
         self.handle_field_key(key);
         None
+    }
+
+    fn handle_prompt_mouse(&mut self, mouse: MouseEvent, prompt_viewport: Rect) -> bool {
+        if self.focus != CronField::Prompt {
+            return false;
+        }
+
+        self.prompt.handle_mouse_scroll(
+            mouse,
+            prompt_viewport,
+            prompt_viewport.width.saturating_sub(2).max(1),
+            prompt_viewport.height.saturating_sub(2).max(1),
+        )
     }
 
     fn handle_paste(&mut self, text: &str) {
@@ -433,9 +561,10 @@ impl CronInitApp {
                 let _ = self.command.paste(text);
             }
             CronField::Agent => {}
-            CronField::Prompt => {
-                let _ = self.prompt.paste(text);
-            }
+            CronField::Prompt => match self.prompt.paste_with_prompt_attachments(text) {
+                Ok(_) => {}
+                Err(error) => self.error = Some(error.to_string()),
+            },
             CronField::WorkingDirectory => {
                 let _ = self.working_directory.paste(text);
             }
@@ -449,7 +578,7 @@ impl CronInitApp {
         }
     }
 
-    fn apply_action(&mut self, action: CronInitAction) {
+    fn apply_action(&mut self, action: CronInitAction, prompt_viewport: Rect) {
         let key = match action {
             CronInitAction::Up => KeyEvent::from(KeyCode::Up),
             CronInitAction::Down => KeyEvent::from(KeyCode::Down),
@@ -460,7 +589,7 @@ impl CronInitApp {
             CronInitAction::Save => KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
             CronInitAction::Esc => KeyEvent::from(KeyCode::Esc),
         };
-        let _ = self.handle_key(key);
+        let _ = self.handle_key_in_viewport(key, prompt_viewport);
     }
 
     fn field_value(&self, field: CronField) -> String {
@@ -998,13 +1127,46 @@ fn snapshot(backend: &TestBackend) -> String {
     lines.join("\n")
 }
 
+fn prompt_editor_viewport(area: Rect) -> Rect {
+    let narrow = area.width < 110;
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(if narrow { 5 } else { 4 }),
+            Constraint::Min(0),
+            Constraint::Length(4),
+        ])
+        .split(area);
+    let body = Layout::default()
+        .direction(if narrow {
+            Direction::Vertical
+        } else {
+            Direction::Horizontal
+        })
+        .constraints(if narrow {
+            vec![Constraint::Percentage(42), Constraint::Percentage(58)]
+        } else {
+            vec![Constraint::Percentage(52), Constraint::Percentage(48)]
+        })
+        .split(layout[1]);
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(11), Constraint::Min(0)])
+        .split(body[1]);
+    let prompt_sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(9), Constraint::Min(0)])
+        .split(sections[1]);
+    prompt_sections[1]
+}
+
 struct TerminalCleanup;
 
 impl Drop for TerminalCleanup {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
         let mut stdout = io::stdout();
-        let _ = execute!(stdout, LeaveAlternateScreen);
+        let _ = execute!(stdout, DisableMouseCapture, LeaveAlternateScreen);
     }
 }
 
@@ -1012,9 +1174,10 @@ impl Drop for TerminalCleanup {
 mod tests {
     use super::{
         CronField, CronInitAction, CronInitApp, CronInitFormContext, CronInitFormExit,
-        CronInitFormPrefill, SchedulePreset, parse_schedule_prefill,
+        CronInitFormPrefill, SchedulePreset, parse_schedule_prefill, prompt_editor_viewport,
     };
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+    use ratatui::layout::Rect;
 
     #[test]
     fn schedule_prefill_detects_hourly_expression() {
@@ -1058,8 +1221,9 @@ mod tests {
             CronInitFormPrefill::default(),
         );
 
-        app.apply_action(CronInitAction::Tab);
-        app.apply_action(CronInitAction::Tab);
+        let viewport = prompt_editor_viewport(Rect::new(0, 0, 120, 32));
+        app.apply_action(CronInitAction::Tab, viewport);
+        app.apply_action(CronInitAction::Tab, viewport);
         assert_eq!(app.focus.index(), 2);
     }
 
@@ -1076,8 +1240,9 @@ mod tests {
             },
         );
         app.focus = CronField::Save;
-
-        let exit = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let viewport = prompt_editor_viewport(Rect::new(0, 0, 120, 32));
+        let exit =
+            app.handle_key_in_viewport(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), viewport);
 
         match exit {
             Some(CronInitFormExit::Submitted(values)) => {
@@ -1101,8 +1266,9 @@ mod tests {
             },
         );
         app.focus = CronField::Prompt;
-
-        let exit = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+        let viewport = prompt_editor_viewport(Rect::new(0, 0, 120, 32));
+        let exit = app
+            .handle_key_in_viewport(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT), viewport);
 
         assert!(exit.is_none());
         assert_eq!(app.prompt.value(), "\n");
@@ -1123,8 +1289,9 @@ mod tests {
             },
         );
         app.focus = CronField::Prompt;
-
-        let exit = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let viewport = prompt_editor_viewport(Rect::new(0, 0, 120, 32));
+        let exit =
+            app.handle_key_in_viewport(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), viewport);
 
         match exit {
             Some(CronInitFormExit::Submitted(values)) => {
@@ -1150,5 +1317,102 @@ mod tests {
 
         assert_eq!(app.prompt.value(), "First line\nSecond line\n");
         assert_eq!(app.error, None);
+    }
+
+    #[test]
+    fn prompt_rejects_image_path_paste_until_persistence_support_lands() {
+        use image::{ImageBuffer, Rgba};
+        use tempfile::tempdir;
+
+        let temp = tempdir().expect("temp dir");
+        let image_path = temp.path().join("mock.png");
+        ImageBuffer::<Rgba<u8>, Vec<u8>>::from_pixel(2, 2, Rgba([1, 2, 3, 255]))
+            .save(&image_path)
+            .expect("save image");
+
+        let mut app = CronInitApp::new(
+            CronInitFormContext {
+                agent_options: vec!["codex".to_string()],
+            },
+            CronInitFormPrefill::default(),
+        );
+        app.focus = CronField::Prompt;
+
+        app.handle_paste(image_path.to_str().expect("utf8"));
+
+        assert_eq!(app.prompt.value(), "");
+        assert_eq!(
+            app.error.as_deref(),
+            Some(super::CRON_PROMPT_ATTACHMENT_REJECTION)
+        );
+    }
+
+    #[test]
+    fn prompt_navigation_keys_scroll_visible_editor() {
+        let mut app = CronInitApp::new(
+            CronInitFormContext {
+                agent_options: vec!["codex".to_string()],
+            },
+            CronInitFormPrefill {
+                prompt: Some(
+                    (0..40)
+                        .map(|index| format!("prompt line {index}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+                ..CronInitFormPrefill::default()
+            },
+        );
+        app.focus = CronField::Prompt;
+
+        let viewport = prompt_editor_viewport(Rect::new(0, 0, 120, 32));
+        let exit =
+            app.handle_key_in_viewport(KeyEvent::new(KeyCode::End, KeyModifiers::NONE), viewport);
+
+        assert!(exit.is_none());
+        let rendered = app.prompt.render_with_viewport(
+            "<blank>",
+            true,
+            viewport.width.saturating_sub(2).max(1),
+            viewport.height.saturating_sub(2).max(1),
+        );
+        assert!(rendered.scroll_offset > 0);
+    }
+
+    #[test]
+    fn prompt_mouse_wheel_scrolls_only_when_prompt_is_active() {
+        let mut app = CronInitApp::new(
+            CronInitFormContext {
+                agent_options: vec!["codex".to_string()],
+            },
+            CronInitFormPrefill {
+                prompt: Some(
+                    (0..50)
+                        .map(|index| format!("prompt line {index}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+                ..CronInitFormPrefill::default()
+            },
+        );
+        let viewport = prompt_editor_viewport(Rect::new(0, 0, 120, 32));
+        let mouse = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: viewport.x + 1,
+            row: viewport.y + 1,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        assert!(!app.handle_prompt_mouse(mouse, viewport));
+
+        app.focus = CronField::Prompt;
+        assert!(app.handle_prompt_mouse(mouse, viewport));
+        let rendered = app.prompt.render_with_viewport(
+            "<blank>",
+            true,
+            viewport.width.saturating_sub(2).max(1),
+            viewport.height.saturating_sub(2).max(1),
+        );
+        assert!(rendered.scroll_offset > 0);
     }
 }

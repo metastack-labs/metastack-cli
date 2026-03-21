@@ -2,10 +2,49 @@
 
 include!("support/common.rs");
 
+fn write_onboarded_config(
+    config_path: &Path,
+    config: impl AsRef<str>,
+) -> Result<(), Box<dyn Error>> {
+    fs::write(
+        config_path,
+        format!(
+            "{}\n[onboarding]\ncompleted = true\n",
+            config.as_ref().trim_end()
+        ),
+    )?;
+    Ok(())
+}
+
+fn assert_issue_mutation_output(
+    assert: &assert_cmd::assert::Assert,
+    expected_command: &str,
+    expected_identifier: &str,
+    expected_title: &str,
+    expected_state: &str,
+    expected_project: &str,
+    expected_team: &str,
+) {
+    let payload: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout)
+        .expect("issue mutation output should be valid JSON");
+
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["command"], expected_command);
+    assert_eq!(
+        payload["result"]["issue"]["identifier"],
+        expected_identifier
+    );
+    assert_eq!(payload["result"]["issue"]["title"], expected_title);
+    assert_eq!(payload["result"]["issue"]["state"], expected_state);
+    assert_eq!(payload["result"]["issue"]["project"], expected_project);
+    assert_eq!(payload["result"]["issue"]["team"], expected_team);
+}
+
 #[test]
 fn issues_commands_require_auth_when_not_in_demo_mode() {
     let temp = tempdir().expect("tempdir should build");
-    let config_path = temp.path().join("missing-metastack.toml");
+    let config_path = temp.path().join("metastack.toml");
+    write_onboarded_config(&config_path, "").expect("config file should write");
 
     cli()
         .current_dir(temp.path())
@@ -26,8 +65,10 @@ fn issues_commands_require_auth_when_not_in_demo_mode() {
 #[test]
 fn linear_list_commands_work_against_a_mock_server() {
     let temp = tempdir().expect("tempdir should build");
+    let config_path = temp.path().join("metastack.toml");
     let server = MockServer::start();
     let api_url = server.url("/graphql");
+    write_onboarded_config(&config_path, "").expect("config file should write");
 
     fs::create_dir_all(temp.path().join(".metastack")).expect("planning dir should build");
     fs::write(
@@ -107,6 +148,7 @@ fn linear_list_commands_work_against_a_mock_server() {
 
     cli()
         .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
         .args([
             "projects",
             "--api-key",
@@ -123,6 +165,7 @@ fn linear_list_commands_work_against_a_mock_server() {
 
     cli()
         .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
         .args([
             "issues",
             "--api-key",
@@ -140,6 +183,7 @@ fn linear_list_commands_work_against_a_mock_server() {
 
     cli()
         .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
         .args([
             "linear",
             "--api-key",
@@ -164,7 +208,7 @@ fn linear_commands_can_read_auth_from_config_file() -> Result<(), Box<dyn Error>
     let api_url = server.url("/graphql");
     let config_path = temp.path().join("metastack.toml");
 
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[linear]
@@ -243,7 +287,7 @@ fn issues_command_uses_repo_scoped_api_key_over_global_auth() -> Result<(), Box<
 }
 "#,
     )?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[linear]
@@ -338,7 +382,7 @@ fn projects_command_uses_repo_selected_profile_and_team_over_global_defaults()
 }
 "#,
     )?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[linear]
@@ -445,7 +489,7 @@ fn issues_command_uses_repo_selected_profile_and_project_over_global_defaults()
 }
 "#,
     )?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[linear]
@@ -573,8 +617,10 @@ team = "PER"
 #[test]
 fn linear_issue_list_render_once_launches_issue_browser_filters() {
     let temp = tempdir().expect("tempdir should build");
+    let config_path = temp.path().join("metastack.toml");
     let server = MockServer::start();
     let api_url = server.url("/graphql");
+    write_onboarded_config(&config_path, "").expect("config file should write");
 
     server.mock(|when, then| {
         when.method(POST)
@@ -666,6 +712,7 @@ fn linear_issue_list_render_once_launches_issue_browser_filters() {
 
     cli()
         .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
         .args([
             "issues",
             "--api-key",
@@ -677,7 +724,7 @@ fn linear_issue_list_render_once_launches_issue_browser_filters() {
             "MET",
             "--render-once",
             "--events",
-            "tab,down,down,enter",
+            "tab,tab,down,down,enter",
         ])
         .assert()
         .success()
@@ -690,9 +737,10 @@ fn linear_issue_list_render_once_launches_issue_browser_filters() {
 #[test]
 fn linear_issue_create_and_edit_work_against_a_mock_server() {
     let temp = tempdir().expect("tempdir should build");
-    let config_path = temp.path().join("missing-metastack.toml");
+    let config_path = temp.path().join("metastack.toml");
     let server = MockServer::start();
     let api_url = server.url("/graphql");
+    write_onboarded_config(&config_path, "").expect("config file should write");
 
     server.mock(|when, then| {
         when.method(POST)
@@ -915,7 +963,7 @@ fn linear_issue_create_and_edit_work_against_a_mock_server() {
         }));
     });
 
-    cli()
+    let create_assert = cli()
         .current_dir(temp.path())
         .env("METASTACK_CONFIG", &config_path)
         .current_dir(temp.path())
@@ -942,10 +990,19 @@ fn linear_issue_create_and_edit_work_against_a_mock_server() {
             "1",
         ])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("Created issue: MET-13"));
+        .success();
 
-    cli()
+    assert_issue_mutation_output(
+        &create_assert,
+        "linear.issues.create",
+        "MET-13",
+        "Add docs",
+        "Todo",
+        "MetaStack CLI",
+        "MET",
+    );
+
+    let edit_assert = cli()
         .current_dir(temp.path())
         .env("METASTACK_CONFIG", &config_path)
         .current_dir(temp.path())
@@ -966,15 +1023,26 @@ fn linear_issue_create_and_edit_work_against_a_mock_server() {
             "In Progress",
         ])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("Updated issue: MET-11"));
+        .success();
+
+    assert_issue_mutation_output(
+        &edit_assert,
+        "linear.issues.edit",
+        "MET-11",
+        "CLI Foundation",
+        "In Progress",
+        "MetaStack CLI",
+        "MET",
+    );
 }
 
 #[test]
 fn linear_issue_create_launches_interactive_form_by_default() {
     let temp = tempdir().expect("tempdir should build");
+    let config_path = temp.path().join("metastack.toml");
     let server = MockServer::start();
     let api_url = server.url("/graphql");
+    write_onboarded_config(&config_path, "").expect("config file should write");
 
     server.mock(|when, then| {
         when.method(POST)
@@ -1014,6 +1082,7 @@ fn linear_issue_create_launches_interactive_form_by_default() {
 
     cli()
         .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
         .args([
             "linear",
             "--api-key",
@@ -1043,8 +1112,10 @@ fn linear_issue_create_launches_interactive_form_by_default() {
 #[test]
 fn linear_issue_edit_launches_interactive_form_by_default() {
     let temp = tempdir().expect("tempdir should build");
+    let config_path = temp.path().join("metastack.toml");
     let server = MockServer::start();
     let api_url = server.url("/graphql");
+    write_onboarded_config(&config_path, "").expect("config file should write");
 
     server.mock(|when, then| {
         when.method(POST)
@@ -1119,6 +1190,7 @@ fn linear_issue_edit_launches_interactive_form_by_default() {
 
     cli()
         .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
         .args([
             "linear",
             "--api-key",
@@ -1144,21 +1216,38 @@ fn linear_issue_edit_launches_interactive_form_by_default() {
 #[test]
 fn linear_issue_create_requires_title_for_non_interactive_mode() {
     let temp = tempdir().expect("tempdir should build");
+    let config_path = temp.path().join("metastack.toml");
+    write_onboarded_config(&config_path, "").expect("config file should write");
 
-    cli()
+    let assert = cli()
         .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
         .args(["issues", "--api-key", "token", "create", "--no-interactive"])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains("`--title` is required"));
+        .failure();
+
+    let payload: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout)
+        .expect("issue create failure should be valid JSON");
+    assert_eq!(payload["status"], "error");
+    assert_eq!(payload["command"], "linear.issues.create");
+    assert_eq!(payload["error"]["code"], "invalid_input");
+    assert!(
+        payload["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("`--title` is required")
+    );
 }
 
 #[test]
 fn dashboard_render_once_uses_ratatui_snapshot_output() {
     let temp = tempdir().expect("tempdir should build");
+    let config_path = temp.path().join("metastack.toml");
+    write_onboarded_config(&config_path, "").expect("config file should write");
 
     cli()
         .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
         .args([
             "dashboard",
             "--api-key",
@@ -1170,17 +1259,20 @@ fn dashboard_render_once_uses_ratatui_snapshot_output() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Status [focus]"))
-        .stdout(predicate::str::contains("Description Preview"))
-        .stdout(predicate::str::contains("MET-11"));
+        .stdout(predicate::str::contains("Description Preview [focus]"))
+        .stdout(predicate::str::contains("MET-11"))
+        .stdout(predicate::str::contains("Wheel scroll preview"));
 }
 
 #[test]
 fn dashboard_linear_matches_legacy_dashboard_output() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
+    let config_path = temp.path().join("metastack.toml");
+    write_onboarded_config(&config_path, "")?;
 
     let legacy = cli()
         .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
         .args([
             "dashboard",
             "--api-key",
@@ -1195,6 +1287,7 @@ fn dashboard_linear_matches_legacy_dashboard_output() -> Result<(), Box<dyn Erro
 
     let preferred = cli()
         .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
         .args([
             "dashboard",
             "linear",
@@ -1233,7 +1326,7 @@ fn linear_issue_create_uses_repo_meta_defaults() -> Result<(), Box<dyn Error>> {
 }
 "#,
     )?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[linear]
@@ -1331,7 +1424,7 @@ api_url = "{api_url}"
         }));
     });
 
-    cli()
+    let assert = cli()
         .current_dir(temp.path())
         .env_remove("LINEAR_API_KEY")
         .env("METASTACK_CONFIG", &config_path)
@@ -1348,8 +1441,17 @@ api_url = "{api_url}"
             "1",
         ])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("Created issue: MET-31"));
+        .success();
+
+    assert_issue_mutation_output(
+        &assert,
+        "linear.issues.create",
+        "MET-31",
+        "Use repo defaults",
+        "Todo",
+        "MetaStack CLI",
+        "MET",
+    );
 
     Ok(())
 }

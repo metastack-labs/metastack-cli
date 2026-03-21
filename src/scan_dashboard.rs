@@ -8,10 +8,11 @@ use ratatui::backend::CrosstermBackend;
 #[cfg(test)]
 use ratatui::backend::TestBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Text};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
+use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::ListItem;
 use ratatui::{Frame, Terminal};
+
+use crate::tui::theme::{Tone, badge, empty_state, key_hints, list, panel_title, paragraph};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ScanItemState {
@@ -96,67 +97,95 @@ pub(crate) fn render_snapshot(data: &ScanDashboardData, width: u16, height: u16)
 }
 
 fn render_dashboard(frame: &mut Frame<'_>, data: &ScanDashboardData) {
+    let narrow = frame.area().width < 100;
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(5),
+            Constraint::Length(if narrow { 6 } else { 5 }),
             Constraint::Min(10),
-            Constraint::Length(3),
+            Constraint::Length(if narrow { 4 } else { 3 }),
         ])
         .split(frame.area());
     let body = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
+        .direction(if narrow {
+            Direction::Vertical
+        } else {
+            Direction::Horizontal
+        })
+        .constraints(if narrow {
+            vec![Constraint::Percentage(45), Constraint::Percentage(55)]
+        } else {
+            vec![Constraint::Percentage(42), Constraint::Percentage(58)]
+        })
         .split(outer[1]);
 
-    let header = Paragraph::new(Text::from(vec![
-        Line::from(data.title.clone()),
-        Line::from(data.status_line.clone()),
-        Line::from("Live agent output is hidden while the scan runs."),
-        Line::from("The generated file list updates as each codebase document lands."),
-    ]))
-    .wrap(Wrap { trim: true })
-    .block(Block::default().borders(Borders::ALL).title("meta scan"));
+    let header = paragraph(
+        Text::from(vec![
+            Line::from(data.title.clone()),
+            Line::from(data.status_line.clone()),
+            Line::from("Live agent output stays hidden while the scan runs."),
+            key_hints(&[("Ctrl-C", "exit"), ("Files", "update live")]),
+        ]),
+        panel_title("meta scan", false),
+    );
     frame.render_widget(header, outer[0]);
 
-    let step_items = data
-        .steps
-        .iter()
-        .map(render_row)
-        .collect::<Vec<ListItem<'static>>>();
-    let step_list = List::new(step_items)
-        .block(Block::default().borders(Borders::ALL).title("Steps"))
-        .highlight_style(Style::default().add_modifier(Modifier::BOLD));
+    let step_items = if data.steps.is_empty() {
+        vec![ListItem::new(empty_state(
+            "No scan phases have reported yet.",
+            "The first agent update will populate this list.",
+        ))]
+    } else {
+        data.steps
+            .iter()
+            .map(render_row)
+            .collect::<Vec<ListItem<'static>>>()
+    };
+    let step_list = list(step_items, panel_title("Steps", false));
     frame.render_widget(step_list, body[0]);
 
-    let file_items = data
-        .files
-        .iter()
-        .map(render_row)
-        .collect::<Vec<ListItem<'static>>>();
-    let file_list = List::new(file_items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Generated Files"),
-        )
-        .highlight_style(Style::default().add_modifier(Modifier::BOLD));
+    let file_items = if data.files.is_empty() {
+        vec![ListItem::new(empty_state(
+            "No generated files have landed yet.",
+            "The file list will populate as each scan artifact is written.",
+        ))]
+    } else {
+        data.files
+            .iter()
+            .map(render_row)
+            .collect::<Vec<ListItem<'static>>>()
+    };
+    let file_list = list(file_items, panel_title("Generated Files", false));
     frame.render_widget(file_list, body[1]);
 
-    let footer = Paragraph::new(format!(
-        "Agent log: {} (kept out of the main scan UI; inspect only for failures)",
-        data.log_path
-    ))
-    .wrap(Wrap { trim: true })
-    .block(Block::default().borders(Borders::ALL).title("Notes"));
+    let footer = paragraph(
+        format!(
+            "Agent log: {} (kept out of the main scan UI; inspect only for failures)",
+            data.log_path
+        ),
+        panel_title("Notes", false),
+    );
     frame.render_widget(footer, outer[2]);
 }
 
 fn render_row(row: &ScanDashboardRow) -> ListItem<'static> {
     ListItem::new(Text::from(vec![
-        Line::from(format!("[{}] {}", row.state.label(), row.label)),
+        Line::from(vec![
+            badge(row.state.label(), scan_row_tone(row.state)),
+            Span::raw(" "),
+            Span::raw(row.label.clone()),
+        ]),
         Line::from(row.detail.clone()),
     ]))
+}
+
+fn scan_row_tone(state: ScanItemState) -> Tone {
+    match state {
+        ScanItemState::Pending => Tone::Muted,
+        ScanItemState::Running => Tone::Info,
+        ScanItemState::Complete => Tone::Success,
+        ScanItemState::Failed => Tone::Danger,
+    }
 }
 
 #[cfg(test)]
@@ -223,5 +252,21 @@ mod tests {
         assert!(snapshot.contains("Refresh codebase docs with `scan-stub`"));
         assert!(snapshot.contains(".metastack/codebase/ARCHITECTURE.md"));
         assert!(snapshot.contains("Agent log: .metastack/agents/sessions/scan.log"));
+    }
+
+    #[test]
+    fn scan_dashboard_snapshot_handles_empty_narrow_state() {
+        let data = ScanDashboardData {
+            title: "Codebase scan for demo-cli".to_string(),
+            status_line: "Waiting for the first agent update".to_string(),
+            steps: Vec::new(),
+            files: Vec::new(),
+            log_path: ".metastack/agents/sessions/scan.log".to_string(),
+        };
+
+        let snapshot = render_snapshot(&data, 84, 28).expect("snapshot should render");
+
+        assert!(snapshot.contains("No scan phases have reported yet."));
+        assert!(snapshot.contains("No generated files have landed yet."));
     }
 }

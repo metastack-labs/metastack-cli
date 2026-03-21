@@ -3,10 +3,11 @@ use ratatui::backend::TestBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Cell, List, ListItem, Paragraph, Row, Table, Wrap};
+use ratatui::widgets::{Cell, List, ListItem, Paragraph, Row, Table, Wrap};
 use ratatui::{Frame, Terminal};
 
 use super::{ListenDashboardData, SessionListView, SessionPhase};
+use crate::tui::theme::{Tone, badge, empty_state, key_hints, panel, panel_title};
 
 pub fn render_dashboard(data: &ListenDashboardData, width: u16, height: u16) -> Result<String> {
     render_dashboard_with_view(data, width, height, SessionListView::Active)
@@ -57,18 +58,21 @@ pub(crate) fn render(frame: &mut Frame<'_>, data: &ListenDashboardData, view: Se
 fn render_header(frame: &mut Frame<'_>, data: &ListenDashboardData, area: Rect) {
     if area.width < 110 {
         let compact = Paragraph::new(Text::from(vec![
-            Line::from(Span::styled(
-                data.title.clone(),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            )),
+            Line::from(vec![
+                badge("listen", Tone::Accent),
+                Span::raw(" "),
+                Span::raw(data.title.clone()),
+            ]),
             Line::from(Span::styled(
                 data.scope.clone(),
                 Style::default()
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
             )),
+            Line::from(vec![
+                Span::styled("Watching: ", label_style()),
+                Span::styled(data.watch_scope.clone(), value_style(Color::LightGreen)),
+            ]),
             Line::from(Span::styled(
                 data.cycle_summary.clone(),
                 Style::default().fg(Color::Gray),
@@ -80,7 +84,7 @@ fn render_header(frame: &mut Frame<'_>, data: &ListenDashboardData, area: Rect) 
             runtime_line("Rate Limits", &data.runtime.rate_limits, Color::LightBlue),
             runtime_line("Dashboard", &data.runtime.dashboard, Color::LightCyan),
             runtime_line(
-                "Dashboard refresh",
+                "Terminal refresh",
                 &data.runtime.dashboard_refresh,
                 Color::Yellow,
             ),
@@ -89,14 +93,21 @@ fn render_header(frame: &mut Frame<'_>, data: &ListenDashboardData, area: Rect) 
                 &data.runtime.linear_refresh,
                 Color::LightYellow,
             ),
+            key_hints(&[
+                ("Tab", "toggle view"),
+                (
+                    if data.vim_mode {
+                        "←/→/h/l"
+                    } else {
+                        "←/→"
+                    },
+                    "switch tabs",
+                ),
+                ("q", "exit"),
+            ]),
         ]))
         .wrap(Wrap { trim: true })
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::DarkGray))
-                .title("Listen Status"),
-        );
+        .block(panel(panel_title("Listen Status", false)));
         frame.render_widget(compact, area);
         return;
     }
@@ -115,18 +126,21 @@ fn render_header(frame: &mut Frame<'_>, data: &ListenDashboardData, area: Rect) 
         .split(area);
 
     let hero = Paragraph::new(Text::from(vec![
-        Line::from(Span::styled(
-            data.title.clone(),
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )),
+        Line::from(vec![
+            badge("listen", Tone::Accent),
+            Span::raw(" "),
+            Span::raw(data.title.clone()),
+        ]),
         Line::from(Span::styled(
             data.scope.clone(),
             Style::default()
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
         )),
+        Line::from(vec![
+            Span::styled("Watching: ", label_style()),
+            Span::styled(data.watch_scope.clone(), value_style(Color::LightGreen)),
+        ]),
         Line::from(Span::styled(
             data.cycle_summary.clone(),
             Style::default().fg(Color::Gray),
@@ -135,14 +149,21 @@ fn render_header(frame: &mut Frame<'_>, data: &ListenDashboardData, area: Rect) 
             Span::styled("State file: ", label_style()),
             Span::styled(data.state_file.clone(), value_style(Color::Green)),
         ]),
+        key_hints(&[
+            ("Tab", "toggle view"),
+            (
+                if data.vim_mode {
+                    "←/→/h/l"
+                } else {
+                    "←/→"
+                },
+                "switch tabs",
+            ),
+            ("q", "exit"),
+        ]),
     ]))
     .wrap(Wrap { trim: true })
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray))
-            .title("Listen Status"),
-    );
+    .block(panel(panel_title("Listen Status", false)));
     frame.render_widget(hero, chunks[0]);
 
     let runtime_lines = vec![
@@ -152,9 +173,10 @@ fn render_header(frame: &mut Frame<'_>, data: &ListenDashboardData, area: Rect) 
         runtime_line("Tokens", &data.runtime.tokens, Color::Magenta),
         runtime_line("Rate Limits", &data.runtime.rate_limits, Color::LightBlue),
         runtime_line("Project", &data.runtime.project, Color::White),
+        runtime_line("Watching", &data.watch_scope, Color::LightGreen),
         runtime_line("Dashboard", &data.runtime.dashboard, Color::LightCyan),
         runtime_line(
-            "Dashboard refresh",
+            "Terminal refresh",
             &data.runtime.dashboard_refresh,
             Color::Yellow,
         ),
@@ -166,12 +188,7 @@ fn render_header(frame: &mut Frame<'_>, data: &ListenDashboardData, area: Rect) 
     ];
     let runtime = Paragraph::new(Text::from(runtime_lines))
         .wrap(Wrap { trim: true })
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::DarkGray))
-                .title("Runtime"),
-        );
+        .block(panel(panel_title("Runtime", false)));
     frame.render_widget(runtime, chunks[1]);
 }
 
@@ -183,10 +200,7 @@ fn render_sessions(
 ) {
     let counts = data.session_counts();
     let sessions = data.sessions_for_view(view);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray))
-        .title("Agent Sessions");
+    let block = panel(panel_title("Agent Sessions", false));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -204,15 +218,28 @@ fn render_sessions(
         session_view_badge(SessionListView::Active, view, counts.active),
         Span::raw(" "),
         session_view_badge(SessionListView::Completed, view, counts.completed),
-        Span::styled("  Tab/←/→ toggles", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            if data.vim_mode {
+                "  Tab/←/→/h/l toggles"
+            } else {
+                "  Tab/←/→ toggles"
+            },
+            Style::default().fg(Color::DarkGray),
+        ),
     ]))
     .wrap(Wrap { trim: true });
     frame.render_widget(controls, sections[0]);
 
     if sessions.is_empty() {
         let empty = Paragraph::new(match view {
-            SessionListView::Active => "No active agent sessions are currently tracked.",
-            SessionListView::Completed => "No completed agent sessions are currently tracked.",
+            SessionListView::Active => empty_state(
+                "No active agent sessions are currently tracked.",
+                "New claimed tickets will appear here once workers start.",
+            ),
+            SessionListView::Completed => empty_state(
+                "No completed agent sessions are currently tracked.",
+                "Completed workers will move into this view after they exit.",
+            ),
         })
         .wrap(Wrap { trim: true });
         frame.render_widget(empty, sections[1]);
@@ -238,6 +265,7 @@ fn render_sessions(
             Cell::from(session.pid_label()),
             Cell::from(session.age_label(data.runtime.current_epoch_seconds)),
             Cell::from(session.tokens_label()),
+            Cell::from(session.latest_resume_provider_label()),
             Cell::from(session.session_label()),
             Cell::from(session.summary.clone()),
         ])
@@ -248,6 +276,7 @@ fn render_sessions(
         Cell::from("PID"),
         Cell::from("AGE"),
         Cell::from("TOKENS"),
+        Cell::from("PROVIDER"),
         Cell::from("SESSION"),
         Cell::from("PROGRESS"),
     ])
@@ -257,20 +286,32 @@ fn render_sessions(
             .add_modifier(Modifier::BOLD),
     )
     .bottom_margin(1);
-    let table = Table::new(
-        rows,
-        [
+    let constraints = if inner.width >= 165 {
+        vec![
             Constraint::Length(10),
             Constraint::Length(13),
             Constraint::Length(8),
             Constraint::Length(10),
-            Constraint::Length(14),
-            Constraint::Length(14),
+            Constraint::Length(44),
+            Constraint::Length(8),
+            Constraint::Length(13),
             Constraint::Min(24),
-        ],
-    )
-    .header(header)
-    .column_spacing(1);
+        ]
+    } else {
+        vec![
+            Constraint::Length(9),
+            Constraint::Length(9),
+            Constraint::Length(8),
+            Constraint::Length(9),
+            Constraint::Length(16),
+            Constraint::Length(8),
+            Constraint::Length(13),
+            Constraint::Min(24),
+        ]
+    };
+    let table = Table::new(rows, constraints)
+        .header(header)
+        .column_spacing(1);
     frame.render_widget(table, sections[1]);
 }
 
@@ -319,12 +360,7 @@ fn render_footer(frame: &mut Frame<'_>, data: &ListenDashboardData, area: Rect) 
             })
             .collect::<Vec<_>>()
     };
-    let pending = List::new(pending_items).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray))
-            .title("Todo Queue"),
-    );
+    let pending = List::new(pending_items).block(panel(panel_title("Todo Queue", false)));
     frame.render_widget(pending, chunks[0]);
 
     let notes = if data.notes.is_empty() {
@@ -332,12 +368,9 @@ fn render_footer(frame: &mut Frame<'_>, data: &ListenDashboardData, area: Rect) 
     } else {
         data.notes.join("\n")
     };
-    let notes = Paragraph::new(notes).wrap(Wrap { trim: true }).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray))
-            .title("Notes"),
-    );
+    let notes = Paragraph::new(notes)
+        .wrap(Wrap { trim: true })
+        .block(panel(panel_title("Notes", false)));
     frame.render_widget(notes, chunks[1]);
 }
 
@@ -417,18 +450,26 @@ mod tests {
         build_dashboard_data,
     };
 
+    fn demo_cycle() -> ListenCycleData {
+        ListenCycleData::demo(
+            Path::new("."),
+            ".metastack/agents/sessions/listen-state.json".to_string(),
+        )
+    }
+
     #[test]
     fn snapshot_contains_runtime_summary_and_agent_columns() {
-        let cycle = ListenCycleData::demo(Path::new("."));
+        let cycle = demo_cycle();
         let data = build_dashboard_data(
             &cycle,
             &DashboardRuntimeContext {
                 started_at_epoch_seconds: 1_773_568_249,
                 now_epoch_seconds: 1_773_575_600,
                 poll_interval_seconds: 7,
+                dashboard_label: "terminal dashboard (TUI)",
                 dashboard_refresh_seconds: 1,
                 linear_refresh_seconds: 15,
-                dashboard_url: Some("http://127.0.0.1:4000/".to_string()),
+                vim_mode: false,
             },
         );
 
@@ -438,6 +479,7 @@ mod tests {
         assert!(snapshot.contains("Agent Sessions"));
         assert!(snapshot.contains("Active (2)"));
         assert!(snapshot.contains("Completed (0)"));
+        assert!(snapshot.contains("PROVIDER"));
         assert!(snapshot.contains("SESSION"));
         assert!(snapshot.contains("PROGRESS"));
         assert!(snapshot.contains("MET-13"));
@@ -445,7 +487,7 @@ mod tests {
 
     #[test]
     fn completed_view_renders_only_completed_sessions() {
-        let mut cycle = ListenCycleData::demo(Path::new("."));
+        let mut cycle = demo_cycle();
         let mut completed = cycle
             .sessions
             .first()
@@ -463,9 +505,10 @@ mod tests {
                 started_at_epoch_seconds: 1_773_568_249,
                 now_epoch_seconds: 1_773_575_600,
                 poll_interval_seconds: 7,
+                dashboard_label: "terminal dashboard (TUI)",
                 dashboard_refresh_seconds: 1,
                 linear_refresh_seconds: 15,
-                dashboard_url: Some("http://127.0.0.1:4000/".to_string()),
+                vim_mode: false,
             },
         );
 
@@ -479,7 +522,7 @@ mod tests {
 
     #[test]
     fn snapshot_keeps_unknown_tokens_and_compact_session_ids() {
-        let mut cycle = ListenCycleData::demo(Path::new("."));
+        let mut cycle = demo_cycle();
         let session = cycle
             .sessions
             .first_mut()
@@ -493,9 +536,10 @@ mod tests {
                 started_at_epoch_seconds: 1_773_568_249,
                 now_epoch_seconds: 1_773_575_600,
                 poll_interval_seconds: 7,
+                dashboard_label: "terminal dashboard (TUI)",
                 dashboard_refresh_seconds: 1,
                 linear_refresh_seconds: 15,
-                dashboard_url: Some("http://127.0.0.1:4000/".to_string()),
+                vim_mode: false,
             },
         );
 
@@ -504,5 +548,71 @@ mod tests {
         assert!(snapshot.contains("n/a"));
         assert!(snapshot.contains("019c...e1bf2a"));
         assert!(snapshot.contains("Progress text stays clean"));
+    }
+
+    #[test]
+    fn snapshot_shows_explicit_runtime_and_session_token_breakdown() {
+        let cycle = demo_cycle();
+        let data = build_dashboard_data(
+            &cycle,
+            &DashboardRuntimeContext {
+                started_at_epoch_seconds: 1_773_568_249,
+                now_epoch_seconds: 1_773_575_600,
+                poll_interval_seconds: 7,
+                dashboard_label: "terminal dashboard (TUI)",
+                dashboard_refresh_seconds: 1,
+                linear_refresh_seconds: 15,
+                vim_mode: false,
+            },
+        );
+
+        let snapshot = render_dashboard(&data, 180, 36).expect("snapshot should render");
+
+        assert!(snapshot.contains("Tokens"));
+        assert!(snapshot.contains("in 17,995,071 | out 58,080 | total 18,053,151"));
+        assert!(snapshot.contains("in 9,614,112 | out 8,120 | total 9,622,232"));
+    }
+
+    #[test]
+    fn snapshot_surfaces_empty_completed_state_in_compact_layout() {
+        let cycle = demo_cycle();
+        let data = build_dashboard_data(
+            &cycle,
+            &DashboardRuntimeContext {
+                started_at_epoch_seconds: 1_773_568_249,
+                now_epoch_seconds: 1_773_575_600,
+                poll_interval_seconds: 7,
+                dashboard_label: "terminal dashboard (TUI)",
+                dashboard_refresh_seconds: 1,
+                linear_refresh_seconds: 15,
+                vim_mode: false,
+            },
+        );
+
+        let snapshot = render_dashboard_with_view(&data, 96, 28, SessionListView::Completed)
+            .expect("completed snapshot should render");
+
+        assert!(snapshot.contains("No completed agent sessions are currently tracked."));
+    }
+
+    #[test]
+    fn snapshot_surfaces_vim_view_switch_hints_when_enabled() {
+        let cycle = demo_cycle();
+        let data = build_dashboard_data(
+            &cycle,
+            &DashboardRuntimeContext {
+                started_at_epoch_seconds: 1_773_568_249,
+                now_epoch_seconds: 1_773_575_600,
+                poll_interval_seconds: 7,
+                dashboard_label: "terminal dashboard (TUI)",
+                dashboard_refresh_seconds: 1,
+                linear_refresh_seconds: 15,
+                vim_mode: true,
+            },
+        );
+
+        let snapshot = render_dashboard(&data, 140, 36).expect("snapshot should render");
+
+        assert!(snapshot.contains("←/→/h/l"));
     }
 }

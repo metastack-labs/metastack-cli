@@ -4,7 +4,7 @@ use std::hash::{Hash, Hasher};
 #[cfg(unix)]
 use std::io::{Read, Write};
 #[cfg(unix)]
-use std::net::{Shutdown, TcpListener, TcpStream};
+use std::net::{TcpListener, TcpStream};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 #[cfg(unix)]
@@ -58,6 +58,16 @@ const TEST_ENV_REMOVALS: &[&str] = &[
     "XDG_CONFIG_HOME",
 ];
 
+fn isolated_home_dir() -> PathBuf {
+    let path = std::env::temp_dir().join(format!(
+        "metastack-test-home-{}-{}",
+        std::process::id(),
+        std::thread::current().name().unwrap_or("main")
+    ));
+    fs::create_dir_all(path.join(".config")).expect("test home directory should be creatable");
+    path
+}
+
 fn test_command() -> Command {
     let meta_bin = std::env::var_os("CARGO_BIN_EXE_meta")
         .map(std::path::PathBuf::from)
@@ -76,6 +86,9 @@ fn test_command() -> Command {
     for key in TEST_ENV_REMOVALS {
         command.env_remove(key);
     }
+    let home_dir = isolated_home_dir();
+    command.env("HOME", &home_dir);
+    command.env("XDG_CONFIG_HOME", home_dir.join(".config"));
     command
 }
 
@@ -91,11 +104,13 @@ fn meta() -> Command {
 fn listen_project_store_dir(
     config_path: &Path,
     repo_root: &Path,
+    project_selector: Option<&str>,
 ) -> Result<PathBuf, Box<dyn Error>> {
     let source_root = listen_source_root(repo_root)?;
     let metastack_root = source_root.join(".metastack").canonicalize()?;
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     metastack_root.display().to_string().hash(&mut hasher);
+    listen_project_scope_key(project_selector, repo_root)?.hash(&mut hasher);
     let project_key = format!("{:016x}", hasher.finish());
     Ok(config_path
         .parent()
@@ -108,7 +123,7 @@ fn listen_project_store_dir(
 
 #[cfg(unix)]
 fn listen_state_path(config_path: &Path, repo_root: &Path) -> Result<PathBuf, Box<dyn Error>> {
-    Ok(listen_project_store_dir(config_path, repo_root)?.join("session.json"))
+    Ok(listen_project_store_dir(config_path, repo_root, None)?.join("session.json"))
 }
 
 #[cfg(unix)]
@@ -117,9 +132,36 @@ fn listen_log_path(
     repo_root: &Path,
     issue_identifier: &str,
 ) -> Result<PathBuf, Box<dyn Error>> {
-    Ok(listen_project_store_dir(config_path, repo_root)?
+    Ok(listen_project_store_dir(config_path, repo_root, None)?
         .join("logs")
         .join(format!("{issue_identifier}.log")))
+}
+
+#[cfg(unix)]
+fn listen_project_scope_key(
+    project_selector: Option<&str>,
+    repo_root: &Path,
+) -> Result<String, Box<dyn Error>> {
+    let selector = match project_selector
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+    {
+        Some(selector) => Some(selector),
+        None => {
+            let meta = fs::read_to_string(repo_root.join(".metastack/meta.json"))?;
+            serde_json::from_str::<serde_json::Value>(&meta)?
+                .get("linear")
+                .and_then(|value| value.get("project_id"))
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+        }
+    };
+
+    Ok(match selector {
+        Some(selector) => format!("project:{}", selector.to_ascii_lowercase()),
+        None => "project:all".to_string(),
+    })
 }
 
 #[cfg(unix)]
@@ -344,14 +386,26 @@ fn commit_and_push_pull_ref(
 
 #[cfg(unix)]
 fn wait_for_path(path: &Path) -> Result<(), Box<dyn Error>> {
-    for _ in 0..1_200 {
+    wait_for_path_with_timeout(path, Duration::from_secs(60))
+}
+
+#[cfg(unix)]
+fn wait_for_path_with_timeout(path: &Path, timeout: Duration) -> Result<(), Box<dyn Error>> {
+    let poll_interval = Duration::from_millis(50);
+    let attempts = timeout.as_millis() / poll_interval.as_millis();
+    for _ in 0..attempts {
         if path.exists() {
             return Ok(());
         }
-        thread::sleep(Duration::from_millis(50));
+        thread::sleep(poll_interval);
     }
 
-    Err(format!("timed out waiting for `{}`", path.display()).into())
+    Err(format!(
+        "timed out waiting for `{}` after {}s",
+        path.display(),
+        timeout.as_secs()
+    )
+    .into())
 }
 
 #[cfg(unix)]
@@ -527,18 +581,30 @@ fn team_payload() -> serde_json::Value {
 
 #[cfg(unix)]
 fn wait_for_file_substring(path: &Path, expected: &str) -> Result<(), Box<dyn Error>> {
-    for _ in 0..600 {
+    wait_for_file_substring_with_timeout(path, expected, Duration::from_secs(60))
+}
+
+#[cfg(unix)]
+fn wait_for_file_substring_with_timeout(
+    path: &Path,
+    expected: &str,
+    timeout: Duration,
+) -> Result<(), Box<dyn Error>> {
+    let poll_interval = Duration::from_millis(100);
+    let attempts = timeout.as_millis() / poll_interval.as_millis();
+    for _ in 0..attempts {
         if let Ok(contents) = fs::read_to_string(path)
             && contents.contains(expected)
         {
             return Ok(());
         }
-        thread::sleep(Duration::from_millis(100));
+        thread::sleep(poll_interval);
     }
 
     Err(format!(
-        "timed out waiting for `{}` to contain substring `{expected}`",
-        path.display()
+        "timed out waiting for `{}` to contain substring `{expected}` after {}s",
+        path.display(),
+        timeout.as_secs()
     )
     .into())
 }
@@ -568,7 +634,7 @@ fn listen_test_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
         .lock()
-        .expect("listen test lock should not be poisoned")
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[cfg(unix)]
@@ -576,6 +642,8 @@ fn listen_test_lock() -> std::sync::MutexGuard<'static, ()> {
 struct DynamicLinearState {
     claimed: bool,
     issue_refreshes_after_claim: usize,
+    review_transition_applied: bool,
+    complete_after_claim_refreshes: usize,
 }
 
 #[cfg(unix)]
@@ -588,18 +656,27 @@ struct DynamicLinearServer {
 #[cfg(unix)]
 impl DynamicLinearServer {
     fn start() -> Result<Self, Box<dyn Error>> {
+        Self::start_with_completion_after_refreshes(8)
+    }
+
+    fn start_with_completion_after_refreshes(
+        complete_after_claim_refreshes: usize,
+    ) -> Result<Self, Box<dyn Error>> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         listener.set_nonblocking(true)?;
         let address = listener.local_addr()?;
         let shutdown = Arc::new(AtomicBool::new(false));
-        let state = Arc::new(Mutex::new(DynamicLinearState::default()));
+        let state = Arc::new(Mutex::new(DynamicLinearState {
+            complete_after_claim_refreshes,
+            ..DynamicLinearState::default()
+        }));
         let thread_shutdown = shutdown.clone();
         let handle = thread::spawn(move || {
             while !thread_shutdown.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
                         let _ = handle_dynamic_linear_connection(&mut stream, &state);
-                        let _ = stream.shutdown(Shutdown::Both);
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(25));
@@ -637,76 +714,121 @@ fn handle_dynamic_linear_connection(
     stream: &mut TcpStream,
     state: &Arc<Mutex<DynamicLinearState>>,
 ) -> Result<(), Box<dyn Error>> {
-    let request = read_http_request(stream)?;
-    let body = request
-        .split("\r\n\r\n")
-        .nth(1)
-        .unwrap_or_default()
-        .to_string();
-    match dynamic_linear_response(&body, state) {
-        Ok(response) => {
-            let encoded = serde_json::to_string(&response)?;
-            write!(
-                stream,
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                encoded.len(),
-                encoded
-            )?;
+    let mut pending = Vec::new();
+    loop {
+        let request = read_http_request(stream, &mut pending)?;
+        if request.trim().is_empty() {
+            return Ok(());
         }
-        Err(error) => {
-            let encoded = serde_json::to_string(&json!({
-                "errors": [{
-                    "message": error.to_string()
-                }]
-            }))?;
-            write!(
-                stream,
-                "HTTP/1.1 500 Internal Server Error\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                encoded.len(),
-                encoded
-            )?;
+        let body = request
+            .split("\r\n\r\n")
+            .nth(1)
+            .unwrap_or_default()
+            .to_string();
+        match dynamic_linear_response(&body, state) {
+            Ok(response) => {
+                let encoded = serde_json::to_string(&response)?;
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: keep-alive\r\n\r\n{}",
+                    encoded.len(),
+                    encoded
+                )?;
+                stream.flush()?;
+            }
+            Err(error) => {
+                let encoded = serde_json::to_string(&json!({
+                    "errors": [{
+                        "message": error.to_string()
+                    }]
+                }))?;
+                write!(
+                    stream,
+                    "HTTP/1.1 500 Internal Server Error\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: keep-alive\r\n\r\n{}",
+                    encoded.len(),
+                    encoded
+                )?;
+                stream.flush()?;
+            }
         }
     }
-    Ok(())
 }
 
 #[cfg(unix)]
-fn read_http_request(stream: &mut TcpStream) -> Result<String, Box<dyn Error>> {
-    let mut buffer = Vec::new();
+fn read_http_request(stream: &mut TcpStream, pending: &mut Vec<u8>) -> Result<String, Box<dyn Error>> {
     let mut chunk = [0u8; 4096];
-    let mut header_end = None;
-    let mut content_length = 0usize;
+    let mut idle_reads_after_data = 0usize;
 
     loop {
-        let read = stream.read(&mut chunk)?;
-        if read == 0 {
-            break;
+        if let Some(request_len) = complete_http_request_len(pending) {
+            let remainder = pending.split_off(request_len);
+            let request = std::mem::replace(pending, remainder);
+            return Ok(String::from_utf8(request)?);
         }
-        buffer.extend_from_slice(&chunk[..read]);
 
-        if header_end.is_none()
-            && let Some(index) = buffer.windows(4).position(|window| window == b"\r\n\r\n")
-        {
-            header_end = Some(index + 4);
-            let headers = String::from_utf8_lossy(&buffer[..index + 4]);
-            for line in headers.lines() {
-                if let Some((name, value)) = line.split_once(':')
-                    && name.eq_ignore_ascii_case("content-length")
-                {
-                    content_length = value.trim().parse::<usize>().unwrap_or(0);
-                    break;
-                }
+        let read = match stream.read(&mut chunk) {
+            Ok(read) => {
+                idle_reads_after_data = 0;
+                read
             }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                if pending.is_empty() {
+                    return Ok(String::new());
+                }
+                idle_reads_after_data += 1;
+                if idle_reads_after_data >= 20 {
+                    return Err(format!(
+                        "timed out waiting for a complete HTTP request after receiving {} bytes",
+                        pending.len()
+                    )
+                    .into());
+                }
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if read == 0 {
+            if pending.is_empty() {
+                return Ok(String::new());
+            }
+            if let Some(request_len) = complete_http_request_len(pending)
+            {
+                let remainder = pending.split_off(request_len);
+                let request = std::mem::replace(pending, remainder);
+                return Ok(String::from_utf8(request)?);
+            }
+            return Err(format!(
+                "peer closed the HTTP request before the body completed (received {} bytes)",
+                pending.len()
+            )
+            .into());
         }
+        pending.extend_from_slice(&chunk[..read]);
+    }
+}
 
-        if let Some(end) = header_end
-            && buffer.len() >= end + content_length
+#[cfg(unix)]
+fn complete_http_request_len(buffer: &[u8]) -> Option<usize> {
+    let header_end = buffer
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|index| index + 4)?;
+    let headers = String::from_utf8_lossy(&buffer[..header_end]);
+    let mut content_length = 0usize;
+    for line in headers.lines() {
+        if let Some((name, value)) = line.split_once(':')
+            && name.eq_ignore_ascii_case("content-length")
         {
+            content_length = value.trim().parse::<usize>().unwrap_or(0);
             break;
         }
     }
-
-    Ok(String::from_utf8(buffer)?)
+    (buffer.len() >= header_end + content_length).then_some(header_end + content_length)
 }
 
 #[cfg(unix)]
@@ -790,6 +912,14 @@ fn dynamic_linear_response(
     if body.contains("mutation UpdateIssue") {
         let mut state = state.lock().expect("state mutex should lock");
         state.claimed = true;
+        if body.contains(r#""stateId":"state-3""#) {
+            state.review_transition_applied = true;
+        }
+        let (state_id, state_name, state_type) = if state.review_transition_applied {
+            ("state-3", "Human Review", "started")
+        } else {
+            ("state-2", "In Progress", "started")
+        };
         return Ok(json!({
             "data": {
                 "issueUpdate": {
@@ -812,9 +942,9 @@ fn dynamic_linear_response(
                             "name": "MetaStack CLI"
                         },
                         "state": {
-                            "id": "state-2",
-                            "name": "In Progress",
-                            "type": "started"
+                            "id": state_id,
+                            "name": state_name,
+                            "type": state_type
                         }
                     }
                 }
@@ -870,6 +1000,26 @@ fn dynamic_linear_response(
         }));
     }
 
+    if body.contains("mutation CreateAttachment") {
+        return Ok(json!({
+            "data": {
+                "attachmentCreate": {
+                    "success": true,
+                    "attachment": {
+                        "id": "attachment-32",
+                        "title": "GitHub PR #321",
+                        "url": "https://github.com/example/repo/pull/321",
+                        "sourceType": "custom",
+                        "metadata": {
+                            "provider": "github",
+                            "type": "pull_request"
+                        }
+                    }
+                }
+            }
+        }));
+    }
+
     if body.contains("query Issue($id: String!)") {
         if body.contains("\"id\":\"issue-33\"") {
             return Ok(json!({
@@ -889,7 +1039,9 @@ fn dynamic_linear_response(
             }));
         }
         let state = state.lock().expect("state mutex should lock");
-        let (state_id, state_name) = if state.claimed {
+        let (state_id, state_name) = if state.review_transition_applied {
+            ("state-3", "Human Review")
+        } else if state.claimed {
             ("state-2", "In Progress")
         } else {
             ("state-1", "Todo")
@@ -913,9 +1065,17 @@ fn dynamic_linear_response(
 
     if body.contains("query Issues") {
         let mut state = state.lock().expect("state mutex should lock");
-        let issue_state = if state.claimed {
+        let issue_state = if state.review_transition_applied {
+            ("state-3", "Human Review", "started")
+        } else if state.claimed {
             state.issue_refreshes_after_claim += 1;
-            if state.issue_refreshes_after_claim >= 6 {
+            let threshold = if state.complete_after_claim_refreshes > 0 {
+                state.complete_after_claim_refreshes
+            } else {
+                6
+            };
+            if state.issue_refreshes_after_claim >= threshold {
+                state.review_transition_applied = true;
                 ("state-3", "Human Review", "started")
             } else {
                 ("state-2", "In Progress", "started")

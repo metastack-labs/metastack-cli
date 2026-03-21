@@ -4,9 +4,10 @@ use std::sync::{
 };
 
 use crate::linear::{
-    AttachmentCreateRequest, AttachmentSummary, IssueComment, IssueCreateRequest,
-    IssueLabelCreateRequest, IssueListFilters, IssueSummary, IssueUpdateRequest, LabelRef,
-    LinearClient, ProjectRef, ProjectSummary, TeamRef, TeamSummary, UserRef, WorkflowState,
+    AttachmentCreateRequest, AttachmentSummary, IssueAssigneeFilter, IssueComment,
+    IssueCreateRequest, IssueLabelCreateRequest, IssueListFilters, IssueSummary,
+    IssueUpdateRequest, LabelRef, LinearClient, ProjectRef, ProjectSummary, TeamRef, TeamSummary,
+    UserRef, WorkflowState,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -14,6 +15,7 @@ use async_trait::async_trait;
 #[derive(Clone, Default)]
 pub(super) struct FakeLinearClient {
     pub(super) projects: Vec<ProjectSummary>,
+    pub(super) users: Vec<UserRef>,
     pub(super) issues: Vec<IssueSummary>,
     pub(super) all_issues: Vec<IssueSummary>,
     pub(super) issue_labels: Vec<LabelRef>,
@@ -33,6 +35,25 @@ pub(super) struct FakeLinearClient {
 impl LinearClient for FakeLinearClient {
     async fn list_projects(&self, _limit: usize) -> Result<Vec<ProjectSummary>> {
         Ok(self.projects.clone())
+    }
+
+    async fn list_users(&self, _limit: usize) -> Result<Vec<UserRef>> {
+        if self.users.is_empty() {
+            Ok(vec![
+                UserRef {
+                    id: "viewer-1".to_string(),
+                    name: "Viewer".to_string(),
+                    email: Some("viewer@example.com".to_string()),
+                },
+                UserRef {
+                    id: "user-2".to_string(),
+                    name: "Someone Else".to_string(),
+                    email: Some("else@example.com".to_string()),
+                },
+            ])
+        } else {
+            Ok(self.users.clone())
+        }
     }
 
     async fn list_issues(&self, _limit: usize) -> Result<Vec<IssueSummary>> {
@@ -77,6 +98,27 @@ impl LinearClient for FakeLinearClient {
                     .map(|entry| entry.name.eq_ignore_ascii_case(state))
                     .unwrap_or(false)
             });
+        }
+        match &filters.assignee {
+            IssueAssigneeFilter::Any => {}
+            IssueAssigneeFilter::Viewer { viewer_id } => {
+                issues.retain(|issue| {
+                    issue
+                        .assignee
+                        .as_ref()
+                        .map(|assignee| assignee.id == *viewer_id)
+                        .unwrap_or(false)
+                });
+            }
+            IssueAssigneeFilter::ViewerOrUnassigned { viewer_id } => {
+                issues.retain(|issue| {
+                    issue
+                        .assignee
+                        .as_ref()
+                        .map(|assignee| assignee.id == *viewer_id)
+                        .unwrap_or(true)
+                });
+            }
         }
         if issues.len() > filters.limit.max(1) {
             issues.truncate(filters.limit.max(1));
@@ -149,6 +191,8 @@ impl LinearClient for FakeLinearClient {
         Ok(IssueComment {
             id: "comment-new".to_string(),
             body,
+            created_at: None,
+            user_name: None,
             resolved_at: None,
         })
     }
@@ -161,6 +205,8 @@ impl LinearClient for FakeLinearClient {
         Ok(IssueComment {
             id: comment_id.to_string(),
             body,
+            created_at: None,
+            user_name: None,
             resolved_at: None,
         })
     }
@@ -281,6 +327,8 @@ pub(super) fn comment(id: &str, body: &str, resolved_at: Option<&str>) -> IssueC
     IssueComment {
         id: id.to_string(),
         body: body.to_string(),
+        created_at: None,
+        user_name: None,
         resolved_at: resolved_at.map(str::to_string),
     }
 }

@@ -26,6 +26,7 @@ mod viewer;
 #[async_trait]
 pub trait LinearClient: Send + Sync {
     async fn list_projects(&self, limit: usize) -> Result<Vec<ProjectSummary>>;
+    async fn list_users(&self, limit: usize) -> Result<Vec<UserRef>>;
     async fn list_issues(&self, limit: usize) -> Result<Vec<IssueSummary>>;
     async fn list_filtered_issues(&self, filters: &IssueListFilters) -> Result<Vec<IssueSummary>>;
     async fn list_issue_labels(&self, team: Option<&str>) -> Result<Vec<LabelRef>>;
@@ -80,6 +81,10 @@ impl ReqwestLinearClient {
 impl LinearClient for ReqwestLinearClient {
     async fn list_projects(&self, limit: usize) -> Result<Vec<ProjectSummary>> {
         self.list_projects_resource(limit).await
+    }
+
+    async fn list_users(&self, limit: usize) -> Result<Vec<UserRef>> {
+        self.list_users_resource(limit).await
     }
 
     async fn list_issues(&self, limit: usize) -> Result<Vec<IssueSummary>> {

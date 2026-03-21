@@ -4,8 +4,8 @@ use serde_json::json;
 
 use crate::config::LinearConfig;
 use crate::linear::{
-    IssueCreateRequest, IssueLabelCreateRequest, IssueListFilters, LinearClient,
-    ReqwestLinearClient,
+    IssueAssigneeFilter, IssueCreateRequest, IssueLabelCreateRequest, IssueListFilters,
+    IssueUpdateRequest, LinearClient, ReqwestLinearClient,
 };
 
 #[tokio::test]
@@ -87,6 +87,9 @@ async fn reqwest_client_sends_server_side_issue_filters() {
             project: None,
             project_id: Some("project-1".to_string()),
             state: Some("Todo".to_string()),
+            assignee: IssueAssigneeFilter::ViewerOrUnassigned {
+                viewer_id: "viewer-1".to_string(),
+            },
             limit: 5,
         })
         .await
@@ -137,13 +140,14 @@ async fn reqwest_client_lists_issue_labels_for_team() {
 }
 
 #[tokio::test]
-async fn reqwest_client_sends_label_ids_when_creating_issue() {
+async fn reqwest_client_sends_assignee_and_label_ids_when_creating_issue() {
     let server = MockServer::start();
     let api_url = server.url("/graphql");
     let create_mock = server.mock(|when, then| {
         when.method(POST)
             .path("/graphql")
             .body_includes("mutation CreateIssue")
+            .body_includes("\"assigneeId\":\"user-1\"")
             .body_includes("\"labelIds\":[\"label-plan\"]");
         then.status(200).json_body(json!({
             "data": {
@@ -165,12 +169,52 @@ async fn reqwest_client_sends_label_ids_when_creating_issue() {
             parent_id: None,
             state_id: Some("state-1".to_string()),
             priority: Some(2),
+            assignee_id: Some("user-1".to_string()),
             label_ids: vec!["label-plan".to_string()],
         })
         .await
         .expect("issue creation should succeed");
 
     assert_eq!(issue.identifier, "MET-41");
+    create_mock.assert_calls(1);
+}
+
+#[tokio::test]
+async fn reqwest_client_allows_unassigned_issue_creation() {
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    let create_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation CreateIssue")
+            .body_includes("\"labelIds\":[]");
+        then.status(200).json_body(json!({
+            "data": {
+                "issueCreate": {
+                    "success": true,
+                    "issue": issue_node("MET-42")
+                }
+            }
+        }));
+    });
+    let client = client(api_url);
+
+    let issue = client
+        .create_issue(IssueCreateRequest {
+            team_id: "team-1".to_string(),
+            title: "Create unassigned issue".to_string(),
+            description: Some("Description".to_string()),
+            project_id: Some("project-1".to_string()),
+            parent_id: None,
+            state_id: Some("state-1".to_string()),
+            priority: Some(2),
+            assignee_id: None,
+            label_ids: Vec::new(),
+        })
+        .await
+        .expect("issue creation should succeed");
+
+    assert_eq!(issue.identifier, "MET-42");
     create_mock.assert_calls(1);
 }
 
@@ -209,6 +253,174 @@ async fn reqwest_client_creates_issue_labels() {
     assert_eq!(label.id, "label-technical");
     assert_eq!(label.name, "technical");
     create_mock.assert_calls(1);
+}
+
+#[tokio::test]
+async fn reqwest_client_sends_estimate_labels_and_parent_when_updating_issue() {
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    let update_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation UpdateIssue")
+            .body_includes("\"estimate\":5.0")
+            .body_includes("\"labelIds\":[\"label-plan\",\"label-hygiene\"]")
+            .body_includes("\"parentId\":\"issue-parent\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "issueUpdate": {
+                    "success": true,
+                    "issue": issue_node("MET-41")
+                }
+            }
+        }));
+    });
+    let client = client(api_url);
+
+    let issue = client
+        .update_issue(
+            "issue-met-41",
+            IssueUpdateRequest {
+                title: None,
+                description: None,
+                project_id: None,
+                state_id: None,
+                priority: None,
+                estimate: Some(5.0),
+                label_ids: Some(vec!["label-plan".to_string(), "label-hygiene".to_string()]),
+                parent_id: Some("issue-parent".to_string()),
+            },
+        )
+        .await
+        .expect("issue update should succeed");
+
+    assert_eq!(issue.identifier, "MET-41");
+    update_mock.assert_calls(1);
+}
+
+#[tokio::test]
+async fn reqwest_client_fetches_parent_description_and_comment_attribution() {
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    let issue_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issue")
+            .body_includes("createdAt")
+            .body_includes("user {")
+            .body_includes("description")
+            .body_includes("\"id\":\"issue-1\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "issue": {
+                    "id": "issue-1",
+                    "identifier": "MET-41",
+                    "title": "Issue MET-41",
+                    "description": "Main description",
+                    "url": "https://linear.app/issues/MET-41",
+                    "priority": 2,
+                    "estimate": 3.0,
+                    "updatedAt": "2026-03-14T16:00:00Z",
+                    "team": {
+                        "id": "team-1",
+                        "key": "MET",
+                        "name": "Metastack"
+                    },
+                    "project": {
+                        "id": "project-1",
+                        "name": "MetaStack CLI"
+                    },
+                    "assignee": null,
+                    "labels": {
+                        "nodes": []
+                    },
+                    "comments": {
+                        "nodes": [{
+                            "id": "comment-1",
+                            "body": "Please localize this image",
+                            "createdAt": "2026-03-17T13:37:00Z",
+                            "user": {
+                                "name": "Jane Reviewer"
+                            },
+                            "resolvedAt": null
+                        }]
+                    },
+                    "state": {
+                        "id": "state-1",
+                        "name": "Todo",
+                        "type": "unstarted"
+                    },
+                    "attachments": {
+                        "nodes": []
+                    },
+                    "parent": {
+                        "id": "parent-1",
+                        "identifier": "MET-40",
+                        "title": "Parent issue",
+                        "url": "https://linear.app/issues/MET-40",
+                        "description": "Parent issue description"
+                    },
+                    "children": {
+                        "nodes": []
+                    }
+                }
+            }
+        }));
+    });
+    let client = client(api_url);
+
+    let issue = client
+        .get_issue("issue-1")
+        .await
+        .expect("issue detail should load");
+
+    assert_eq!(
+        issue
+            .parent
+            .as_ref()
+            .and_then(|parent| parent.description.as_deref()),
+        Some("Parent issue description")
+    );
+    assert_eq!(issue.comments.len(), 1);
+    assert_eq!(
+        issue.comments[0].created_at.as_deref(),
+        Some("2026-03-17T13:37:00Z")
+    );
+    assert_eq!(
+        issue.comments[0].user_name.as_deref(),
+        Some("Jane Reviewer")
+    );
+    issue_mock.assert_calls(1);
+}
+
+#[test]
+fn download_request_adds_raw_authorization_only_for_linear_upload_hosts() {
+    let client = client("https://api.linear.app/graphql".to_string());
+    let transport = super::graphql::GraphqlTransport::new(&client.config, &client.http);
+
+    let linear_request = transport
+        .build_download_request("https://uploads.linear.app/uploads/test.png")
+        .expect("linear upload request")
+        .build()
+        .expect("request should build");
+    let external_request = transport
+        .build_download_request("https://example.com/test.png")
+        .expect("external request")
+        .build()
+        .expect("request should build");
+
+    assert_eq!(
+        linear_request
+            .headers()
+            .get(reqwest::header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok()),
+        Some("token")
+    );
+    assert!(
+        !external_request
+            .headers()
+            .contains_key(reqwest::header::AUTHORIZATION)
+    );
 }
 
 fn client(api_url: String) -> ReqwestLinearClient {

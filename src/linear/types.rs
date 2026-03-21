@@ -33,6 +33,10 @@ pub struct IssueComment {
     pub id: String,
     pub body: String,
     #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub user_name: Option<String>,
+    #[serde(default)]
     pub resolved_at: Option<String>,
 }
 
@@ -61,6 +65,8 @@ pub struct IssueLink {
     pub identifier: String,
     pub title: String,
     pub url: String,
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,11 +129,24 @@ pub struct ProjectListFilters {
 }
 
 #[derive(Debug, Clone, Default)]
+pub enum IssueAssigneeFilter {
+    #[default]
+    Any,
+    Viewer {
+        viewer_id: String,
+    },
+    ViewerOrUnassigned {
+        viewer_id: String,
+    },
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct IssueListFilters {
     pub team: Option<String>,
     pub project: Option<String>,
     pub project_id: Option<String>,
     pub state: Option<String>,
+    pub assignee: IssueAssigneeFilter,
     pub limit: usize,
 }
 
@@ -149,6 +168,7 @@ pub struct IssueCreateSpec {
     pub parent_id: Option<String>,
     pub state: Option<String>,
     pub priority: Option<u8>,
+    pub assignee_id: Option<String>,
     #[allow(dead_code)]
     pub labels: Vec<String>,
 }
@@ -161,6 +181,9 @@ pub struct IssueEditSpec {
     pub project: Option<String>,
     pub state: Option<String>,
     pub priority: Option<u8>,
+    pub estimate: Option<f64>,
+    pub labels: Option<Vec<String>>,
+    pub parent_identifier: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -178,6 +201,7 @@ pub struct IssueCreateRequest {
     pub parent_id: Option<String>,
     pub state_id: Option<String>,
     pub priority: Option<u8>,
+    pub assignee_id: Option<String>,
     #[allow(dead_code)]
     pub label_ids: Vec<String>,
 }
@@ -195,6 +219,9 @@ pub struct IssueUpdateRequest {
     pub project_id: Option<String>,
     pub state_id: Option<String>,
     pub priority: Option<u8>,
+    pub estimate: Option<f64>,
+    pub label_ids: Option<Vec<String>>,
+    pub parent_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]

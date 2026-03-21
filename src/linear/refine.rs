@@ -16,6 +16,7 @@ use crate::config::AGENT_ROUTE_LINEAR_ISSUES_REFINE;
 use crate::fs::{
     PlanningPaths, canonicalize_existing_dir, display_path, ensure_dir, write_text_file,
 };
+use crate::output::render_json_success;
 use crate::repo_target::RepoTarget;
 use crate::scaffold::ensure_planning_layout;
 
@@ -120,7 +121,38 @@ pub(crate) async fn run_issue_refine_command(
         reports.push(report);
     }
 
-    println!("{}", render_refinement_reports(&root, &reports));
+    if args.json {
+        #[derive(Serialize)]
+        struct RefinementResult {
+            reports: Vec<RefinementJsonReport>,
+        }
+
+        #[derive(Serialize)]
+        struct RefinementJsonReport {
+            issue_identifier: String,
+            run_dir: String,
+            apply_requested: bool,
+        }
+
+        println!(
+            "{}",
+            render_json_success(
+                "linear.issues.refine",
+                &RefinementResult {
+                    reports: reports
+                        .iter()
+                        .map(|report| RefinementJsonReport {
+                            issue_identifier: report.issue_identifier.clone(),
+                            run_dir: display_path(&report.run_dir, &root),
+                            apply_requested: report.apply_requested,
+                        })
+                        .collect(),
+                },
+            )?
+        );
+    } else {
+        println!("{}", render_refinement_reports(&root, &reports));
+    }
     Ok(())
 }
 
@@ -189,6 +221,7 @@ async fn refine_issue(
             model: args.model.clone(),
             reasoning: args.reasoning.clone(),
             transport: None,
+            attachments: Vec::new(),
         })
         .with_context(|| {
             "meta issues refine requires a configured local agent to critique and rewrite existing issues"
@@ -274,6 +307,9 @@ async fn refine_issue(
                     project: None,
                     state: None,
                     priority: None,
+                    estimate: None,
+                    labels: None,
+                    parent_identifier: None,
                 })
                 .await
             {
@@ -402,6 +438,7 @@ fn build_issue_metadata(issue: &IssueSummary) -> BacklogIssueMetadata {
         local_hash: None,
         remote_hash: None,
         last_sync_at: None,
+        last_pulled_comment_ids: Vec::new(),
         managed_files: Vec::<ManagedFileRecord>::new(),
     }
 }
@@ -749,6 +786,7 @@ mod tests {
                 identifier: "MET-143".to_string(),
                 title: "Parent".to_string(),
                 url: "https://linear.example/MET-143".to_string(),
+                description: None,
             }),
             children: Vec::new(),
         };

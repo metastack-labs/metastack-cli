@@ -1,6 +1,9 @@
+use std::ffi::OsString;
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
+
+use crate::tui::prompt_images::PromptImageAttachment;
 
 const ROOT_HELP_EXAMPLES: &str = "\
 Example flows:
@@ -20,6 +23,10 @@ Example flows:
 const BACKLOG_HELP_EXAMPLES: &str = "\
 Examples:
   meta backlog plan --root . --request \"Split the onboarding work into tickets\"
+  meta backlog plan --root . ENG-10144
+  meta backlog plan --root . ENG-10144 --velocity
+  meta backlog improve --root . --mode basic
+  meta backlog improve --root . ENG-10144 --mode advanced --apply
   meta backlog tech MET-35
   meta backlog split MET-35
   meta backlog sync status
@@ -27,11 +34,43 @@ Examples:
   meta backlog sync pull --all
   meta backlog sync push MET-35 --update-description";
 
+const BACKLOG_IMPROVE_HELP: &str = "\
+Use `meta backlog improve` for a repo-scoped backlog sweep across existing issues in one state.
+Choose `--mode basic` for conservative metadata hygiene and `--mode advanced` for deeper
+rewrites or parent-child structure proposals.
+
+Use `meta linear issues refine` when you already know which issue needs a critique/rewrite and
+the primary goal is improving that issue's description rather than scanning the backlog.";
+
+const ISSUES_REFINE_HELP: &str = "\
+Use `meta linear issues refine` when you already know which issue needs a critique/rewrite and
+want a focused description-quality pass with auditable refinement artifacts.
+
+Use `meta backlog improve` when you want a repo-scoped backlog sweep for missing labels,
+acceptance criteria, priority/estimate, and parent-child structure opportunities.";
+
 const AGENTS_HELP_EXAMPLES: &str = "\
 Examples:
   meta agents listen --team MET --project \"MetaStack CLI\"
   meta agents workflows list --root .
   meta agents workflows run ticket-implementation --root . --dry-run";
+
+const LISTEN_HELP_EXAMPLES: &str = "\
+Terminal-only examples:
+  meta agents listen --check --root .
+  meta agents listen --team MET --once
+  meta listen sessions list
+
+Concurrent project-scoped examples from one checkout:
+  meta agents listen --team MET --project \"MetaStack CLI\"
+  meta agents listen --team MET --project \"MetaStack API\"
+  meta listen sessions inspect --root . --project \"MetaStack API\"
+  meta listen sessions clear --root . --project \"MetaStack API\"
+  meta listen sessions resume --root . --project \"MetaStack API\" --once
+
+Default-project example:
+  meta runtime setup --root . --team MET --project \"MetaStack CLI\"
+  meta agents listen --team MET";
 
 const CONTEXT_HELP_EXAMPLES: &str = "\
 Examples:
@@ -92,6 +131,24 @@ Examples:
   meta merge --render-once --events space,down,space,enter
   meta merge --no-interactive --pull-request 101 --pull-request 102 --validate \"make quality\"";
 
+const WORKSPACE_HELP_EXAMPLES: &str = "\
+Examples:
+  meta workspace list --root .
+  meta workspace clean ENG-10175 --root .
+  meta workspace clean --target-only --root .
+  meta workspace prune --dry-run --root .";
+
+const UPGRADE_HELP_EXAMPLES: &str = "\
+Default latest-stable path:
+  meta upgrade --check
+  meta upgrade --dry-run
+  meta upgrade
+
+Advanced version-management path:
+  meta upgrade --version 0.2.0 --dry-run
+  meta upgrade --version 0.3.0-rc.1 --prerelease
+  meta upgrade --version 0.1.0 --allow-downgrade";
+
 #[derive(Debug, Parser)]
 #[command(
     name = "meta",
@@ -121,28 +178,43 @@ pub enum Command {
     Dashboard(DashboardArgs),
     /// Inspect open pull requests, batch them in a one-shot dashboard, and publish one aggregate PR.
     Merge(MergeArgs),
+    /// List and clean sibling listener workspace clones under the fixed `<repo>-workspace/` root.
+    Workspace(WorkspaceArgs),
+    /// Securely self-update a GitHub Release install of `meta` on macOS/Linux.
+    Upgrade(UpgradeArgs),
     /// Compatibility alias for `meta backlog plan`.
+    #[command(hide = true)]
     Plan(PlanArgs),
     /// Compatibility alias for `meta backlog tech`.
+    #[command(hide = true)]
     Technical(TechnicalArgs),
     /// Compatibility alias for `meta agents listen`.
+    #[command(hide = true)]
     Listen(ListenArgs),
     /// Compatibility alias for `meta linear issues`.
+    #[command(hide = true)]
     #[command(visible_alias = "tickets")]
     Issues(IssuesArgs),
     /// Compatibility alias for `meta linear projects`.
+    #[command(hide = true)]
     Projects(ProjectsArgs),
     /// Compatibility alias for `meta runtime cron`.
+    #[command(hide = true)]
     Cron(CronArgs),
     /// Compatibility alias for `meta context scan`.
+    #[command(hide = true)]
     Scan(ScanArgs),
     /// Compatibility alias for `meta agents workflows`.
+    #[command(hide = true)]
     Workflows(WorkflowsArgs),
     /// Compatibility alias for `meta runtime config`.
+    #[command(hide = true)]
     Config(ConfigArgs),
     /// Compatibility alias for `meta runtime setup`.
+    #[command(hide = true)]
     Setup(SetupArgs),
     /// Compatibility alias for `meta backlog sync`.
+    #[command(hide = true)]
     Sync(SyncArgs),
     /// Hidden worker used by `meta listen` to supervise repeated agent turns.
     #[command(hide = true)]
@@ -167,6 +239,9 @@ pub struct ScanArgs {
     /// Repository root to scan.
     #[arg(long, value_name = "PATH", default_value = ".")]
     pub root: PathBuf,
+    /// Emit the scan result as JSON.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -187,6 +262,8 @@ pub struct BacklogArgs {
 pub enum BacklogCommands {
     /// Plan a backlog request into one or more Linear backlog issues.
     Plan(PlanArgs),
+    /// Review repo-scoped backlog issues for hygiene gaps and optionally apply improvements.
+    Improve(BacklogImproveArgs),
     /// Create a backlog sub-issue and local planning files from a parent issue.
     #[command(name = "tech", visible_alias = "split", visible_alias = "derive")]
     Tech(TechnicalArgs),
@@ -194,11 +271,133 @@ pub enum BacklogCommands {
     Sync(SyncArgs),
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+pub enum BacklogImproveModeArg {
+    Basic,
+    Advanced,
+}
+
+#[derive(Debug, Clone, Args)]
+#[command(after_help = BACKLOG_IMPROVE_HELP)]
+pub struct BacklogImproveArgs {
+    #[command(flatten)]
+    pub client: LinearClientArgs,
+    /// Optional explicit issue identifiers to improve. When omitted, scans repo-scoped backlog issues.
+    #[arg(value_name = "IDENTIFIER")]
+    pub issues: Vec<String>,
+    /// Improvement depth. `basic` focuses on safe metadata hygiene; `advanced` can rewrite more deeply and propose structure changes.
+    #[arg(long, value_enum, default_value_t = BacklogImproveModeArg::Basic)]
+    pub mode: BacklogImproveModeArg,
+    /// Backlog state to scan when no explicit issues are provided.
+    #[arg(long, default_value = "Backlog")]
+    pub state: String,
+    /// Maximum number of repo-scoped issues to scan when no explicit issues are provided.
+    #[arg(long, default_value_t = 25)]
+    pub limit: usize,
+    /// Apply the proposed updates after persisting the local artifact trail.
+    #[arg(long)]
+    pub apply: bool,
+    /// Override the configured default agent/provider for backlog improvement.
+    #[arg(long)]
+    pub agent: Option<String>,
+    /// Override the configured default model for backlog improvement.
+    #[arg(long)]
+    pub model: Option<String>,
+    /// Override the resolved built-in reasoning option for backlog improvement.
+    #[arg(long)]
+    pub reasoning: Option<String>,
+}
+
 #[derive(Debug, Clone, Args)]
 #[command(after_help = AGENTS_HELP_EXAMPLES)]
 pub struct AgentsArgs {
     #[command(subcommand)]
     pub command: AgentsCommands,
+}
+
+#[derive(Debug, Clone, Args)]
+#[command(after_help = WORKSPACE_HELP_EXAMPLES)]
+pub struct WorkspaceArgs {
+    #[command(subcommand)]
+    pub command: WorkspaceCommands,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum WorkspaceCommands {
+    /// List ticket workspace clones with local git safety signals plus Linear and optional PR status.
+    List(WorkspaceListArgs),
+    /// Remove one workspace clone or delete `target/` directories across all clones.
+    Clean(WorkspaceCleanArgs),
+    /// Remove completed workspace clones and print reclaimed-space summaries.
+    Prune(WorkspacePruneArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct WorkspaceListArgs {
+    #[command(flatten)]
+    pub client: LinearClientArgs,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct WorkspaceCleanArgs {
+    #[command(flatten)]
+    pub root: RepositoryRootArgs,
+    /// Ticket identifier to clean, for example ENG-10175.
+    #[arg(value_name = "TICKET", required_unless_present = "target_only")]
+    pub ticket: Option<String>,
+    /// Remove `target/` directories instead of deleting workspace clones.
+    #[arg(long)]
+    pub target_only: bool,
+    /// Skip confirmation before deleting a workspace clone.
+    #[arg(long)]
+    pub force: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct WorkspacePruneArgs {
+    #[command(flatten)]
+    pub client: LinearClientArgs,
+    /// Preview which clones would be removed without deleting anything.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Skip confirmation before removing workspace clones.
+    #[arg(long)]
+    pub force: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+#[command(after_help = UPGRADE_HELP_EXAMPLES)]
+pub struct UpgradeArgs {
+    /// Check the latest stable release and report whether this install is up to date.
+    #[arg(long, conflicts_with = "dry_run")]
+    pub check: bool,
+    /// Resolve the selected release and print the replacement plan without modifying the install.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Install a specific release version instead of the latest stable release.
+    #[arg(long, value_name = "VERSION")]
+    pub version: Option<String>,
+    /// Allow prerelease versions for explicit version requests or latest-release resolution.
+    #[arg(long)]
+    pub prerelease: bool,
+    /// Allow replacing the current install with an older version.
+    #[arg(long)]
+    pub allow_downgrade: bool,
+    /// Testing override for the GitHub Releases API root.
+    #[arg(long, hide = true, default_value = "https://api.github.com")]
+    pub github_api_url: String,
+    /// Testing override for the GitHub repository used for release discovery.
+    #[arg(long, hide = true, default_value = "metastack-systems/metastack-cli")]
+    pub repository: String,
+    /// Testing override for the executable path that should be replaced.
+    #[arg(long, hide = true, value_name = "PATH")]
+    pub executable_path: Option<PathBuf>,
+    /// Testing override for the detected operating system slug.
+    #[arg(long, hide = true, value_name = "OS")]
+    pub os: Option<String>,
+    /// Testing override for the detected architecture slug.
+    #[arg(long, hide = true, value_name = "ARCH")]
+    pub arch: Option<String>,
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -333,6 +532,9 @@ pub struct MergeArgs {
     /// Skip the one-shot dashboard and run the selected pull requests directly.
     #[arg(long, conflicts_with = "render_once")]
     pub no_interactive: bool,
+    /// Resume an existing merge run by run id under `.metastack/merge-runs/<RUN_ID>/`.
+    #[arg(long, value_name = "RUN_ID", conflicts_with_all = ["json", "render_once", "pull_requests"])]
+    pub resume_run: Option<String>,
     /// Repeatable pull request number used with `--no-interactive`.
     #[arg(long = "pull-request", value_name = "NUMBER")]
     pub pull_requests: Vec<u64>,
@@ -436,8 +638,11 @@ pub struct CronInitArgs {
     #[arg(long)]
     pub disabled: bool,
     /// Skip the dashboard flow and create directly from CLI flags.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "render_once")]
     pub no_interactive: bool,
+    /// Emit the cron-init result as JSON.
+    #[arg(long, conflicts_with = "render_once")]
+    pub json: bool,
     /// Render the cron init dashboard once to an in-memory buffer and print the snapshot.
     #[arg(long, hide = true)]
     pub render_once: bool,
@@ -483,12 +688,27 @@ pub struct CronDaemonArgs {
 pub struct PlanArgs {
     #[command(flatten)]
     pub client: LinearClientArgs,
+    /// Existing issue identifier to reshape in place, for example ENG-10144.
+    #[arg(value_name = "IDENTIFIER", conflicts_with = "request")]
+    pub target: Option<String>,
     /// Override the Linear team used for created backlog issues.
     #[arg(long)]
     pub team: Option<String>,
     /// Override the Linear project name attached to created backlog issues.
     #[arg(long)]
     pub project: Option<String>,
+    /// Override the Linear workflow state attached to created backlog issues.
+    #[arg(long)]
+    pub state: Option<String>,
+    /// Override the Linear priority attached to created backlog issues (1-4).
+    #[arg(long)]
+    pub priority: Option<u8>,
+    /// Add one or more extra Linear labels to created backlog issues.
+    #[arg(long = "label")]
+    pub labels: Vec<String>,
+    /// Override the assignee attached to created backlog issues. Supports `viewer`, user IDs, names, and emails.
+    #[arg(long)]
+    pub assignee: Option<String>,
     /// Prefill the initial planning request. Required when `--no-interactive` is used.
     #[arg(long)]
     pub request: Option<String>,
@@ -504,6 +724,18 @@ pub struct PlanArgs {
     /// Override the resolved built-in reasoning option for this planning run.
     #[arg(long)]
     pub reasoning: Option<String>,
+    /// Use the fast single-pass planning flow.
+    #[arg(long)]
+    pub fast: bool,
+    /// In fast mode, allow the generated plan to contain multiple tickets instead of the single-ticket default.
+    #[arg(long)]
+    pub multi: bool,
+    /// In fast mode, cap the one-round follow-up batch size between 0 and 10.
+    #[arg(long)]
+    pub questions: Option<usize>,
+    /// Skip the reshape diff preview and apply the in-place update immediately.
+    #[arg(long)]
+    pub velocity: bool,
     /// Skip the ratatui workflow and run directly from flags/stdin context.
     #[arg(long)]
     pub no_interactive: bool,
@@ -533,6 +765,72 @@ pub struct ConfigArgs {
     /// Update the global default built-in reasoning option.
     #[arg(long)]
     pub default_reasoning: Option<String>,
+    /// Update how many times `meta merge` will ask the agent to repair failed validation by default.
+    #[arg(long)]
+    pub merge_validation_repair_attempts: Option<String>,
+    /// Update how many transient validation reruns `meta merge` will allow before escalating.
+    #[arg(long)]
+    pub merge_validation_transient_retry_attempts: Option<String>,
+    /// Update how many times `meta merge` retries push and PR publication after transient remote failures.
+    #[arg(long)]
+    pub merge_publication_retry_attempts: Option<String>,
+    /// Update the default assignee used by backlog ticket creation.
+    #[arg(long)]
+    pub default_assignee: Option<String>,
+    /// Update the default state used by backlog ticket creation.
+    #[arg(long)]
+    pub default_state: Option<String>,
+    /// Update the default priority used by backlog ticket creation.
+    #[arg(long)]
+    pub default_priority: Option<String>,
+    /// Update the additive default labels used by backlog ticket creation. Pass `none` to clear them.
+    #[arg(long = "default-label")]
+    pub default_labels: Vec<String>,
+    /// Update the zero-prompt default project selector used by backlog ticket creation.
+    #[arg(long)]
+    pub velocity_project: Option<String>,
+    /// Update the zero-prompt default state used by backlog ticket creation.
+    #[arg(long)]
+    pub velocity_state: Option<String>,
+    /// Update zero-prompt auto-assignment for backlog ticket creation. Supported values: `viewer`.
+    #[arg(long)]
+    pub velocity_auto_assign: Option<String>,
+    /// Update the install-scoped default Linear project ID.
+    #[arg(long)]
+    pub project_id: Option<String>,
+    /// Update the install-scoped default listen label.
+    #[arg(long)]
+    pub listen_label: Option<String>,
+    /// Update the install-scoped listen assignee scope.
+    #[arg(long, value_enum)]
+    pub assignment_scope: Option<ListenAssignmentScopeArg>,
+    /// Update the install-scoped listen refresh policy.
+    #[arg(long, value_enum)]
+    pub refresh_policy: Option<ListenRefreshPolicyArg>,
+    /// Update the install-scoped listen poll interval (seconds).
+    #[arg(long)]
+    pub poll_interval: Option<String>,
+    /// Update the install-scoped plan follow-up question limit.
+    #[arg(long)]
+    pub plan_follow_up_limit: Option<String>,
+    /// Update the install-scoped default mode for `meta backlog plan`. Supported values: `normal`, `fast`, or `none`.
+    #[arg(long)]
+    pub plan_default_mode: Option<String>,
+    /// Update whether install-scoped fast planning defaults to a single ticket. Supported values: `true`, `false`, or `none`.
+    #[arg(long)]
+    pub plan_fast_single_ticket: Option<String>,
+    /// Update the install-scoped fast planning follow-up batch size.
+    #[arg(long)]
+    pub plan_fast_questions: Option<String>,
+    /// Enable or disable install-scoped vim navigation aliases for supported TUI flows.
+    #[arg(long, value_enum)]
+    pub vim_mode: Option<VimModeArg>,
+    /// Update the install-scoped default plan label.
+    #[arg(long)]
+    pub plan_label: Option<String>,
+    /// Update the install-scoped default technical label.
+    #[arg(long)]
+    pub technical_label: Option<String>,
     /// Set or update an advanced agent route override for a family key like `backlog` or a command key like `backlog.plan`.
     #[arg(long)]
     pub route: Option<String>,
@@ -551,8 +849,11 @@ pub struct ConfigArgs {
     /// Launch the dedicated advanced agent-routing dashboard instead of the primary simple config flow.
     #[arg(long)]
     pub advanced_routing: bool,
-    /// Emit the install-scoped config view as JSON instead of launching the dashboard.
+    /// Launch the shared first-run onboarding wizard instead of the manual config dashboard.
     #[arg(long)]
+    pub replay_onboarding: bool,
+    /// Emit the install-scoped config view as JSON instead of launching the dashboard.
+    #[arg(long, conflicts_with = "render_once")]
     pub json: bool,
     /// Render the config dashboard once to an in-memory buffer and print the snapshot.
     #[arg(long, hide = true)]
@@ -598,7 +899,7 @@ pub struct SetupArgs {
     /// Update the repo-scoped default built-in reasoning option.
     #[arg(long)]
     pub reasoning: Option<String>,
-    /// Update the label required for `meta listen` pickup.
+    /// Update the labels required for `meta listen` pickup. Provide a comma-separated list.
     #[arg(long)]
     pub listen_label: Option<String>,
     /// Update the assignee filter used by `meta listen`.
@@ -616,14 +917,44 @@ pub struct SetupArgs {
     /// Update the interactive `meta plan` follow-up question limit.
     #[arg(long)]
     pub interactive_plan_follow_up_question_limit: Option<String>,
+    /// Update the repo-scoped default mode for `meta backlog plan`. Supported values: `normal`, `fast`, or `none`.
+    #[arg(long)]
+    pub plan_default_mode: Option<String>,
+    /// Update whether repo-scoped fast planning defaults to a single ticket. Supported values: `true`, `false`, or `none`.
+    #[arg(long)]
+    pub plan_fast_single_ticket: Option<String>,
+    /// Update the repo-scoped fast planning follow-up batch size.
+    #[arg(long)]
+    pub plan_fast_questions: Option<String>,
     /// Update the default label applied to issues created by `meta plan`.
     #[arg(long)]
     pub plan_label: Option<String>,
     /// Update the default label applied to issues created by `meta backlog tech`.
     #[arg(long)]
     pub technical_label: Option<String>,
-    /// Emit the repo-scoped setup view as JSON instead of launching the dashboard.
+    /// Update the default assignee used by backlog ticket creation.
     #[arg(long)]
+    pub default_assignee: Option<String>,
+    /// Update the default state used by backlog ticket creation.
+    #[arg(long)]
+    pub default_state: Option<String>,
+    /// Update the default priority used by backlog ticket creation.
+    #[arg(long)]
+    pub default_priority: Option<String>,
+    /// Update the additive default labels used by backlog ticket creation. Pass `none` to clear them.
+    #[arg(long = "default-label")]
+    pub default_labels: Vec<String>,
+    /// Update the zero-prompt default project selector used by backlog ticket creation.
+    #[arg(long)]
+    pub velocity_project: Option<String>,
+    /// Update the zero-prompt default state used by backlog ticket creation.
+    #[arg(long)]
+    pub velocity_state: Option<String>,
+    /// Update zero-prompt auto-assignment for backlog ticket creation. Supported values: `viewer`.
+    #[arg(long)]
+    pub velocity_auto_assign: Option<String>,
+    /// Emit the repo-scoped setup view as JSON instead of launching the dashboard.
+    #[arg(long, conflicts_with = "render_once")]
     pub json: bool,
     /// Render the setup dashboard once to an in-memory buffer and print the snapshot.
     #[arg(long, hide = true)]
@@ -640,6 +971,7 @@ pub struct SetupArgs {
 }
 
 #[derive(Debug, Clone, Args)]
+#[command(after_help = LISTEN_HELP_EXAMPLES)]
 pub struct ListenArgs {
     #[command(subcommand)]
     pub command: Option<ListenCommands>,
@@ -665,7 +997,7 @@ pub enum ListenSessionCommands {
     List(ListenSessionListArgs),
     /// Inspect one stored MetaListen project session.
     Inspect(ListenSessionInspectArgs),
-    /// Clear one stored MetaListen project session.
+    /// Clear selected stored MetaListen project sessions.
     Clear(ListenSessionClearArgs),
     /// Resume listening for a stored MetaListen project session.
     Resume(Box<ListenSessionResumeArgs>),
@@ -676,6 +1008,9 @@ pub struct ListenSessionTargetArgs {
     /// Resolve the stored project session from this repository root.
     #[arg(long, value_name = "PATH", default_value = ".")]
     pub root: PathBuf,
+    /// Resolve the stored project session for this effective Linear project selector.
+    #[arg(long)]
+    pub project: Option<String>,
     /// Resolve the stored project session from an install-scoped project key.
     #[arg(long, value_name = "KEY")]
     pub project_key: Option<String>,
@@ -691,9 +1026,30 @@ pub struct ListenSessionInspectArgs {
 }
 
 #[derive(Debug, Clone, Args)]
+#[command(group(
+    ArgGroup::new("selector")
+        .required(true)
+        .multiple(false)
+        .args(["issue_identifier", "blocked", "completed", "stale", "all"])
+))]
 pub struct ListenSessionClearArgs {
     #[command(flatten)]
     pub target: ListenSessionTargetArgs,
+    /// Clear the stored session for this issue identifier, for example ENG-1234.
+    #[arg(value_name = "IDENTIFIER")]
+    pub issue_identifier: Option<String>,
+    /// Clear only blocked stored sessions.
+    #[arg(long)]
+    pub blocked: bool,
+    /// Clear only completed stored sessions.
+    #[arg(long)]
+    pub completed: bool,
+    /// Clear only stored sessions whose worker pid is no longer running.
+    #[arg(long)]
+    pub stale: bool,
+    /// Clear every stored session record for the selected project.
+    #[arg(long)]
+    pub all: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -734,15 +1090,18 @@ pub struct ListenRunArgs {
     /// Poll interval in seconds for the live daemon loop.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     pub poll_interval: Option<u64>,
-    /// Local port for the browser dashboard served by the live listener.
-    #[arg(long, default_value_t = 4000)]
-    pub dashboard_port: u16,
+    /// Watch Todo issues for all assignees during this run without changing repo setup.
+    #[arg(long)]
+    pub all_assignees: bool,
     /// Run listen prerequisite checks and exit without polling Linear or starting the daemon.
     #[arg(long, conflicts_with_all = ["once", "render_once", "demo"])]
     pub check: bool,
     /// Execute a single live poll cycle and print a textual summary.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "render_once")]
     pub once: bool,
+    /// Emit the single poll-cycle result as JSON. Requires `--once`.
+    #[arg(long, conflicts_with = "render_once")]
+    pub json: bool,
     /// Execute a single cycle and print a deterministic ratatui snapshot.
     #[arg(long)]
     pub render_once: bool,
@@ -773,6 +1132,21 @@ pub struct TechnicalArgs {
     /// Optional parent issue identifier, for example MET-35.
     #[arg(value_name = "IDENTIFIER")]
     pub issue: Option<String>,
+    /// Override the Linear workflow state attached to created backlog issues.
+    #[arg(long)]
+    pub state: Option<String>,
+    /// Override the Linear priority attached to created backlog issues (1-4).
+    #[arg(long)]
+    pub priority: Option<u8>,
+    /// Add one or more extra Linear labels to created backlog issues.
+    #[arg(long = "label")]
+    pub labels: Vec<String>,
+    /// Override the assignee attached to created backlog issues. Supports `viewer`, user IDs, names, and emails.
+    #[arg(long)]
+    pub assignee: Option<String>,
+    /// Skip the ratatui workflow and require explicit input instead of prompting.
+    #[arg(long)]
+    pub no_interactive: bool,
     /// Override the configured default agent/provider for backlog generation.
     #[arg(long)]
     pub agent: Option<String>,
@@ -791,8 +1165,11 @@ pub struct SyncArgs {
     #[command(subcommand)]
     pub command: Option<SyncCommands>,
     /// Skip interactive sync pickers and require explicit command arguments.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "render_once")]
     pub no_interactive: bool,
+    /// Emit direct sync-command results as JSON.
+    #[arg(long, conflicts_with = "render_once")]
+    pub json: bool,
     /// Filter to a specific project name (overrides the repo default).
     #[arg(long)]
     pub project: Option<String>,
@@ -870,6 +1247,9 @@ pub struct ListenWorkerArgs {
     /// Repository root whose listen state should be updated.
     #[arg(long, value_name = "PATH")]
     pub source_root: PathBuf,
+    /// Effective Linear project selector for the listener session store.
+    #[arg(long)]
+    pub project: Option<String>,
     /// Workspace checkout where the agent should run.
     #[arg(long, value_name = "PATH")]
     pub workspace: PathBuf,
@@ -924,6 +1304,8 @@ pub struct RunAgentArgs {
     pub reasoning: Option<String>,
     /// Override the configured transport for this launch.
     pub transport: Option<PromptTransportArg>,
+    /// Ordered prompt image attachments for built-in provider launches.
+    pub attachments: Vec<PromptImageAttachment>,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -1028,7 +1410,7 @@ pub struct IssueListArgs {
     #[arg(long)]
     pub state: Option<String>,
     /// Emit raw JSON instead of a table.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "render_once")]
     pub json: bool,
     /// Render the issue browser once to an in-memory buffer and print the snapshot.
     #[arg(long, hide = true)]
@@ -1065,7 +1447,7 @@ pub struct IssueCreateArgs {
     #[arg(long, value_parser = clap::value_parser!(u8).range(0..=4))]
     pub priority: Option<u8>,
     /// Skip the ratatui workflow and create directly from CLI flags.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "render_once")]
     pub no_interactive: bool,
     /// Render the create form once to an in-memory buffer and print the snapshot.
     #[arg(long, hide = true)]
@@ -1102,7 +1484,7 @@ pub struct IssueEditArgs {
     #[arg(long, value_parser = clap::value_parser!(u8).range(0..=4))]
     pub priority: Option<u8>,
     /// Skip the ratatui workflow and update directly from CLI flags.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "render_once")]
     pub no_interactive: bool,
     /// Render the edit form once to an in-memory buffer and print the snapshot.
     #[arg(long, hide = true)]
@@ -1119,6 +1501,7 @@ pub struct IssueEditArgs {
 }
 
 #[derive(Debug, Clone, Args)]
+#[command(after_help = ISSUES_REFINE_HELP)]
 pub struct IssueRefineArgs {
     /// One or more existing issue identifiers, for example MET-35.
     #[arg(value_name = "IDENTIFIER", required = true)]
@@ -1129,6 +1512,9 @@ pub struct IssueRefineArgs {
     /// Update the local backlog packet and push the final rewrite back to Linear.
     #[arg(long)]
     pub apply: bool,
+    /// Emit refinement results as JSON.
+    #[arg(long)]
+    pub json: bool,
     /// Override the configured default agent/provider for refinement.
     #[arg(long)]
     pub agent: Option<String>,
@@ -1233,6 +1619,11 @@ pub enum SyncDashboardEventArg {
 pub enum MergeDashboardEventArg {
     Up,
     Down,
+    Tab,
+    PageUp,
+    PageDown,
+    Home,
+    End,
     Space,
     Enter,
     Back,
@@ -1283,13 +1674,20 @@ pub enum PromptTransportArg {
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum ListenAssignmentScopeArg {
     Any,
-    Viewer,
+    ViewerOnly,
+    ViewerOrUnassigned,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum ListenRefreshPolicyArg {
     ReuseAndRefresh,
     RecreateFromOriginMain,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum VimModeArg {
+    Enabled,
+    Disabled,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -1300,4 +1698,200 @@ pub enum ConfigEventArg {
     BackTab,
     Enter,
     Esc,
+}
+
+impl Cli {
+    /// Infer the machine-output command from raw argv when clap parsing fails before dispatch.
+    pub(crate) fn machine_output_command_from_argv(args: &[OsString]) -> Option<&'static str> {
+        let tokens = args
+            .iter()
+            .skip(1)
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        infer_machine_output_command(&tokens)
+    }
+
+    pub(crate) fn machine_output_command(&self) -> Option<&'static str> {
+        match &self.command {
+            Command::Backlog(args) => match &args.command {
+                BacklogCommands::Plan(args) if args.no_interactive => Some("backlog.plan"),
+                BacklogCommands::Tech(args) if args.no_interactive => Some("backlog.tech"),
+                BacklogCommands::Sync(args) if args.no_interactive || args.json => {
+                    Some("backlog.sync")
+                }
+                _ => None,
+            },
+            Command::Agents(args) => match &args.command {
+                AgentsCommands::Listen(args) if args.run.json => Some("agents.listen"),
+                _ => None,
+            },
+            Command::Linear(args) => match &args.command {
+                LinearCommands::Projects(ProjectsCommands::List(args)) if args.json => {
+                    Some("linear.projects.list")
+                }
+                LinearCommands::Issues(command) => match command {
+                    IssueCommands::List(args) if args.json => Some("linear.issues.list"),
+                    IssueCommands::Create(args) if args.no_interactive => {
+                        Some("linear.issues.create")
+                    }
+                    IssueCommands::Edit(args) if args.no_interactive => Some("linear.issues.edit"),
+                    IssueCommands::Refine(args) if args.json => Some("linear.issues.refine"),
+                    _ => None,
+                },
+                _ => None,
+            },
+            Command::Context(args) => match &args.command {
+                ContextCommands::Scan(args) if args.json => Some("context.scan"),
+                _ => None,
+            },
+            Command::Runtime(args) => match &args.command {
+                RuntimeCommands::Config(args) if args.json => Some("runtime.config"),
+                RuntimeCommands::Setup(args) if args.json => Some("runtime.setup"),
+                RuntimeCommands::Cron(args) => match &args.command {
+                    CronCommands::Init(args) if args.no_interactive || args.json => {
+                        Some("runtime.cron.init")
+                    }
+                    _ => None,
+                },
+                _ => None,
+            },
+            Command::Merge(args) if args.json => Some("merge"),
+            Command::Plan(args) if args.no_interactive => Some("backlog.plan"),
+            Command::Technical(args) if args.no_interactive => Some("backlog.tech"),
+            Command::Listen(args) if args.run.json => Some("agents.listen"),
+            Command::Issues(args) => match &args.command {
+                IssueCommands::List(args) if args.json => Some("linear.issues.list"),
+                IssueCommands::Create(args) if args.no_interactive => Some("linear.issues.create"),
+                IssueCommands::Edit(args) if args.no_interactive => Some("linear.issues.edit"),
+                IssueCommands::Refine(args) if args.json => Some("linear.issues.refine"),
+                _ => None,
+            },
+            Command::Projects(args) => match &args.command {
+                ProjectsCommands::List(args) if args.json => Some("linear.projects.list"),
+                _ => None,
+            },
+            Command::Cron(args) => match &args.command {
+                CronCommands::Init(args) if args.no_interactive || args.json => {
+                    Some("runtime.cron.init")
+                }
+                _ => None,
+            },
+            Command::Scan(args) if args.json => Some("context.scan"),
+            Command::Config(args) if args.json => Some("runtime.config"),
+            Command::Setup(args) if args.json => Some("runtime.setup"),
+            Command::Sync(args) if args.no_interactive || args.json => Some("backlog.sync"),
+            _ => None,
+        }
+    }
+}
+
+fn infer_machine_output_command(tokens: &[String]) -> Option<&'static str> {
+    let (command, rest) = tokens.split_first()?;
+    match command.as_str() {
+        "backlog" => infer_backlog_machine_output(rest),
+        "agents" => infer_agents_machine_output(rest),
+        "linear" => infer_linear_machine_output(rest),
+        "context" => {
+            if matches_subcommand(rest, "scan") && has_flag(rest, "--json") {
+                Some("context.scan")
+            } else {
+                None
+            }
+        }
+        "runtime" => infer_runtime_machine_output(rest),
+        "merge" if has_flag(rest, "--json") => Some("merge"),
+        "plan" if has_flag(rest, "--no-interactive") => Some("backlog.plan"),
+        "technical" if has_flag(rest, "--no-interactive") => Some("backlog.tech"),
+        "listen" if has_flag(rest, "--json") => Some("agents.listen"),
+        "issues" => infer_issue_machine_output(rest),
+        "projects" => {
+            if matches_subcommand(rest, "list") && has_flag(rest, "--json") {
+                Some("linear.projects.list")
+            } else {
+                None
+            }
+        }
+        "cron" => infer_cron_init_machine_output(rest),
+        "scan" if has_flag(rest, "--json") => Some("context.scan"),
+        "config" if has_flag(rest, "--json") => Some("runtime.config"),
+        "setup" if has_flag(rest, "--json") => Some("runtime.setup"),
+        "sync" if has_flag(rest, "--json") || has_flag(rest, "--no-interactive") => {
+            Some("backlog.sync")
+        }
+        _ => None,
+    }
+}
+
+fn infer_backlog_machine_output(tokens: &[String]) -> Option<&'static str> {
+    let (command, rest) = tokens.split_first()?;
+    match command.as_str() {
+        "plan" if has_flag(rest, "--no-interactive") => Some("backlog.plan"),
+        "tech" | "split" | "derive" if has_flag(rest, "--no-interactive") => Some("backlog.tech"),
+        "sync" if has_flag(rest, "--json") || has_flag(rest, "--no-interactive") => {
+            Some("backlog.sync")
+        }
+        _ => None,
+    }
+}
+
+fn infer_agents_machine_output(tokens: &[String]) -> Option<&'static str> {
+    let (command, rest) = tokens.split_first()?;
+    match command.as_str() {
+        "listen" if has_flag(rest, "--json") => Some("agents.listen"),
+        _ => None,
+    }
+}
+
+fn infer_linear_machine_output(tokens: &[String]) -> Option<&'static str> {
+    let (command, rest) = tokens.split_first()?;
+    match command.as_str() {
+        "projects" => {
+            if matches_subcommand(rest, "list") && has_flag(rest, "--json") {
+                Some("linear.projects.list")
+            } else {
+                None
+            }
+        }
+        "issues" => infer_issue_machine_output(rest),
+        _ => None,
+    }
+}
+
+fn infer_issue_machine_output(tokens: &[String]) -> Option<&'static str> {
+    let (command, rest) = tokens.split_first()?;
+    match command.as_str() {
+        "list" if has_flag(rest, "--json") => Some("linear.issues.list"),
+        "create" if has_flag(rest, "--no-interactive") => Some("linear.issues.create"),
+        "edit" if has_flag(rest, "--no-interactive") => Some("linear.issues.edit"),
+        "refine" if has_flag(rest, "--json") => Some("linear.issues.refine"),
+        _ => None,
+    }
+}
+
+fn infer_runtime_machine_output(tokens: &[String]) -> Option<&'static str> {
+    let (command, rest) = tokens.split_first()?;
+    match command.as_str() {
+        "config" if has_flag(rest, "--json") => Some("runtime.config"),
+        "setup" if has_flag(rest, "--json") => Some("runtime.setup"),
+        "cron" => infer_cron_init_machine_output(rest),
+        _ => None,
+    }
+}
+
+fn infer_cron_init_machine_output(tokens: &[String]) -> Option<&'static str> {
+    if matches_subcommand(tokens, "init")
+        && (has_flag(tokens, "--json") || has_flag(tokens, "--no-interactive"))
+    {
+        Some("runtime.cron.init")
+    } else {
+        None
+    }
+}
+
+fn matches_subcommand(tokens: &[String], name: &str) -> bool {
+    matches!(tokens.first(), Some(token) if token == name)
+}
+
+fn has_flag(tokens: &[String], flag: &str) -> bool {
+    tokens.iter().any(|token| token == flag)
 }

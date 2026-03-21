@@ -9,9 +9,13 @@ use time::{OffsetDateTime, UtcOffset};
 use walkdir::WalkDir;
 
 use crate::fs::{PlanningPaths, write_text_file};
+use crate::linear::load_localized_ticket_context_ignored_paths;
 
 pub const INDEX_FILE_NAME: &str = "index.md";
 pub const METADATA_FILE_NAME: &str = ".linear.json";
+pub const TICKET_DISCUSSION_FILE_NAME: &str = "context/ticket-discussion.md";
+pub const TICKET_IMAGE_MANIFEST_FILE_NAME: &str = "artifacts/ticket-images.md";
+pub const TICKET_IMAGE_DIR_NAME: &str = "artifacts/ticket-images";
 const CANONICAL_PLACEHOLDERS: &[&str] = &[
     "{{BACKLOG_TITLE}}",
     "{{BACKLOG_SLUG}}",
@@ -160,6 +164,8 @@ pub struct BacklogIssueMetadata {
     pub remote_hash: Option<String>,
     #[serde(default)]
     pub last_sync_at: Option<String>,
+    #[serde(default)]
+    pub last_pulled_comment_ids: Vec<String>,
     #[serde(default)]
     pub managed_files: Vec<ManagedFileRecord>,
 }
@@ -350,6 +356,7 @@ pub fn write_issue_attachment_file(
 }
 
 pub fn collect_local_sync_files(issue_dir: &Path) -> Result<Vec<LocalBacklogFile>> {
+    let ignored_paths = load_localized_ticket_context_ignored_paths(issue_dir)?;
     let mut files = WalkDir::new(issue_dir)
         .into_iter()
         .filter_entry(|entry| {
@@ -368,7 +375,11 @@ pub fn collect_local_sync_files(issue_dir: &Path) -> Result<Vec<LocalBacklogFile
             Ok(_) => None,
             Err(error) => Some(Err(error)),
         })
-        .map(|entry| -> Result<LocalBacklogFile> {
+        .map(|entry| match entry {
+            Ok(entry) => Ok(entry),
+            Err(error) => Err(error),
+        })
+        .map(|entry| -> Result<Option<LocalBacklogFile>> {
             let entry = entry.with_context(|| {
                 format!(
                     "failed to traverse backlog issue directory `{}`",
@@ -376,22 +387,44 @@ pub fn collect_local_sync_files(issue_dir: &Path) -> Result<Vec<LocalBacklogFile
                 )
             })?;
             let relative_path = relative_path(issue_dir, entry.path())?;
+            if ignored_paths.contains(&relative_path) {
+                return Ok(None);
+            }
 
             let contents = fs::read(entry.path())
                 .with_context(|| format!("failed to read `{}`", entry.path().display()))?;
 
-            Ok(LocalBacklogFile {
+            Ok(Some(LocalBacklogFile {
                 title: relative_path.clone(),
                 content_type: content_type_for_path(entry.path()),
                 absolute_path: entry.into_path(),
                 relative_path,
                 contents,
-            })
+            }))
+        })
+        .filter_map(|result| match result {
+            Ok(Some(file)) => Some(Ok(file)),
+            Ok(None) => None,
+            Err(error) => Some(Err(error)),
         })
         .collect::<Result<Vec<_>>>()?;
 
     files.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
     Ok(files)
+}
+
+pub fn collect_remote_managed_sync_files(issue_dir: &Path) -> Result<Vec<LocalBacklogFile>> {
+    Ok(collect_local_sync_files(issue_dir)?
+        .into_iter()
+        .filter(|file| is_remote_managed_sync_relative_path(&file.relative_path))
+        .collect())
+}
+
+pub fn is_remote_managed_sync_relative_path(relative_path: &str) -> bool {
+    !matches!(
+        relative_path,
+        TICKET_DISCUSSION_FILE_NAME | TICKET_IMAGE_MANIFEST_FILE_NAME
+    ) && !relative_path.starts_with(&format!("{TICKET_IMAGE_DIR_NAME}/"))
 }
 
 /// Compute the deterministic local sync hash for tracked backlog files in an issue directory.
@@ -403,7 +436,7 @@ pub fn compute_local_sync_hash(issue_dir: &Path) -> Result<Option<String>> {
         return Ok(None);
     }
 
-    let files = collect_local_sync_files(issue_dir)?;
+    let files = collect_remote_managed_sync_files(issue_dir)?;
     Ok(Some(hash_local_backlog_files(&files)))
 }
 
@@ -734,6 +767,7 @@ mod tests {
                 local_hash: None,
                 remote_hash: None,
                 last_sync_at: None,
+                last_pulled_comment_ids: Vec::new(),
                 managed_files: Vec::<ManagedFileRecord>::new(),
             }),
             Some("local".to_string()),

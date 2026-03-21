@@ -66,7 +66,8 @@ pub fn render_bootstrap_workpad(
     lines.extend([
         "- [ ] 3\\. Validate, publish, and prepare the change for review".to_string(),
         "  - [ ] 3.1 Run focused tests plus required quality gates".to_string(),
-        "  - [ ] 3.2 Commit, push, and attach the PR to the Linear issue".to_string(),
+        "  - [ ] 3.2 Commit and push the branch so shared automation can publish the draft PR"
+            .to_string(),
         String::new(),
         "### Acceptance Criteria".to_string(),
         String::new(),

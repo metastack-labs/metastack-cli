@@ -1,8 +1,8 @@
 use anyhow::{Result, anyhow, bail};
 
 use crate::linear::{
-    IssueCreateRequest, IssueCreateSpec, IssueEditContext, IssueEditSpec, IssueListFilters,
-    IssueSummary, IssueUpdateRequest, LinearClient,
+    IssueAssigneeFilter, IssueCreateRequest, IssueCreateSpec, IssueEditContext, IssueEditSpec,
+    IssueListFilters, IssueSummary, IssueUpdateRequest, LinearClient,
 };
 
 use super::{
@@ -16,6 +16,7 @@ struct IssueListSelection {
     project: Option<String>,
     project_id: Option<String>,
     state: Option<String>,
+    assignee: IssueAssigneeFilter,
     limit: usize,
 }
 
@@ -26,6 +27,7 @@ impl IssueListSelection {
             project: filters.project,
             project_id: filters.project_id,
             state: filters.state,
+            assignee: filters.assignee,
             limit: filters.limit.max(1),
         }
     }
@@ -35,6 +37,7 @@ impl IssueListSelection {
             || self.project.is_some()
             || self.project_id.is_some()
             || self.state.is_some()
+            || !matches!(self.assignee, IssueAssigneeFilter::Any)
     }
 }
 
@@ -51,6 +54,7 @@ where
                     project: selection.project.clone(),
                     project_id: selection.project_id.clone(),
                     state: selection.state.clone(),
+                    assignee: selection.assignee.clone(),
                     limit: selection.limit,
                 })
                 .await?
@@ -89,6 +93,27 @@ where
                     .map(|entry| entry.name.eq_ignore_ascii_case(state))
                     .unwrap_or(false)
             });
+        }
+        match &selection.assignee {
+            IssueAssigneeFilter::Any => {}
+            IssueAssigneeFilter::Viewer { viewer_id } => {
+                issues.retain(|issue| {
+                    issue
+                        .assignee
+                        .as_ref()
+                        .map(|assignee| assignee.id == *viewer_id)
+                        .unwrap_or(false)
+                });
+            }
+            IssueAssigneeFilter::ViewerOrUnassigned { viewer_id } => {
+                issues.retain(|issue| {
+                    issue
+                        .assignee
+                        .as_ref()
+                        .map(|assignee| assignee.id == *viewer_id)
+                        .unwrap_or(true)
+                });
+            }
         }
 
         issues.sort_by(|left, right| left.identifier.cmp(&right.identifier));
@@ -157,7 +182,9 @@ where
                 Some(&team.key),
             )
             .await?;
-        let label_ids = self.resolve_label_ids(&spec.labels, &team.key).await?;
+        let label_ids = self
+            .ensure_and_resolve_label_ids(Some(team.key.clone()), &spec.labels)
+            .await?;
 
         self.client
             .create_issue(IssueCreateRequest {
@@ -168,6 +195,7 @@ where
                 parent_id: spec.parent_id,
                 state_id,
                 priority: spec.priority,
+                assignee_id: spec.assignee_id,
                 label_ids,
             })
             .await
@@ -180,12 +208,41 @@ where
         let project_id = self
             .resolve_project_id(spec.project.as_deref(), None, Some(&issue.team.key))
             .await?;
+        let label_ids = match spec.labels.as_ref() {
+            Some(labels) => Some(
+                self.ensure_and_resolve_label_ids(Some(issue.team.key.clone()), labels)
+                    .await?,
+            ),
+            None => None,
+        };
+        let parent_id = match spec.parent_identifier.as_deref() {
+            Some(parent_identifier) => {
+                if issue.identifier.eq_ignore_ascii_case(parent_identifier) {
+                    bail!("issue `{}` cannot be its own parent", issue.identifier);
+                }
+                let parent = self.load_issue(parent_identifier).await?;
+                if !parent.team.key.eq_ignore_ascii_case(&issue.team.key) {
+                    bail!(
+                        "parent issue `{}` belongs to team `{}`, but `{}` belongs to `{}`",
+                        parent.identifier,
+                        parent.team.key,
+                        issue.identifier,
+                        issue.team.key
+                    );
+                }
+                Some(parent.id)
+            }
+            None => None,
+        };
 
         if spec.title.is_none()
             && spec.description.is_none()
             && spec.project.is_none()
             && spec.state.is_none()
             && spec.priority.is_none()
+            && spec.estimate.is_none()
+            && label_ids.is_none()
+            && parent_id.is_none()
         {
             bail!("no issue fields were provided to edit");
         }
@@ -199,6 +256,9 @@ where
                     project_id,
                     state_id,
                     priority: spec.priority,
+                    estimate: spec.estimate,
+                    label_ids,
+                    parent_id,
                 },
             )
             .await

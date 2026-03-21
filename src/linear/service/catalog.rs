@@ -33,6 +33,7 @@ where
                 project: filters.project.clone(),
                 project_id: filters.project_id.clone(),
                 state: None,
+                assignee: crate::linear::IssueAssigneeFilter::Any,
                 limit: filters.limit.max(1),
             })
             .await?;

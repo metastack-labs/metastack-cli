@@ -62,6 +62,9 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Install interactive test dependency
+        run: sudo apt-get update && sudo apt-get install --yes expect
+
       - name: Run root quality gate
         run: make quality
 
