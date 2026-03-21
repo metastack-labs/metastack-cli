@@ -36,6 +36,20 @@ case "$METASTACK_AGENT_PROMPT" in
   *"Return JSON only using this exact shape"*)
     printf '%s' '{"questions":["Who is the primary user for this workflow?","What should stay explicitly out of scope?"]}'
     ;;
+  *"Return an invalid SPEC missing required headings"*)
+    printf '%s' '# OVERVIEW
+
+This response is intentionally incomplete.
+
+## GOALS
+
+- Prove the validator rejects malformed SPEC output.
+
+## FEATURES
+
+- Skip one required heading on purpose.
+'
+    ;;
   *"Mode: Improve SPEC"*)
     printf '%s' '# OVERVIEW
 
@@ -187,6 +201,34 @@ fn spec_command_improves_existing_repo_local_spec() -> Result<(), Box<dyn Error>
     let prompt = fs::read_to_string(output_dir.join("prompt-1.txt"))?;
     assert!(prompt.contains("Old overview."));
     assert!(!repo_root.join(".metastack/backlog").exists());
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn spec_command_rejects_generated_spec_missing_required_headings() -> Result<(), Box<dyn Error>> {
+    let (_temp, repo_root, config_path, output_dir) = setup_spec_repo()?;
+
+    cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &output_dir)
+        .args([
+            "backlog",
+            "spec",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--no-interactive",
+            "--request",
+            "Return an invalid SPEC missing required headings",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "generated SPEC is missing the required `NON-GOALS` heading",
+        ));
+
+    assert!(!repo_root.join(".metastack/SPEC.md").exists());
 
     Ok(())
 }
