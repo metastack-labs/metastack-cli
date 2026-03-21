@@ -4,6 +4,7 @@
 
 - `cargo test --test commands meta_backlog_spec_help_exposes_new_subcommand`
 - `cargo test --test backlog_spec`
+- `cargo test --lib backlog_spec::tests::zero_follow_up_questions_skip_to_generation_loading`
 - `cargo clippy --all-targets --all-features -- -D warnings`
 - `make quality`
 - direct create/improve CLI proof via `cargo run -- backlog spec ...` against an isolated temp repo with a deterministic local agent stub
@@ -19,6 +20,9 @@
   - proved repeat-run improvement revises the existing SPEC in place and includes prior SPEC content in the generation prompt
   - proved render-once coverage for the request, follow-up, loading, and review states without writing `.metastack/SPEC.md`
   - proved malformed generated output missing required uppercase headings is rejected
+- `cargo test --lib backlog_spec::tests::zero_follow_up_questions_skip_to_generation_loading`
+  - passed
+  - proved the interactive flow skips the empty follow-up interview state and transitions straight into SPEC generation loading when the agent returns zero questions
 - `cargo clippy --all-targets --all-features -- -D warnings`
   - passed
   - confirmed the new `meta backlog spec` flow, embedded instruction contract, and route-key wiring stay warning-free

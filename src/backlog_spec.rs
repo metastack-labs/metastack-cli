@@ -184,10 +184,14 @@ enum RecoveryStage {
 }
 
 struct BacklogSpecApp {
+    root: PathBuf,
     mode: SpecMode,
     spec_path: PathBuf,
     existing_spec: Option<String>,
     prefilled_answers: Vec<String>,
+    agent: Option<String>,
+    model: Option<String>,
+    reasoning: Option<String>,
     stage: SpecStage,
     pending: Option<PendingJob>,
 }
@@ -332,7 +336,17 @@ fn run_interactive_spec_flow(
     model: Option<String>,
     reasoning: Option<String>,
 ) -> Result<InteractiveExit> {
-    let mut app = BacklogSpecApp::new(mode, spec_path, existing_spec, initial_request, answers);
+    let mut app = BacklogSpecApp::new(
+        root.to_path_buf(),
+        mode,
+        spec_path,
+        existing_spec,
+        initial_request,
+        answers,
+        agent.clone(),
+        model.clone(),
+        reasoning.clone(),
+    );
 
     let mut stdout = io::stdout();
     enable_raw_mode().context("failed to enable raw mode for SPEC workflow")?;
@@ -393,11 +407,15 @@ fn render_once_snapshot(
     let mut terminal =
         Terminal::new(backend).context("failed to initialize render-once backend")?;
     let mut app = BacklogSpecApp::new(
+        root.to_path_buf(),
         mode,
         spec_path.to_path_buf(),
         existing_spec,
         initial_request,
         answers,
+        None,
+        None,
+        None,
     );
 
     for action in actions {
@@ -459,18 +477,27 @@ fn render_once_snapshot(
 }
 
 impl BacklogSpecApp {
+    #[allow(clippy::too_many_arguments)]
     fn new(
+        root: PathBuf,
         mode: SpecMode,
         spec_path: PathBuf,
         existing_spec: Option<String>,
         initial_request: Option<String>,
         prefilled_answers: Vec<String>,
+        agent: Option<String>,
+        model: Option<String>,
+        reasoning: Option<String>,
     ) -> Self {
         Self {
+            root,
             mode,
             spec_path,
             existing_spec,
             prefilled_answers,
+            agent,
+            model,
+            reasoning,
             stage: SpecStage::Request(RequestApp {
                 mode,
                 request: InputFieldState::multiline(initial_request.unwrap_or_default()),
@@ -810,6 +837,10 @@ fn finish_pending(app: &mut BacklogSpecApp, result: Result<PendingResult>) -> Re
 
     match result {
         Ok(PendingResult::Questions(questions)) => {
+            let request = match pending.recovery_stage {
+                RecoveryStage::Request(request) => request.request.value().trim().to_string(),
+                RecoveryStage::Questions(questions) => questions.request,
+            };
             let question_answers = questions
                 .into_iter()
                 .enumerate()
@@ -823,10 +854,19 @@ fn finish_pending(app: &mut BacklogSpecApp, result: Result<PendingResult>) -> Re
                     ),
                 })
                 .collect::<Vec<_>>();
-            let request = match pending.recovery_stage {
-                RecoveryStage::Request(request) => request.request.value().trim().to_string(),
-                RecoveryStage::Questions(questions) => questions.request,
-            };
+            if question_answers.is_empty() {
+                let root = app.root.clone();
+                start_generation(
+                    app,
+                    &root,
+                    request,
+                    Vec::new(),
+                    app.agent.clone(),
+                    app.model.clone(),
+                    app.reasoning.clone(),
+                );
+                return Ok(());
+            }
             app.stage = SpecStage::Questions(QuestionsApp {
                 mode: app.mode,
                 request,
@@ -1586,11 +1626,15 @@ mod tests {
     #[test]
     fn shift_enter_keeps_request_stage_open_and_inserts_newline() {
         let mut app = BacklogSpecApp::new(
+            PathBuf::from("."),
             SpecMode::Create,
             PathBuf::from(".metastack/SPEC.md"),
             None,
             Some("Line 1".to_string()),
             Vec::new(),
+            None,
+            None,
+            None,
         );
 
         let exit = app
@@ -1613,10 +1657,14 @@ mod tests {
     #[test]
     fn shift_enter_keeps_question_stage_open_and_inserts_newline() {
         let mut app = BacklogSpecApp {
+            root: PathBuf::from("."),
             mode: SpecMode::Create,
             spec_path: PathBuf::from(".metastack/SPEC.md"),
             existing_spec: None,
             prefilled_answers: Vec::new(),
+            agent: None,
+            model: None,
+            reasoning: None,
             stage: SpecStage::Questions(QuestionsApp {
                 mode: SpecMode::Create,
                 request: "Draft a repo-local spec".to_string(),
@@ -1647,5 +1695,48 @@ mod tests {
             }
             other => panic!("expected questions stage, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn zero_follow_up_questions_skip_to_generation_loading() {
+        let mut app = BacklogSpecApp {
+            root: PathBuf::from("."),
+            mode: SpecMode::Create,
+            spec_path: PathBuf::from(".metastack/SPEC.md"),
+            existing_spec: None,
+            prefilled_answers: Vec::new(),
+            agent: None,
+            model: None,
+            reasoning: None,
+            stage: SpecStage::Loading(LoadingApp {
+                mode: SpecMode::Create,
+                phase: PendingKind::Questions,
+                detail: "Reviewing repository context".to_string(),
+                spinner_index: 0,
+            }),
+            pending: Some(PendingJob {
+                receiver: mpsc::channel().1,
+                recovery_stage: RecoveryStage::Request(RequestApp {
+                    mode: SpecMode::Create,
+                    request: InputFieldState::multiline("Draft a repo-local spec"),
+                    error: None,
+                }),
+            }),
+        };
+
+        finish_pending(&mut app, Ok(PendingResult::Questions(Vec::new())))
+            .expect("zero-question result should transition cleanly");
+
+        match app.stage {
+            SpecStage::Loading(LoadingApp {
+                phase: PendingKind::Generate,
+                ref detail,
+                ..
+            }) => {
+                assert!(detail.contains(".metastack/SPEC.md"));
+            }
+            other => panic!("expected generation loading stage, got {other:?}"),
+        }
+        assert!(app.pending.is_some());
     }
 }
