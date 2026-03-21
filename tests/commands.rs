@@ -154,6 +154,9 @@ fn agents_listen_help_describes_session_browser_navigation() {
             "Use Up/Down (or j/k when vim mode is enabled)",
         ))
         .stdout(predicate::str::contains(
+            "Esc or Backspace to close detail mode",
+        ))
+        .stdout(predicate::str::contains(
             "Missing or malformed session detail artifacts do not block the list view",
         ));
 }

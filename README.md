@@ -970,7 +970,8 @@ selection, renders a compact `PR` badge (`none`, `draft #N`, `ready #N`), and op
 detail pane with `Enter`. That drill-down shows the selected session's milestones, workspace and
 backlog references, prompt-context references, PR publication state, and short log excerpts from
 the install-scoped session detail artifact. Use `Up` / `Down` or `j` / `k` to move between
-sessions, `Esc` to close detail mode, and `PgUp` / `PgDn` to scroll the focused detail pane.
+sessions, `Esc` or `Backspace` to close detail mode, and `PgUp` / `PgDn` to scroll the focused
+detail pane.
 Examples:
 
 ```bash

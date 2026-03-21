@@ -641,7 +641,7 @@ fn render_session_detail_text(
 
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "Esc closes detail. PgUp/PgDn scroll.",
+        "Esc/Backspace close detail. PgUp/PgDn scroll.",
         Style::default().fg(Color::DarkGray),
     )));
 
@@ -808,9 +808,11 @@ fn snapshot(backend: &TestBackend) -> String {
 mod tests {
     use std::path::Path;
 
+    use ratatui::text::Line;
+
     use super::{
         SessionBrowserState, render_dashboard, render_dashboard_with_state,
-        render_dashboard_with_view,
+        render_dashboard_with_view, render_session_detail_text,
     };
     use crate::listen::{
         DashboardRuntimeContext, ListenCycleData, SessionListView, SessionPhase,
@@ -1071,5 +1073,42 @@ mod tests {
         .expect("detail snapshot should render");
 
         assert!(snapshot.contains("Recent Log Excerpts"));
+    }
+
+    #[test]
+    fn selected_session_detail_text_mentions_backspace_close_alias() {
+        let cycle = demo_cycle();
+        let data = build_dashboard_data(
+            &cycle,
+            &DashboardRuntimeContext {
+                started_at_epoch_seconds: 1_773_568_249,
+                now_epoch_seconds: 1_773_575_600,
+                poll_interval_seconds: 7,
+                dashboard_label: "terminal dashboard (TUI)",
+                dashboard_refresh_seconds: 1,
+                linear_refresh_seconds: 15,
+                vim_mode: false,
+            },
+        );
+
+        let state = SessionBrowserState {
+            detail_mode: true,
+            ..SessionBrowserState::default()
+        };
+        let session = state
+            .selected_session(&data)
+            .expect("demo data should include a selected session");
+        let detail = data
+            .detail_for_session(&session.issue_identifier)
+            .expect("demo data should include detail for the selected session");
+        let text = render_session_detail_text(session, detail);
+        let rendered = text
+            .lines
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("Esc/Backspace close detail. PgUp/PgDn scroll."));
     }
 }
