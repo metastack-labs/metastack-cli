@@ -136,6 +136,11 @@ pub(crate) async fn run_issues_command(
             let run_non_interactive =
                 create_args.no_interactive || (!create_args.render_once && !can_launch_tui);
 
+            let resolved_default_state = create_args
+                .state
+                .clone()
+                .or_else(|| app_config.backlog.default_state.clone());
+
             if run_non_interactive {
                 let title = create_args.title.ok_or_else(|| {
                     anyhow!(
@@ -150,7 +155,7 @@ pub(crate) async fn run_issues_command(
                         project_id: defaulted_project_id.clone(),
                         project: explicit_project.clone(),
                         parent_id: None,
-                        state: create_args.state,
+                        state: resolved_default_state,
                         priority: create_args.priority,
                         assignee_id: None,
                         labels: Vec::new(),
@@ -188,7 +193,7 @@ pub(crate) async fn run_issues_command(
                     IssueCreateFormPrefill {
                         title: create_args.title,
                         description: create_args.description,
-                        state: create_args.state,
+                        state: resolved_default_state,
                         priority: create_args.priority,
                     },
                     IssueCreateFormOptions {

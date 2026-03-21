@@ -819,6 +819,7 @@ enum ConfigStep {
     ApiKey,
     Team,
     ProjectId,
+    DefaultIssueStatus,
     ListenLabel,
     AssignmentScope,
     RefreshPolicy,
@@ -838,11 +839,12 @@ enum ConfigStep {
 }
 
 impl ConfigStep {
-    fn all() -> [Self; 19] {
+    fn all() -> [Self; 20] {
         [
             Self::ApiKey,
             Self::Team,
             Self::ProjectId,
+            Self::DefaultIssueStatus,
             Self::ListenLabel,
             Self::AssignmentScope,
             Self::RefreshPolicy,
@@ -884,6 +886,7 @@ impl ConfigStep {
             Self::ApiKey => "Linear API key",
             Self::Team => "Default team",
             Self::ProjectId => "Project ID",
+            Self::DefaultIssueStatus => "Issue status",
             Self::ListenLabel => "Listen label",
             Self::AssignmentScope => "Assignee scope",
             Self::RefreshPolicy => "Refresh policy",
@@ -908,6 +911,7 @@ impl ConfigStep {
             Self::ApiKey => "Linear API key",
             Self::Team => "Default Linear team",
             Self::ProjectId => "Default Linear project ID",
+            Self::DefaultIssueStatus => "Default issue status",
             Self::ListenLabel => "Default listen label",
             Self::AssignmentScope => "Listen assignee scope",
             Self::RefreshPolicy => "Workspace refresh policy",
@@ -945,6 +949,7 @@ struct ConfigApp {
     api_key: InputFieldState,
     team: InputFieldState,
     project_id: InputFieldState,
+    default_issue_status: InputFieldState,
     listen_label: InputFieldState,
     poll_interval: InputFieldState,
     plan_follow_up_limit: InputFieldState,
@@ -970,6 +975,7 @@ struct SubmittedConfig {
     api_key: Option<String>,
     team: Option<String>,
     project_id: Option<String>,
+    default_issue_status: Option<String>,
     listen_label: Option<String>,
     assignment_scope: ListenAssignmentScope,
     refresh_policy: ListenRefreshPolicy,
@@ -1038,6 +1044,13 @@ impl ConfigApp {
                     .defaults
                     .linear
                     .project_id
+                    .clone()
+                    .unwrap_or_default(),
+            ),
+            default_issue_status: InputFieldState::new(
+                view.app_config
+                    .backlog
+                    .default_state
                     .clone()
                     .unwrap_or_default(),
             ),
@@ -1338,6 +1351,9 @@ impl ConfigApp {
                     ConfigStep::ProjectId => {
                         let _ = self.project_id.handle_key(key);
                     }
+                    ConfigStep::DefaultIssueStatus => {
+                        let _ = self.default_issue_status.handle_key(key);
+                    }
                     ConfigStep::ListenLabel => {
                         let _ = self.listen_label.handle_key(key);
                     }
@@ -1418,6 +1434,9 @@ impl ConfigApp {
             ConfigStep::ProjectId => {
                 let _ = self.project_id.paste(text);
             }
+            ConfigStep::DefaultIssueStatus => {
+                let _ = self.default_issue_status.paste(text);
+            }
             ConfigStep::ListenLabel => {
                 let _ = self.listen_label.paste(text);
             }
@@ -1458,6 +1477,10 @@ impl ConfigApp {
                 ("Linear API key", summarize_secret(&self.api_key)),
                 ("Default team", summarize_optional_value(&self.team)),
                 ("Project ID", summarize_optional_value(&self.project_id)),
+                (
+                    "Issue status",
+                    summarize_optional_value(&self.default_issue_status),
+                ),
                 ("Listen label", summarize_optional_value(&self.listen_label)),
                 (
                     "Assignee scope",
@@ -1578,6 +1601,7 @@ impl ConfigApp {
             api_key: normalize_optional(self.api_key.value()),
             team: normalize_optional(self.team.value()),
             project_id: normalize_optional(self.project_id.value()),
+            default_issue_status: normalize_optional(self.default_issue_status.value()),
             listen_label: normalize_optional(self.listen_label.value()),
             assignment_scope: match self.assignment_scope.selected() {
                 1 => ListenAssignmentScope::ViewerOrUnassigned,
@@ -1624,6 +1648,7 @@ impl SubmittedConfig {
         view.app_config.linear.api_key = self.api_key.clone();
         view.app_config.linear.team = self.team.clone();
         view.app_config.defaults.linear.project_id = self.project_id.clone();
+        view.app_config.backlog.default_state = self.default_issue_status.clone();
         view.app_config.defaults.listen.required_label = self.listen_label.clone();
         view.app_config.defaults.listen.assignment_scope = Some(self.assignment_scope);
         view.app_config.defaults.listen.refresh_policy = Some(self.refresh_policy);
@@ -2518,6 +2543,13 @@ fn render_step_panel(frame: &mut Frame<'_>, app: &ConfigApp, area: Rect) {
             &app.project_id,
             "Optional canonical Linear project ID (leave blank to unset).",
         ),
+        ConfigStep::DefaultIssueStatus => render_input_panel(
+            frame,
+            area,
+            &title,
+            &app.default_issue_status,
+            "Default Linear workflow status for new standalone issues (e.g. Backlog, Todo). Leave blank to use the built-in default (Backlog).",
+        ),
         ConfigStep::ListenLabel => render_input_panel(
             frame,
             area,
@@ -2614,6 +2646,7 @@ fn render_footer(frame: &mut Frame<'_>, app: &ConfigApp, area: Rect) {
         ConfigStep::ApiKey
         | ConfigStep::Team
         | ConfigStep::ProjectId
+        | ConfigStep::DefaultIssueStatus
         | ConfigStep::ListenLabel
         | ConfigStep::PollInterval
         | ConfigStep::PlanFollowUpLimit

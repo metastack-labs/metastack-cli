@@ -878,7 +878,7 @@ default_reasoning = "medium"
             "--width",
             "110",
             "--height",
-            "50",
+            "52",
         ])
         .assert()
         .success()
@@ -886,6 +886,7 @@ default_reasoning = "medium"
         .stdout(predicate::str::contains("Meta Config"))
         .stdout(predicate::str::contains("Listen label"))
         .stdout(predicate::str::contains("Project ID"))
+        .stdout(predicate::str::contains("Issue status"))
         .stdout(predicate::str::contains("Assignee scope"))
         .stdout(predicate::str::contains("Refresh policy"))
         .stdout(predicate::str::contains("Poll interval"))
@@ -1151,16 +1152,17 @@ default_model = "gpt-5.4"
             "--width",
             "96",
             "--height",
-            "40",
+            "44",
         ])
         .assert()
         .success()
         .stdout(predicate::str::contains("Questions"))
         .stdout(predicate::str::contains("Summary"))
+        .stdout(predicate::str::contains("Issue status"))
         .stdout(predicate::str::contains("agent ticket needing extra room"))
-        .stdout(predicate::str::contains("17. Plan label"))
-        .stdout(predicate::str::contains("18. Tech label"))
-        .stdout(predicate::str::contains("19. Save"));
+        .stdout(predicate::str::contains("18. Plan label"))
+        .stdout(predicate::str::contains("19. Tech label"))
+        .stdout(predicate::str::contains("20. Save"));
 
     Ok(())
 }

@@ -73,6 +73,7 @@ struct SetupApp {
     api_key: InputFieldState,
     team: InputFieldState,
     project: InputFieldState,
+    default_issue_status: InputFieldState,
     provider_field: SelectFieldState,
     model_field: SelectFieldState,
     reasoning: SelectFieldState,
@@ -98,6 +99,7 @@ struct SubmittedSetup {
     profile: Option<String>,
     team: Option<String>,
     project_selector: Option<String>,
+    default_issue_status: Option<String>,
     provider: Option<String>,
     model: Option<String>,
     reasoning: Option<String>,
@@ -127,6 +129,7 @@ enum SetupStep {
     LinearApiKey,
     Team,
     Project,
+    DefaultIssueStatus,
     Provider,
     Model,
     Reasoning,
@@ -145,12 +148,13 @@ enum SetupStep {
 }
 
 impl SetupStep {
-    fn all() -> [Self; 19] {
+    fn all() -> [Self; 20] {
         [
             Self::LinearAuth,
             Self::LinearApiKey,
             Self::Team,
             Self::Project,
+            Self::DefaultIssueStatus,
             Self::Provider,
             Self::Model,
             Self::Reasoning,
@@ -192,6 +196,7 @@ impl SetupStep {
             Self::LinearApiKey => "Project Linear API key",
             Self::Team => "Default team",
             Self::Project => "Default project",
+            Self::DefaultIssueStatus => "Issue status",
             Self::Provider => "Repo agent",
             Self::Model => "Repo model",
             Self::Reasoning => "Repo reasoning",
@@ -216,6 +221,7 @@ impl SetupStep {
             Self::LinearApiKey => "API key",
             Self::Team => "Team",
             Self::Project => "Project",
+            Self::DefaultIssueStatus => "Issue status",
             Self::Provider => "Agent",
             Self::Model => "Model",
             Self::Reasoning => "Reasoning",
@@ -240,6 +246,7 @@ impl SetupStep {
             Self::LinearApiKey => "Project Linear API key (CLI config)",
             Self::Team => "Repo default Linear team",
             Self::Project => "Repo default Linear project",
+            Self::DefaultIssueStatus => "Default issue status for new standalone tickets",
             Self::Provider => "Repo default agent/provider",
             Self::Model => "Repo default model",
             Self::Reasoning => "Repo default reasoning effort",
@@ -862,6 +869,13 @@ impl SetupApp {
                     .clone()
                     .unwrap_or_default(),
             ),
+            default_issue_status: InputFieldState::new(
+                view.planning_meta
+                    .backlog
+                    .default_state
+                    .clone()
+                    .unwrap_or_default(),
+            ),
             provider_field: SelectFieldState::new(provider_options, provider_index),
             model_field: SelectFieldState::new(vec!["Leave unset".to_string()], 0),
             reasoning: SelectFieldState::new(vec!["Leave unset".to_string()], 0),
@@ -1157,6 +1171,9 @@ impl SetupApp {
             SetupStep::Project => {
                 let _ = self.project.paste(text);
             }
+            SetupStep::DefaultIssueStatus => {
+                let _ = self.default_issue_status.paste(text);
+            }
             SetupStep::ListenLabel => {
                 let _ = self.listen_label.paste(text);
             }
@@ -1201,6 +1218,9 @@ impl SetupApp {
             }
             SetupStep::Project => {
                 let _ = self.project.handle_key(key);
+            }
+            SetupStep::DefaultIssueStatus => {
+                let _ = self.default_issue_status.handle_key(key);
             }
             SetupStep::ListenLabel => {
                 let _ = self.listen_label.handle_key(key);
@@ -1272,6 +1292,7 @@ impl SetupApp {
             SetupStep::LinearApiKey
             | SetupStep::Team
             | SetupStep::Project
+            | SetupStep::DefaultIssueStatus
             | SetupStep::ListenLabel
             | SetupStep::InstructionsPath
             | SetupStep::ListenPollInterval
@@ -1292,6 +1313,10 @@ impl SetupApp {
                 ),
                 ("Default team", summarize_optional(&self.team)),
                 ("Project selector", summarize_optional(&self.project)),
+                (
+                    "Issue status",
+                    summarize_optional(&self.default_issue_status),
+                ),
                 (
                     "Repo provider",
                     self.provider_field
@@ -1390,6 +1415,7 @@ impl SetupApp {
             profile: self.profile.clone(),
             team: normalize_optional(self.team.value()),
             project_selector: normalize_optional(self.project.value()),
+            default_issue_status: normalize_optional(self.default_issue_status.value()),
             provider,
             model,
             reasoning,
@@ -1443,6 +1469,7 @@ impl SubmittedSetup {
         view.planning_meta.linear.team = self.team.clone();
         view.planning_meta.linear.project_id =
             resolve_project_selector(view, self.project_selector.clone()).await?;
+        view.planning_meta.backlog.default_state = self.default_issue_status.clone();
         view.planning_meta.agent.provider = self.provider.clone();
         view.planning_meta.agent.model = self.model.clone();
         view.planning_meta.agent.reasoning = self.reasoning.clone();
@@ -1585,7 +1612,7 @@ fn render_setup_dashboard(frame: &mut Frame<'_>, app: &SetupApp) {
             .split(body_area);
         let sidebar = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(12), Constraint::Min(10)])
+            .constraints([Constraint::Length(13), Constraint::Min(10)])
             .split(body[0]);
         render_step_list(frame, app, sidebar[0], 2);
         render_summary_panel(frame, app, sidebar[1]);
@@ -1692,6 +1719,13 @@ fn render_step_panel(frame: &mut Frame<'_>, app: &SetupApp, area: Rect) {
             &title,
             &app.project,
             "Enter a Linear project name or ID. Names resolve to canonical project IDs on save.",
+        ),
+        SetupStep::DefaultIssueStatus => render_input_panel(
+            frame,
+            area,
+            &title,
+            &app.default_issue_status,
+            "Default Linear workflow status for new standalone issues (e.g. Backlog, Todo). Leave blank to use the built-in default (Backlog).",
         ),
         SetupStep::Provider => render_select_panel(frame, area, &title, &app.provider_field),
         SetupStep::Model => render_select_panel(frame, area, &title, &app.model_field),
@@ -2187,7 +2221,7 @@ fn summary_viewport(area: Rect) -> Rect {
             .split(body_area);
         let sidebar = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(12), Constraint::Min(10)])
+            .constraints([Constraint::Length(13), Constraint::Min(10)])
             .split(body[0]);
         sidebar[1]
     } else {
