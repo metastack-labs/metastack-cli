@@ -138,6 +138,18 @@ fn agents_help_lists_listen_and_workflows() {
 }
 
 #[test]
+fn agents_workflows_run_help_describes_tui_first_and_fallback_flags() {
+    cli()
+        .args(["agents", "workflows", "run", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--no-interactive"))
+        .stdout(predicate::str::contains("--render-once"))
+        .stdout(predicate::str::contains("--output"))
+        .stdout(predicate::str::contains("--overwrite"));
+}
+
+#[test]
 fn agents_listen_help_describes_session_browser_navigation() {
     cli()
         .args(["agents", "listen", "--help"])

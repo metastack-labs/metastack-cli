@@ -475,7 +475,7 @@ Summarize the resolved provider selection.
     )?;
     fs::write(
         &config_path,
-        r#"[agents]
+        r##"[agents]
 default_agent = "codex"
 default_model = "gpt-5.4"
 default_reasoning = "low"
@@ -484,7 +484,7 @@ default_reasoning = "low"
 provider = "codex"
 model = "gpt-5.4"
 reasoning = "high"
-"#,
+"##,
     )?;
 
     let stub_path = bin_dir.join("claude");
@@ -610,20 +610,19 @@ edition = "2024"
 }
 "#,
     )?;
-    fs::write(
-        &config_path,
-        format!(
-            r#"[linear]
+    let config_body = format!(
+        r##"[linear]
 api_key = "token"
-api_url = "{api_url}"
+api_url = "{}"
 
 [agents.commands.workflow-stub]
 command = "workflow-stub"
 args = ["{{{{payload}}}}"]
 transport = "arg"
-"#,
-        ),
-    )?;
+"##,
+        api_url,
+    );
+    fs::write(&config_path, config_body)?;
 
     let stub_path = bin_dir.join("workflow-stub");
     fs::write(
@@ -759,12 +758,10 @@ edition = "2024"
 }
 "#,
     )?;
-    fs::write(
-        &config_path,
-        format!(
-            r#"[linear]
+    let config_body = format!(
+        r##"[linear]
 api_key = "token"
-api_url = "{api_url}"
+api_url = "{}"
 
 [agents]
 default_agent = "codex"
@@ -777,9 +774,10 @@ provider = "workflow-stub"
 command = "workflow-stub"
 args = ["{{{{payload}}}}"]
 transport = "arg"
-"#,
-        ),
-    )?;
+"##,
+        api_url,
+    );
+    fs::write(&config_path, config_body)?;
 
     let stub_path = bin_dir.join("workflow-stub");
     fs::write(
@@ -904,5 +902,236 @@ Validate provider/model compatibility.
         ))
         .stderr(predicate::str::contains("supported models"));
 
+    Ok(())
+}
+
+#[test]
+fn workflows_run_render_once_shows_tui_first_wizard() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    ensure_workflow_test_config(&config_path)?;
+
+    meta()
+        .workflow_repo(&repo_root, &config_path)?
+        .args([
+            "workflows",
+            "run",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+            "ticket-implementation",
+            "--render-once",
+            "--width",
+            "120",
+            "--height",
+            "34",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Workflow Run (ticket-implementation)",
+        ))
+        .stdout(predicate::str::contains("Wizard Steps"))
+        .stdout(predicate::str::contains("issue (required)"))
+        .stdout(predicate::str::contains("implementation_notes (op"))
+        .stdout(predicate::str::contains("Generated Markdown").not());
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn workflows_run_no_interactive_can_save_generated_output() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let stub_dir = temp.path().join("stub-output");
+    fs::create_dir_all(repo_root.join(".metastack/workflows"))?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&stub_dir)?;
+
+    fs::write(
+        repo_root.join(".metastack/workflows/save-proof.md"),
+        r#"---
+name: save-proof
+summary: Verify non-interactive save behavior.
+provider: codex
+parameters:
+  - name: request
+    description: Prompt text.
+    required: true
+---
+# Generated
+
+{{request}}
+"#,
+    )?;
+    fs::write(
+        &config_path,
+        r#"[agents]
+default_agent = "codex"
+default_model = "gpt-5.4"
+default_reasoning = "medium"
+"#,
+    )?;
+
+    let stub_path = bin_dir.join("codex");
+    fs::write(
+        &stub_path,
+        r##"#!/bin/sh
+if [ "$1" = "--help" ]; then
+  cat <<'EOF'
+-a, --ask-for-approval <APPROVAL_POLICY>
+-s, --sandbox <SANDBOX_MODE>
+-C, --cd <DIR>
+    --add-dir <DIR>
+    --dangerously-bypass-approvals-and-sandbox
+EOF
+  exit 0
+fi
+if [ "$1" = "exec" ] && [ "$2" = "--help" ]; then
+  cat <<'EOF'
+-j, --json
+-m, --model <MODEL>
+-c, --config <key=value>
+EOF
+  exit 0
+fi
+printf '%s\n' '{"type":"thread.started","thread_id":"workflow-thread"}'
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"# Saved\n\nnon-interactive ok"}}'
+"##,
+    )?;
+    let mut permissions = fs::metadata(&stub_path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&stub_path, permissions)?;
+
+    let output_path = repo_root.join(".metastack/workflows/generated/save-proof.md");
+    let current_path = std::env::var("PATH")?;
+    meta()
+        .workflow_repo(&repo_root, &config_path)?
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &stub_dir)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "workflows",
+            "run",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+            "save-proof",
+            "--no-interactive",
+            "--param",
+            "request=Save this plan",
+            "--output",
+            output_path.to_str().expect("output path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Workflow `save-proof` artifact created at `.metastack/workflows/generated/save-proof.md`.",
+        ));
+
+    assert_eq!(
+        fs::read_to_string(output_path)?,
+        "# Saved\n\nnon-interactive ok"
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn workflows_run_no_interactive_refuses_overwrite_without_flag() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    fs::create_dir_all(repo_root.join(".metastack/workflows"))?;
+    fs::create_dir_all(&bin_dir)?;
+
+    fs::write(
+        repo_root.join(".metastack/workflows/save-proof.md"),
+        r#"---
+name: save-proof
+summary: Verify non-interactive save behavior.
+provider: codex
+parameters:
+  - name: request
+    description: Prompt text.
+    required: true
+---
+# Generated
+
+{{request}}
+"#,
+    )?;
+    fs::write(
+        &config_path,
+        r#"[agents]
+default_agent = "codex"
+default_model = "gpt-5.4"
+default_reasoning = "medium"
+"#,
+    )?;
+
+    let stub_path = bin_dir.join("codex");
+    fs::write(
+        &stub_path,
+        r##"#!/bin/sh
+if [ "$1" = "--help" ]; then
+  cat <<'EOF'
+-a, --ask-for-approval <APPROVAL_POLICY>
+-s, --sandbox <SANDBOX_MODE>
+-C, --cd <DIR>
+    --add-dir <DIR>
+    --dangerously-bypass-approvals-and-sandbox
+EOF
+  exit 0
+fi
+if [ "$1" = "exec" ] && [ "$2" = "--help" ]; then
+  cat <<'EOF'
+-j, --json
+-m, --model <MODEL>
+-c, --config <key=value>
+EOF
+  exit 0
+fi
+printf '%s\n' '{"type":"thread.started","thread_id":"workflow-thread"}'
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"# Saved\n\nreplacement"}}'
+"##,
+    )?;
+    let mut permissions = fs::metadata(&stub_path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&stub_path, permissions)?;
+
+    let output_path = repo_root.join(".metastack/workflows/generated/save-proof.md");
+    fs::create_dir_all(output_path.parent().expect("parent path"))?;
+    fs::write(&output_path, "# Existing\n")?;
+
+    let current_path = std::env::var("PATH")?;
+    meta()
+        .workflow_repo(&repo_root, &config_path)?
+        .env("METASTACK_CONFIG", &config_path)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "workflows",
+            "run",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+            "save-proof",
+            "--no-interactive",
+            "--param",
+            "request=Save this plan",
+            "--output",
+            output_path.to_str().expect("output path should be utf-8"),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("refusing to overwrite"))
+        .stderr(predicate::str::contains(
+            ".metastack/workflows/generated/save-proof.md",
+        ));
+
+    assert_eq!(fs::read_to_string(output_path)?, "# Existing\n");
     Ok(())
 }

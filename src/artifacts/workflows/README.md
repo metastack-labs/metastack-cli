@@ -59,3 +59,24 @@ Prompt templates can reference workflow parameters plus shared variables such as
 - `{{issue_identifier}}`, `{{issue_title}}`, `{{issue_url}}`, `{{issue_state}}`, `{{issue_description}}` when `linear_issue_parameter` is set
 
 Repo-local playbooks live under `.metastack/workflows/`. The built-in playbooks shipped by this repository live alongside this README in `src/artifacts/workflows/`.
+
+## Run Experience
+
+`meta agents workflows run <NAME>` is TUI-first when stdin/stdout are attached to a TTY:
+
+- the wizard walks through one workflow parameter per step
+- required values are validated inline before generation
+- Linear issue parameters must look like identifiers such as `MET-50`
+- generation lands on a review/export dashboard instead of exiting immediately
+- `e` opens multiline edit mode for the generated Markdown
+- `s` opens a one-off save-path prompt with a `.metastack/workflows/generated/` default
+
+For scripts and tests, use the deterministic fallback:
+
+```bash
+meta agents workflows run <NAME> --no-interactive --param key=value
+meta agents workflows run <NAME> --no-interactive --param key=value --output path/to/file.md
+```
+
+The fallback keeps the existing promptless execution contract and only overwrites an existing
+output file when `--overwrite` is supplied.

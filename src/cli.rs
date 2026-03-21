@@ -53,7 +53,9 @@ const AGENTS_HELP_EXAMPLES: &str = "\
 Examples:
   meta agents listen --team MET --project \"MetaStack CLI\"
   meta agents workflows list --root .
-  meta agents workflows run ticket-implementation --root . --dry-run";
+  meta agents workflows run ticket-implementation --root .
+  meta agents workflows run ticket-implementation --root . --no-interactive --param issue=MET-93
+  meta agents workflows run ticket-implementation --root . --render-once --param issue=MET-93";
 
 const LISTEN_HELP_EXAMPLES: &str = "\
 Interactive dashboard:
@@ -422,6 +424,7 @@ pub struct WorkflowsArgs {
 }
 
 #[derive(Debug, Clone, Subcommand)]
+#[allow(clippy::large_enum_variant)]
 pub enum WorkflowCommands {
     /// List the built-in and repo-local workflow playbooks.
     List(WorkflowListArgs),
@@ -468,6 +471,24 @@ pub struct WorkflowRunArgs {
     /// Render the resolved instructions and prompt without launching the provider.
     #[arg(long)]
     pub dry_run: bool,
+    /// Skip the guided TUI and require explicit `--param` values instead.
+    #[arg(long, conflicts_with = "render_once")]
+    pub no_interactive: bool,
+    /// Save the generated Markdown review artifact to this path.
+    #[arg(long, value_name = "PATH")]
+    pub output: Option<PathBuf>,
+    /// Replace the output file when it already exists.
+    #[arg(long, requires = "output")]
+    pub overwrite: bool,
+    /// Render the workflow wizard once to an in-memory buffer and print the snapshot.
+    #[arg(long, conflicts_with_all = ["no_interactive", "dry_run"])]
+    pub render_once: bool,
+    /// Snapshot width when `--render-once` is set.
+    #[arg(long, default_value_t = 120, requires = "render_once")]
+    pub width: u16,
+    /// Snapshot height when `--render-once` is set.
+    #[arg(long, default_value_t = 34, requires = "render_once")]
+    pub height: u16,
     /// Linear API token. Falls back to LINEAR_API_KEY.
     #[arg(long, hide_env_values = true)]
     pub api_key: Option<String>,
