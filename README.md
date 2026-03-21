@@ -577,13 +577,43 @@ List, explain, and run reusable workflow playbooks. The CLI ships with built-in 
 ```bash
 meta agents workflows list
 meta agents workflows explain backlog-planning
-meta agents workflows run backlog-planning --param request="Plan a reusable workflow system"
-meta agents workflows run ticket-implementation --param issue=MET-93
+meta agents workflows run backlog-planning
+meta agents workflows run ticket-implementation
+meta agents workflows run ticket-implementation --no-interactive --param issue=MET-93
+meta agents workflows run ticket-implementation --render-once --param issue=MET-93
 ```
 
 Legacy alias: `meta workflows`
 
+Compatibility alias under `meta agents`: `meta agents workflow ...`
+
+```bash
+meta agents workflow run ticket-implementation --render-once
+```
+
 Playbooks use Markdown with YAML front matter. The front matter defines the workflow name, summary, default provider, parameter contract, validation steps, optional instructions, and optional Linear issue lookup parameter. See [`src/artifacts/workflows/README.md`](src/artifacts/workflows/README.md) for the shipped format and `.metastack/workflows/README.md` for the repo-local scaffold.
+
+Interactive terminal runs are TUI-first:
+
+- TTY runs open a guided wizard that collects required workflow inputs step by step.
+- After generation the command lands on a review dashboard instead of exiting immediately.
+- `e` opens multiline edit mode for the generated Markdown.
+- `s` opens a one-off save-path prompt whose default lives under `.metastack/workflows/generated/`.
+- Existing files require explicit overwrite confirmation in the TUI, or `--overwrite` in the headless fallback.
+
+Deterministic fallback rules:
+
+- Use `--no-interactive` for scripts, CI, and tests.
+- Runs without a TTY use the same fallback automatically unless `--render-once` is set.
+- The fallback path still requires explicit `--param key=value` pairs for all required inputs.
+- `--output <PATH>` saves the generated Markdown artifact directly.
+- `--render-once` prints a deterministic snapshot of the wizard for snapshot-style tests.
+- `--render-once --events ...` scripts wizard, review, edit, and save transitions for deterministic TUI proofs.
+- Use `accept-edit`, `discard-edit`, and `paste=TEXT` in `--events` to prove edited save/cancel behavior explicitly.
+
+Reference:
+
+- [`docs/workflows-run-tui.md`](docs/workflows-run-tui.md)
 
 ### `context`
 
@@ -617,6 +647,7 @@ Use these flags when an outer agent or shell wrapper needs deterministic non-int
 | `meta linear issues refine` | n/a | `--json` | success and failure emit JSON |
 | `meta context scan` | n/a | `--json` | success and failure emit JSON |
 | `meta agents listen --once` | headless | `--json` | emits one poll-cycle JSON payload |
+| `meta agents workflows run` | `--no-interactive` | n/a | human-readable output or `--render-once` snapshot |
 | `meta runtime cron init` | `--no-interactive` | `--json` or implicit in `--no-interactive` | success and failure emit JSON |
 
 Notes:
@@ -642,6 +673,7 @@ This matrix is the contract for agent callers deciding whether to drive a comman
 | `meta linear issues refine` | not needed; command is already headless | supported | not supported |
 | `meta context scan` | not needed; command is already headless | supported | not supported |
 | `meta agents listen --once` | not needed; `--once` is the headless poll mode | supported only with `--once`; returns one poll cycle | supported separately as a text dashboard snapshot |
+| `meta agents workflows run` | required for promptless scripted runs with explicit params | not supported | supported for the workflow wizard snapshot |
 | `meta runtime cron init` | required for promptless writes; implies JSON | supported | supported as a text dashboard snapshot |
 | `meta runtime config` | not needed | supported | supported |
 | `meta merge` | required for promptless execution with explicit PR selection | supported | supported |

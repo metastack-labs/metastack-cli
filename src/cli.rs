@@ -1,5 +1,6 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 
@@ -53,7 +54,21 @@ const AGENTS_HELP_EXAMPLES: &str = "\
 Examples:
   meta agents listen --team MET --project \"MetaStack CLI\"
   meta agents workflows list --root .
-  meta agents workflows run ticket-implementation --root . --dry-run";
+  meta agents workflows run ticket-implementation --root .
+  meta agents workflows run ticket-implementation --root . --no-interactive --param issue=MET-93
+  meta agents workflows run ticket-implementation --root . --render-once --param issue=MET-93";
+
+const WORKFLOW_RUN_HELP: &str = "\
+Interactive mode:
+  TTY runs open a guided wizard, then land on a review/export dashboard.
+  Use --render-once for deterministic wizard snapshots in tests.
+  Use --events to script render-once snapshots through review, edit, and save states.
+  Use accept-edit/discard-edit to prove edit outcomes, and paste=TEXT to inject scripted input.
+
+Non-interactive mode:
+  Use --no-interactive with explicit --param key=value pairs for scripts and CI.
+  Runs without a TTY use the same fallback automatically unless --render-once is set.
+  Use --output and --overwrite to save the reviewed Markdown artifact headlessly.";
 
 const LISTEN_HELP_EXAMPLES: &str = "\
 Interactive dashboard:
@@ -412,6 +427,7 @@ pub enum AgentsCommands {
     /// Listen for eligible Linear issues and supervise them through the interactive session browser.
     Listen(ListenArgs),
     /// List, explain, and run reusable workflow playbooks.
+    #[command(alias = "workflow")]
     Workflows(WorkflowsArgs),
 }
 
@@ -422,6 +438,7 @@ pub struct WorkflowsArgs {
 }
 
 #[derive(Debug, Clone, Subcommand)]
+#[allow(clippy::large_enum_variant)]
 pub enum WorkflowCommands {
     /// List the built-in and repo-local workflow playbooks.
     List(WorkflowListArgs),
@@ -447,6 +464,7 @@ pub struct WorkflowExplainArgs {
 }
 
 #[derive(Debug, Clone, Args)]
+#[command(after_help = WORKFLOW_RUN_HELP)]
 pub struct WorkflowRunArgs {
     #[command(flatten)]
     pub root: RepositoryRootArgs,
@@ -468,6 +486,32 @@ pub struct WorkflowRunArgs {
     /// Render the resolved instructions and prompt without launching the provider.
     #[arg(long)]
     pub dry_run: bool,
+    /// Skip the guided TUI and require explicit `--param` values instead.
+    #[arg(long, conflicts_with = "render_once")]
+    pub no_interactive: bool,
+    /// Save the generated Markdown review artifact to this path.
+    #[arg(long, value_name = "PATH")]
+    pub output: Option<PathBuf>,
+    /// Replace the output file when it already exists.
+    #[arg(long, requires = "output")]
+    pub overwrite: bool,
+    /// Render the workflow wizard once to an in-memory buffer and print the snapshot.
+    #[arg(long, conflicts_with_all = ["no_interactive", "dry_run"])]
+    pub render_once: bool,
+    /// Apply scripted TUI events before printing a `--render-once` snapshot.
+    #[arg(
+        long,
+        value_delimiter = ',',
+        requires = "render_once",
+        value_parser = parse_workflow_run_event
+    )]
+    pub events: Vec<WorkflowRunEventArg>,
+    /// Snapshot width when `--render-once` is set.
+    #[arg(long, default_value_t = 120, requires = "render_once")]
+    pub width: u16,
+    /// Snapshot height when `--render-once` is set.
+    #[arg(long, default_value_t = 34, requires = "render_once")]
+    pub height: u16,
     /// Linear API token. Falls back to LINEAR_API_KEY.
     #[arg(long, hide_env_values = true)]
     pub api_key: Option<String>,
@@ -480,6 +524,60 @@ pub struct WorkflowRunArgs {
     /// Default Linear team key used for workflow-triggered issue lookups.
     #[arg(long)]
     pub team: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkflowRunEventArg {
+    Enter,
+    Tab,
+    BackTab,
+    Esc,
+    Edit,
+    Save,
+    AcceptEdit,
+    DiscardEdit,
+    Paste(String),
+}
+
+fn parse_workflow_run_event(raw: &str) -> Result<WorkflowRunEventArg, String> {
+    WorkflowRunEventArg::from_str(raw)
+}
+
+impl FromStr for WorkflowRunEventArg {
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        let normalized = raw.trim();
+        if normalized.is_empty() {
+            return Err("workflow render-once events cannot be empty".to_string());
+        }
+
+        match normalized {
+            "enter" => Ok(Self::Enter),
+            "tab" => Ok(Self::Tab),
+            "back-tab" => Ok(Self::BackTab),
+            "esc" => Ok(Self::Esc),
+            "edit" => Ok(Self::Edit),
+            "save" => Ok(Self::Save),
+            "accept-edit" => Ok(Self::AcceptEdit),
+            "discard-edit" => Ok(Self::DiscardEdit),
+            _ => normalized
+                .strip_prefix("paste=")
+                .map(|text| {
+                    Self::Paste(
+                        text.replace("\\n", "\n")
+                            .replace("\\t", "\t")
+                            .replace("\\,", ","),
+                    )
+                })
+                .ok_or_else(|| {
+                    format!(
+                        "unsupported workflow render-once event `{normalized}`; expected one of \
+enter, tab, back-tab, esc, edit, save, accept-edit, discard-edit, or paste=TEXT"
+                    )
+                }),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Args)]
