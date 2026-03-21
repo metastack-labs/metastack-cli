@@ -588,9 +588,9 @@ meta backlog release --name sprint-1 --batch-size 5 --apply --project "Sprint 1"
 The generated packet includes:
 
 - an ordered issue sequence that pulls prerequisites ahead of downstream higher-priority work
-- a recommended cut line based on `--batch-size`
+- an explicit recommended cut line based on `--batch-size`
 - must-have versus deferrable slices
-- planning risks and fallback notes when Linear data is missing or dependency signals are weak
+- planning risks and fallback notes when Linear data is missing, dependency signals are weak, or inferred dependencies form a cycle
 - both Markdown (`index.md`) and machine-readable JSON (`plan.json`) output
 
 Pass `--apply` only when you want to update existing Linear issue metadata for the issues above the cut line. The current apply path reassigns those included issues to an existing Linear project and/or workflow state; it does not mutate the primary issue descriptions.

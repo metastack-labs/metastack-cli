@@ -64,6 +64,7 @@ struct ReleasePacket {
     batch_size: usize,
     selected_issue_count: usize,
     live_linear_data: bool,
+    cut_line: RecommendedCutLine,
     included: Vec<ReleaseIssue>,
     deferred: Vec<ReleaseIssue>,
     ordering: Vec<String>,
@@ -71,6 +72,15 @@ struct ReleasePacket {
     notes: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     apply: Option<AppliedMetadata>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RecommendedCutLine {
+    issue_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ends_after: Option<String>,
+    included: Vec<String>,
+    deferred_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -289,6 +299,7 @@ fn build_release_packet(
         .map(|entry| entry.identifier.clone())
         .collect::<BTreeSet<_>>();
     let dependency_map = infer_dependencies(backlog, live_issues, &identifiers);
+    let dependency_cycles = find_dependency_cycles(&dependency_map);
     let dependents = build_dependents(&dependency_map);
     let ordered = topological_order(backlog, live_issues, &dependency_map);
     let must_have = infer_must_have(&ordered, live_issues, &dependency_map);
@@ -323,6 +334,16 @@ fn build_release_packet(
                 entry.identifier
             ));
         }
+    }
+    for cycle in &dependency_cycles {
+        let mut path = cycle.clone();
+        if let Some(first) = cycle.first() {
+            path.push(first.clone());
+        }
+        risks.push(format!(
+            "Cyclic dependency signals detected: {}. Ordering falls back to priority and identifier order within that cycle.",
+            path.join(" -> ")
+        ));
     }
 
     for identifier in &ordered {
@@ -421,6 +442,15 @@ fn build_release_packet(
         batch_size: args.batch_size,
         selected_issue_count: backlog.len(),
         live_linear_data: !live_issues.is_empty(),
+        cut_line: RecommendedCutLine {
+            issue_count: included_issues.len(),
+            ends_after: included_issues.last().map(|issue| issue.identifier.clone()),
+            included: included_issues
+                .iter()
+                .map(|issue| issue.identifier.clone())
+                .collect(),
+            deferred_count: deferred_issues.len(),
+        },
         included: included_issues,
         deferred: deferred_issues,
         ordering: ordered,
@@ -737,6 +767,73 @@ fn collect_dependency_mentions(
     }
 }
 
+fn find_dependency_cycles(dependency_map: &BTreeMap<String, BTreeSet<String>>) -> Vec<Vec<String>> {
+    let mut cycles = BTreeMap::<String, Vec<String>>::new();
+    let mut visiting = Vec::<String>::new();
+    let mut visited = BTreeSet::<String>::new();
+
+    for identifier in dependency_map.keys() {
+        collect_dependency_cycles(
+            identifier,
+            dependency_map,
+            &mut visiting,
+            &mut visited,
+            &mut cycles,
+        );
+    }
+
+    cycles.into_values().collect()
+}
+
+fn collect_dependency_cycles(
+    identifier: &str,
+    dependency_map: &BTreeMap<String, BTreeSet<String>>,
+    visiting: &mut Vec<String>,
+    visited: &mut BTreeSet<String>,
+    cycles: &mut BTreeMap<String, Vec<String>>,
+) {
+    if visited.contains(identifier) {
+        return;
+    }
+
+    if let Some(position) = visiting
+        .iter()
+        .position(|candidate| candidate == identifier)
+    {
+        let cycle = canonicalize_cycle(visiting[position..].to_vec());
+        cycles.insert(cycle.join("->"), cycle);
+        return;
+    }
+
+    visiting.push(identifier.to_string());
+    if let Some(dependencies) = dependency_map.get(identifier) {
+        for dependency in dependencies {
+            collect_dependency_cycles(dependency, dependency_map, visiting, visited, cycles);
+        }
+    }
+    visiting.pop();
+    visited.insert(identifier.to_string());
+}
+
+fn canonicalize_cycle(cycle: Vec<String>) -> Vec<String> {
+    if cycle.len() <= 1 {
+        return cycle;
+    }
+
+    let mut best = cycle.clone();
+    for offset in 1..cycle.len() {
+        let rotated = cycle[offset..]
+            .iter()
+            .chain(cycle[..offset].iter())
+            .cloned()
+            .collect::<Vec<_>>();
+        if rotated < best {
+            best = rotated;
+        }
+    }
+    best
+}
+
 fn write_release_packet(root: &Path, name: &str, packet: &ReleasePacket) -> Result<PathBuf> {
     let paths = PlanningPaths::new(root);
     ensure_dir(&paths.releases_dir)?;
@@ -786,6 +883,18 @@ fn render_release_markdown(packet: &ReleasePacket) -> String {
     }
     if packet.included.is_empty() {
         lines.push("- No issues landed above the recommended cut line.".to_string());
+    }
+
+    lines.extend([String::new(), "## Cut Line".to_string(), String::new()]);
+    match &packet.cut_line.ends_after {
+        Some(identifier) => lines.push(format!(
+            "- Recommended cut line: after `{identifier}` ({} issue(s) included, {} deferred).",
+            packet.cut_line.issue_count, packet.cut_line.deferred_count
+        )),
+        None => lines.push(
+            "- Recommended cut line: no issue qualified for the current execution batch."
+                .to_string(),
+        ),
     }
 
     lines.extend([
@@ -1080,6 +1189,19 @@ mod tests {
         assert_eq!(
             infer_must_have(&ordered, &issues, &deps),
             BTreeSet::from(["MET-10".to_string(), "MET-11".to_string()])
+        );
+    }
+
+    #[test]
+    fn dependency_cycles_are_reported_once() {
+        let deps = BTreeMap::from([
+            ("MET-10".to_string(), BTreeSet::from(["MET-11".to_string()])),
+            ("MET-11".to_string(), BTreeSet::from(["MET-10".to_string()])),
+        ]);
+
+        assert_eq!(
+            find_dependency_cycles(&deps),
+            vec![vec!["MET-10".to_string(), "MET-11".to_string()]]
         );
     }
 }

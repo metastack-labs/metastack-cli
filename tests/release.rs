@@ -176,9 +176,13 @@ api_url = "{api_url}"
     )?;
 
     assert!(markdown.contains("## Recommended Batch"));
+    assert!(markdown.contains("## Cut Line"));
+    assert!(markdown.contains("after `MET-11`"));
     assert!(markdown.contains("`MET-10`"));
     assert!(markdown.contains("`MET-11`"));
     assert!(markdown.contains("`MET-12`"));
+    assert!(json.contains("\"cut_line\": {"));
+    assert!(json.contains("\"ends_after\": \"MET-11\""));
     assert!(json.contains("\"ordering\": [\n    \"MET-10\",\n    \"MET-11\",\n    \"MET-12\""));
     assert!(json.contains("\"above_cut_line\": true"));
     assert!(json.contains("\"above_cut_line\": false"));
@@ -419,6 +423,68 @@ api_url = "http://127.0.0.1:9/graphql"
         .stderr(predicate::str::contains(
             "not enough backlog items to build a release packet; found 1 item",
         ));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn release_reports_cyclic_dependency_signals_as_risks() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+    write_backlog_issue(
+        &repo_root,
+        "MET-10",
+        "Lay release foundations",
+        Some("blocked by MET-11"),
+    )?;
+    write_backlog_issue(
+        &repo_root,
+        "MET-11",
+        "Ship release batching UX",
+        Some("blocked by MET-10"),
+    )?;
+    fs::write(&config_path, "")?;
+
+    cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "backlog",
+            "release",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--name",
+            "cycle-risk",
+            "--batch-size",
+            "1",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Cyclic dependency signals detected",
+        ))
+        .stdout(predicate::str::contains("\"ends_after\": \"MET-10\""));
+
+    let markdown = fs::read_to_string(
+        repo_root
+            .join(".metastack/releases/cycle-risk")
+            .join("index.md"),
+    )?;
+    assert!(markdown.contains("Cyclic dependency signals detected: MET-10 -> MET-11 -> MET-10."));
 
     Ok(())
 }
