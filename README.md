@@ -113,6 +113,7 @@ Inside a repository you want metastack to manage:
 ```bash
 meta runtime config
 meta runtime setup
+meta backlog spec --root .
 meta context scan
 meta context show
 meta backlog plan --request "Break the next release into Linear-ready tickets"
@@ -144,6 +145,7 @@ sandbox_mode = "danger-full-access"
 
 ```text
 .metastack/
+  SPEC.md
   README.md
   meta.json
   agents/
@@ -216,12 +218,13 @@ A typical end-to-end loop looks like this:
 
 1. Run `meta runtime config` once to save install-scoped Linear auth and agent defaults.
 2. Run `meta runtime setup` once per repository to scaffold `.metastack/` and save repo defaults.
-3. Run `meta context scan` to refresh the repo context under `.metastack/codebase/`.
-4. Use `meta backlog plan` or `meta backlog tech` to create structured backlog work.
-5. Use `meta linear ...`, `meta dashboard ...`, or `meta backlog sync` to coordinate with Linear.
-6. Use `meta merge` when you want to batch open GitHub PRs in one isolated aggregate merge run.
-7. Use `meta agents listen` when you want unattended ticket execution inside a dedicated workspace clone.
-8. Use `meta workspace` when you want to inspect or clean those listener-created clones later.
+3. Run `meta backlog spec` to create or refine the repo-local `.metastack/SPEC.md`.
+4. Run `meta context scan` to refresh the repo context under `.metastack/codebase/`.
+5. Use `meta backlog plan` or `meta backlog tech` to create structured backlog work.
+6. Use `meta linear ...`, `meta dashboard ...`, or `meta backlog sync` to coordinate with Linear.
+7. Use `meta merge` when you want to batch open GitHub PRs in one isolated aggregate merge run.
+8. Use `meta agents listen` when you want unattended ticket execution inside a dedicated workspace clone.
+9. Use `meta workspace` when you want to inspect or clean those listener-created clones later.
 
 ## Example Flows
 
@@ -229,6 +232,7 @@ Engineer:
 
 ```bash
 meta runtime setup --team MET --project "MetaStack CLI"
+meta backlog spec --root .
 meta context scan
 meta backlog plan --request "Break the next release into Linear-ready tickets"
 meta backlog tech MET-35
