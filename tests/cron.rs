@@ -1103,6 +1103,58 @@ steps:
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn cron_resume_rejects_runs_still_marked_running() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let config_path = temp.path().join("metastack.toml");
+    write_onboarded_config(&config_path, "")?;
+    fs::create_dir_all(temp.path().join(".metastack/cron/.runtime/runs"))?;
+
+    let now = chrono::Utc::now().to_rfc3339();
+    fs::write(
+        temp.path()
+            .join(".metastack/cron/.runtime/runs/running-demo.json"),
+        format!(
+            r#"{{
+  "version": 1,
+  "run_id": "running-demo",
+  "job_name": "demo",
+  "definition_path": ".metastack/cron/demo.md",
+  "source": {{
+    "kind": "repository",
+    "label": "repository",
+    "path": ".metastack/cron"
+  }},
+  "trigger": "manual",
+  "status": "running",
+  "created_at": "{now}",
+  "updated_at": "{now}",
+  "started_at": "{now}",
+  "retry": {{
+    "max_attempts": 1,
+    "backoff_seconds": 0
+  }},
+  "log_path": ".metastack/cron/.runtime/logs/running-demo.log",
+  "steps": [],
+  "attempts": []
+}}"#
+        ),
+    )?;
+
+    cli()
+        .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
+        .args(["runtime", "cron", "resume", "running-demo"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "is still marked as running; wait for it to finish or restart the scheduler to reconcile it before resuming",
+        ));
+
+    Ok(())
+}
+
 #[test]
 fn cron_validate_accepts_shipped_sample_workflows() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;

@@ -1093,7 +1093,13 @@ fn new_run(
 
 fn prepare_run_for_resume(run: &mut PersistedRun) -> Result<()> {
     match run.status {
-        RunStatus::Interrupted | RunStatus::Failed | RunStatus::Running => {}
+        RunStatus::Interrupted | RunStatus::Failed => {}
+        RunStatus::Running => {
+            bail!(
+                "run `{}` is still marked as running; wait for it to finish or restart the scheduler to reconcile it before resuming",
+                run.run_id
+            )
+        }
         RunStatus::WaitingForApproval => {
             bail!(
                 "run `{}` is waiting for approval; use `meta cron approve` or `meta cron reject`",
