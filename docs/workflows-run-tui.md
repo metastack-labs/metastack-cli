@@ -22,6 +22,7 @@ The deterministic fallback remains available for scripts, CI, and tests via `--n
 ## Wizard Steps
 
 - One step per workflow parameter in front-matter order.
+- Workflows with no explicit parameters skip the wizard body and generate immediately into review.
 - Each step shows:
   - parameter name
   - required/optional status

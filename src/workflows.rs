@@ -282,6 +282,7 @@ async fn run_workflow_tui(
         args.overwrite,
         app_config.vim_mode_enabled(),
     );
+    prime_workflow_tui(root.as_path(), args, &mut app).await?;
 
     if args.render_once {
         return render_workflow_snapshot(root, args, &mut app).await;
@@ -326,6 +327,18 @@ async fn run_workflow_tui(
             _ => {}
         }
     }
+}
+
+async fn prime_workflow_tui(
+    root: &Path,
+    args: &WorkflowRunArgs,
+    app: &mut WorkflowRunApp,
+) -> Result<()> {
+    if !app.has_wizard_steps() {
+        let _ =
+            apply_workflow_ui_command(root, args, app, WorkflowUiCommand::Generate, true).await?;
+    }
+    Ok(())
 }
 
 async fn render_workflow_snapshot(
@@ -855,6 +868,10 @@ impl WorkflowRunApp {
             .collect()
     }
 
+    fn has_wizard_steps(&self) -> bool {
+        !self.fields.is_empty()
+    }
+
     fn set_error(&mut self, message: String) {
         self.error = Some(message);
     }
@@ -1275,6 +1292,22 @@ fn render_workflow_run(frame: &mut ratatui::Frame<'_>, app: &WorkflowRunApp) {
 }
 
 fn render_wizard(frame: &mut ratatui::Frame<'_>, app: &WorkflowRunApp, area: Rect) {
+    if app.fields.is_empty() {
+        let waiting = Paragraph::new(Text::from(vec![
+            Line::from("This workflow does not require any explicit inputs."),
+            Line::from("Generation runs immediately and then opens the review/export dashboard."),
+        ]))
+        .wrap(Wrap { trim: false })
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Wizard")
+                .border_style(Style::default().add_modifier(Modifier::BOLD)),
+        );
+        frame.render_widget(waiting, area);
+        return;
+    }
+
     let body = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([

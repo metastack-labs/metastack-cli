@@ -940,6 +940,94 @@ fn workflows_run_render_once_shows_tui_first_wizard() -> Result<(), Box<dyn Erro
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn workflows_run_render_once_without_parameters_skips_empty_wizard() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    fs::create_dir_all(repo_root.join(".metastack/workflows"))?;
+    fs::create_dir_all(&bin_dir)?;
+
+    fs::write(
+        repo_root.join(".metastack/workflows/no-input-proof.md"),
+        r#"---
+name: no-input-proof
+summary: Verify parameterless workflow review routing.
+provider: codex
+---
+# Generated
+
+No explicit inputs required.
+"#,
+    )?;
+    fs::write(
+        &config_path,
+        r#"[agents]
+default_agent = "codex"
+default_model = "gpt-5.4"
+default_reasoning = "medium"
+"#,
+    )?;
+
+    let stub_path = bin_dir.join("codex");
+    fs::write(
+        &stub_path,
+        r##"#!/bin/sh
+if [ "$1" = "--help" ]; then
+  cat <<'EOF'
+-a, --ask-for-approval <APPROVAL_POLICY>
+-s, --sandbox <SANDBOX_MODE>
+-C, --cd <DIR>
+    --add-dir <DIR>
+    --dangerously-bypass-approvals-and-sandbox
+EOF
+  exit 0
+fi
+if [ "$1" = "exec" ] && [ "$2" = "--help" ]; then
+  cat <<'EOF'
+-j, --json
+-m, --model <MODEL>
+-c, --config <key=value>
+EOF
+  exit 0
+fi
+printf '%s\n' '{"type":"thread.started","thread_id":"workflow-thread"}'
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"# Snapshot\n\nparameterless ok"}}'
+"##,
+    )?;
+    let mut permissions = fs::metadata(&stub_path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&stub_path, permissions)?;
+
+    let current_path = std::env::var("PATH")?;
+    meta()
+        .workflow_repo(&repo_root, &config_path)?
+        .env("METASTACK_CONFIG", &config_path)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "workflows",
+            "run",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+            "no-input-proof",
+            "--render-once",
+            "--width",
+            "120",
+            "--height",
+            "34",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Generated Markdown [focus]"))
+        .stdout(predicate::str::contains("# Snapshot"))
+        .stdout(predicate::str::contains("Workflow: no-input-proof"))
+        .stdout(predicate::str::contains("Wizard Steps").not());
+
+    Ok(())
+}
+
 #[test]
 fn agents_workflow_alias_run_render_once_uses_tui_first_flow() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
