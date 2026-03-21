@@ -214,6 +214,72 @@ fn backlog_dependencies_ignores_legacy_self_parent_metadata() -> Result<(), Box<
 }
 
 #[test]
+fn backlog_dependencies_warns_on_parent_cycles() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    write_onboarded_config(&config_path)?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+
+    write_backlog_item(
+        &repo_root,
+        "met-30",
+        "MET-30",
+        "Dependency: parent loop A",
+        "Parent: MET-31",
+    )?;
+    write_backlog_item(
+        &repo_root,
+        "met-31",
+        "MET-31",
+        "Dependency: parent loop B",
+        "Parent: MET-30",
+    )?;
+
+    let output = cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "backlog",
+            "dependencies",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let payload: serde_json::Value = serde_json::from_slice(&output)?;
+    let warnings = payload["result"]["warnings"]
+        .as_array()
+        .ok_or("warnings should be an array")?;
+
+    assert!(
+        warnings.iter().any(|warning| {
+            warning
+                .as_str()
+                .is_some_and(|value| value.contains("parent cycle: MET-30 -> MET-31 -> MET-30"))
+        }),
+        "expected parent cycle warning, got {warnings:?}"
+    );
+    assert_eq!(payload["result"]["changes"], json!([]));
+
+    Ok(())
+}
+
+#[test]
 fn backlog_dependencies_apply_creates_blocker_relation_in_linear() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");

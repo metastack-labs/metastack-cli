@@ -262,6 +262,7 @@ fn analyze_dependencies(
         .collect::<BTreeMap<_, _>>();
     let mut proposals = BTreeSet::new();
     let mut warnings = BTreeSet::new();
+    let mut parent_edges = BTreeSet::new();
     let mut hard_edges = BTreeSet::new();
     let mut soft_edges = BTreeSet::new();
 
@@ -280,6 +281,7 @@ fn analyze_dependencies(
                     reason: "existing backlog packet parent relationship".to_string(),
                     source: "local backlog metadata".to_string(),
                 });
+                parent_edges.insert((parent_identifier.clone(), item.identifier.clone()));
             } else {
                 warnings.insert(format!(
                     "parent reference `{parent_identifier}` from `{}` does not exist in the local backlog set",
@@ -351,12 +353,18 @@ fn analyze_dependencies(
 
     warnings.extend(detect_cycles(
         &collect_nodes(items),
-        &hard_edges,
-        "hard blocker cycle",
+        &parent_edges,
+        "parent cycle",
     ));
     warnings.extend(detect_cycles(
         &collect_nodes(items),
-        &hard_edges.union(&soft_edges).cloned().collect(),
+        &hard_edges,
+        "hard blocker cycle",
+    ));
+    let combined_edges = combine_edge_sets([&parent_edges, &hard_edges, &soft_edges]);
+    warnings.extend(detect_cycles(
+        &collect_nodes(items),
+        &combined_edges,
         "combined dependency cycle",
     ));
 
@@ -981,6 +989,16 @@ fn detect_cycles(
     }
 
     warnings
+}
+
+fn combine_edge_sets<'a, I>(edge_sets: I) -> BTreeSet<(String, String)>
+where
+    I: IntoIterator<Item = &'a BTreeSet<(String, String)>>,
+{
+    edge_sets
+        .into_iter()
+        .flat_map(|edges| edges.iter().cloned())
+        .collect()
 }
 
 fn dfs_cycle(
