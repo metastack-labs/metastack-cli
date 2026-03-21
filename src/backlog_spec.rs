@@ -577,8 +577,20 @@ impl BacklogSpecApp {
                     }
                 }
                 KeyCode::Enter if !key.modifiers.contains(KeyModifiers::SHIFT) => {
-                    let follow_ups = collect_follow_up_answers(&app.questions)?;
-                    next = NextStep::StartGeneration(app.request.clone(), follow_ups);
+                    let has_empty = app
+                        .questions
+                        .iter()
+                        .any(|q| q.answer.value().trim().is_empty());
+                    if has_empty {
+                        app.error = Some(
+                            "Answer each follow-up question before generating the SPEC."
+                                .to_string(),
+                        );
+                    } else {
+                        app.error = None;
+                        let follow_ups = collect_follow_up_answers(&app.questions)?;
+                        next = NextStep::StartGeneration(app.request.clone(), follow_ups);
+                    }
                 }
                 _ => {
                     if let Some(current) = app.questions.get_mut(app.selected) {
@@ -1117,7 +1129,7 @@ fn collect_follow_up_answers(questions: &[QuestionAnswer]) -> Result<Vec<FollowU
         .iter()
         .any(|follow_up| follow_up.answer.is_empty())
     {
-        bail!("Answer each follow-up question before generating the SPEC");
+        bail!("Answer each follow-up question before generating the SPEC.");
     }
 
     Ok(follow_ups)
