@@ -145,6 +145,75 @@ fn backlog_dependencies_json_is_deterministic_from_local_packets() -> Result<(),
 }
 
 #[test]
+fn backlog_dependencies_ignores_legacy_self_parent_metadata() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    write_onboarded_config(&config_path)?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+
+    write_backlog_item(
+        &repo_root,
+        "met-7",
+        "MET-7",
+        "Dependency analysis root ticket",
+        "Ready to land independently.",
+    )?;
+
+    let metadata_path = repo_root.join(".metastack/backlog/met-7/.linear.json");
+    fs::write(
+        metadata_path,
+        serde_json::to_string_pretty(&json!({
+            "issue_id": "issue-met-7",
+            "identifier": "MET-7",
+            "title": "Dependency analysis root ticket",
+            "url": "https://linear.app/issues/MET-7",
+            "team_key": "MET",
+            "project_id": "project-1",
+            "project_name": "MetaStack CLI",
+            "parent_id": "issue-met-7",
+            "parent_identifier": "MET-7",
+            "managed_files": []
+        }))?,
+    )?;
+
+    let output = cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "backlog",
+            "dependencies",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let payload: serde_json::Value = serde_json::from_slice(&output)?;
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["result"]["warnings"], json!([]));
+    assert_eq!(
+        payload["result"]["items"][0]["parent_identifier"],
+        serde_json::Value::Null
+    );
+
+    Ok(())
+}
+
+#[test]
 fn backlog_dependencies_apply_creates_blocker_relation_in_linear() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");

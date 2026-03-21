@@ -207,7 +207,8 @@ fn load_backlog_dependency_items(root: &Path) -> Result<Vec<BacklogDependencyIte
         let parent_identifier = metadata
             .as_ref()
             .and_then(|entry| entry.parent_identifier.clone())
-            .or_else(|| parent_identifier_from_text(&index_text));
+            .or_else(|| parent_identifier_from_text(&index_text))
+            .filter(|value| !value.eq_ignore_ascii_case(&identifier));
         let content_lines = collect_markdown_lines(&issue_dir)?;
 
         items.push(BacklogDependencyItem {

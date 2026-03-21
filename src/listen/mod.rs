@@ -1355,8 +1355,8 @@ where
                     .project
                     .as_ref()
                     .map(|project| project.name.clone()),
-                parent_id: Some(parent_issue.id.clone()),
-                parent_identifier: Some(parent_issue.identifier.clone()),
+                parent_id: None,
+                parent_identifier: None,
                 local_hash: None,
                 remote_hash: None,
                 last_sync_at: None,
