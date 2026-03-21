@@ -222,4 +222,32 @@ mod tests {
         s.remediation_required = Some(true);
         assert_eq!(s.remediation_label(), "yes");
     }
+
+    #[test]
+    fn all_active_phases_block_pickup() {
+        for phase in [
+            ReviewPhase::Claimed,
+            ReviewPhase::ReviewStarted,
+            ReviewPhase::Running,
+        ] {
+            let mut s = session(42);
+            s.phase = phase;
+            let state = ReviewState::from_sessions(vec![s]);
+            assert!(state.blocks_pickup(42), "{:?} should block pickup", phase);
+        }
+    }
+
+    #[test]
+    fn terminal_phases_do_not_block_pickup() {
+        for phase in [ReviewPhase::Completed, ReviewPhase::Blocked] {
+            let mut s = session(42);
+            s.phase = phase;
+            let state = ReviewState::from_sessions(vec![s]);
+            assert!(
+                !state.blocks_pickup(42),
+                "{:?} should not block pickup",
+                phase
+            );
+        }
+    }
 }

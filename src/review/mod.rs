@@ -212,7 +212,7 @@ fn run_review_one_shot(args: &ReviewRunArgs, pr_number: u64) -> Result<()> {
 
     if remediation_required {
         eprintln!("Remediation required. Creating follow-up branch and PR...");
-        run_remediation(
+        let outcome = run_remediation(
             &root,
             &pr,
             &linear_identifier,
@@ -221,6 +221,10 @@ fn run_review_one_shot(args: &ReviewRunArgs, pr_number: u64) -> Result<()> {
             &planning_meta,
             args,
         )?;
+        eprintln!(
+            "Remediation PR #{} created: {}",
+            outcome.pr_number, outcome.pr_url
+        );
     } else {
         eprintln!("No remediation required for PR #{pr_number}.");
         println!("{review_output}");
@@ -485,6 +489,12 @@ fn print_dry_run_output(
 // Remediation workflow
 // ---------------------------------------------------------------------------
 
+/// Result of a successful remediation workflow, carrying the follow-up PR details.
+struct RemediationOutcome {
+    pr_number: u64,
+    pr_url: String,
+}
+
 fn run_remediation(
     root: &Path,
     pr: &GhPrMetadata,
@@ -493,7 +503,7 @@ fn run_remediation(
     _config: &AppConfig,
     _planning_meta: &PlanningMeta,
     args: &ReviewRunArgs,
-) -> Result<()> {
+) -> Result<RemediationOutcome> {
     let gh = GhCli;
     let remediation_branch = format!("review/remediation-pr-{}", pr.number);
     let base_branch = &pr.head_ref_name;
@@ -583,7 +593,10 @@ fn run_remediation(
         result.number, result.url
     );
 
-    Ok(())
+    Ok(RemediationOutcome {
+        pr_number: result.number,
+        pr_url: result.url,
+    })
 }
 
 fn post_linear_remediation_comment(
@@ -839,8 +852,12 @@ fn run_single_review_cycle(
             continue;
         }
         session.phase = ReviewPhase::ReviewStarted;
-        session.summary = "Starting review".to_string();
+        session.summary = "Resolving PR context".to_string();
         session.updated_at_epoch_seconds = now;
+
+        session.phase = ReviewPhase::Running;
+        session.summary = "Running agent review".to_string();
+        session.updated_at_epoch_seconds = now_epoch_seconds();
 
         match run_review_for_session(root, session.pr_number, args) {
             Ok(result) => {
@@ -957,8 +974,10 @@ fn run_review_for_session(
                 &planning_meta,
                 args,
             ) {
-                Ok(()) => {
+                Ok(outcome) => {
                     result.summary = "Remediation PR created".to_string();
+                    result.remediation_pr_number = Some(outcome.pr_number);
+                    result.remediation_pr_url = Some(outcome.pr_url);
                 }
                 Err(e) => {
                     result.summary = format!("Remediation failed: {e}");
