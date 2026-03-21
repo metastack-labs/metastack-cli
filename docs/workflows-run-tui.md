@@ -60,6 +60,7 @@ The deterministic fallback remains available for scripts, CI, and tests via `--n
   - `--events edit,accept-edit` proves the edit accept path
   - `--events edit,discard-edit` proves the edit discard path
   - `--events save,enter` proves save and overwrite prompt behavior
+  - `--events paste=TEXT` injects scripted text into the focused field or editor; `\n` and `\t` are decoded
 
 ## Edit Mode
 

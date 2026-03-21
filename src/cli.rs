@@ -1,5 +1,6 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 
@@ -62,6 +63,7 @@ Interactive mode:
   TTY runs open a guided wizard, then land on a review/export dashboard.
   Use --render-once for deterministic wizard snapshots in tests.
   Use --events to script render-once snapshots through review, edit, and save states.
+  Use accept-edit/discard-edit to prove edit outcomes, and paste=TEXT to inject scripted input.
 
 Non-interactive mode:
   Use --no-interactive with explicit --param key=value pairs for scripts and CI.
@@ -496,7 +498,12 @@ pub struct WorkflowRunArgs {
     #[arg(long, conflicts_with_all = ["no_interactive", "dry_run"])]
     pub render_once: bool,
     /// Apply scripted TUI events before printing a `--render-once` snapshot.
-    #[arg(long, value_enum, value_delimiter = ',', requires = "render_once")]
+    #[arg(
+        long,
+        value_delimiter = ',',
+        requires = "render_once",
+        value_parser = parse_workflow_run_event
+    )]
     pub events: Vec<WorkflowRunEventArg>,
     /// Snapshot width when `--render-once` is set.
     #[arg(long, default_value_t = 120, requires = "render_once")]
@@ -518,7 +525,7 @@ pub struct WorkflowRunArgs {
     pub team: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkflowRunEventArg {
     Enter,
     Tab,
@@ -528,6 +535,48 @@ pub enum WorkflowRunEventArg {
     Save,
     AcceptEdit,
     DiscardEdit,
+    Paste(String),
+}
+
+fn parse_workflow_run_event(raw: &str) -> Result<WorkflowRunEventArg, String> {
+    WorkflowRunEventArg::from_str(raw)
+}
+
+impl FromStr for WorkflowRunEventArg {
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        let normalized = raw.trim();
+        if normalized.is_empty() {
+            return Err("workflow render-once events cannot be empty".to_string());
+        }
+
+        match normalized {
+            "enter" => Ok(Self::Enter),
+            "tab" => Ok(Self::Tab),
+            "back-tab" => Ok(Self::BackTab),
+            "esc" => Ok(Self::Esc),
+            "edit" => Ok(Self::Edit),
+            "save" => Ok(Self::Save),
+            "accept-edit" => Ok(Self::AcceptEdit),
+            "discard-edit" => Ok(Self::DiscardEdit),
+            _ => normalized
+                .strip_prefix("paste=")
+                .map(|text| {
+                    Self::Paste(
+                        text.replace("\\n", "\n")
+                            .replace("\\t", "\t")
+                            .replace("\\,", ","),
+                    )
+                })
+                .ok_or_else(|| {
+                    format!(
+                        "unsupported workflow render-once event `{normalized}`; expected one of \
+enter, tab, back-tab, esc, edit, save, accept-edit, discard-edit, or paste=TEXT"
+                    )
+                }),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Args)]

@@ -608,7 +608,7 @@ Deterministic fallback rules:
 - `--output <PATH>` saves the generated Markdown artifact directly.
 - `--render-once` prints a deterministic snapshot of the wizard for snapshot-style tests.
 - `--render-once --events ...` scripts wizard, review, edit, and save transitions for deterministic TUI proofs.
-- Use `accept-edit` and `discard-edit` in `--events` to prove edit accept/cancel behavior explicitly.
+- Use `accept-edit`, `discard-edit`, and `paste=TEXT` in `--events` to prove edited save/cancel behavior explicitly.
 
 Reference:
 

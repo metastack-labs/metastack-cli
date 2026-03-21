@@ -351,7 +351,7 @@ async fn render_workflow_snapshot(
         Terminal::new(backend).context("failed to create workflow snapshot terminal")?;
 
     for event in &args.events {
-        let command = apply_render_once_event(app, *event)?;
+        let command = apply_render_once_event(app, event.clone())?;
         apply_workflow_ui_command(&root, args, app, command, true).await?;
     }
 
@@ -1209,6 +1209,10 @@ fn apply_render_once_event(
         WorkflowRunEventArg::Save => KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
         WorkflowRunEventArg::AcceptEdit => KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
         WorkflowRunEventArg::DiscardEdit => KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        WorkflowRunEventArg::Paste(text) => {
+            app.handle_paste(&text);
+            return Ok(WorkflowUiCommand::None);
+        }
     };
     app.handle_key(key)
 }

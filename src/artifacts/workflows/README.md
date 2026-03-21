@@ -86,4 +86,5 @@ output file when `--overwrite` is supplied.
 
 For deterministic TUI proofs, `--render-once --events ...` can script the wizard into review,
 edit, and save states without entering the live terminal loop. Use `accept-edit` and
-`discard-edit` to prove both edit outcomes explicitly.
+`discard-edit` to prove both edit outcomes explicitly, and `paste=TEXT` when the proof needs to
+mutate the focused field or Markdown editor before saving.
