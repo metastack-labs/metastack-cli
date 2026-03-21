@@ -26,8 +26,9 @@ pub(crate) use ticket_context::{
 pub use transport::{LinearClient, ReqwestLinearClient};
 pub use types::{
     AttachmentCreateRequest, AttachmentSummary, DashboardData, DashboardFilters,
-    IssueAssigneeFilter, IssueComment, IssueCreateRequest, IssueCreateSpec, IssueEditContext,
-    IssueEditSpec, IssueLabelCreateRequest, IssueLink, IssueListFilters, IssueSummary,
-    IssueUpdateRequest, LabelRef, ProjectListFilters, ProjectRef, ProjectSummary, TeamRef,
-    TeamSummary, UserRef, WorkflowState,
+    IssueAssigneeFilter, IssueComment, IssueCreateRequest, IssueCreateSpec,
+    IssueDependencySnapshot, IssueEditContext, IssueEditSpec, IssueLabelCreateRequest, IssueLink,
+    IssueListFilters, IssueRelationCreateRequest, IssueRelationSummary, IssueRelationType,
+    IssueRelationUpdateRequest, IssueSummary, IssueUpdateRequest, LabelRef, ProjectListFilters,
+    ProjectRef, ProjectSummary, TeamRef, TeamSummary, UserRef, WorkflowState,
 };

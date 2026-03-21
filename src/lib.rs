@@ -2,6 +2,7 @@ mod agent_provider;
 mod agents;
 mod backlog;
 mod backlog_defaults;
+mod backlog_dependencies;
 mod backlog_improve;
 mod backlog_spec;
 mod cli;
@@ -43,6 +44,7 @@ use anyhow::{Result, bail};
 use clap::Parser;
 use clap::error::ErrorKind;
 
+use crate::backlog_dependencies::run_backlog_dependencies;
 use crate::backlog_improve::run_backlog_improve;
 use crate::backlog_spec::{BacklogSpecOutput, run_backlog_spec};
 use crate::cli::{
@@ -163,6 +165,9 @@ async fn dispatch(cli: Cli) -> Result<()> {
             }
             BacklogCommands::Improve(args) => {
                 run_backlog_improve(&args).await?;
+            }
+            BacklogCommands::Dependencies(args) => {
+                run_backlog_dependencies(&args).await?;
             }
             BacklogCommands::Tech(args) => {
                 let report = run_technical(&args).await?;

@@ -2,8 +2,9 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::linear::{
-    AttachmentSummary, IssueComment, IssueLink, IssueSummary, LabelRef, ProjectRef, ProjectSummary,
-    TeamRef, TeamSummary, UserRef, WorkflowState,
+    AttachmentSummary, IssueComment, IssueDependencySnapshot, IssueLink, IssueRelationSummary,
+    IssueRelationType, IssueSummary, LabelRef, ProjectRef, ProjectSummary, TeamRef, TeamSummary,
+    UserRef, WorkflowState,
 };
 
 #[derive(Debug, Deserialize)]
@@ -70,6 +71,11 @@ pub(super) struct IssueByIdPayload {
 }
 
 #[derive(Debug, Deserialize)]
+pub(super) struct IssueDependencySnapshotPayload {
+    pub(super) issue: Option<IssueDependencyNode>,
+}
+
+#[derive(Debug, Deserialize)]
 pub(super) struct IssueCommentsPayload {
     pub(super) issue: Option<IssueCommentsNode>,
 }
@@ -84,6 +90,18 @@ pub(super) struct IssueCreatePayload {
 pub(super) struct IssueUpdatePayload {
     #[serde(rename = "issueUpdate")]
     pub(super) issue_update: IssueMutationNode,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct IssueRelationCreatePayload {
+    #[serde(rename = "issueRelationCreate")]
+    pub(super) issue_relation_create: IssueRelationMutationNode,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct IssueRelationUpdatePayload {
+    #[serde(rename = "issueRelationUpdate")]
+    pub(super) issue_relation_update: IssueRelationMutationNode,
 }
 
 #[derive(Debug, Deserialize)]
@@ -145,6 +163,13 @@ pub(super) struct CommentMutationNode {
 pub(super) struct AttachmentMutationNode {
     pub(super) success: bool,
     pub(super) attachment: Option<AttachmentNode>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct IssueRelationMutationNode {
+    pub(super) success: bool,
+    #[serde(rename = "issueRelation")]
+    pub(super) issue_relation: Option<IssueRelationNode>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -221,6 +246,17 @@ pub(super) struct IssueNode {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(super) struct IssueDependencyNode {
+    #[serde(flatten)]
+    pub(super) issue: IssueNode,
+    #[serde(default)]
+    pub(super) relations: Option<Connection<IssueRelationNode>>,
+    #[serde(default)]
+    pub(super) inverse_relations: Option<Connection<IssueRelationNode>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(super) struct AttachmentNode {
     pub(super) id: String,
     pub(super) title: String,
@@ -239,6 +275,16 @@ pub(super) struct IssueLinkNode {
     pub(super) url: String,
     #[serde(default)]
     pub(super) description: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct IssueRelationNode {
+    pub(super) id: String,
+    #[serde(rename = "type")]
+    pub(super) relation_type: IssueRelationType,
+    pub(super) issue: IssueLinkNode,
+    pub(super) related_issue: IssueLinkNode,
 }
 
 #[derive(Debug, Deserialize)]
@@ -319,6 +365,34 @@ impl From<IssueNode> for IssueSummary {
     }
 }
 
+impl From<IssueDependencyNode> for IssueDependencySnapshot {
+    fn from(value: IssueDependencyNode) -> Self {
+        Self {
+            issue: IssueSummary::from(value.issue),
+            relations: value
+                .relations
+                .map(|relations| {
+                    relations
+                        .nodes
+                        .into_iter()
+                        .map(IssueRelationSummary::from)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            inverse_relations: value
+                .inverse_relations
+                .map(|relations| {
+                    relations
+                        .nodes
+                        .into_iter()
+                        .map(IssueRelationSummary::from)
+                        .collect()
+                })
+                .unwrap_or_default(),
+        }
+    }
+}
+
 impl From<CommentNode> for IssueComment {
     fn from(value: CommentNode) -> Self {
         Self {
@@ -351,6 +425,17 @@ impl From<IssueLinkNode> for IssueLink {
             title: value.title,
             url: value.url,
             description: value.description,
+        }
+    }
+}
+
+impl From<IssueRelationNode> for IssueRelationSummary {
+    fn from(value: IssueRelationNode) -> Self {
+        Self {
+            id: value.id,
+            relation_type: value.relation_type,
+            issue: IssueLink::from(value.issue),
+            related_issue: IssueLink::from(value.related_issue),
         }
     }
 }
