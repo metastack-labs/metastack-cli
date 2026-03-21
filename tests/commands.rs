@@ -143,6 +143,12 @@ fn agents_workflows_run_help_describes_tui_first_and_fallback_flags() {
         .args(["agents", "workflows", "run", "--help"])
         .assert()
         .success()
+        .stdout(predicate::str::contains(
+            "TTY runs open a guided wizard, then land on a review/export dashboard.",
+        ))
+        .stdout(predicate::str::contains(
+            "Use --no-interactive with explicit --param key=value pairs for scripts and CI.",
+        ))
         .stdout(predicate::str::contains("--no-interactive"))
         .stdout(predicate::str::contains("--render-once"))
         .stdout(predicate::str::contains("--output"))

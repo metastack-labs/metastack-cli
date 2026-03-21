@@ -231,20 +231,24 @@ async fn run_workflow(args: &WorkflowRunArgs) -> Result<String> {
         return run_workflow_tui(root, workflow, args, provided_params).await;
     }
 
+    let resolved_output = args
+        .output
+        .as_ref()
+        .map(|output| resolve_output_path(&root, output))
+        .transpose()?;
     let prepared = prepare_workflow_run(&root, &workflow, args, provided_params).await?;
     let artifact = execute_prepared_workflow(&root, &prepared)?;
 
-    if let Some(output) = args.output.as_ref() {
-        let output = resolve_output_path(&root, output)?;
-        let decision = save_artifact(&output, &artifact.markdown, args.overwrite)?;
+    if let Some(output) = resolved_output.as_ref() {
+        let decision = save_artifact(output, &artifact.markdown, args.overwrite)?;
         if decision == SaveDecision::NeedsOverwrite {
             bail!(
                 "refusing to overwrite `{}` without `--overwrite`",
-                display_path(&output, &root)
+                display_path(output, &root)
             );
         }
         return Ok(render_saved_artifact_message(
-            &workflow, &root, &output, decision,
+            &workflow, &root, output, decision,
         ));
     }
 

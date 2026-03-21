@@ -1135,3 +1135,82 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"#
     assert_eq!(fs::read_to_string(output_path)?, "# Existing\n");
     Ok(())
 }
+
+#[cfg(unix)]
+#[test]
+fn workflows_run_no_interactive_rejects_output_outside_repo_before_execution()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let stub_dir = temp.path().join("stub-output");
+    fs::create_dir_all(repo_root.join(".metastack/workflows"))?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&stub_dir)?;
+
+    fs::write(
+        repo_root.join(".metastack/workflows/save-proof.md"),
+        r#"---
+name: save-proof
+summary: Verify non-interactive save behavior.
+provider: codex
+parameters:
+  - name: request
+    description: Prompt text.
+    required: true
+---
+# Generated
+
+{{request}}
+"#,
+    )?;
+    fs::write(
+        &config_path,
+        r#"[agents]
+default_agent = "codex"
+default_model = "gpt-5.4"
+default_reasoning = "medium"
+"#,
+    )?;
+
+    let stub_path = bin_dir.join("codex");
+    fs::write(
+        &stub_path,
+        r##"#!/bin/sh
+printf '%s\n' "$@" > "$TEST_OUTPUT_DIR/args.txt"
+printf '%s\n' '{"type":"thread.started","thread_id":"workflow-thread"}'
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"# Saved\n\noutside repo"}}'
+"##,
+    )?;
+    let mut permissions = fs::metadata(&stub_path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&stub_path, permissions)?;
+
+    let current_path = std::env::var("PATH")?;
+    meta()
+        .workflow_repo(&repo_root, &config_path)?
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &stub_dir)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "workflows",
+            "run",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+            "save-proof",
+            "--no-interactive",
+            "--param",
+            "request=Save this plan",
+            "--output",
+            "../outside.md",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "refusing to write outside the repository root",
+        ));
+
+    assert!(!stub_dir.join("args.txt").exists());
+    Ok(())
+}

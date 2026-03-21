@@ -57,6 +57,15 @@ Examples:
   meta agents workflows run ticket-implementation --root . --no-interactive --param issue=MET-93
   meta agents workflows run ticket-implementation --root . --render-once --param issue=MET-93";
 
+const WORKFLOW_RUN_HELP: &str = "\
+Interactive mode:
+  TTY runs open a guided wizard, then land on a review/export dashboard.
+  Use --render-once for deterministic wizard snapshots in tests.
+
+Non-interactive mode:
+  Use --no-interactive with explicit --param key=value pairs for scripts and CI.
+  Use --output and --overwrite to save the reviewed Markdown artifact headlessly.";
+
 const LISTEN_HELP_EXAMPLES: &str = "\
 Interactive dashboard:
   - Session rows stay compact and include PR visibility as `none`, `draft #N`, or `ready #N`
@@ -450,6 +459,7 @@ pub struct WorkflowExplainArgs {
 }
 
 #[derive(Debug, Clone, Args)]
+#[command(after_help = WORKFLOW_RUN_HELP)]
 pub struct WorkflowRunArgs {
     #[command(flatten)]
     pub root: RepositoryRootArgs,
