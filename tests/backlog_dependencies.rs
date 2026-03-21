@@ -353,6 +353,141 @@ fn backlog_dependencies_warns_on_conflicting_parent_references() -> Result<(), B
 }
 
 #[test]
+fn backlog_dependencies_parent_edges_drive_rollout_order() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    write_onboarded_config(&config_path)?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+
+    write_backlog_item(
+        &repo_root,
+        "met-60",
+        "MET-60",
+        "Dependency: parent",
+        "Ready first.",
+    )?;
+    write_backlog_item(
+        &repo_root,
+        "met-61",
+        "MET-61",
+        "Dependency: child",
+        "Parent: MET-60",
+    )?;
+    write_backlog_item(
+        &repo_root,
+        "met-62",
+        "MET-62",
+        "Dependency: sibling",
+        "Ready in parallel with MET-60.",
+    )?;
+
+    let output = cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "backlog",
+            "dependencies",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let payload: serde_json::Value = serde_json::from_slice(&output)?;
+    assert_eq!(
+        payload["result"]["rollout_order"],
+        json!([["MET-60", "MET-62"], ["MET-61"]])
+    );
+    assert_eq!(
+        payload["result"]["parallel_workstreams"],
+        json!([
+            {
+                "wave": 1,
+                "group": "dependency",
+                "issues": ["MET-60", "MET-62"]
+            }
+        ])
+    );
+
+    Ok(())
+}
+
+#[test]
+fn backlog_dependencies_text_output_separates_relationship_classes() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    write_onboarded_config(&config_path)?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+
+    write_backlog_item(
+        &repo_root,
+        "met-70",
+        "MET-70",
+        "Dependency: foundation",
+        "Ready first.",
+    )?;
+    write_backlog_item(
+        &repo_root,
+        "met-71",
+        "MET-71",
+        "Dependency: child",
+        "Parent: MET-70",
+    )?;
+    write_backlog_item(
+        &repo_root,
+        "met-72",
+        "MET-72",
+        "Dependency: command",
+        "Blocked by MET-70\nRelated: MET-71",
+    )?;
+
+    cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "backlog",
+            "dependencies",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Parent relationships:"))
+        .stdout(predicate::str::contains("Hard blockers:"))
+        .stdout(predicate::str::contains("Related links:"))
+        .stdout(predicate::str::contains("Soft sequencing suggestions:"))
+        .stdout(predicate::str::contains("- MET-72 blocked by MET-70"))
+        .stdout(predicate::str::contains("- MET-72 <-> MET-71"))
+        .stdout(predicate::str::contains("- MET-71 -> MET-70"));
+
+    Ok(())
+}
+
+#[test]
 fn backlog_dependencies_apply_creates_blocker_relation_in_linear() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");

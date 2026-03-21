@@ -402,8 +402,9 @@ fn analyze_dependencies(
         "combined dependency cycle",
     ));
 
-    let rollout_order = topological_waves(items, &hard_edges);
-    let parallel_workstreams = build_parallel_workstreams(items, &rollout_order, &hard_edges);
+    let rollout_edges = combine_edge_sets([&parent_edges, &hard_edges]);
+    let rollout_order = topological_waves(items, &rollout_edges);
+    let parallel_workstreams = build_parallel_workstreams(items, &rollout_order, &rollout_edges);
     let changes = build_changes(items, &proposals, &warnings);
     let proposal_list = proposals.into_iter().collect::<Vec<_>>();
     let warning_list = warnings.into_iter().collect::<Vec<_>>();
@@ -698,6 +699,26 @@ async fn apply_changes(
 }
 
 fn render_analysis(analysis: &DependencyAnalysisResult, applied: bool) -> String {
+    let parent_proposals = analysis
+        .proposals
+        .iter()
+        .filter(|proposal| proposal.kind == RelationshipKind::Parent)
+        .collect::<Vec<_>>();
+    let blocker_proposals = analysis
+        .proposals
+        .iter()
+        .filter(|proposal| proposal.kind == RelationshipKind::BlockedBy)
+        .collect::<Vec<_>>();
+    let related_proposals = analysis
+        .proposals
+        .iter()
+        .filter(|proposal| proposal.kind == RelationshipKind::Related)
+        .collect::<Vec<_>>();
+    let soft_sequence_proposals = analysis
+        .proposals
+        .iter()
+        .filter(|proposal| proposal.kind == RelationshipKind::SoftSequence)
+        .collect::<Vec<_>>();
     let mut lines = vec![
         format!(
             "meta backlog dependencies {}",
@@ -714,16 +735,55 @@ fn render_analysis(analysis: &DependencyAnalysisResult, applied: bool) -> String
             }
         ),
         String::new(),
-        "Proposed relationships:".to_string(),
+        "Parent relationships:".to_string(),
     ];
 
-    if analysis.proposals.is_empty() {
+    if parent_proposals.is_empty() {
         lines.push("- none".to_string());
     } else {
-        for proposal in &analysis.proposals {
+        for proposal in parent_proposals {
             lines.push(format!(
-                "- {:?}: {} -> {} ({})",
-                proposal.kind, proposal.issue, proposal.related_issue, proposal.reason
+                "- {} -> {} ({})",
+                proposal.issue, proposal.related_issue, proposal.reason
+            ));
+        }
+    }
+
+    lines.push(String::new());
+    lines.push("Hard blockers:".to_string());
+    if blocker_proposals.is_empty() {
+        lines.push("- none".to_string());
+    } else {
+        for proposal in blocker_proposals {
+            lines.push(format!(
+                "- {} blocked by {} ({})",
+                proposal.issue, proposal.related_issue, proposal.reason
+            ));
+        }
+    }
+
+    lines.push(String::new());
+    lines.push("Related links:".to_string());
+    if related_proposals.is_empty() {
+        lines.push("- none".to_string());
+    } else {
+        for proposal in related_proposals {
+            lines.push(format!(
+                "- {} <-> {} ({})",
+                proposal.issue, proposal.related_issue, proposal.reason
+            ));
+        }
+    }
+
+    lines.push(String::new());
+    lines.push("Soft sequencing suggestions:".to_string());
+    if soft_sequence_proposals.is_empty() {
+        lines.push("- none".to_string());
+    } else {
+        for proposal in soft_sequence_proposals {
+            lines.push(format!(
+                "- {} after {} ({})",
+                proposal.issue, proposal.related_issue, proposal.reason
             ));
         }
     }
