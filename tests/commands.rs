@@ -138,6 +138,24 @@ fn agents_help_lists_listen_and_workflows() {
 }
 
 #[test]
+fn agents_listen_help_describes_session_browser_navigation() {
+    cli()
+        .args(["agents", "listen", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("interactive session browser"))
+        .stdout(predicate::str::contains(
+            "include PR visibility as `none`, `draft #N`, or `ready #N`",
+        ))
+        .stdout(predicate::str::contains(
+            "Press Enter on the selected session to open the detail pane",
+        ))
+        .stdout(predicate::str::contains(
+            "Use Up/Down (or j/k when vim mode is enabled)",
+        ));
+}
+
+#[test]
 fn backlog_help_lists_tech_and_sync_commands() {
     cli()
         .args(["backlog", "--help"])

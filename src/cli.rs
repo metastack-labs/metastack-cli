@@ -56,6 +56,11 @@ Examples:
   meta agents workflows run ticket-implementation --root . --dry-run";
 
 const LISTEN_HELP_EXAMPLES: &str = "\
+Interactive dashboard:
+  - Session rows stay compact and include PR visibility as `none`, `draft #N`, or `ready #N`
+  - Press Enter on the selected session to open the detail pane for milestones, references, prompt context, and log excerpts
+  - Use Up/Down (or j/k when vim mode is enabled) to change the selected session, Esc to close detail mode, and PgUp/PgDn to scroll detail content
+
 Terminal-only examples:
   meta agents listen --check --root .
   meta agents listen --team MET --once
@@ -402,7 +407,7 @@ pub struct UpgradeArgs {
 
 #[derive(Debug, Clone, Subcommand)]
 pub enum AgentsCommands {
-    /// Listen to Linear for new backlog requests and run agents.
+    /// Listen for eligible Linear issues and supervise them through the interactive session browser.
     Listen(ListenArgs),
     /// List, explain, and run reusable workflow playbooks.
     Workflows(WorkflowsArgs),
@@ -971,7 +976,10 @@ pub struct SetupArgs {
 }
 
 #[derive(Debug, Clone, Args)]
-#[command(after_help = LISTEN_HELP_EXAMPLES)]
+#[command(
+    about = "Listen for eligible Linear issues and supervise them through the interactive session browser",
+    after_help = LISTEN_HELP_EXAMPLES
+)]
 pub struct ListenArgs {
     #[command(subcommand)]
     pub command: Option<ListenCommands>,

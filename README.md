@@ -961,14 +961,16 @@ Legacy alias: `meta listen`
 
 `meta agents listen` keeps the same repository identity as the source checkout, but the worker prompt is anchored to the provided workspace checkout as the only local write scope. Implementation, validation, and local backlog updates must stay inside that workspace for the active repository unless the issue explicitly asks for a narrower subproject.
 
-The live terminal dashboard refreshes locally every second so session-state changes stay visible, while the configured listen poll interval continues to control how often Linear is queried. Steady-state listen runs stay entirely in the terminal TUI, `--render-once` emits a terminal snapshot, and `--once --json` emits one machine-readable poll-cycle payload without going through the ratatui snapshot path.
+The live terminal dashboard refreshes locally every second so session-state changes stay visible, while the configured listen poll interval continues to control how often Linear is queried. Steady-state listen runs stay entirely in the terminal TUI as an interactive session browser, `--render-once` emits a terminal snapshot, and `--once --json` emits one machine-readable poll-cycle payload without going through the ratatui snapshot path.
 
 When built-in `codex` or `claude` workers emit structured usage telemetry, `meta agents listen` accumulates session-level input and output tokens across repeated turns and renders both per-session and runtime rollups as `in`, `out`, and `total`. When exact counts are unavailable, the dashboard and textual summaries continue to show `n/a`.
 When install-scoped `vim_mode` is enabled, the listen dashboard also accepts `h` / `l` as aliases
-for the existing left/right view-switching controls. The session table now keeps an active row
+for the existing left/right view-switching controls. The session table keeps an active row
 selection, renders a compact `PR` badge (`none`, `draft #N`, `ready #N`), and opens a structured
-detail pane with `Enter`. Use `Up` / `Down` or `j` / `k` to move between sessions, `Esc` to close
-detail mode, and `PgUp` / `PgDn` to scroll the focused detail pane.
+detail pane with `Enter`. That drill-down shows the selected session's milestones, workspace and
+backlog references, prompt-context references, PR publication state, and short log excerpts from
+the install-scoped session detail artifact. Use `Up` / `Down` or `j` / `k` to move between
+sessions, `Esc` to close detail mode, and `PgUp` / `PgDn` to scroll the focused detail pane.
 Examples:
 
 ```bash
