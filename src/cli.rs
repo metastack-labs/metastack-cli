@@ -67,6 +67,7 @@ Interactive mode:
 
 Non-interactive mode:
   Use --no-interactive with explicit --param key=value pairs for scripts and CI.
+  Runs without a TTY use the same fallback automatically unless --render-once is set.
   Use --output and --overwrite to save the reviewed Markdown artifact headlessly.";
 
 const LISTEN_HELP_EXAMPLES: &str = "\

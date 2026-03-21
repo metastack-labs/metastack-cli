@@ -645,8 +645,7 @@ fn render_workflow_explanation(root: &Path, workflow: &WorkflowPlaybook) -> Stri
         format!("Provider: `{}`", workflow.provider),
         "Interactive mode: TTY runs open a guided wizard, then a review/export dashboard."
             .to_string(),
-        "Fallback mode: use `--no-interactive` with explicit `--param key=value` pairs for scripts."
-            .to_string(),
+        "Fallback mode: use `--no-interactive` with explicit `--param key=value` pairs for scripts, or rely on the same headless path automatically when stdin/stdout are not TTYs.".to_string(),
     ];
 
     if let Some(parameter) = workflow.linear_issue_parameter.as_deref() {

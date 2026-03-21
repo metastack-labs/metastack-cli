@@ -604,6 +604,7 @@ Interactive terminal runs are TUI-first:
 Deterministic fallback rules:
 
 - Use `--no-interactive` for scripts, CI, and tests.
+- Runs without a TTY use the same fallback automatically unless `--render-once` is set.
 - The fallback path still requires explicit `--param key=value` pairs for all required inputs.
 - `--output <PATH>` saves the generated Markdown artifact directly.
 - `--render-once` prints a deterministic snapshot of the wizard for snapshot-style tests.
