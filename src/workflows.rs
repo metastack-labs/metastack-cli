@@ -164,6 +164,7 @@ struct WorkflowRunApp {
     artifact_scroll: ScrollState,
     detail_scroll: ScrollState,
     save_path_input: InputFieldState,
+    suggested_output: PathBuf,
     markdown_editor: InputFieldState,
     artifact: Option<WorkflowArtifact>,
     overwrite: bool,
@@ -847,6 +848,7 @@ impl WorkflowRunApp {
             artifact_scroll: ScrollState::default(),
             detail_scroll: ScrollState::default(),
             save_path_input: InputFieldState::new(display_path(&default_output, root)),
+            suggested_output: default_output,
             markdown_editor: InputFieldState::multiline(String::new()),
             artifact: None,
             overwrite,
@@ -889,6 +891,7 @@ impl WorkflowRunApp {
             .unwrap_or_else(|| artifact.default_output.clone());
         self.save_path_input =
             InputFieldState::new(display_output_path(&self.repo_root, &save_path));
+        self.suggested_output = save_path;
         self.artifact = Some(artifact);
         self.screen = WorkflowRunScreen::Review;
         self.review_focus = ReviewFocus::Artifact;
@@ -1466,9 +1469,10 @@ fn render_save_prompt(frame: &mut ratatui::Frame<'_>, app: &WorkflowRunApp, area
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(3), Constraint::Min(1)])
         .split(inner);
+    let suggested = display_output_path(&app.repo_root, &app.suggested_output);
     let helper = Paragraph::new(Text::from(vec![
-        Line::from("Default target:"),
-        Line::from(app.save_path_input.value().to_string()),
+        Line::from("Suggested target:"),
+        Line::from(suggested),
         Line::from("Paths must stay inside the repository root."),
     ]))
     .wrap(Wrap { trim: false });

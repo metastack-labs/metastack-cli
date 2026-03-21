@@ -72,7 +72,7 @@ The deterministic fallback remains available for scripts, CI, and tests via `--n
 ## Save Behavior
 
 - Saving always uses a one-off path prompt.
-- Default target:
+- Suggested target:
   - `.metastack/workflows/generated/<workflow-name>.md`
   - When the workflow has a Linear issue parameter and a value is present, the default becomes `.metastack/workflows/generated/<workflow-name>-<issue>.md`
 - Save safety:
