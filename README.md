@@ -661,10 +661,16 @@ Create repository-local cron jobs as Markdown plus YAML front matter, then super
 meta runtime cron init
 meta runtime cron init nightly --no-interactive --schedule "0 * * * *" --command "cargo test" --prompt "Review the latest test output and fix any failures"
 meta runtime cron --root target/cli-proof/cron init nightly --no-interactive --schedule "0 * * * *" --command "cargo test"
+meta runtime cron list
+meta runtime cron validate
 meta runtime cron status
 meta runtime cron start
 meta runtime cron stop
 meta runtime cron run nightly
+meta runtime cron approvals
+meta runtime cron approve <RUN_ID> --note "ship it"
+meta runtime cron reject <RUN_ID> --reason "not ready"
+meta runtime cron resume <RUN_ID>
 ```
 
 Legacy alias: `meta cron`
@@ -673,18 +679,20 @@ Machine mode:
 
 - `meta runtime cron init --no-interactive ...` now emits structured JSON by default
 - `meta runtime cron init --json ...` forces JSON without changing the rest of the command contract
+- `meta runtime cron list --json`, `validate --json`, and `approvals --json` emit structured inspection output
 - `--render-once` stays a text snapshot path for the dashboard and is separate from machine JSON output
 
 Side effects:
 
 - ensures `.metastack/cron/` exists
 - creates `.metastack/cron/<NAME>.md` job definitions
-- runs the shell command first when configured, then the optional agent in the same working directory
-- creates `.metastack/cron/.runtime/` on demand for scheduler state and logs
+- discovers workflow definitions from the install-scoped data root first, then overrides them by name with repo-scoped definitions under `.metastack/cron/`
+- creates `.metastack/cron/.runtime/` on demand for scheduler state, per-run logs, and persisted run-state JSON under `.metastack/cron/.runtime/runs/`
+- persists approval checkpoints, retry history, and resumable step state for every workflow run
 
 In the interactive cron editor, the prompt field submits on `Enter`, inserts a newline on `Shift+Enter`, and supports `Up`/`Down`, `PgUp`/`PgDn`, `Home`/`End`, plus mouse-wheel scrolling to keep long wrapped prompts reachable.
 
-Cron job files use this shape:
+Legacy single-step cron job files still work:
 
 ```md
 ---
@@ -699,6 +707,40 @@ enabled: true
 
 Review the command output and update the repository when needed.
 ```
+
+Explicit workflow files use the same Markdown wrapper but can declare durable steps, retries, and approval checkpoints:
+
+```md
+---
+schedule: "0 * * * *"
+mode: workflow
+enabled: false
+retry:
+  max_attempts: 2
+  backoff_seconds: 5
+steps:
+  - id: collect
+    type: shell
+    command: "cargo test"
+  - id: summarize
+    type: agent
+    agent: "codex"
+    prompt: "Review the collected test output and summarize failures."
+  - id: approval
+    type: approval
+    approval_message: "Approve opening follow-up issues for the failing tests."
+  - id: follow_up
+    type: cli
+    command: "linear"
+    args: ["issues", "list", "--state", "Todo"]
+    guardrails:
+      allow: ["linear"]
+      mutates: []
+---
+Operator notes and runbook text live in the Markdown body.
+```
+
+Use `meta runtime cron validate` before starting the daemon when you are editing workflow files, `meta runtime cron approvals` to inspect paused runs, and `meta runtime cron approve|reject|resume` to move persisted runs forward without replaying completed steps. Shipped disabled-by-default examples live under [`src/artifacts/cron/`](src/artifacts/cron/README.md).
 
 ### `backlog plan`
 

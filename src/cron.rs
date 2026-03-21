@@ -3,18 +3,22 @@ mod runtime;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::IsTerminal;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Local, Utc};
 use cron::Schedule;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use walkdir::WalkDir;
 
-use crate::cli::{CronArgs, CronCommands, CronInitArgs, CronInitEventArg};
+use crate::cli::{
+    CronArgs, CronCommands, CronInitArgs, CronInitEventArg, CronListArgs, CronValidateArgs,
+};
 use crate::config::{
     AGENT_ROUTE_RUNTIME_CRON_PROMPT, AgentConfigOverrides, AppConfig, PlanningMeta,
-    detect_supported_agents, normalize_agent_name, resolve_agent_route,
+    detect_supported_agents, normalize_agent_name, resolve_agent_route, resolve_data_root,
 };
 use crate::cron_dashboard::{
     CronInitAction, CronInitFormContext, CronInitFormExit, CronInitFormOptions,
@@ -38,6 +42,8 @@ Use this directory for repository-local automation jobs managed by `meta cron`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CronJobFrontMatter {
     schedule: String,
+    #[serde(default)]
+    mode: CronJobMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     command: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -52,21 +58,166 @@ struct CronJobFrontMatter {
     timeout_seconds: u64,
     #[serde(default = "runtime::default_enabled")]
     enabled: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    steps: Vec<CronStepDefinition>,
+    #[serde(default, skip_serializing_if = "CronRetryPolicy::is_default")]
+    retry: CronRetryPolicy,
 }
 
 #[derive(Debug, Clone)]
-struct CronJob {
+pub(super) struct CronJob {
     name: String,
     relative_path: String,
+    absolute_path: PathBuf,
+    source: CronDefinitionSource,
     front_matter: CronJobFrontMatter,
     prompt_markdown: Option<String>,
+    steps: Vec<CronStepDefinition>,
 }
 
 #[derive(Debug)]
-struct DiscoveredJob {
+pub(super) struct DiscoveredJob {
     name: String,
     relative_path: String,
+    source: CronDefinitionSource,
     result: Result<CronJob>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum CronJobMode {
+    #[default]
+    Legacy,
+    Workflow,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum CronStepKind {
+    Shell,
+    Agent,
+    Cli,
+    Approval,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct CronRetryPolicy {
+    #[serde(default = "default_max_attempts")]
+    max_attempts: u32,
+    #[serde(default)]
+    backoff_seconds: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub(super) struct CronStepWhen {
+    step: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    equals: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    not_equals: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    exists: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub(super) struct CronStepGuardrails {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    allow: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    mutates: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct CronStepDefinition {
+    id: String,
+    #[serde(rename = "type")]
+    kind: CronStepKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    args: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    prompt: Option<String>,
+    #[serde(
+        default = "runtime::default_shell",
+        skip_serializing_if = "is_default_shell"
+    )]
+    shell: String,
+    #[serde(
+        default = "runtime::default_working_directory",
+        skip_serializing_if = "is_default_working_directory"
+    )]
+    working_directory: String,
+    #[serde(
+        default = "runtime::default_timeout_seconds",
+        skip_serializing_if = "is_default_timeout_seconds"
+    )]
+    timeout_seconds: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    route_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    approval_message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    when: Option<CronStepWhen>,
+    #[serde(default, skip_serializing_if = "CronStepGuardrails::is_empty")]
+    guardrails: CronStepGuardrails,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum CronDefinitionSourceKind {
+    Install,
+    Repository,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(super) struct CronDefinitionSource {
+    kind: CronDefinitionSourceKind,
+    label: String,
+    path: String,
+}
+
+impl CronRetryPolicy {
+    fn is_default(&self) -> bool {
+        self.max_attempts == default_max_attempts() && self.backoff_seconds == 0
+    }
+}
+
+impl Default for CronRetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_attempts: default_max_attempts(),
+            backoff_seconds: 0,
+        }
+    }
+}
+
+impl CronStepGuardrails {
+    fn is_empty(&self) -> bool {
+        self.allow.is_empty() && self.mutates.is_empty()
+    }
+}
+
+fn default_max_attempts() -> u32 {
+    1
+}
+
+fn is_default_shell(value: &str) -> bool {
+    value == runtime::default_shell()
+}
+
+fn is_default_working_directory(value: &str) -> bool {
+    value == runtime::default_working_directory()
+}
+
+fn is_default_timeout_seconds(value: &u64) -> bool {
+    *value == runtime::default_timeout_seconds()
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -101,14 +252,6 @@ struct ScheduledJob {
 }
 
 #[derive(Debug, Clone)]
-struct JobExecutionOutcome {
-    exit_code: Option<i32>,
-    error: Option<String>,
-    timed_out: bool,
-    log_path: String,
-}
-
-#[derive(Debug, Clone)]
 struct CommandPhaseOutcome {
     executed: bool,
     exit_code: Option<i32>,
@@ -116,21 +259,21 @@ struct CommandPhaseOutcome {
     timed_out: bool,
 }
 
-impl JobExecutionOutcome {
-    fn succeeded(&self) -> bool {
-        !self.timed_out && self.error.is_none() && self.exit_code.is_none_or(|code| code == 0)
-    }
-}
-
 pub fn run_cron(args: &CronArgs) -> Result<Option<String>> {
     let root = canonicalize_existing_dir(&args.root)?;
 
     match &args.command {
         CronCommands::Init(command) => Ok(Some(run_init(&root, command)?)),
+        CronCommands::List(command) => Ok(Some(run_list(&root, command)?)),
+        CronCommands::Validate(command) => Ok(Some(run_validate(&root, command)?)),
         CronCommands::Start(command) => runtime::run_start(&root, command),
         CronCommands::Stop => Ok(Some(runtime::run_stop(&root)?)),
         CronCommands::Status => Ok(Some(runtime::run_status(&root)?)),
         CronCommands::Run(command) => Ok(Some(runtime::run_job_now(&root, command)?)),
+        CronCommands::Resume(command) => Ok(Some(runtime::run_resume(&root, command)?)),
+        CronCommands::Approvals(command) => Ok(Some(runtime::run_approvals(&root, command)?)),
+        CronCommands::Approve(command) => Ok(Some(runtime::run_approve(&root, command)?)),
+        CronCommands::Reject(command) => Ok(Some(runtime::run_reject(&root, command)?)),
         CronCommands::Daemon(command) => runtime::run_daemon(&root, command),
     }
 }
@@ -195,6 +338,119 @@ fn run_init(root: &Path, args: &CronInitArgs) -> Result<String> {
         interactive || args.force,
         args.no_interactive || args.json,
     )
+}
+
+fn run_list(root: &Path, args: &CronListArgs) -> Result<String> {
+    ensure_cron_layout(root)?;
+    let discovered = discover_jobs(root)?;
+
+    #[derive(Serialize)]
+    struct ListedJob<'a> {
+        name: &'a str,
+        source: &'a CronDefinitionSource,
+        path: &'a str,
+        enabled: bool,
+        mode: String,
+        schedule: &'a str,
+        steps: usize,
+        valid: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    }
+
+    let listed = discovered
+        .iter()
+        .map(|item| match &item.result {
+            Ok(job) => ListedJob {
+                name: &job.name,
+                source: &job.source,
+                path: &job.relative_path,
+                enabled: job.front_matter.enabled,
+                mode: mode_label(&job.front_matter.mode),
+                schedule: &job.front_matter.schedule,
+                steps: job.steps.len(),
+                valid: true,
+                error: None,
+            },
+            Err(error) => ListedJob {
+                name: &item.name,
+                source: &item.source,
+                path: &item.relative_path,
+                enabled: false,
+                mode: mode_label(&CronJobMode::Workflow),
+                schedule: "",
+                steps: 0,
+                valid: false,
+                error: Some(format!("{error:#}")),
+            },
+        })
+        .collect::<Vec<_>>();
+
+    if args.json {
+        return render_json_success("runtime.cron.list", &listed);
+    }
+
+    if listed.is_empty() {
+        return Ok("No cron workflow definitions found.".to_string());
+    }
+
+    let mut lines = Vec::new();
+    for entry in listed {
+        lines.push(format!(
+            "- {} [{}] {}",
+            entry.name,
+            if entry.valid { "valid" } else { "invalid" },
+            if entry.enabled { "enabled" } else { "disabled" }
+        ));
+        lines.push(format!("  source: {}", entry.source.label));
+        lines.push(format!("  file: {}", entry.path));
+        if !entry.schedule.is_empty() {
+            lines.push(format!("  schedule: {}", entry.schedule));
+            lines.push(format!("  mode: {}", entry.mode));
+            lines.push(format!("  steps: {}", entry.steps));
+        }
+        if let Some(error) = entry.error {
+            lines.push(format!("  error: {error}"));
+        }
+    }
+    Ok(lines.join("\n"))
+}
+
+fn run_validate(root: &Path, args: &CronValidateArgs) -> Result<String> {
+    ensure_cron_layout(root)?;
+    let discovered = discover_jobs(root)?;
+    let failures = discovered
+        .iter()
+        .filter_map(|item| item.result.as_ref().err().map(|error| (item, error)))
+        .map(|(item, error)| format!("{}: {error:#}", item.relative_path))
+        .collect::<Vec<_>>();
+
+    #[derive(Serialize)]
+    struct ValidationResult<'a> {
+        valid: bool,
+        files_checked: usize,
+        failures: &'a [String],
+    }
+
+    if args.json {
+        return render_json_success(
+            "runtime.cron.validate",
+            &ValidationResult {
+                valid: failures.is_empty(),
+                files_checked: discovered.len(),
+                failures: &failures,
+            },
+        );
+    }
+
+    if failures.is_empty() {
+        Ok(format!(
+            "Validated {} cron workflow definition(s) successfully.",
+            discovered.len()
+        ))
+    } else {
+        bail!("cron workflow validation failed:\n{}", failures.join("\n"))
+    }
 }
 
 fn run_init_non_interactive(
@@ -271,6 +527,7 @@ fn write_cron_job(
     let path = paths.cron_job_path(&values.name);
     let front_matter = CronJobFrontMatter {
         schedule: values.schedule,
+        mode: CronJobMode::Legacy,
         command: normalize_optional(Some(values.command.as_str())),
         agent: values.agent,
         prompt: None,
@@ -278,6 +535,8 @@ fn write_cron_job(
         working_directory: values.working_directory,
         timeout_seconds: values.timeout_seconds,
         enabled: values.enabled,
+        steps: Vec::new(),
+        retry: CronRetryPolicy::default(),
     };
     let contents = render_job_markdown(&front_matter, values.prompt.as_deref())?;
     let status = write_text_file(&path, &contents, force)?;
@@ -372,7 +631,15 @@ fn load_existing_prefill(root: &Path, name: Option<&str>) -> Result<Option<CronI
         return Ok(None);
     }
 
-    let job = load_job(root, &path)?;
+    let job = load_job(
+        root,
+        &path,
+        CronDefinitionSource {
+            kind: CronDefinitionSourceKind::Repository,
+            label: "repository".to_string(),
+            path: PlanningPaths::new(root).cron_dir.display().to_string(),
+        },
+    )?;
     Ok(Some(CronInitFormPrefill {
         name: Some(job.name),
         schedule: Some(job.front_matter.schedule),
@@ -459,18 +726,6 @@ fn render_command_error(job: &CronJob, outcome: &CommandPhaseOutcome) -> Option<
         .map(|error| format!("shell command failed: {error}"))
 }
 
-fn combine_phase_errors(
-    command_error: Option<String>,
-    agent_error: Option<String>,
-) -> Option<String> {
-    match (command_error, agent_error) {
-        (Some(command_error), Some(agent_error)) => Some(format!("{command_error}; {agent_error}")),
-        (Some(command_error), None) => Some(command_error),
-        (None, Some(agent_error)) => Some(agent_error),
-        (None, None) => None,
-    }
-}
-
 fn render_agent_prompt(
     job: &CronJob,
     working_directory: &Path,
@@ -529,21 +784,81 @@ fn render_agent_prompt(
     lines.join("\n")
 }
 
-fn discover_jobs(root: &Path) -> Result<Vec<DiscoveredJob>> {
-    let paths = PlanningPaths::new(root);
-    if !paths.cron_dir.exists() {
+pub(super) fn discover_jobs(root: &Path) -> Result<Vec<DiscoveredJob>> {
+    let mut discovered = BTreeMap::new();
+
+    for source in discover_definition_sources(root)? {
+        let source_jobs = discover_jobs_in_source(root, &source)?;
+        for (name, relative_path, absolute_path) in source_jobs {
+            discovered.insert(
+                name.clone(),
+                DiscoveredJob {
+                    name,
+                    relative_path,
+                    source: source.clone(),
+                    result: load_job(root, &absolute_path, source.clone()),
+                },
+            );
+        }
+    }
+
+    Ok(discovered.into_values().collect())
+}
+
+fn discover_definition_sources(root: &Path) -> Result<Vec<CronDefinitionSource>> {
+    let mut sources = Vec::new();
+    let install_root = resolve_data_root()?.join("cron");
+    if install_root.is_dir() {
+        sources.push(CronDefinitionSource {
+            kind: CronDefinitionSourceKind::Install,
+            label: "install".to_string(),
+            path: install_root.display().to_string(),
+        });
+    }
+
+    let repo_root = PlanningPaths::new(root).cron_dir;
+    sources.push(CronDefinitionSource {
+        kind: CronDefinitionSourceKind::Repository,
+        label: "repository".to_string(),
+        path: repo_root.display().to_string(),
+    });
+    Ok(sources)
+}
+
+fn discover_jobs_in_source(
+    root: &Path,
+    source: &CronDefinitionSource,
+) -> Result<Vec<(String, String, PathBuf)>> {
+    let base = PathBuf::from(&source.path);
+    if !base.is_dir() {
         return Ok(Vec::new());
     }
 
-    let mut paths_to_load = fs::read_dir(&paths.cron_dir)
-        .with_context(|| format!("failed to read `{}`", paths.cron_dir.display()))?
-        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .filter(|path| path.extension().is_some_and(|extension| extension == "md"))
-        .filter(|path| {
-            path.file_name()
-                .is_some_and(|file_name| file_name != "README.md")
-        })
-        .collect::<Vec<_>>();
+    let mut paths_to_load = Vec::new();
+    for entry in WalkDir::new(&base) {
+        let entry = entry.with_context(|| format!("failed to walk `{}`", base.display()))?;
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if path
+            .components()
+            .any(|component| component.as_os_str() == ".runtime")
+        {
+            continue;
+        }
+        let is_markdown = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("md"));
+        if !is_markdown {
+            continue;
+        }
+        if path.file_name().and_then(|value| value.to_str()) == Some("README.md") {
+            continue;
+        }
+        paths_to_load.push(path.to_path_buf());
+    }
     paths_to_load.sort();
 
     let mut discovered = Vec::with_capacity(paths_to_load.len());
@@ -553,40 +868,200 @@ fn discover_jobs(root: &Path) -> Result<Vec<DiscoveredJob>> {
             .and_then(|stem| stem.to_str())
             .ok_or_else(|| anyhow!("cron job path `{}` has no valid file stem", path.display()))?
             .to_string();
-        let relative_path = display_path(&path, root);
-        discovered.push(DiscoveredJob {
-            name,
-            relative_path,
-            result: load_job(root, &path),
-        });
+        let relative_path = match source.kind {
+            CronDefinitionSourceKind::Repository => display_path(&path, root),
+            CronDefinitionSourceKind::Install => display_path(&path, &base),
+        };
+        discovered.push((name, relative_path, path));
     }
-
     Ok(discovered)
 }
 
-fn load_job(root: &Path, path: &Path) -> Result<CronJob> {
+pub(super) fn load_job(root: &Path, path: &Path, source: CronDefinitionSource) -> Result<CronJob> {
     let contents =
         fs::read_to_string(path).with_context(|| format!("failed to read `{}`", path.display()))?;
     let (front_matter, body) = split_front_matter(&contents)?;
-    let front_matter: CronJobFrontMatter =
+    let mut front_matter: CronJobFrontMatter =
         serde_yaml::from_str(&front_matter).context("failed to parse YAML front matter")?;
     parse_schedule(&front_matter.schedule)?;
-    validate_job_name(
-        path.file_stem()
-            .and_then(|stem| stem.to_str())
-            .ok_or_else(|| anyhow!("cron job path `{}` has no valid file stem", path.display()))?,
-    )?;
+    let name = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .ok_or_else(|| anyhow!("cron job path `{}` has no valid file stem", path.display()))?
+        .to_string();
+    validate_job_name(&name)?;
+    let prompt_markdown = normalize_prompt(Some(body.trim()));
+    let steps = synthesize_steps(&front_matter, prompt_markdown.as_deref())
+        .with_context(|| format!("invalid cron workflow `{}`", path.display()))?;
+    validate_front_matter(&front_matter, &steps, path)?;
+    if !front_matter.steps.is_empty() {
+        front_matter.mode = CronJobMode::Workflow;
+    }
 
     Ok(CronJob {
-        name: path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .expect("validated file stem")
-            .to_string(),
-        relative_path: display_path(path, root),
+        name,
+        relative_path: match source.kind {
+            CronDefinitionSourceKind::Repository => display_path(path, root),
+            CronDefinitionSourceKind::Install => {
+                let install_root = PathBuf::from(&source.path);
+                display_path(path, &install_root)
+            }
+        },
+        absolute_path: path.to_path_buf(),
+        source,
         front_matter,
-        prompt_markdown: normalize_prompt(Some(body.trim())),
+        prompt_markdown,
+        steps,
     })
+}
+
+fn synthesize_steps(
+    front_matter: &CronJobFrontMatter,
+    prompt_markdown: Option<&str>,
+) -> Result<Vec<CronStepDefinition>> {
+    if !front_matter.steps.is_empty() {
+        return Ok(front_matter.steps.clone());
+    }
+
+    let mut steps = Vec::new();
+    if let Some(command) = normalize_optional(front_matter.command.as_deref()) {
+        steps.push(CronStepDefinition {
+            id: "command".to_string(),
+            kind: CronStepKind::Shell,
+            name: Some("Command".to_string()),
+            command: Some(command),
+            args: None,
+            agent: None,
+            prompt: None,
+            shell: front_matter.shell.clone(),
+            working_directory: front_matter.working_directory.clone(),
+            timeout_seconds: front_matter.timeout_seconds,
+            route_key: None,
+            approval_message: None,
+            when: None,
+            guardrails: CronStepGuardrails::default(),
+        });
+    }
+    if let Some(prompt) = normalize_prompt(prompt_markdown.or(front_matter.prompt.as_deref())) {
+        steps.push(CronStepDefinition {
+            id: "agent".to_string(),
+            kind: CronStepKind::Agent,
+            name: Some("Agent".to_string()),
+            command: None,
+            args: None,
+            agent: front_matter.agent.clone(),
+            prompt: Some(prompt),
+            shell: runtime::default_shell(),
+            working_directory: front_matter.working_directory.clone(),
+            timeout_seconds: front_matter.timeout_seconds,
+            route_key: Some(AGENT_ROUTE_RUNTIME_CRON_PROMPT.to_string()),
+            approval_message: None,
+            when: None,
+            guardrails: CronStepGuardrails::default(),
+        });
+    }
+    if steps.is_empty() {
+        bail!("either legacy `command`/prompt fields or explicit `steps` are required");
+    }
+    Ok(steps)
+}
+
+fn validate_front_matter(
+    front_matter: &CronJobFrontMatter,
+    steps: &[CronStepDefinition],
+    path: &Path,
+) -> Result<()> {
+    if front_matter.schedule.trim().is_empty() {
+        bail!("{}: `schedule` must not be empty", path.display());
+    }
+    if front_matter.retry.max_attempts == 0 {
+        bail!(
+            "{}: `retry.max_attempts` must be at least 1",
+            path.display()
+        );
+    }
+    if steps.is_empty() {
+        bail!(
+            "{}: workflow must contain at least one step",
+            path.display()
+        );
+    }
+    let mut seen_ids = BTreeSet::new();
+    for step in steps {
+        if step.id.trim().is_empty() {
+            bail!("{}: step `id` must not be empty", path.display());
+        }
+        if !seen_ids.insert(step.id.clone()) {
+            bail!("{}: duplicate step id `{}`", path.display(), step.id);
+        }
+        validate_step(step, path)?;
+    }
+    Ok(())
+}
+
+fn validate_step(step: &CronStepDefinition, path: &Path) -> Result<()> {
+    for target in &step.guardrails.mutates {
+        if !step
+            .guardrails
+            .allow
+            .iter()
+            .any(|allowed| allowed == target)
+        {
+            bail!(
+                "{}: step `{}` mutates `{target}` but does not allow it in `guardrails.allow`",
+                path.display(),
+                step.id
+            );
+        }
+    }
+    if let Some(condition) = &step.when
+        && condition.step.trim().is_empty()
+    {
+        bail!(
+            "{}: step `{}` has `when.step` but it is empty",
+            path.display(),
+            step.id
+        );
+    }
+    match step.kind {
+        CronStepKind::Shell => {
+            if normalize_optional(step.command.as_deref()).is_none() {
+                bail!(
+                    "{}: shell step `{}` requires `command`",
+                    path.display(),
+                    step.id
+                );
+            }
+        }
+        CronStepKind::Agent => {
+            if normalize_prompt(step.prompt.as_deref()).is_none() {
+                bail!(
+                    "{}: agent step `{}` requires `prompt`",
+                    path.display(),
+                    step.id
+                );
+            }
+        }
+        CronStepKind::Cli => {
+            if normalize_optional(step.command.as_deref()).is_none() {
+                bail!(
+                    "{}: cli step `{}` requires `command`",
+                    path.display(),
+                    step.id
+                );
+            }
+        }
+        CronStepKind::Approval => {
+            if normalize_prompt(step.approval_message.as_deref()).is_none() {
+                bail!(
+                    "{}: approval step `{}` requires `approval_message`",
+                    path.display(),
+                    step.id
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 fn render_job_markdown(
@@ -624,6 +1099,13 @@ fn normalize_optional(value: Option<&str>) -> Option<String> {
             Some(trimmed.to_string())
         }
     })
+}
+
+fn mode_label(mode: &CronJobMode) -> String {
+    match mode {
+        CronJobMode::Legacy => "legacy".to_string(),
+        CronJobMode::Workflow => "workflow".to_string(),
+    }
 }
 
 fn split_front_matter(contents: &str) -> Result<(String, String)> {
@@ -722,6 +1204,7 @@ mod tests {
     fn rendered_job_round_trips_yaml_front_matter() {
         let front_matter = CronJobFrontMatter {
             schedule: "0 * * * *".to_string(),
+            mode: super::CronJobMode::Legacy,
             command: Some("echo hello".to_string()),
             agent: Some("codex".to_string()),
             prompt: None,
@@ -729,6 +1212,8 @@ mod tests {
             working_directory: ".".to_string(),
             timeout_seconds: 90,
             enabled: true,
+            steps: Vec::new(),
+            retry: super::CronRetryPolicy::default(),
         };
         let markdown = render_job_markdown(&front_matter, Some("Review the command output"))
             .expect("markdown");

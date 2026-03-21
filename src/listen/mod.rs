@@ -2788,6 +2788,7 @@ fn listen_browser_action(code: KeyCode, vim_mode: bool) -> Option<dashboard::Ses
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_live_loop<F, Fut, S, RP, PP, R>(
     _args: &ListenRunArgs,
     loop_config: ListenLoopConfig,
