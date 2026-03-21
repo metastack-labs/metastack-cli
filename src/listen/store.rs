@@ -453,14 +453,25 @@ impl ListenProjectStore {
         }
     }
 
-    /// Removes the stored session entry and per-ticket log file for one Linear ticket.
+    /// Removes the stored session entry, structured detail artifact, and per-ticket log file for
+    /// one Linear ticket.
     ///
     /// Returns an error when the persisted state cannot be read or updated, or when the matching
-    /// log file cannot be removed.
+    /// detail/log files cannot be removed.
     pub(crate) fn remove_ticket_artifacts(&self, issue_identifier: &str) -> Result<()> {
         let mut state = self.load_state()?;
         if state.remove_issue(issue_identifier) {
             self.save_state(&state)?;
+        }
+
+        let detail_path = self.detail_path(issue_identifier);
+        match fs::remove_file(&detail_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to remove `{}`", detail_path.display()));
+            }
         }
 
         let log_path = self.log_path(issue_identifier);
@@ -994,12 +1005,13 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::config::data_root_from_config_path;
-    use crate::listen::TokenUsage;
+    use crate::listen::{ListenSessionDetail, PullRequestSummary, TokenUsage};
 
     use super::{
-        ActiveListenerLock, AgentSession, COMPLETED_SESSION_TTL_SECONDS, ListenProjectStore,
-        ListenState, SessionPhase, SessionSelector, project_key_for_metastack_root,
-        resolve_source_root, write_json,
+        ActiveListenerLock, AgentSession, COMPLETED_SESSION_TTL_SECONDS,
+        LISTEN_SESSION_DETAIL_VERSION, ListenProjectStore, ListenState, SessionDetailReferences,
+        SessionPhase, SessionSelector, project_key_for_metastack_root, resolve_source_root,
+        write_json,
     };
 
     #[test]
@@ -1312,6 +1324,51 @@ mod tests {
             .context("failed to seed session log for listen store test")?;
         store.save_state(&ListenState::from_sessions(vec![session]))?;
 
+        assert!(store.detail_path(issue_identifier).is_file());
+        assert!(store.log_path(issue_identifier).is_file());
+
+        store.remove_ticket_artifacts(issue_identifier)?;
+
+        assert!(store.load_state()?.sessions.is_empty());
+        assert!(!store.detail_path(issue_identifier).exists());
+        assert!(!store.log_path(issue_identifier).exists());
+        Ok(())
+    }
+
+    #[test]
+    fn remove_ticket_artifacts_cleans_orphaned_detail_without_session_state() -> Result<()> {
+        let temp = tempdir()?;
+        let repo_root = temp.path().join("repo");
+        let data_root = temp.path().join("data");
+        fs::create_dir_all(repo_root.join(".metastack"))?;
+        let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
+        store.ensure_layout()?;
+
+        let issue_identifier = "ENG-10163";
+        fs::write(
+            store.detail_path(issue_identifier),
+            serde_json::to_vec_pretty(&ListenSessionDetail {
+                version: LISTEN_SESSION_DETAIL_VERSION,
+                issue_identifier: issue_identifier.to_string(),
+                issue_title: "orphan detail".to_string(),
+                updated_at_epoch_seconds: 100,
+                session_updated_at_epoch_seconds: 100,
+                phase: SessionPhase::Completed,
+                summary: "detail without state".to_string(),
+                turns: Some(1),
+                tokens: TokenUsage::default(),
+                pull_request: PullRequestSummary::default(),
+                references: SessionDetailReferences::default(),
+                prompt_context: Vec::new(),
+                milestones: Vec::new(),
+                log_excerpts: Vec::new(),
+            })?,
+        )
+        .context("failed to seed orphaned detail artifact for listen store test")?;
+        fs::write(store.log_path(issue_identifier), "worker log line\n")
+            .context("failed to seed orphaned log file for listen store test")?;
+
+        assert!(store.load_state()?.sessions.is_empty());
         assert!(store.detail_path(issue_identifier).is_file());
         assert!(store.log_path(issue_identifier).is_file());
 
