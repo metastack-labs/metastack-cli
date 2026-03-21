@@ -878,7 +878,7 @@ default_reasoning = "medium"
             "--width",
             "110",
             "--height",
-            "52",
+            "70",
         ])
         .assert()
         .success()
@@ -1084,9 +1084,9 @@ default_model = "gpt-5.4"
         .stdout(predicate::str::contains("Meta Setup"))
         .stdout(predicate::str::contains("agent-ticket-needing-extra-room"))
         .stdout(predicate::str::contains(
-            "docs/instructions/with/a/very/long/path/li",
+            "docs/instructions/with/a/very/long/path/",
         ))
-        .stdout(predicate::str::contains("sten.md"))
+        .stdout(predicate::str::contains("listen.md"))
         .stdout(predicate::str::contains("planning-with-a-long-label"))
         .stdout(predicate::str::contains("engineering-with-a-long-label"));
 

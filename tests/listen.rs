@@ -5006,7 +5006,7 @@ fn listen_once_relaunches_agent_until_issue_leaves_active_states() -> Result<(),
     let config_path = temp.path().join("metastack.toml");
     let bin_dir = temp.path().join("bin");
     let stub_dir = temp.path().join("stub-output");
-    let server = DynamicLinearServer::start_with_completion_after_refreshes(4)?;
+    let server = DynamicLinearServer::start_with_completion_after_refreshes(8)?;
     fs::create_dir_all(&repo_root)?;
     fs::create_dir_all(&bin_dir)?;
     fs::create_dir_all(&stub_dir)?;

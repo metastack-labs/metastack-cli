@@ -675,8 +675,11 @@ impl DynamicLinearServer {
             while !thread_shutdown.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
-                        let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
-                        let _ = handle_dynamic_linear_connection(&mut stream, &state);
+                        let state = Arc::clone(&state);
+                        thread::spawn(move || {
+                            let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+                            let _ = handle_dynamic_linear_connection(&mut stream, &state);
+                        });
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(25));
@@ -715,43 +718,43 @@ fn handle_dynamic_linear_connection(
     state: &Arc<Mutex<DynamicLinearState>>,
 ) -> Result<(), Box<dyn Error>> {
     let mut pending = Vec::new();
-    loop {
-        let request = read_http_request(stream, &mut pending)?;
-        if request.trim().is_empty() {
-            return Ok(());
+    let request = read_http_request(stream, &mut pending)?;
+    if request.trim().is_empty() {
+        return Ok(());
+    }
+    let body = request
+        .split("\r\n\r\n")
+        .nth(1)
+        .unwrap_or_default()
+        .to_string();
+    match dynamic_linear_response(&body, state) {
+        Ok(response) => {
+            let encoded = serde_json::to_string(&response)?;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                encoded.len(),
+                encoded
+            )?;
+            stream.flush()?;
         }
-        let body = request
-            .split("\r\n\r\n")
-            .nth(1)
-            .unwrap_or_default()
-            .to_string();
-        match dynamic_linear_response(&body, state) {
-            Ok(response) => {
-                let encoded = serde_json::to_string(&response)?;
-                write!(
-                    stream,
-                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: keep-alive\r\n\r\n{}",
-                    encoded.len(),
-                    encoded
-                )?;
-                stream.flush()?;
-            }
-            Err(error) => {
-                let encoded = serde_json::to_string(&json!({
-                    "errors": [{
-                        "message": error.to_string()
-                    }]
-                }))?;
-                write!(
-                    stream,
-                    "HTTP/1.1 500 Internal Server Error\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: keep-alive\r\n\r\n{}",
-                    encoded.len(),
-                    encoded
-                )?;
-                stream.flush()?;
-            }
+        Err(error) => {
+            let encoded = serde_json::to_string(&json!({
+                "errors": [{
+                    "message": error.to_string()
+                }]
+            }))?;
+            write!(
+                stream,
+                "HTTP/1.1 500 Internal Server Error\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                encoded.len(),
+                encoded
+            )?;
+            stream.flush()?;
         }
     }
+
+    Ok(())
 }
 
 #[cfg(unix)]

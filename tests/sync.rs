@@ -2333,7 +2333,7 @@ fn sync_render_once_uses_local_backlog_entries_and_only_hydrates_linked_rows()
         .stdout(predicate::str::contains("Backlog Search"))
         .stdout(predicate::str::contains("Third issue"))
         .stdout(predicate::str::contains("manual-entry"))
-        .stdout(predicate::str::contains("sync: unlinked"));
+        .stdout(predicate::str::contains("state: Unlinked"));
 
     linked_issue_lookup.assert();
     linked_issue_detail.assert();

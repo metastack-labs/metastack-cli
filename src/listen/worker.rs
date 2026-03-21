@@ -566,14 +566,14 @@ where
         ..IssueListFilters::default()
     };
 
-    for attempt in 0..2 {
+    for attempt in 0..3 {
         match service
             .find_issue_by_identifier(identifier, filters.clone())
             .await
         {
             Ok(Some(issue)) => return Ok(issue),
             Ok(None) => return Err(anyhow!("issue `{identifier}` was not found in Linear")),
-            Err(error) if attempt == 0 && is_transient_linear_read_failure(&error) => {
+            Err(error) if attempt < 2 && is_transient_linear_read_failure(&error) => {
                 sleep(Duration::from_millis(100)).await;
             }
             Err(error) => return Err(error),
