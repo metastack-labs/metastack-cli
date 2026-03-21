@@ -29,6 +29,7 @@ pub const AGENT_ROUTE_LINEAR_ISSUES_REFINE: &str = "linear.issues.refine";
 pub const AGENT_ROUTE_AGENTS_LISTEN: &str = "agents.listen";
 pub const AGENT_ROUTE_AGENTS_WORKFLOWS_RUN: &str = "agents.workflows.run";
 pub const AGENT_ROUTE_RUNTIME_CRON_PROMPT: &str = "runtime.cron.prompt";
+pub const AGENT_ROUTE_BACKLOG_RELEASE: &str = "backlog.release";
 pub const AGENT_ROUTE_MERGE: &str = "merge.run";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -831,6 +832,11 @@ pub fn supported_agent_route_definitions() -> &'static [AgentRouteDefinition] {
             key: AGENT_ROUTE_BACKLOG_SPLIT,
             family: "backlog",
             label: "meta backlog split",
+        },
+        AgentRouteDefinition {
+            key: AGENT_ROUTE_BACKLOG_RELEASE,
+            family: "backlog",
+            label: "meta backlog release",
         },
         AgentRouteDefinition {
             key: AGENT_ROUTE_CONTEXT_SCAN,

@@ -22,6 +22,8 @@ Examples:
   meta backlog plan --root . --request \"Split the onboarding work into tickets\"
   meta backlog tech MET-35
   meta backlog split MET-35
+  meta backlog release --root .
+  meta backlog release --root . --name v0.3 --no-interactive
   meta backlog sync status
   meta backlog sync link MET-35 --entry manual-notes --pull
   meta backlog sync pull --all
@@ -190,6 +192,8 @@ pub enum BacklogCommands {
     /// Create a backlog sub-issue and local planning files from a parent issue.
     #[command(name = "tech", visible_alias = "split", visible_alias = "derive")]
     Tech(TechnicalArgs),
+    /// Slice backlog issues into milestone-ready execution batches.
+    Release(ReleaseArgs),
     /// Launch the sync dashboard or run direct pull/push backlog operations.
     Sync(SyncArgs),
 }
@@ -507,6 +511,31 @@ pub struct PlanArgs {
     /// Skip the ratatui workflow and run directly from flags/stdin context.
     #[arg(long)]
     pub no_interactive: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ReleaseArgs {
+    /// Repository root containing the `.metastack/` workspace.
+    #[arg(long, value_name = "PATH", default_value = ".")]
+    pub root: PathBuf,
+    /// Optional release plan name (defaults to an auto-generated timestamp slug).
+    #[arg(long)]
+    pub name: Option<String>,
+    /// Override the configured default agent/provider for release planning.
+    #[arg(long)]
+    pub agent: Option<String>,
+    /// Override the configured default model for release planning.
+    #[arg(long)]
+    pub model: Option<String>,
+    /// Override the resolved built-in reasoning option for release planning.
+    #[arg(long)]
+    pub reasoning: Option<String>,
+    /// Skip interactive confirmation and generate the release plan directly.
+    #[arg(long)]
+    pub no_interactive: bool,
+    /// Push the selected grouping into Linear-compatible metadata after generating the plan.
+    #[arg(long)]
+    pub apply: bool,
 }
 
 #[derive(Debug, Clone, Args)]
