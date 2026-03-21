@@ -847,7 +847,7 @@ Side effects:
 
 - scans every local backlog packet under `.metastack/backlog/`, ignoring `_TEMPLATE`
 - distinguishes hard blockers from soft sequencing fallbacks and reports parallelizable waves
-- detects hard and combined dependency cycles and surfaces them as warnings instead of applying an invalid ordering
+- detects circular and conflicting dependency chains and surfaces them as warnings instead of applying an invalid ordering
 - with `--apply`, prints a dry-run preview first and requires confirmation unless `--yes` is present
 - with `--apply`, mutates only the proposed parent and issue-relation edges in Linear; unrelated issue descriptions and attachments remain untouched
 

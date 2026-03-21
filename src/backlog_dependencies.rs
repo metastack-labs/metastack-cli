@@ -25,6 +25,7 @@ struct BacklogDependencyItem {
     title: String,
     metadata: Option<BacklogIssueMetadata>,
     parent_identifier: Option<String>,
+    explicit_parent_identifiers: Vec<String>,
     content_lines: Vec<String>,
     remote: Option<IssueDependencySnapshot>,
 }
@@ -197,6 +198,7 @@ fn load_backlog_dependency_items(root: &Path) -> Result<Vec<BacklogDependencyIte
         let metadata = load_issue_metadata_if_present(&issue_dir)?;
         let index_path = issue_dir.join(INDEX_FILE_NAME);
         let index_text = read_optional_text_file(&index_path)?;
+        let content_lines = collect_markdown_lines(&issue_dir)?;
         let title = metadata
             .as_ref()
             .map(|entry| entry.title.trim().to_string())
@@ -208,12 +210,15 @@ fn load_backlog_dependency_items(root: &Path) -> Result<Vec<BacklogDependencyIte
             .map(|entry| entry.identifier.clone())
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| slug.clone());
+        let explicit_parent_identifiers = extract_parent_identifiers(&content_lines)
+            .into_iter()
+            .filter(|value| !value.eq_ignore_ascii_case(&identifier))
+            .collect::<Vec<_>>();
         let parent_identifier = metadata
             .as_ref()
             .and_then(|entry| entry.parent_identifier.clone())
-            .or_else(|| parent_identifier_from_text(&index_text))
+            .or_else(|| explicit_parent_identifiers.first().cloned())
             .filter(|value| !value.eq_ignore_ascii_case(&identifier));
-        let content_lines = collect_markdown_lines(&issue_dir)?;
 
         items.push(BacklogDependencyItem {
             slug,
@@ -222,6 +227,7 @@ fn load_backlog_dependency_items(root: &Path) -> Result<Vec<BacklogDependencyIte
             title,
             metadata,
             parent_identifier,
+            explicit_parent_identifiers,
             content_lines,
             remote: None,
         });
@@ -271,11 +277,35 @@ fn analyze_dependencies(
     let mut soft_edges = BTreeSet::new();
 
     for item in items {
+        let explicit_parents = item
+            .explicit_parent_identifiers
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if explicit_parents.len() > 1 {
+            warnings.insert(format!(
+                "parent conflict: {} references multiple parents {}",
+                item.identifier,
+                explicit_parents.into_iter().collect::<Vec<_>>().join(", ")
+            ));
+        }
         if let Some(parent_identifier) = item.parent_identifier.as_ref() {
             if parent_identifier.eq_ignore_ascii_case(&item.identifier) {
                 warnings.insert(format!(
                     "parent cycle: {} cannot be its own parent",
                     item.identifier
+                ));
+            } else if !item.explicit_parent_identifiers.is_empty()
+                && !item
+                    .explicit_parent_identifiers
+                    .iter()
+                    .any(|candidate| candidate == parent_identifier)
+            {
+                warnings.insert(format!(
+                    "parent conflict: {} resolves to parent `{}` but backlog text references {}",
+                    item.identifier,
+                    parent_identifier,
+                    item.explicit_parent_identifiers.join(", ")
                 ));
             } else if item_map.contains_key(parent_identifier) {
                 proposals.insert(RelationshipProposal {
@@ -1104,7 +1134,7 @@ fn extract_issue_identifiers(line: &str) -> Vec<String> {
 }
 
 fn collect_markdown_lines(issue_dir: &Path) -> Result<Vec<String>> {
-    let mut lines = Vec::new();
+    let mut markdown_paths = Vec::new();
     for entry in walkdir::WalkDir::new(issue_dir) {
         let entry =
             entry.with_context(|| format!("failed to traverse `{}`", issue_dir.display()))?;
@@ -1122,7 +1152,13 @@ fn collect_markdown_lines(issue_dir: &Path) -> Result<Vec<String>> {
         if path.extension().and_then(|value| value.to_str()) != Some("md") {
             continue;
         }
-        let text = fs::read_to_string(path)
+        markdown_paths.push(path.to_path_buf());
+    }
+
+    markdown_paths.sort();
+    let mut lines = Vec::new();
+    for path in markdown_paths {
+        let text = fs::read_to_string(&path)
             .with_context(|| format!("failed to read `{}`", path.display()))?;
         lines.extend(text.lines().map(ToOwned::to_owned));
     }
@@ -1137,15 +1173,15 @@ fn first_heading(markdown: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn parent_identifier_from_text(markdown: &str) -> Option<String> {
-    markdown.lines().find_map(|line| {
+fn extract_parent_identifiers(lines: &[String]) -> Vec<String> {
+    let mut identifiers = BTreeSet::new();
+    for line in lines {
         let lower = line.to_ascii_lowercase();
         if lower.contains("parent:") || lower.contains("parent issue:") {
-            extract_issue_identifiers(line).into_iter().next()
-        } else {
-            None
+            identifiers.extend(extract_issue_identifiers(line));
         }
-    })
+    }
+    identifiers.into_iter().collect()
 }
 
 fn read_optional_text_file(path: &Path) -> Result<String> {
