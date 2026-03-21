@@ -22,7 +22,7 @@ steps:
     when:
       step: review
       path: status
-      not_equals: null
+      exists: true
     guardrails:
       allow: ["github"]
       mutates: []

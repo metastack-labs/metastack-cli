@@ -35,7 +35,7 @@ Supported step types:
 
 Optional step fields:
 
-- `when`: branch on a prior step output
+- `when`: branch on a prior step output. `when.step` must reference an earlier step, and each condition may set only one of `equals`, `not_equals`, or `exists`.
 - `guardrails.allow`: explicit allowed mutation targets
 - `guardrails.mutates`: declared mutation targets that must be covered by `allow`
 

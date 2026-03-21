@@ -803,6 +803,83 @@ steps:
 }
 
 #[test]
+fn cron_validate_rejects_forward_when_references() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let config_path = temp.path().join("metastack.toml");
+    write_onboarded_config(&config_path, "")?;
+    fs::create_dir_all(temp.path().join(".metastack/cron"))?;
+    fs::write(
+        temp.path().join(".metastack/cron/invalid-when.md"),
+        r#"---
+schedule: "0 * * * *"
+mode: workflow
+steps:
+  - id: deploy
+    type: shell
+    command: "printf deploy"
+    when:
+      step: approve
+      exists: true
+  - id: approve
+    type: approval
+    approval_message: "Approve deploy"
+---
+"#,
+    )?;
+
+    cli()
+        .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
+        .args(["runtime", "cron", "validate"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "references unknown or later step `approve` in `when.step`",
+        ));
+
+    Ok(())
+}
+
+#[test]
+fn cron_validate_rejects_ambiguous_when_conditions() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let config_path = temp.path().join("metastack.toml");
+    write_onboarded_config(&config_path, "")?;
+    fs::create_dir_all(temp.path().join(".metastack/cron"))?;
+    fs::write(
+        temp.path().join(".metastack/cron/ambiguous-when.md"),
+        r#"---
+schedule: "0 * * * *"
+mode: workflow
+steps:
+  - id: prep
+    type: shell
+    command: "printf prep"
+  - id: deploy
+    type: shell
+    command: "printf deploy"
+    when:
+      step: prep
+      equals: "ready"
+      exists: true
+---
+"#,
+    )?;
+
+    cli()
+        .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
+        .args(["runtime", "cron", "validate"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "must set only one of `when.equals`, `when.not_equals`, or `when.exists`",
+        ));
+
+    Ok(())
+}
+
+#[test]
 fn cron_run_waits_for_approval_and_approve_resumes_the_run() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let config_path = temp.path().join("metastack.toml");

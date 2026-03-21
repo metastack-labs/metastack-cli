@@ -994,12 +994,12 @@ fn validate_front_matter(
         if !seen_ids.insert(step.id.clone()) {
             bail!("{}: duplicate step id `{}`", path.display(), step.id);
         }
-        validate_step(step, path)?;
+        validate_step(step, path, &seen_ids)?;
     }
     Ok(())
 }
 
-fn validate_step(step: &CronStepDefinition, path: &Path) -> Result<()> {
+fn validate_step(step: &CronStepDefinition, path: &Path, seen_ids: &BTreeSet<String>) -> Result<()> {
     for target in &step.guardrails.mutates {
         if !step
             .guardrails
@@ -1022,6 +1022,9 @@ fn validate_step(step: &CronStepDefinition, path: &Path) -> Result<()> {
             path.display(),
             step.id
         );
+    }
+    if let Some(condition) = &step.when {
+        validate_when_condition(step, condition, path, seen_ids)?;
     }
     match step.kind {
         CronStepKind::Shell => {
@@ -1062,6 +1065,61 @@ fn validate_step(step: &CronStepDefinition, path: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn validate_when_condition(
+    step: &CronStepDefinition,
+    condition: &CronStepWhen,
+    path: &Path,
+    seen_ids: &BTreeSet<String>,
+) -> Result<()> {
+    if condition.step == step.id {
+        bail!(
+            "{}: step `{}` cannot reference itself in `when.step`",
+            path.display(),
+            step.id
+        );
+    }
+    if !seen_ids.contains(&condition.step) {
+        bail!(
+            "{}: step `{}` references unknown or later step `{}` in `when.step`",
+            path.display(),
+            step.id,
+            condition.step
+        );
+    }
+    if let Some(path_value) = condition.path.as_deref()
+        && path_value.trim().is_empty()
+    {
+        bail!(
+            "{}: step `{}` has `when.path` but it is empty",
+            path.display(),
+            step.id
+        );
+    }
+
+    let configured_checks = [
+        condition.equals.is_some(),
+        condition.not_equals.is_some(),
+        condition.exists.is_some(),
+    ]
+    .into_iter()
+    .filter(|present| *present)
+    .count();
+
+    match configured_checks {
+        0 => bail!(
+            "{}: step `{}` must set one of `when.equals`, `when.not_equals`, or `when.exists`",
+            path.display(),
+            step.id
+        ),
+        1 => Ok(()),
+        _ => bail!(
+            "{}: step `{}` must set only one of `when.equals`, `when.not_equals`, or `when.exists`",
+            path.display(),
+            step.id
+        ),
+    }
 }
 
 fn render_job_markdown(
