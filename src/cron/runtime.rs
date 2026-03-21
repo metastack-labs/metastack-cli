@@ -416,17 +416,22 @@ pub(super) fn run_approvals(root: &Path, args: &CronApprovalsArgs) -> Result<Str
     let entries = approvals
         .iter()
         .map(|run| {
-            let approval = run.pending_approval.as_ref().expect("pending approval");
-            ApprovalEntry {
+            let approval = run.pending_approval.as_ref().ok_or_else(|| {
+                anyhow!(
+                    "run `{}` is marked as waiting for approval without a pending approval payload",
+                    run.run_id
+                )
+            })?;
+            Ok(ApprovalEntry {
                 run_id: &run.run_id,
                 job_name: &run.job_name,
                 step_id: &approval.step_id,
                 message: &approval.message,
                 requested_at: approval.requested_at,
                 log_path: &run.log_path,
-            }
+            })
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>>>()?;
 
     if args.json {
         return render_json_success("runtime.cron.approvals", &entries);
@@ -548,12 +553,13 @@ fn run_scheduler_loop(
     ensure_runtime_layout(&paths)?;
 
     let mut state = load_scheduler_state(&paths)?;
-    state.pid = Some(pid_override.unwrap_or_else(std::process::id));
+    let daemon_pid = pid_override.unwrap_or_else(std::process::id);
+    state.pid = Some(daemon_pid);
     state.poll_interval_seconds = Some(poll_interval_seconds.max(1));
     state.started_at = Some(Utc::now());
     state.updated_at = Some(Utc::now());
     state.log_path = Some(display_path(&paths.cron_scheduler_log_path(), root));
-    write_pid(&paths, state.pid.expect("daemon pid must be present"))?;
+    write_pid(&paths, daemon_pid)?;
     persist_scheduler_state(&paths, &state)?;
     reconcile_incomplete_runs(root, &paths, &mut state)?;
 
@@ -570,19 +576,18 @@ fn run_scheduler_loop(
             match discovered_job.result {
                 Ok(job) => {
                     let schedule = parse_schedule(&job.front_matter.schedule)?;
+                    let initial_due_at = scheduled_next_due_at(&schedule, now, &job.name)?;
                     let cache_entry =
                         schedule_cache
                             .entry(job.name.clone())
                             .or_insert_with(|| ScheduledJob {
                                 schedule_source: job.front_matter.schedule.clone(),
-                                next_due_at: super::next_after(&schedule, now)
-                                    .expect("cron schedules should always have a next run"),
+                                next_due_at: initial_due_at,
                             });
 
                     if cache_entry.schedule_source != job.front_matter.schedule {
                         cache_entry.schedule_source = job.front_matter.schedule.clone();
-                        cache_entry.next_due_at = super::next_after(&schedule, now)
-                            .expect("cron schedules should always have a next run");
+                        cache_entry.next_due_at = scheduled_next_due_at(&schedule, now, &job.name)?;
                     }
 
                     let runtime = known_jobs
@@ -610,8 +615,8 @@ fn run_scheduler_loop(
                             if let Some(refreshed_runtime) = state.jobs.get(&job.name).cloned() {
                                 *runtime = refreshed_runtime;
                             }
-                            cache_entry.next_due_at = super::next_after(&schedule, Local::now())
-                                .expect("cron schedules should always have a next run");
+                            cache_entry.next_due_at =
+                                scheduled_next_due_at(&schedule, Local::now(), &job.name)?;
                             runtime.next_run_at = Some(cache_entry.next_due_at.with_timezone(&Utc));
                         }
                     } else {
@@ -635,6 +640,16 @@ fn run_scheduler_loop(
         persist_scheduler_state(&paths, &state)?;
         thread::sleep(poll_interval);
     }
+}
+
+fn scheduled_next_due_at(
+    schedule: &cron::Schedule,
+    now: DateTime<Local>,
+    job_name: &str,
+) -> Result<DateTime<Local>> {
+    super::next_after(schedule, now).with_context(|| {
+        format!("cron workflow `{job_name}` does not produce a next scheduled run")
+    })
 }
 
 fn execute_new_run(
