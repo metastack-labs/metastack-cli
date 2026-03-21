@@ -347,3 +347,41 @@ fn spec_command_render_once_covers_major_tui_states() -> Result<(), Box<dyn Erro
     assert!(!repo_root.join(".metastack/SPEC.md").exists());
     Ok(())
 }
+
+#[cfg(unix)]
+#[test]
+fn spec_command_render_once_uses_improve_prompt_when_spec_exists() -> Result<(), Box<dyn Error>> {
+    let (_temp, repo_root, config_path, output_dir) = setup_spec_repo()?;
+    let spec_path = repo_root.join(".metastack/SPEC.md");
+    fs::write(
+        &spec_path,
+        "# OVERVIEW\n\nExisting overview.\n\n## GOALS\n\n- Existing goal.\n\n## FEATURES\n\n- Existing feature.\n\n## NON-GOALS\n\n- Existing non-goal.\n",
+    )?;
+
+    cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &output_dir)
+        .args([
+            "backlog",
+            "spec",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--render-once",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "What should be updated or improved?",
+        ))
+        .stdout(predicate::str::contains(
+            "load the current `.metastack/SPEC.md` and revise it in place",
+        ))
+        .stdout(predicate::str::contains(
+            "What should this repository build?",
+        ).not());
+
+    let spec = fs::read_to_string(&spec_path)?;
+    assert!(spec.contains("Existing overview."));
+
+    Ok(())
+}
