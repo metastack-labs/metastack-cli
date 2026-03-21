@@ -570,13 +570,10 @@ fn render_session_detail_text(
         detail_line("PR", &detail.pull_request.compact_label()),
     ];
 
-    if let Some(number) = detail.pull_request.number {
-        let pr_reference = detail
-            .pull_request
-            .url
-            .clone()
-            .unwrap_or_else(|| format!("#{number}"));
-        lines.push(detail_line("PR URL", &pr_reference));
+    if let Some(url) = detail.pull_request.url.as_deref() {
+        lines.push(detail_line("PR URL", url));
+    } else if let Some(number) = detail.pull_request.number {
+        lines.push(detail_line("PR Ref", &format!("#{number}")));
     }
     if let Some(branch) = detail.references.branch.as_deref() {
         lines.push(detail_line("Branch", branch));
@@ -1110,5 +1107,57 @@ mod tests {
             .join("\n");
 
         assert!(rendered.contains("Esc/Backspace close detail. PgUp/PgDn scroll."));
+    }
+
+    #[test]
+    fn selected_session_detail_text_shows_pull_request_url_without_number() {
+        let mut cycle = demo_cycle();
+        let session = cycle
+            .sessions
+            .first_mut()
+            .expect("demo data should include a session");
+        session.pull_request.number = None;
+        let detail = cycle
+            .session_details
+            .get_mut(&session.issue_identifier)
+            .expect("demo data should include detail for the selected session");
+        detail.pull_request.number = None;
+        detail.pull_request.url =
+            Some("https://github.com/metastack-labs/metastack-cli/pull/321".to_string());
+
+        let data = build_dashboard_data(
+            &cycle,
+            &DashboardRuntimeContext {
+                started_at_epoch_seconds: 1_773_568_249,
+                now_epoch_seconds: 1_773_575_600,
+                poll_interval_seconds: 7,
+                dashboard_label: "terminal dashboard (TUI)",
+                dashboard_refresh_seconds: 1,
+                linear_refresh_seconds: 15,
+                vim_mode: false,
+            },
+        );
+
+        let state = SessionBrowserState {
+            detail_mode: true,
+            ..SessionBrowserState::default()
+        };
+        let session = state
+            .selected_session(&data)
+            .expect("demo data should include a selected session");
+        let detail = data
+            .detail_for_session(&session.issue_identifier)
+            .expect("demo data should include detail for the selected session");
+        let text = render_session_detail_text(session, detail);
+        let rendered = text
+            .lines
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            rendered.contains("PR URL: https://github.com/metastack-labs/metastack-cli/pull/321")
+        );
     }
 }
