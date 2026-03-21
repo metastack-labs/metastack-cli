@@ -705,6 +705,10 @@ pub enum CronCommands {
     /// Launch the cron-init dashboard or create a Markdown cron job template directly from flags.
     #[command(visible_alias = "new")]
     Init(CronInitArgs),
+    /// List discovered cron workflow definitions without starting the daemon.
+    List(CronListArgs),
+    /// Validate discovered cron workflow definitions without starting the daemon.
+    Validate(CronValidateArgs),
     /// Start the cron scheduler, detached when supported.
     Start(CronStartArgs),
     /// Stop the detached cron scheduler.
@@ -713,6 +717,14 @@ pub enum CronCommands {
     Status,
     /// Run one cron job immediately.
     Run(CronRunArgs),
+    /// Resume an interrupted cron workflow run from persisted state.
+    Resume(CronResumeArgs),
+    /// List pending cron workflow approvals.
+    Approvals(CronApprovalsArgs),
+    /// Approve a waiting cron workflow run and continue execution.
+    Approve(CronApproveArgs),
+    /// Reject a waiting cron workflow run.
+    Reject(CronRejectArgs),
     /// Hidden worker used by `meta cron start` for the detached scheduler loop.
     #[command(hide = true)]
     Daemon(CronDaemonArgs),
@@ -780,11 +792,59 @@ pub struct CronStartArgs {
     pub poll_interval_seconds: u64,
 }
 
+#[derive(Debug, Clone, Args, Default)]
+pub struct CronListArgs {
+    /// Emit the discovered workflow list as JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, Args, Default)]
+pub struct CronValidateArgs {
+    /// Emit validation results as JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
 #[derive(Debug, Clone, Args)]
 pub struct CronRunArgs {
     /// Cron job name without the `.md` suffix.
     #[arg(value_name = "NAME")]
     pub name: String,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct CronResumeArgs {
+    /// Persisted cron workflow run identifier.
+    #[arg(value_name = "RUN_ID")]
+    pub run_id: String,
+}
+
+#[derive(Debug, Clone, Args, Default)]
+pub struct CronApprovalsArgs {
+    /// Emit pending approvals as JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct CronApproveArgs {
+    /// Persisted cron workflow run identifier.
+    #[arg(value_name = "RUN_ID")]
+    pub run_id: String,
+    /// Optional approval note persisted into the run artifact.
+    #[arg(long)]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct CronRejectArgs {
+    /// Persisted cron workflow run identifier.
+    #[arg(value_name = "RUN_ID")]
+    pub run_id: String,
+    /// Rejection reason persisted into the run artifact.
+    #[arg(long)]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Args)]
