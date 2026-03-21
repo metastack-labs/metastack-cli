@@ -199,7 +199,7 @@ fn render_summary(view: &ConfigViewData, include_path: bool) -> String {
             .defaults
             .listen
             .assignment_scope
-            .map(|s| format!("{s:?}"))
+            .map(assignee_scope_label)
             .unwrap_or_else(|| "unset".to_string())
     ));
     lines.push(format!(
@@ -400,6 +400,18 @@ fn assignee_scope_options() -> Vec<String> {
         "Only issues assigned to the authenticated viewer".to_string(),
         "Viewer-assigned issues plus unassigned issues".to_string(),
     ]
+}
+
+fn assignee_scope_label(scope: ListenAssignmentScope) -> String {
+    match scope {
+        ListenAssignmentScope::Any => "Any eligible issue".to_string(),
+        ListenAssignmentScope::ViewerOnly => {
+            "Only issues assigned to the authenticated viewer".to_string()
+        }
+        ListenAssignmentScope::ViewerOrUnassigned => {
+            "Viewer-assigned issues plus unassigned issues".to_string()
+        }
+    }
 }
 
 fn assignee_scope_index(scope: ListenAssignmentScope) -> usize {
