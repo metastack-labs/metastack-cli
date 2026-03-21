@@ -802,7 +802,7 @@ pub struct CronInitArgs {
     #[arg(long, conflicts_with = "render_once")]
     pub no_interactive: bool,
     /// Emit the cron-init result as JSON.
-    #[arg(long, conflicts_with = "render_once")]
+    #[arg(long, conflicts_with = "render_once", requires = "once")]
     pub json: bool,
     /// Render the cron init dashboard once to an in-memory buffer and print the snapshot.
     #[arg(long, hide = true)]

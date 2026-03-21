@@ -2,7 +2,9 @@ pub(crate) mod dashboard;
 mod state;
 pub(crate) mod store;
 
+use std::collections::BTreeSet;
 use std::io;
+use std::io::IsTerminal;
 use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -21,10 +23,15 @@ use crate::agents::{
     render_invocation_diagnostics, resolve_agent_invocation_for_planning, run_agent_capture,
 };
 use crate::cli::{ReviewArgs, ReviewDashboardEventArg, ReviewRunArgs, RunAgentArgs};
-use crate::config::{AGENT_ROUTE_AGENTS_REVIEW, AppConfig, PlanningMeta};
+use crate::config::{
+    AGENT_ROUTE_AGENTS_REVIEW, AppConfig, LinearConfig, LinearConfigOverrides, PlanningMeta,
+};
 use crate::context::{load_codebase_context_bundle, load_workflow_contract, render_repo_map};
-use crate::fs::canonicalize_existing_dir;
+use crate::fs::{
+    canonicalize_existing_dir, ensure_dir, ensure_workspace_path_is_safe, sibling_workspace_root,
+};
 use crate::github_pr::GhCli;
+use crate::linear::{IssueComment, IssueSummary, LinearService, ReqwestLinearClient};
 
 use dashboard::{
     ReviewBrowserAction, ReviewBrowserState, ReviewListView, render,
@@ -145,7 +152,11 @@ struct GhPrListEntry {
 /// or required external tools are unavailable.
 pub(crate) async fn run_review(args: &ReviewArgs) -> Result<()> {
     if let Some(pr_number) = args.pr_number {
-        run_review_one_shot(&args.run, pr_number)
+        if should_launch_interactive_review_dashboard(&args.run) {
+            run_review_one_shot_with_dashboard(&args.run, pr_number)
+        } else {
+            run_review_one_shot(&args.run, pr_number)
+        }
     } else {
         run_review_listener(&args.run).await
     }
@@ -167,7 +178,14 @@ fn run_review_one_shot(args: &ReviewRunArgs, pr_number: u64) -> Result<()> {
     let linear_identifier = resolve_linear_identifier(&pr)?;
 
     if args.dry_run {
-        return print_dry_run_output(&config, &planning_meta, &root, &pr, &linear_identifier);
+        return print_dry_run_output(
+            &config,
+            &planning_meta,
+            &root,
+            &pr,
+            &linear_identifier,
+            args,
+        );
     }
 
     let diff = fetch_pr_diff(&root, pr_number)?;
@@ -175,7 +193,8 @@ fn run_review_one_shot(args: &ReviewRunArgs, pr_number: u64) -> Result<()> {
     let context_bundle = load_codebase_context_bundle(&root).unwrap_or_default();
     let workflow_contract = load_workflow_contract(&root).unwrap_or_default();
     let repo_map = render_repo_map(&root).unwrap_or_default();
-    let ticket_context = gather_linear_ticket_context(&linear_identifier);
+    let ticket_context =
+        gather_linear_ticket_context(&root, &config, &planning_meta, &linear_identifier)?;
 
     let review_prompt = assemble_review_prompt(
         &pr,
@@ -233,6 +252,164 @@ fn run_review_one_shot(args: &ReviewRunArgs, pr_number: u64) -> Result<()> {
     Ok(())
 }
 
+fn run_review_one_shot_with_dashboard(args: &ReviewRunArgs, pr_number: u64) -> Result<()> {
+    let root = canonicalize_existing_dir(&args.root)?;
+    let config = AppConfig::load()?;
+    let planning_meta = crate::config::load_required_planning_meta(&root, "meta agents review")?;
+    let gh = GhCli;
+    let mut dashboard = ReviewTerminalDashboard::open()?;
+    let mut data = one_shot_dashboard_data(
+        &root,
+        ReviewSession {
+            pr_number,
+            pr_title: format!("PR #{pr_number}"),
+            pr_url: None,
+            pr_author: None,
+            head_branch: None,
+            base_branch: None,
+            linear_identifier: None,
+            phase: ReviewPhase::Claimed,
+            summary: "Initializing review dashboard".to_string(),
+            updated_at_epoch_seconds: now_epoch_seconds(),
+            remediation_required: None,
+            remediation_pr_number: None,
+            remediation_pr_url: None,
+        },
+        vec!["Initializing one-shot review dashboard.".to_string()],
+    );
+    dashboard.draw(&data)?;
+
+    set_session_status(
+        &mut data,
+        ReviewPhase::Claimed,
+        "Verifying GitHub CLI authentication",
+        "Checking `gh auth status` before review starts.",
+    );
+    dashboard.draw(&data)?;
+    verify_gh_auth(&root)?;
+
+    set_session_status(
+        &mut data,
+        ReviewPhase::ReviewStarted,
+        "Loading pull request metadata",
+        format!("Fetching PR #{pr_number} metadata from GitHub."),
+    );
+    dashboard.draw(&data)?;
+    let pr = fetch_pr_metadata(&gh, &root, pr_number)?;
+    populate_session_metadata(&mut data.sessions[0], &pr);
+    let linear_identifier = resolve_linear_identifier(&pr)?;
+    data.sessions[0].linear_identifier = Some(linear_identifier.clone());
+    dashboard.draw(&data)?;
+
+    let diff = {
+        set_session_status(
+            &mut data,
+            ReviewPhase::ReviewStarted,
+            "Loading pull request diff and repository context",
+            format!(
+                "Resolving linked Linear ticket `{linear_identifier}` and gathering repository context."
+            ),
+        );
+        dashboard.draw(&data)?;
+        fetch_pr_diff(&root, pr_number)?
+    };
+
+    let context_bundle = load_codebase_context_bundle(&root).unwrap_or_default();
+    let workflow_contract = load_workflow_contract(&root).unwrap_or_default();
+    let repo_map = render_repo_map(&root).unwrap_or_default();
+    let ticket_context =
+        gather_linear_ticket_context(&root, &config, &planning_meta, &linear_identifier)?;
+
+    let review_prompt = assemble_review_prompt(
+        &pr,
+        &linear_identifier,
+        &diff,
+        &context_bundle,
+        &workflow_contract,
+        &repo_map,
+        &ticket_context,
+    );
+
+    let agent_args = RunAgentArgs {
+        root: Some(root.clone()),
+        route_key: Some(AGENT_ROUTE_AGENTS_REVIEW.to_string()),
+        agent: args.agent.clone(),
+        prompt: review_prompt,
+        instructions: Some(REVIEW_INSTRUCTIONS.to_string()),
+        model: args.model.clone(),
+        reasoning: args.reasoning.clone(),
+        transport: None,
+        attachments: Vec::new(),
+    };
+
+    let invocation = resolve_agent_invocation_for_planning(&config, &planning_meta, &agent_args)?;
+    set_session_status(
+        &mut data,
+        ReviewPhase::Running,
+        format!("Running agent review with {}", invocation.agent),
+        format!(
+            "Resolved provider `{}` with model `{}` and reasoning `{}`.",
+            invocation.agent,
+            invocation.model.as_deref().unwrap_or("unset"),
+            invocation.reasoning.as_deref().unwrap_or("unset")
+        ),
+    );
+    dashboard.draw(&data)?;
+
+    let report = run_agent_capture(&agent_args)?;
+    let review_output = report.stdout.trim().to_string();
+    let remediation_required = review_output_requires_remediation(&review_output);
+
+    if remediation_required {
+        set_session_status(
+            &mut data,
+            ReviewPhase::Running,
+            "Creating remediation branch and PR",
+            "Required fixes were found. Opening a remediation branch and follow-up PR.",
+        );
+        data.sessions[0].remediation_required = Some(true);
+        dashboard.draw(&data)?;
+
+        let outcome = run_remediation(
+            &root,
+            &pr,
+            &linear_identifier,
+            &review_output,
+            &config,
+            &planning_meta,
+            args,
+        )?;
+        data.sessions[0].phase = ReviewPhase::Completed;
+        data.sessions[0].summary = "Remediation PR created".to_string();
+        data.sessions[0].remediation_pr_number = Some(outcome.pr_number);
+        data.sessions[0].remediation_pr_url = Some(outcome.pr_url.clone());
+        data.sessions[0].updated_at_epoch_seconds = now_epoch_seconds();
+        push_note(
+            &mut data,
+            format!(
+                "Opened remediation PR #{} for original PR #{pr_number}.",
+                outcome.pr_number
+            ),
+        );
+        dashboard.draw(&data)?;
+    } else {
+        data.sessions[0].phase = ReviewPhase::Completed;
+        data.sessions[0].summary = "No remediation required".to_string();
+        data.sessions[0].remediation_required = Some(false);
+        data.sessions[0].updated_at_epoch_seconds = now_epoch_seconds();
+        push_note(
+            &mut data,
+            format!("Review finished for PR #{pr_number} without remediation."),
+        );
+        dashboard.draw(&data)?;
+    }
+
+    dashboard.close()?;
+    println!("{review_output}");
+
+    Ok(())
+}
+
 fn verify_gh_auth(root: &Path) -> Result<()> {
     let output = Command::new("gh")
         .args(["auth", "status"])
@@ -263,18 +440,51 @@ fn fetch_pr_metadata(gh: &GhCli, root: &Path, pr_number: u64) -> Result<GhPrMeta
 }
 
 fn resolve_linear_identifier(pr: &GhPrMetadata) -> Result<String> {
-    let body_text = pr.body.clone().unwrap_or_default();
-    let candidates = [&pr.title as &str, &pr.head_ref_name, &body_text];
-    for candidate in &candidates {
-        if let Some(identifier) = extract_linear_identifier(candidate) {
-            return Ok(identifier);
+    let identifiers = collect_linear_identifiers(pr);
+    match identifiers.as_slice() {
+        [identifier] => Ok(identifier.clone()),
+        [] => bail!(
+            "no Linear ticket identifier found in PR #{} title, branch, or body. \
+             Expected a pattern like `MET-42` or `ENG-1234`.",
+            pr.number
+        ),
+        _ => bail!(
+            "multiple Linear ticket identifiers found in PR #{}: {}. \
+             Link exactly one ticket in the title, branch, or body.",
+            pr.number,
+            identifiers.join(", ")
+        ),
+    }
+}
+
+fn collect_linear_identifiers(pr: &GhPrMetadata) -> Vec<String> {
+    let mut identifiers = BTreeSet::new();
+    for candidate in [
+        &pr.title as &str,
+        &pr.head_ref_name,
+        pr.body.as_deref().unwrap_or(""),
+    ] {
+        collect_linear_identifiers_from_text(candidate, &mut identifiers);
+    }
+    identifiers.into_iter().collect()
+}
+
+fn collect_linear_identifiers_from_text(text: &str, identifiers: &mut BTreeSet<String>) {
+    if let Some(identifier) = extract_linear_identifier(text) {
+        identifiers.insert(identifier);
+    }
+    for segment in text.split([' ', ':', '/', '_', '(', ')', '[', ']', ',', '\n', '\t']) {
+        if is_linear_identifier(segment) {
+            identifiers.insert(segment.to_uppercase());
+        }
+        let parts: Vec<&str> = segment.split('-').collect();
+        if parts.len() >= 2 {
+            let candidate = format!("{}-{}", parts[0], parts[1]);
+            if is_linear_identifier(&candidate) {
+                identifiers.insert(candidate.to_uppercase());
+            }
         }
     }
-    bail!(
-        "no Linear ticket identifier found in PR #{} title, branch, or body. \
-         Expected a pattern like `MET-42` or `ENG-1234`.",
-        pr.number
-    );
 }
 
 fn extract_linear_identifier(text: &str) -> Option<String> {
@@ -324,11 +534,166 @@ fn fetch_pr_diff(root: &Path, pr_number: u64) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-fn gather_linear_ticket_context(identifier: &str) -> String {
-    format!(
-        "Linked Linear ticket: {identifier}\n\
-         (Full ticket context should be gathered from Linear API when available.)"
+fn gather_linear_ticket_context(
+    root: &Path,
+    config: &AppConfig,
+    planning_meta: &PlanningMeta,
+    identifier: &str,
+) -> Result<String> {
+    let issue = load_linear_issue(root, config, planning_meta, identifier)?;
+    Ok(render_linear_ticket_context(&issue))
+}
+
+fn load_linear_issue(
+    root: &Path,
+    config: &AppConfig,
+    planning_meta: &PlanningMeta,
+    identifier: &str,
+) -> Result<IssueSummary> {
+    let linear_config = LinearConfig::from_sources(
+        config,
+        planning_meta,
+        Some(root),
+        LinearConfigOverrides::default(),
+    )?;
+    let default_team = linear_config.default_team.clone();
+    let service = LinearService::new(ReqwestLinearClient::new(linear_config)?, default_team);
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to initialize Linear runtime for review")?
+        .block_on(async move { service.load_issue(identifier).await })
+        .with_context(|| format!("failed to load Linear ticket `{identifier}`"))
+}
+
+fn render_linear_ticket_context(issue: &IssueSummary) -> String {
+    let labels = if issue.labels.is_empty() {
+        "none".to_string()
+    } else {
+        issue
+            .labels
+            .iter()
+            .map(|label| label.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let acceptance_criteria = extract_markdown_section(
+        issue.description.as_deref().unwrap_or(""),
+        &["Acceptance Criteria", "Acceptance", "Requirements"],
     )
+    .unwrap_or_else(|| {
+        "No explicit acceptance criteria section found in the Linear description.".to_string()
+    });
+    let workpad = active_workpad_comment(issue)
+        .map(|comment| comment.body.trim().to_string())
+        .unwrap_or_else(|| "No active workpad comment found.".to_string());
+
+    format!(
+        "Identifier: {identifier}\n\
+         Title: {title}\n\
+         URL: {url}\n\
+         State: {state}\n\
+         Priority: {priority}\n\
+         Project: {project}\n\
+         Labels: {labels}\n\
+\n\
+         ## Acceptance Criteria\n\
+         {acceptance_criteria}\n\
+\n\
+         ## Description\n\
+         {description}\n\
+\n\
+         ## Active Workpad\n\
+         {workpad}\n\
+\n\
+         ## Ticket Discussion\n\
+         {discussion}",
+        identifier = issue.identifier,
+        title = issue.title,
+        url = issue.url,
+        state = issue
+            .state
+            .as_ref()
+            .map(|state| state.name.as_str())
+            .unwrap_or("unknown"),
+        priority = issue
+            .priority
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "unset".to_string()),
+        project = issue
+            .project
+            .as_ref()
+            .map(|project| project.name.as_str())
+            .unwrap_or("none"),
+        labels = labels,
+        acceptance_criteria = acceptance_criteria,
+        description = issue
+            .description
+            .as_deref()
+            .unwrap_or("No Linear description provided."),
+        workpad = workpad,
+        discussion = render_recent_linear_comments(issue),
+    )
+}
+
+fn extract_markdown_section(body: &str, headings: &[&str]) -> Option<String> {
+    let mut lines = Vec::new();
+    let mut capturing = false;
+
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            let heading = trimmed.trim_start_matches('#').trim();
+            if headings
+                .iter()
+                .any(|candidate| heading.eq_ignore_ascii_case(candidate))
+            {
+                capturing = true;
+                continue;
+            }
+            if capturing {
+                break;
+            }
+        }
+
+        if capturing {
+            lines.push(line);
+        }
+    }
+
+    let rendered = lines.join("\n").trim().to_string();
+    (!rendered.is_empty()).then_some(rendered)
+}
+
+fn active_workpad_comment(issue: &IssueSummary) -> Option<&IssueComment> {
+    issue
+        .comments
+        .iter()
+        .rev()
+        .find(|comment| comment.resolved_at.is_none() && comment.body.contains("## Codex Workpad"))
+}
+
+fn render_recent_linear_comments(issue: &IssueSummary) -> String {
+    let mut rendered = issue
+        .comments
+        .iter()
+        .rev()
+        .filter(|comment| !comment.body.trim().is_empty())
+        .filter(|comment| !comment.body.contains("## Codex Workpad"))
+        .take(5)
+        .map(|comment| {
+            let author = comment.user_name.as_deref().unwrap_or("unknown");
+            let created_at = comment.created_at.as_deref().unwrap_or("unknown");
+            format!("- {author} ({created_at})\n{}", comment.body.trim())
+        })
+        .collect::<Vec<_>>();
+    rendered.reverse();
+
+    if rendered.is_empty() {
+        "No ticket comments found.".to_string()
+    } else {
+        rendered.join("\n\n")
+    }
 }
 
 fn assemble_review_prompt(
@@ -443,6 +808,7 @@ fn print_dry_run_output(
     root: &Path,
     pr: &GhPrMetadata,
     linear_identifier: &str,
+    args: &ReviewRunArgs,
 ) -> Result<()> {
     let invocation = resolve_agent_invocation_for_planning(
         config,
@@ -450,11 +816,11 @@ fn print_dry_run_output(
         &RunAgentArgs {
             root: Some(root.to_path_buf()),
             route_key: Some(AGENT_ROUTE_AGENTS_REVIEW.to_string()),
-            agent: None,
+            agent: args.agent.clone(),
             prompt: "(dry-run preview)".to_string(),
             instructions: None,
-            model: None,
-            reasoning: None,
+            model: args.model.clone(),
+            reasoning: args.reasoning.clone(),
             transport: None,
             attachments: Vec::new(),
         },
@@ -500,24 +866,15 @@ fn run_remediation(
     pr: &GhPrMetadata,
     linear_identifier: &str,
     review_output: &str,
-    _config: &AppConfig,
-    _planning_meta: &PlanningMeta,
+    config: &AppConfig,
+    planning_meta: &PlanningMeta,
     args: &ReviewRunArgs,
 ) -> Result<RemediationOutcome> {
     let gh = GhCli;
     let remediation_branch = format!("review/remediation-pr-{}", pr.number);
-    let base_branch = &pr.head_ref_name;
-
-    run_git(root, &["fetch", "origin", base_branch])?;
-    run_git(
-        root,
-        &[
-            "checkout",
-            "-b",
-            &remediation_branch,
-            &format!("origin/{base_branch}"),
-        ],
-    )?;
+    let workspace_path = prepare_remediation_workspace(root, pr.number)?;
+    materialize_pull_request_head(&workspace_path, pr.number, &remediation_branch)?;
+    let starting_head = git_stdout(&workspace_path, &["rev-parse", "HEAD"])?;
 
     let fix_prompt = format!(
         "You are applying required fixes from a code review to this branch.\n\n\
@@ -529,7 +886,7 @@ fn run_remediation(
     );
 
     let fix_args = RunAgentArgs {
-        root: Some(root.to_path_buf()),
+        root: Some(workspace_path.clone()),
         route_key: Some(AGENT_ROUTE_AGENTS_REVIEW.to_string()),
         agent: args.agent.clone(),
         prompt: fix_prompt,
@@ -543,7 +900,13 @@ fn run_remediation(
     let report = run_agent_capture(&fix_args)?;
     eprintln!("{}", report.stdout.trim());
 
-    run_git(root, &["push", "-u", "origin", &remediation_branch]).map_err(|e| {
+    ensure_remediation_commits_created(&workspace_path, &starting_head)?;
+
+    run_git(
+        &workspace_path,
+        &["push", "-u", "origin", &remediation_branch],
+    )
+    .map_err(|e| {
         anyhow!(
             "failed to push remediation branch `{remediation_branch}`: {e}. \
              Check repository write permissions."
@@ -556,41 +919,53 @@ fn run_remediation(
          Automated remediation PR for #{pr_number} based on `meta agents review` audit.\n\n\
          ## Review Findings\n\n\
          {review_output}\n\n\
-         ## Linear Ticket\n\n\
+        ## Linear Ticket\n\n\
          {linear_identifier}\n",
         pr_number = pr.number,
     );
-    let body_path = root.join(".metastack").join("review-pr-body.md");
-    crate::fs::ensure_dir(&root.join(".metastack"))?;
+    let body_path = workspace_path.join(".metastack").join("review-pr-body.md");
+    ensure_dir(&workspace_path.join(".metastack"))?;
     std::fs::write(&body_path, &pr_body).context("failed to write remediation PR body")?;
 
     let result = gh.publish_branch_pull_request(
-        root,
+        &workspace_path,
         crate::github_pr::PullRequestPublishRequest {
             head_branch: &remediation_branch,
-            base_branch,
+            base_branch: &pr.base_ref_name,
             title: &pr_title,
             body_path: &body_path,
             mode: crate::github_pr::PullRequestPublishMode::Ready,
         },
     )?;
 
-    let _ = gh.ensure_label_exists(root, METASTACK_LABEL, "5319E7", "MetaStack managed PR");
-    let _ = gh.add_label_to_pull_request(root, result.number, METASTACK_LABEL);
+    let _ = gh.ensure_label_exists(
+        &workspace_path,
+        METASTACK_LABEL,
+        "5319E7",
+        "MetaStack managed PR",
+    );
+    let _ = gh.add_label_to_pull_request(&workspace_path, result.number, METASTACK_LABEL);
 
     eprintln!("Remediation PR #{} created: {}", result.number, result.url);
 
-    if let Err(e) = post_linear_remediation_comment(linear_identifier, &result.url, pr.number) {
-        eprintln!("warning: failed to post Linear comment for {linear_identifier}: {e}");
-    }
+    post_linear_remediation_comment(
+        root,
+        config,
+        planning_meta,
+        linear_identifier,
+        &result.url,
+        pr.number,
+    )?;
 
-    let _ = run_git(root, &["checkout", &pr.base_ref_name]);
     let _ = std::fs::remove_file(&body_path);
 
     println!("{review_output}");
     println!(
-        "\nRemediation PR #{} opened against `{base_branch}`: {}",
-        result.number, result.url
+        "\nRemediation PR #{} opened against `{}` from `{}`: {}",
+        result.number,
+        pr.base_ref_name,
+        workspace_path.display(),
+        result.url
     );
 
     Ok(RemediationOutcome {
@@ -599,15 +974,120 @@ fn run_remediation(
     })
 }
 
+fn prepare_remediation_workspace(root: &Path, pr_number: u64) -> Result<std::path::PathBuf> {
+    let workspace_root = sibling_workspace_root(root)?.join("review-runs");
+    ensure_dir(&workspace_root)?;
+    let workspace_path = workspace_root.join(format!("pr-{pr_number}"));
+
+    if workspace_path.exists() {
+        ensure_workspace_path_is_safe(root, &workspace_root, &workspace_path)?;
+        std::fs::remove_dir_all(&workspace_path).with_context(|| {
+            format!(
+                "failed to remove existing remediation workspace `{}`",
+                workspace_path.display()
+            )
+        })?;
+    }
+
+    run_git(
+        root,
+        &[
+            "clone",
+            root.to_str()
+                .ok_or_else(|| anyhow!("repository path is not valid utf-8"))?,
+            workspace_path
+                .to_str()
+                .ok_or_else(|| anyhow!("workspace path is not valid utf-8"))?,
+        ],
+    )?;
+    ensure_workspace_path_is_safe(root, &workspace_root, &workspace_path)?;
+    configure_workspace_git_identity(root, &workspace_path)?;
+    Ok(workspace_path)
+}
+
+fn materialize_pull_request_head(
+    workspace_path: &Path,
+    pr_number: u64,
+    remediation_branch: &str,
+) -> Result<()> {
+    let output = Command::new("gh")
+        .args(["pr", "checkout", &pr_number.to_string(), "--detach"])
+        .current_dir(workspace_path)
+        .output()
+        .context("failed to run `gh pr checkout` for remediation workspace")?;
+    if !output.status.success() {
+        bail!(
+            "failed to materialize PR #{} in remediation workspace: {}",
+            pr_number,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    run_git(
+        workspace_path,
+        &["checkout", "-B", remediation_branch, "HEAD"],
+    )?;
+    Ok(())
+}
+
+fn ensure_remediation_commits_created(workspace_path: &Path, starting_head: &str) -> Result<()> {
+    let commit_count = git_stdout(
+        workspace_path,
+        &["rev-list", "--count", &format!("{starting_head}..HEAD")],
+    )?;
+    if commit_count.trim() == "0" {
+        bail!(
+            "remediation agent did not create any commits in `{}`",
+            workspace_path.display()
+        );
+    }
+    Ok(())
+}
+
+fn configure_workspace_git_identity(source_root: &Path, workspace_path: &Path) -> Result<()> {
+    for key in ["user.email", "user.name"] {
+        let value = git_stdout(source_root, &["config", "--get", key]).unwrap_or_default();
+        let value = value.trim();
+        if !value.is_empty() {
+            run_git(workspace_path, &["config", key, value])?;
+        }
+    }
+    Ok(())
+}
+
 fn post_linear_remediation_comment(
+    root: &Path,
+    config: &AppConfig,
+    planning_meta: &PlanningMeta,
     linear_identifier: &str,
     remediation_pr_url: &str,
     original_pr_number: u64,
 ) -> Result<()> {
-    eprintln!(
-        "note: Linear comment for {linear_identifier} remediation of PR #{original_pr_number} -> \
-         {remediation_pr_url} would be posted here when Linear API is available in-session."
+    let issue = load_linear_issue(root, config, planning_meta, linear_identifier)?;
+    let linear_config = LinearConfig::from_sources(
+        config,
+        planning_meta,
+        Some(root),
+        LinearConfigOverrides::default(),
+    )?;
+    let default_team = linear_config.default_team.clone();
+    let service = LinearService::new(ReqwestLinearClient::new(linear_config)?, default_team);
+    let body = format!(
+        "## MetaStack Review Remediation\n\nOpened remediation follow-up for PR #{original_pr_number}: {remediation_pr_url}"
     );
+
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to initialize Linear runtime for remediation comment")?
+        .block_on(async move {
+            service
+                .upsert_comment_with_marker(&issue, "## MetaStack Review Remediation", body)
+                .await
+        })
+        .with_context(|| {
+            format!("failed to post remediation comment to Linear ticket `{linear_identifier}`")
+        })?;
+
     Ok(())
 }
 
@@ -627,11 +1107,31 @@ fn run_git(root: &Path, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
+fn git_stdout(root: &Path, args: &[&str]) -> Result<String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .with_context(|| format!("failed to run `git {}`", args.join(" ")))?;
+    if !output.status.success() {
+        bail!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
 // ---------------------------------------------------------------------------
 // Listener mode
 // ---------------------------------------------------------------------------
 
 async fn run_review_listener(args: &ReviewRunArgs) -> Result<()> {
+    if args.json && !args.once {
+        bail!("`--json` requires `--once` for `meta agents review`");
+    }
+
     let root = canonicalize_existing_dir(&args.root)?;
 
     if args.check {
@@ -732,36 +1232,29 @@ async fn run_review_daemon(
     args: &ReviewRunArgs,
 ) -> Result<()> {
     let _lock = store.acquire_lock()?;
-
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
+    let mut terminal = ReviewTerminalDashboard::open()?;
     let mut browser_state = ReviewBrowserState::default();
     let mut last_poll = Instant::now() - Duration::from_secs(DEFAULT_POLL_INTERVAL_SECONDS + 1);
     let mut last_render =
         Instant::now() - Duration::from_secs(TERMINAL_REFRESH_INTERVAL_SECONDS + 1);
-    let mut latest_data: Option<ReviewDashboardData> = None;
+    let mut latest_data = initial_listener_dashboard_data(root, store);
 
     loop {
         if last_poll.elapsed() >= Duration::from_secs(DEFAULT_POLL_INTERVAL_SECONDS) {
             match run_single_review_cycle(root, store, args) {
                 Ok(data) => {
-                    latest_data = Some(data);
+                    latest_data = data;
                     last_poll = Instant::now();
                 }
                 Err(e) => {
-                    eprintln!("poll error: {e}");
+                    push_note(&mut latest_data, format!("Review poll failed: {e}"));
                 }
             }
         }
 
         if last_render.elapsed() >= Duration::from_secs(TERMINAL_REFRESH_INTERVAL_SECONDS) {
-            if let Some(ref data) = latest_data {
-                terminal.draw(|frame| render(frame, data, &browser_state))?;
-                last_render = Instant::now();
-            }
+            terminal.draw_dashboard(&latest_data, &browser_state)?;
+            last_render = Instant::now();
         }
 
         if event::poll(Duration::from_millis(INPUT_POLL_INTERVAL_MILLIS))? {
@@ -775,29 +1268,19 @@ async fn run_review_daemon(
                         break;
                     }
                     KeyCode::Up | KeyCode::Char('k') => {
-                        if let Some(ref data) = latest_data {
-                            browser_state.apply_action(ReviewBrowserAction::Up, data);
-                        }
+                        browser_state.apply_action(ReviewBrowserAction::Up, &latest_data);
                     }
                     KeyCode::Down | KeyCode::Char('j') => {
-                        if let Some(ref data) = latest_data {
-                            browser_state.apply_action(ReviewBrowserAction::Down, data);
-                        }
+                        browser_state.apply_action(ReviewBrowserAction::Down, &latest_data);
                     }
                     KeyCode::Tab => {
-                        if let Some(ref data) = latest_data {
-                            browser_state.apply_action(ReviewBrowserAction::Tab, data);
-                        }
+                        browser_state.apply_action(ReviewBrowserAction::Tab, &latest_data);
                     }
                     KeyCode::PageUp => {
-                        if let Some(ref data) = latest_data {
-                            browser_state.apply_action(ReviewBrowserAction::PageUp, data);
-                        }
+                        browser_state.apply_action(ReviewBrowserAction::PageUp, &latest_data);
                     }
                     KeyCode::PageDown => {
-                        if let Some(ref data) = latest_data {
-                            browser_state.apply_action(ReviewBrowserAction::PageDown, data);
-                        }
+                        browser_state.apply_action(ReviewBrowserAction::PageDown, &latest_data);
                     }
                     _ => {}
                 }
@@ -805,9 +1288,7 @@ async fn run_review_daemon(
         }
     }
 
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
+    terminal.close()?;
 
     Ok(())
 }
@@ -914,16 +1395,20 @@ fn run_review_for_session(
     let gh = GhCli;
 
     let pr = fetch_pr_metadata(&gh, root, pr_number)?;
-    let linear_id = resolve_linear_identifier(&pr).ok();
+    let linear_id = Some(resolve_linear_identifier(&pr)?);
 
     let diff = fetch_pr_diff(root, pr_number)?;
     let context_bundle = load_codebase_context_bundle(root).unwrap_or_default();
     let workflow_contract = load_workflow_contract(root).unwrap_or_default();
     let repo_map = render_repo_map(root).unwrap_or_default();
-    let ticket_context = linear_id
-        .as_deref()
-        .map(gather_linear_ticket_context)
-        .unwrap_or_else(|| "No linked Linear ticket found.".to_string());
+    let ticket_context = gather_linear_ticket_context(
+        root,
+        &config,
+        &planning_meta,
+        linear_id
+            .as_deref()
+            .expect("linear identifier should exist"),
+    )?;
 
     let review_prompt = assemble_review_prompt(
         &pr,
@@ -964,28 +1449,21 @@ fn run_review_for_session(
     };
 
     if remediation_required {
-        if let Some(ref linear_id) = linear_id {
-            match run_remediation(
-                root,
-                &pr,
-                linear_id,
-                &review_output,
-                &config,
-                &planning_meta,
-                args,
-            ) {
-                Ok(outcome) => {
-                    result.summary = "Remediation PR created".to_string();
-                    result.remediation_pr_number = Some(outcome.pr_number);
-                    result.remediation_pr_url = Some(outcome.pr_url);
-                }
-                Err(e) => {
-                    result.summary = format!("Remediation failed: {e}");
-                }
-            }
-        } else {
-            result.summary = "Remediation required but no Linear ticket linked".to_string();
-        }
+        let linear_id = linear_id
+            .as_deref()
+            .ok_or_else(|| anyhow!("missing linked Linear ticket for remediation"))?;
+        let outcome = run_remediation(
+            root,
+            &pr,
+            linear_id,
+            &review_output,
+            &config,
+            &planning_meta,
+            args,
+        )?;
+        result.summary = "Remediation PR created".to_string();
+        result.remediation_pr_number = Some(outcome.pr_number);
+        result.remediation_pr_url = Some(outcome.pr_url);
     }
 
     Ok(result)
@@ -1026,6 +1504,143 @@ fn format_duration(seconds: u64) -> String {
     }
 }
 
+fn should_launch_interactive_review_dashboard(args: &ReviewRunArgs) -> bool {
+    io::stdin().is_terminal()
+        && io::stdout().is_terminal()
+        && !args.dry_run
+        && !args.check
+        && !args.once
+        && !args.json
+        && !args.render_once
+}
+
+fn one_shot_dashboard_data(
+    root: &Path,
+    session: ReviewSession,
+    notes: Vec<String>,
+) -> ReviewDashboardData {
+    ReviewDashboardData {
+        scope: store::resolve_origin_remote(root).unwrap_or_else(|_| root.display().to_string()),
+        cycle_summary: format!("Reviewing PR #{}", session.pr_number),
+        eligible_prs: 1,
+        sessions: vec![session],
+        now_epoch_seconds: now_epoch_seconds(),
+        notes,
+        state_file: "one-shot review".to_string(),
+    }
+}
+
+fn initial_listener_dashboard_data(root: &Path, store: &ReviewProjectStore) -> ReviewDashboardData {
+    let sessions = store
+        .load_state()
+        .map(|state| state.sorted_sessions())
+        .unwrap_or_default();
+    ReviewDashboardData {
+        scope: store::resolve_origin_remote(root).unwrap_or_else(|_| root.display().to_string()),
+        cycle_summary: "Starting dashboard before the first review poll completes.".to_string(),
+        eligible_prs: 0,
+        sessions,
+        now_epoch_seconds: now_epoch_seconds(),
+        notes: vec!["Starting dashboard before the first review poll completes.".to_string()],
+        state_file: store.paths().state_path.display().to_string(),
+    }
+}
+
+fn set_session_status(
+    data: &mut ReviewDashboardData,
+    phase: ReviewPhase,
+    summary: impl Into<String>,
+    note: impl Into<String>,
+) {
+    if let Some(session) = data.sessions.first_mut() {
+        session.phase = phase;
+        session.summary = summary.into();
+        session.updated_at_epoch_seconds = now_epoch_seconds();
+    }
+    push_note(data, note.into());
+}
+
+fn push_note(data: &mut ReviewDashboardData, note: impl Into<String>) {
+    data.now_epoch_seconds = now_epoch_seconds();
+    data.notes.insert(0, note.into());
+    data.notes.truncate(6);
+}
+
+fn populate_session_metadata(session: &mut ReviewSession, pr: &GhPrMetadata) {
+    session.pr_title = pr.title.clone();
+    session.pr_url = Some(pr.url.clone());
+    session.pr_author = Some(pr.author.login.clone());
+    session.head_branch = Some(pr.head_ref_name.clone());
+    session.base_branch = Some(pr.base_ref_name.clone());
+    session.updated_at_epoch_seconds = now_epoch_seconds();
+}
+
+struct ReviewTerminalDashboard {
+    terminal: Terminal<CrosstermBackend<io::Stdout>>,
+    open: bool,
+}
+
+impl ReviewTerminalDashboard {
+    /// Open the shared review dashboard terminal session.
+    ///
+    /// Returns an error when raw mode, alternate screen setup, or terminal construction fails.
+    fn open() -> Result<Self> {
+        enable_raw_mode()?;
+        let mut stdout = io::stdout();
+        execute!(stdout, EnterAlternateScreen)?;
+        let backend = CrosstermBackend::new(stdout);
+        let terminal = Terminal::new(backend)?;
+        Ok(Self {
+            terminal,
+            open: true,
+        })
+    }
+
+    /// Draw the review dashboard with the provided data and browser state.
+    ///
+    /// Returns an error when the terminal backend cannot render the frame.
+    fn draw_dashboard(
+        &mut self,
+        data: &ReviewDashboardData,
+        state: &ReviewBrowserState,
+    ) -> Result<()> {
+        self.terminal.draw(|frame| render(frame, data, state))?;
+        Ok(())
+    }
+
+    /// Draw a one-shot review frame using the default browser state.
+    ///
+    /// Returns an error when the terminal backend cannot render the frame.
+    fn draw(&mut self, data: &ReviewDashboardData) -> Result<()> {
+        self.draw_dashboard(data, &ReviewBrowserState::default())
+    }
+
+    /// Restore the normal terminal screen and cursor.
+    ///
+    /// Returns an error when screen restoration fails.
+    fn close(&mut self) -> Result<()> {
+        if !self.open {
+            return Ok(());
+        }
+        disable_raw_mode()?;
+        execute!(self.terminal.backend_mut(), LeaveAlternateScreen)?;
+        self.terminal.show_cursor()?;
+        self.open = false;
+        Ok(())
+    }
+}
+
+impl Drop for ReviewTerminalDashboard {
+    fn drop(&mut self) {
+        if self.open {
+            let _ = disable_raw_mode();
+            let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
+            let _ = self.terminal.show_cursor();
+            self.open = false;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1049,6 +1664,44 @@ mod tests {
     #[test]
     fn extract_linear_identifier_missing() {
         assert_eq!(extract_linear_identifier("fix the thing"), None);
+    }
+
+    #[test]
+    fn resolve_linear_identifier_rejects_ambiguous_ticket_links() {
+        let pr = GhPrMetadata {
+            number: 42,
+            title: "MET-74: Review flow".to_string(),
+            url: "https://example.test/pull/42".to_string(),
+            body: Some("Also references MET-99".to_string()),
+            author: GhPrAuthor {
+                login: "metasudo".to_string(),
+            },
+            head_ref_name: "met-74-review".to_string(),
+            base_ref_name: "main".to_string(),
+            changed_files: 1,
+            additions: 1,
+            deletions: 0,
+            state: "OPEN".to_string(),
+            labels: Vec::new(),
+            review_decision: None,
+        };
+
+        let error = resolve_linear_identifier(&pr).expect_err("multiple tickets should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("multiple Linear ticket identifiers")
+        );
+    }
+
+    #[test]
+    fn extract_markdown_section_returns_heading_body() {
+        let body =
+            "# Overview\nhello\n\n## Acceptance Criteria\n- first\n- second\n\n## Notes\nmore";
+        assert_eq!(
+            extract_markdown_section(body, &["Acceptance Criteria"]),
+            Some("- first\n- second".to_string())
+        );
     }
 
     #[test]
