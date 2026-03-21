@@ -423,6 +423,7 @@ pub enum AgentsCommands {
     /// Listen for eligible Linear issues and supervise them through the interactive session browser.
     Listen(ListenArgs),
     /// List, explain, and run reusable workflow playbooks.
+    #[command(alias = "workflow")]
     Workflows(WorkflowsArgs),
 }
 

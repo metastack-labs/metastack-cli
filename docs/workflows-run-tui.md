@@ -2,7 +2,7 @@
 
 ## Summary
 
-`meta agents workflows run <NAME>` is now TUI-first for interactive terminal sessions. When both stdin and stdout are attached to a TTY, the command opens a guided wizard, generates the workflow Markdown artifact, lands on a review/export dashboard, and lets the user optionally edit or save the result before exiting.
+`meta agents workflows run <NAME>` is now TUI-first for interactive terminal sessions. When both stdin and stdout are attached to a TTY, the command opens a guided wizard, generates the workflow Markdown artifact, lands on a review/export dashboard, and lets the user optionally edit or save the result before exiting. `meta agents workflow run <NAME>` remains available as a compatibility alias.
 
 The deterministic fallback remains available for scripts, CI, and tests via `--no-interactive`.
 
