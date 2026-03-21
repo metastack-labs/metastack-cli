@@ -1287,6 +1287,33 @@ mod tests {
     }
 
     #[test]
+    fn remove_ticket_artifacts_cleans_detail_and_log_files() -> Result<()> {
+        let temp = tempdir()?;
+        let repo_root = temp.path().join("repo");
+        let data_root = temp.path().join("data");
+        fs::create_dir_all(repo_root.join(".metastack"))?;
+        let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
+        store.ensure_layout()?;
+
+        let issue_identifier = "ENG-10163";
+        let mut session = default_session(issue_identifier, SessionPhase::Running, 100);
+        session.log_path = Some(store.log_path(issue_identifier).display().to_string());
+        fs::write(store.log_path(issue_identifier), "worker log line\n")
+            .context("failed to seed session log for listen store test")?;
+        store.save_state(&ListenState::from_sessions(vec![session]))?;
+
+        assert!(store.detail_path(issue_identifier).is_file());
+        assert!(store.log_path(issue_identifier).is_file());
+
+        store.remove_ticket_artifacts(issue_identifier)?;
+
+        assert!(store.load_state()?.sessions.is_empty());
+        assert!(!store.detail_path(issue_identifier).exists());
+        assert!(!store.log_path(issue_identifier).exists());
+        Ok(())
+    }
+
+    #[test]
     fn list_projects_uses_pruned_state_for_latest_session() -> Result<()> {
         let temp = tempdir()?;
         let repo_root = temp.path().join("repo");
