@@ -18,6 +18,19 @@ pub(crate) struct SessionBrowserState {
     pub(crate) detail_scroll: u16,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionBrowserAction {
+    Up,
+    Down,
+    Tab,
+    Left,
+    Right,
+    Enter,
+    Back,
+    PageUp,
+    PageDown,
+}
+
 impl Default for SessionBrowserState {
     fn default() -> Self {
         Self {
@@ -79,6 +92,56 @@ impl SessionBrowserState {
         };
         sessions.get(index).copied()
     }
+
+    pub(crate) fn apply_action(
+        &mut self,
+        data: &ListenDashboardData,
+        action: SessionBrowserAction,
+    ) {
+        match action {
+            SessionBrowserAction::Up => {
+                if self.detail_mode {
+                    self.detail_scroll = self.detail_scroll.saturating_sub(1);
+                } else {
+                    self.select_previous(data);
+                }
+            }
+            SessionBrowserAction::Down => {
+                if self.detail_mode {
+                    self.detail_scroll = self.detail_scroll.saturating_add(1);
+                } else {
+                    self.select_next(data);
+                }
+            }
+            SessionBrowserAction::Tab => {
+                self.view = self.view.toggle();
+                self.detail_scroll = 0;
+            }
+            SessionBrowserAction::Left => {
+                self.view = SessionListView::Active;
+                self.detail_scroll = 0;
+            }
+            SessionBrowserAction::Right => {
+                self.view = SessionListView::Completed;
+                self.detail_scroll = 0;
+            }
+            SessionBrowserAction::Enter => {
+                self.detail_mode = !self.detail_mode;
+                self.detail_scroll = 0;
+            }
+            SessionBrowserAction::Back => {
+                self.detail_mode = false;
+                self.detail_scroll = 0;
+            }
+            SessionBrowserAction::PageUp => {
+                self.detail_scroll = self.detail_scroll.saturating_sub(5);
+            }
+            SessionBrowserAction::PageDown => {
+                self.detail_scroll = self.detail_scroll.saturating_add(5);
+            }
+        }
+        self.normalize(data);
+    }
 }
 
 pub fn render_dashboard(data: &ListenDashboardData, width: u16, height: u16) -> Result<String> {
@@ -99,7 +162,7 @@ fn render_dashboard_with_view(
     render_dashboard_with_state(data, width, height, state)
 }
 
-fn render_dashboard_with_state(
+pub(crate) fn render_dashboard_with_state(
     data: &ListenDashboardData,
     width: u16,
     height: u16,

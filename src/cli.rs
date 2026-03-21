@@ -1114,6 +1114,9 @@ pub struct ListenRunArgs {
     /// Execute a single cycle and print a deterministic ratatui snapshot.
     #[arg(long)]
     pub render_once: bool,
+    /// Apply listen-browser actions before a render-once snapshot.
+    #[arg(long, hide = true, value_enum, value_delimiter = ',')]
+    pub events: Vec<ListenDashboardEventArg>,
     /// Use built-in sample data instead of calling Linear.
     #[arg(long)]
     pub demo: bool,
@@ -1614,6 +1617,19 @@ pub enum DashboardEventArg {
     Down,
     Tab,
     Enter,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ListenDashboardEventArg {
+    Up,
+    Down,
+    Tab,
+    Left,
+    Right,
+    Enter,
+    Back,
+    PageUp,
+    PageDown,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]

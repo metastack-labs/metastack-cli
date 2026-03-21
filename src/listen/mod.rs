@@ -34,8 +34,8 @@ use crate::backlog::{
     TemplateContext, render_template_files, save_issue_metadata, write_issue_description,
 };
 use crate::cli::{
-    ListenRunArgs, ListenSessionClearArgs, ListenSessionInspectArgs, ListenSessionListArgs,
-    ListenSessionResumeArgs, ListenWorkerArgs,
+    ListenDashboardEventArg, ListenRunArgs, ListenSessionClearArgs, ListenSessionInspectArgs,
+    ListenSessionListArgs, ListenSessionResumeArgs, ListenWorkerArgs,
 };
 use crate::config::{
     AppConfig, DEFAULT_SYNC_DISCUSSION_PROMPT_CHAR_LIMIT, LinearConfig, LinearConfigOverrides,
@@ -2414,7 +2414,7 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
             );
             println!(
                 "{}",
-                dashboard::render_dashboard(&data, args.width, args.height)?
+                render_listen_snapshot(&data, args.width, args.height, &args.events)?
             );
             return Ok(());
         }
@@ -2587,7 +2587,7 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
         );
         println!(
             "{}",
-            dashboard::render_dashboard(&data, args.width, args.height)?
+            render_listen_snapshot(&data, args.width, args.height, &args.events)?
         );
         return Ok(());
     }
@@ -2723,6 +2723,56 @@ fn clear_selector(args: &ListenSessionClearArgs) -> SessionSelector {
     }
 }
 
+fn render_listen_snapshot(
+    data: &ListenDashboardData,
+    width: u16,
+    height: u16,
+    events: &[ListenDashboardEventArg],
+) -> Result<String> {
+    if events.is_empty() {
+        return dashboard::render_dashboard(data, width, height);
+    }
+    let mut browser_state = dashboard::SessionBrowserState::default();
+    browser_state.normalize(data);
+    for event in events {
+        browser_state.apply_action(data, listen_dashboard_action(*event));
+    }
+    dashboard::render_dashboard_with_state(data, width, height, browser_state)
+}
+
+fn listen_dashboard_action(event: ListenDashboardEventArg) -> dashboard::SessionBrowserAction {
+    match event {
+        ListenDashboardEventArg::Up => dashboard::SessionBrowserAction::Up,
+        ListenDashboardEventArg::Down => dashboard::SessionBrowserAction::Down,
+        ListenDashboardEventArg::Tab => dashboard::SessionBrowserAction::Tab,
+        ListenDashboardEventArg::Left => dashboard::SessionBrowserAction::Left,
+        ListenDashboardEventArg::Right => dashboard::SessionBrowserAction::Right,
+        ListenDashboardEventArg::Enter => dashboard::SessionBrowserAction::Enter,
+        ListenDashboardEventArg::Back => dashboard::SessionBrowserAction::Back,
+        ListenDashboardEventArg::PageUp => dashboard::SessionBrowserAction::PageUp,
+        ListenDashboardEventArg::PageDown => dashboard::SessionBrowserAction::PageDown,
+    }
+}
+
+fn listen_browser_action(code: KeyCode, vim_mode: bool) -> Option<dashboard::SessionBrowserAction> {
+    match code {
+        KeyCode::Up => Some(dashboard::SessionBrowserAction::Up),
+        KeyCode::Down => Some(dashboard::SessionBrowserAction::Down),
+        KeyCode::Tab => Some(dashboard::SessionBrowserAction::Tab),
+        KeyCode::Left => Some(dashboard::SessionBrowserAction::Left),
+        KeyCode::Right => Some(dashboard::SessionBrowserAction::Right),
+        KeyCode::Enter => Some(dashboard::SessionBrowserAction::Enter),
+        KeyCode::Esc | KeyCode::Backspace => Some(dashboard::SessionBrowserAction::Back),
+        KeyCode::PageUp => Some(dashboard::SessionBrowserAction::PageUp),
+        KeyCode::PageDown => Some(dashboard::SessionBrowserAction::PageDown),
+        KeyCode::Char('h') if vim_mode => Some(dashboard::SessionBrowserAction::Left),
+        KeyCode::Char('j') if vim_mode => Some(dashboard::SessionBrowserAction::Down),
+        KeyCode::Char('k') if vim_mode => Some(dashboard::SessionBrowserAction::Up),
+        KeyCode::Char('l') if vim_mode => Some(dashboard::SessionBrowserAction::Right),
+        _ => None,
+    }
+}
+
 async fn run_live_loop<F, Fut, S>(
     _args: &ListenRunArgs,
     loop_config: ListenLoopConfig,
@@ -2807,45 +2857,8 @@ where
                 key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
             if ctrl_c || matches!(key.code, KeyCode::Char('q')) {
                 break;
-            } else if matches!(key.code, KeyCode::Tab) {
-                browser_state.view = browser_state.view.toggle();
-                browser_state.detail_scroll = 0;
-            } else if matches!(key.code, KeyCode::Left)
-                || (loop_config.vim_mode && matches!(key.code, KeyCode::Char('h')))
-            {
-                browser_state.view = SessionListView::Active;
-                browser_state.detail_scroll = 0;
-            } else if matches!(key.code, KeyCode::Right)
-                || (loop_config.vim_mode && matches!(key.code, KeyCode::Char('l')))
-            {
-                browser_state.view = SessionListView::Completed;
-                browser_state.detail_scroll = 0;
-            } else if matches!(key.code, KeyCode::Enter) {
-                browser_state.detail_mode = !browser_state.detail_mode;
-                browser_state.detail_scroll = 0;
-            } else if matches!(key.code, KeyCode::Esc | KeyCode::Backspace) {
-                browser_state.detail_mode = false;
-                browser_state.detail_scroll = 0;
-            } else if matches!(key.code, KeyCode::PageUp) {
-                browser_state.detail_scroll = browser_state.detail_scroll.saturating_sub(5);
-            } else if matches!(key.code, KeyCode::PageDown) {
-                browser_state.detail_scroll = browser_state.detail_scroll.saturating_add(5);
-            } else if matches!(key.code, KeyCode::Up)
-                || (loop_config.vim_mode && matches!(key.code, KeyCode::Char('k')))
-            {
-                if browser_state.detail_mode {
-                    browser_state.detail_scroll = browser_state.detail_scroll.saturating_sub(1);
-                } else {
-                    browser_state.select_previous(&data);
-                }
-            } else if matches!(key.code, KeyCode::Down)
-                || (loop_config.vim_mode && matches!(key.code, KeyCode::Char('j')))
-            {
-                if browser_state.detail_mode {
-                    browser_state.detail_scroll = browser_state.detail_scroll.saturating_add(1);
-                } else {
-                    browser_state.select_next(&data);
-                }
+            } else if let Some(action) = listen_browser_action(key.code, loop_config.vim_mode) {
+                browser_state.apply_action(&data, action);
             }
         }
 

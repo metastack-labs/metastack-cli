@@ -996,6 +996,51 @@ fn listen_render_once_demo_outputs_dashboard_snapshot() -> Result<(), Box<dyn Er
 }
 
 #[test]
+fn listen_render_once_demo_can_snapshot_selected_session_detail() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    write_onboarded_config(&config_path, "")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "agents",
+            "listen",
+            "--demo",
+            "--render-once",
+            "--events",
+            "enter",
+            "--width",
+            "200",
+            "--height",
+            "44",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Selected Session"))
+        .stdout(predicate::str::contains("PR: draft #321"))
+        .stdout(predicate::str::contains("Prompt Context"))
+        .stdout(predicate::str::contains("Workpad: comment-met-13"));
+
+    Ok(())
+}
+
+#[test]
 fn agents_listen_help_omits_browser_dashboard_flags() {
     let _guard = listen_test_lock();
     meta()
