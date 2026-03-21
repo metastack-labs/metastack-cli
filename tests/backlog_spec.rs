@@ -241,6 +241,27 @@ fn spec_command_render_once_covers_major_tui_states() -> Result<(), Box<dyn Erro
             "--render-once",
             "--request",
             "Add a repo-local SPEC workflow",
+            "--events",
+            "enter,wait,wait",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Create SPEC follow-up interview"))
+        .stdout(predicate::str::contains(
+            "Who is the primary user for this workflow?",
+        ));
+
+    cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &output_dir)
+        .args([
+            "backlog",
+            "spec",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--render-once",
+            "--request",
+            "Add a repo-local SPEC workflow",
             "--answer",
             "CLI maintainers",
             "--answer",
