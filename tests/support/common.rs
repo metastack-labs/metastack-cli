@@ -718,48 +718,49 @@ fn handle_dynamic_linear_connection(
     state: &Arc<Mutex<DynamicLinearState>>,
 ) -> Result<(), Box<dyn Error>> {
     let mut pending = Vec::new();
-    let request = read_http_request(stream, &mut pending)?;
-    if request.trim().is_empty() {
-        return Ok(());
-    }
-    let body = request
-        .split("\r\n\r\n")
-        .nth(1)
-        .unwrap_or_default()
-        .to_string();
-    match dynamic_linear_response(&body, state) {
-        Ok(response) => {
-            let encoded = serde_json::to_string(&response)?;
-            write!(
-                stream,
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                encoded.len(),
-                encoded
-            )?;
-            stream.flush()?;
+    loop {
+        let request = read_http_request(stream, &mut pending)?;
+        if request.trim().is_empty() {
+            return Ok(());
         }
-        Err(error) => {
-            let encoded = serde_json::to_string(&json!({
-                "errors": [{
-                    "message": error.to_string()
-                }]
-            }))?;
-            write!(
-                stream,
-                "HTTP/1.1 500 Internal Server Error\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                encoded.len(),
-                encoded
-            )?;
-            stream.flush()?;
+        let body = request
+            .split("\r\n\r\n")
+            .nth(1)
+            .unwrap_or_default()
+            .to_string();
+        match dynamic_linear_response(&body, state) {
+            Ok(response) => {
+                let encoded = serde_json::to_string(&response)?;
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: keep-alive\r\n\r\n{}",
+                    encoded.len(),
+                    encoded
+                )?;
+                stream.flush()?;
+            }
+            Err(error) => {
+                let encoded = serde_json::to_string(&json!({
+                    "errors": [{
+                        "message": error.to_string()
+                    }]
+                }))?;
+                write!(
+                    stream,
+                    "HTTP/1.1 500 Internal Server Error\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: keep-alive\r\n\r\n{}",
+                    encoded.len(),
+                    encoded
+                )?;
+                stream.flush()?;
+            }
         }
     }
-
-    Ok(())
 }
 
 #[cfg(unix)]
 fn read_http_request(stream: &mut TcpStream, pending: &mut Vec<u8>) -> Result<String, Box<dyn Error>> {
     let mut chunk = [0u8; 4096];
+    let mut idle_reads_before_data = 0usize;
     let mut idle_reads_after_data = 0usize;
 
     loop {
@@ -781,7 +782,11 @@ fn read_http_request(stream: &mut TcpStream, pending: &mut Vec<u8>) -> Result<St
                 ) =>
             {
                 if pending.is_empty() {
-                    return Ok(String::new());
+                    idle_reads_before_data += 1;
+                    if idle_reads_before_data >= 5 {
+                        return Ok(String::new());
+                    }
+                    continue;
                 }
                 idle_reads_after_data += 1;
                 if idle_reads_after_data >= 20 {
@@ -811,6 +816,7 @@ fn read_http_request(stream: &mut TcpStream, pending: &mut Vec<u8>) -> Result<St
             )
             .into());
         }
+        idle_reads_before_data = 0;
         pending.extend_from_slice(&chunk[..read]);
     }
 }
