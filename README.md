@@ -1,6 +1,6 @@
 
 <div align="center">
-  <h1>Intuition Org Harness</h1>
+  <h1>MetaStack CLI</h1>
   <p><strong>Linear-native planning, repo context, and local agent automation from one CLI.</strong></p>
   <p>Create backlog items, sync planning files, run reusable workflows, and supervise unattended ticket execution without leaving the terminal.</p>
   <p>
