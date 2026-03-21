@@ -527,6 +527,7 @@ pub enum WorkflowRunEventArg {
     Edit,
     Save,
     AcceptEdit,
+    DiscardEdit,
 }
 
 #[derive(Debug, Clone, Args)]

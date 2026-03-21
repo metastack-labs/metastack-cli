@@ -1193,6 +1193,7 @@ fn apply_render_once_event(
         WorkflowRunEventArg::Edit => KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
         WorkflowRunEventArg::Save => KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
         WorkflowRunEventArg::AcceptEdit => KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+        WorkflowRunEventArg::DiscardEdit => KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
     };
     app.handle_key(key)
 }

@@ -58,6 +58,7 @@ The deterministic fallback remains available for scripts, CI, and tests via `--n
 - Snapshot automation:
   - `--events enter` advances the wizard and generates on the last step
   - `--events edit,accept-edit` proves the edit accept path
+  - `--events edit,discard-edit` proves the edit discard path
   - `--events save,enter` proves save and overwrite prompt behavior
 
 ## Edit Mode

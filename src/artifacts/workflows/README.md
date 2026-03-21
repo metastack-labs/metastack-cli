@@ -85,4 +85,5 @@ The fallback keeps the existing promptless execution contract and only overwrite
 output file when `--overwrite` is supplied.
 
 For deterministic TUI proofs, `--render-once --events ...` can script the wizard into review,
-edit, and save states without entering the live terminal loop.
+edit, and save states without entering the live terminal loop. Use `accept-edit` and
+`discard-edit` to prove both edit outcomes explicitly.
