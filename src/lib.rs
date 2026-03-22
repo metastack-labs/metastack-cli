@@ -15,6 +15,7 @@ mod cron_dashboard;
 mod doctor;
 mod fs;
 mod github_pr;
+mod improve;
 mod linear;
 mod listen;
 mod merge;
@@ -58,6 +59,7 @@ use crate::cli::{
     ListenAssignmentScopeArg, MergeDashboardEventArg, RuntimeCommands, SpecEventArg, SyncCommands,
     SyncDashboardEventArg,
 };
+use crate::improve::run_improve;
 use crate::config::ListenAssignmentScope;
 use crate::config_command::{ConfigAction, ConfigCommandOutput, run_config};
 use crate::context::run_context_command;
@@ -266,6 +268,9 @@ async fn dispatch(cli: Cli) -> Result<()> {
             }
             AgentsCommands::Retro(args) => {
                 run_retro(&args).await?;
+            }
+            AgentsCommands::Improve(args) => {
+                run_improve(&args).await?;
             }
             AgentsCommands::Workflows(args) => {
                 println!("{}", run_workflows(&args).await?);

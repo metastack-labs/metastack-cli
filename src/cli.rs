@@ -75,6 +75,8 @@ Examples:
   meta agents review --root . --once
   meta agents retro 42 --root .
   meta agents retro --root .
+  meta agents improve --root .
+  meta agents improve --root . --render-once
   meta agents workflows list --root .
   meta agents workflows run ticket-implementation --root .
   meta agents workflows run ticket-implementation --root . --no-interactive --param issue=MET-93
@@ -513,6 +515,8 @@ pub enum AgentsCommands {
     Review(ReviewArgs),
     /// Analyze merged work for follow-up Linear tickets through a guided retro dashboard.
     Retro(RetroArgs),
+    /// Improve an existing PR by running an agent in an isolated workspace and publishing a stacked PR.
+    Improve(ImproveArgs),
     /// List, explain, and run reusable workflow playbooks.
     #[command(alias = "workflow")]
     Workflows(WorkflowsArgs),
@@ -535,6 +539,25 @@ pub struct OrchestrateArgs {
     /// Emit status output as JSON.
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ImproveArgs {
+    /// Repository root containing the `.metastack/` workspace.
+    #[arg(long, value_name = "PATH", default_value = ".")]
+    pub root: std::path::PathBuf,
+    /// Render the dashboard once and print a deterministic snapshot.
+    #[arg(long)]
+    pub render_once: bool,
+    /// Apply dashboard actions before a render-once snapshot.
+    #[arg(long, hide = true, value_enum, value_delimiter = ',')]
+    pub events: Vec<crate::improve::ImproveEventArg>,
+    /// Snapshot width for render-once output.
+    #[arg(long, hide = true, default_value = "120")]
+    pub width: u16,
+    /// Snapshot height for render-once output.
+    #[arg(long, hide = true, default_value = "32")]
+    pub height: u16,
 }
 
 #[derive(Debug, Clone, Args)]
