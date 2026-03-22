@@ -2439,7 +2439,9 @@ impl InteractiveReviewApp {
         {
             return false;
         }
-        let selected_pr = self.selected_candidate().map(|candidate| candidate.pr_number);
+        let selected_pr = self
+            .selected_candidate()
+            .map(|candidate| candidate.pr_number);
         if self.query.handle_key(key) {
             self.restore_selected_candidate(selected_pr);
             self.preview_scroll.reset();
@@ -6832,7 +6834,8 @@ mod tests {
         type_query(&mut app, "beta");
 
         assert_eq!(
-            app.selected_candidate().map(|candidate| candidate.pr_number),
+            app.selected_candidate()
+                .map(|candidate| candidate.pr_number),
             Some(123),
             "filtering in place should keep the cursor on the previously selected PR"
         );
@@ -6846,7 +6849,8 @@ mod tests {
         }
 
         assert_eq!(
-            app.selected_candidate().map(|candidate| candidate.pr_number),
+            app.selected_candidate()
+                .map(|candidate| candidate.pr_number),
             Some(123),
             "clearing the filter should restore the same selected PR when it is still visible"
         );
