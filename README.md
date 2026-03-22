@@ -531,6 +531,7 @@ Behavior summary:
 
 - `--json` emits the resolved GitHub repository metadata plus the open PR list used by the dashboard and planner.
 - Plain `meta merge` opens a one-shot dashboard that lets you select multiple PRs, review the selected batch summary, scroll the focused preview pane with `Up`/`Down`, `PgUp`/`PgDn`, `Home`/`End`, or the mouse wheel when it overflows, launch immediately, then stay in a live progress screen until the merge run succeeds or fails.
+- The focused `meta merge` preview keeps the PR metadata header and now renders the selected PR body with the shared TUI markdown renderer, preserving headings, lists, blockquotes, fenced code blocks, and blank lines.
 - `--render-once` prints a deterministic dashboard snapshot for tests and proofs.
 - `--no-interactive` skips the dashboard and runs the selected `--pull-request` values directly while printing textual phase updates to stdout.
 - `--resume-run <RUN_ID>` reuses an existing aggregate branch and run artifact directory under `.metastack/merge-runs/<RUN_ID>/`, revalidates the preserved workspace, repushes the branch, and updates the aggregate PR instead of starting from scratch.
@@ -1102,6 +1103,7 @@ Notes:
 - `meta linear issues list` opens an interactive issue browser unless you pass `--json`
 - `meta linear issues list`, `meta dashboard linear`, and `meta dashboard team` share the same free-text search behavior when the issue list is focused: type to search by identifier, title, state, project, or description, with exact identifiers ranked ahead of broader matches
 - the shared Linear dashboards keep their existing filters, and the search query narrows the visible issue set after those filters are applied
+- Shared Linear issue previews now preserve markdown block structure for headings, bullet lists, blockquotes, fenced code blocks, and blank lines through one reusable renderer under `src/tui/`.
 - `meta linear issues create` and `meta linear issues edit` open ratatui workflows when stdin/stdout are attached to a TTY
 - `meta linear issues create --no-interactive ...` and `meta linear issues edit --no-interactive ...` emit structured JSON instead of text
 - In the interactive create/edit forms, multiline descriptions advance on `Enter`, insert a newline on `Shift+Enter`, and support `Up`/`Down`, `PgUp`/`PgDn`, `Home`/`End`, plus mouse-wheel scrolling while the description pane is focused; the summary/review sidebar also scrolls with the mouse wheel when long descriptions overflow
@@ -1177,15 +1179,33 @@ Legacy alias: `meta listen`
 The live terminal dashboard refreshes locally every second so session-state changes stay visible, while the configured listen poll interval continues to control how often Linear is queried. Steady-state listen runs stay entirely in the terminal TUI as an interactive session browser, `--render-once` emits a terminal snapshot, and `--once --json` emits one machine-readable poll-cycle payload without going through the ratatui snapshot path.
 
 When built-in `codex` or `claude` workers emit structured usage telemetry, `meta agents listen` accumulates session-level input and output tokens across repeated turns. Runtime summaries, detail panes, and textual inspection output render `in`, `out`, and `total`, while the session table keeps a compact total-only token column. When exact counts are unavailable, the dashboard and textual summaries continue to show `n/a`.
-When install-scoped `vim_mode` is enabled, the listen dashboard also accepts `h` / `l` as aliases
-for the existing left/right view-switching controls. The session table keeps an active row
-selection, renders a compact `PR` badge (`none`, `draft #N`, `ready #N`), and opens a structured
-detail pane with `Enter`. That drill-down shows the selected session's milestones, workspace and
-backlog references, prompt-context references, PR publication state, any available PR URL or bare
-`#N` reference, and short log excerpts from the install-scoped session detail artifact. Use `Up` /
-`Down` or `j` / `k` to move between
-sessions, `Esc` or `Backspace` to close detail mode, and `PgUp` / `PgDn` to scroll the focused
-detail pane.
+The interactive dashboard has two primary panes: **Agent Sessions** (active and completed listener
+workers) and **In Progress Issues - All Users** (all Linear issues currently in `In Progress`). The In Progress Issues
+pane displays each issue's short title, assignee, and whether an open GitHub PR is attached.
+GitHub enrichment considers only open PRs; closed or merged PRs are not shown as active
+attachments. Issues with no assignee or no PR attachment are handled gracefully.
+
+Use `Tab` to switch focus between the Agent Sessions and In Progress Issues panes. When focused on
+Agent Sessions, `Left`/`Right` (or `h`/`l` in vim mode) switch between Active and Completed
+session views. Press `Enter` on a selected item to open a detail/preview pane: session detail
+shows milestones, references, prompt context, PR state, and log excerpts; In Progress Issue detail
+shows the full issue description, assignee, PR link, and Linear URL. `Esc` or `Backspace` closes
+detail mode, and `PgUp`/`PgDn` scrolls the focused detail pane.
+
+Both panes can be independently hidden via CLI flags or config:
+- `--hide-active-issues` hides the In Progress Issues pane for this run
+- `--hide-preview` hides the preview/detail pane for this run
+- Set `listen.dashboard_active_issues` or `listen.dashboard_preview` to `false` in
+  `.metastack/meta.json` to change the default
+
+When `vim_mode` is enabled, the dashboard also accepts `h`/`l` as aliases for left/right and
+`j`/`k` as aliases for up/down. The session table renders a compact `PR` badge (`none`,
+`draft #N`, `ready #N`). Press `P` to pause a running session, `R` to resume paused or retry
+blocked.
+
+This feature is interactive-TUI only and does not expand non-interactive output (`--once`,
+`--json`).
+
 Examples:
 
 ```bash

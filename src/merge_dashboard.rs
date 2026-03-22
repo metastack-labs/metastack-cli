@@ -15,6 +15,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{ListItem, ListState};
 use ratatui::{Frame, Terminal};
 
+use crate::tui::markdown::render_markdown;
 use crate::tui::scroll::{ScrollState, plain_text, scrollable_content_paragraph, wrapped_rows};
 use crate::tui::theme::{
     Tone, badge, emphasis_style, empty_state, key_hints, label_style, list, muted_style,
@@ -29,6 +30,7 @@ pub struct MergeDashboardPullRequest {
     pub head_ref: String,
     pub updated_at: String,
     pub url: String,
+    pub body: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -492,25 +494,48 @@ impl MergeDashboardApp {
         lines.join("\n")
     }
 
-    fn detail_text(&self) -> String {
+    fn detail_text(&self) -> Text<'static> {
         let Some(pr) = self.data.pull_requests.get(self.pr_index) else {
-            return format!(
-                "Repository: {}\nBase branch: {}\n\nOpen PR discovery is empty, so there is nothing to preview.\n\nThe planner preview will appear here once GitHub returns open pull requests.",
-                self.data.repo_label, self.data.base_branch
-            );
+            return Text::from(vec![
+                Line::from(format!("Repository: {}", self.data.repo_label)),
+                Line::from(format!("Base branch: {}", self.data.base_branch)),
+                Line::from(""),
+                Line::from("Open PR discovery is empty, so there is nothing to preview."),
+                Line::from(""),
+                Line::from(
+                    "The planner preview will appear here once GitHub returns open pull requests.",
+                ),
+            ]);
         };
 
-        format!(
-            "Repository: {}\nBase branch: {}\n\nFocused pull request\n#{} {}\nAuthor: {}\nHead ref: {}\nUpdated: {}\nURL: {}\n\nPlanner handoff\nThe merge planner receives every selected PR title, author, branch, timestamp, and URL, then proposes an explicit merge order and conflict hotspots before execution.",
-            self.data.repo_label,
-            self.data.base_branch,
-            pr.number,
-            pr.title,
-            pr.author,
-            pr.head_ref,
-            pr.updated_at,
-            pr.url
-        )
+        let mut lines = vec![
+            Line::from(format!("Repository: {}", self.data.repo_label)),
+            Line::from(format!("Base branch: {}", self.data.base_branch)),
+            Line::from(""),
+            Line::from("Focused pull request"),
+            Line::from(format!("#{} {}", pr.number, pr.title)),
+            Line::from(format!("Author: {}", pr.author)),
+            Line::from(format!("Head ref: {}", pr.head_ref)),
+            Line::from(format!("Updated: {}", pr.updated_at)),
+            Line::from(format!("URL: {}", pr.url)),
+            Line::from(""),
+            Line::from("Description"),
+        ];
+        let body = if pr.body.trim().is_empty() {
+            "_No pull request description provided._"
+        } else {
+            pr.body.as_str()
+        };
+        lines.extend(render_markdown(body, muted_style(), &[]).lines);
+        lines.extend([
+            Line::from(""),
+            Line::from("Planner handoff"),
+            Line::from(
+                "The merge planner receives every selected PR title, author, branch, timestamp, URL, and rendered PR body context before execution.",
+            ),
+        ]);
+
+        Text::from(lines)
     }
 
     fn move_selection(&mut self, delta: isize) {
@@ -522,7 +547,7 @@ impl MergeDashboardApp {
     }
 
     fn preview_content_rows(&self, width: u16) -> usize {
-        wrapped_rows(&plain_text(&Text::from(self.detail_text())), width.max(1))
+        wrapped_rows(&plain_text(&self.detail_text()), width.max(1))
     }
 
     fn scroll_preview_key(&mut self, key: KeyCode, viewport: Rect) {
@@ -614,6 +639,7 @@ mod tests {
         Focus, MergeDashboardAction, MergeDashboardApp, MergeDashboardData, MergeDashboardExit,
         MergeDashboardOptions, MergeDashboardPullRequest, preview_viewport, run_merge_dashboard,
     };
+    use crate::tui::scroll::plain_text;
     use crossterm::event::{KeyModifiers, MouseEvent, MouseEventKind};
     use ratatui::layout::Rect;
 
@@ -630,6 +656,7 @@ mod tests {
                     head_ref: "feature/transport".to_string(),
                     updated_at: "2026-03-16T18:30:00Z".to_string(),
                     url: "https://example.com/101".to_string(),
+                    body: "## Summary\n\n- transport setup\n- validation".to_string(),
                 },
                 MergeDashboardPullRequest {
                     number: 102,
@@ -638,6 +665,7 @@ mod tests {
                     head_ref: "feature/dashboard".to_string(),
                     updated_at: "2026-03-16T18:45:00Z".to_string(),
                     url: "https://example.com/102".to_string(),
+                    body: "> follow-up preview body".to_string(),
                 },
             ],
         }
@@ -688,6 +716,16 @@ mod tests {
         };
         assert!(snapshot.contains("#101 Add merge transport"));
         assert!(snapshot.contains("1 pull request(s) will be handed to the merge agent"));
+    }
+
+    #[test]
+    fn merge_dashboard_detail_text_includes_pr_body_markdown() {
+        let app = MergeDashboardApp::new(demo_data());
+        let detail = plain_text(&app.detail_text());
+
+        assert!(detail.contains("Description"));
+        assert!(detail.contains("## Summary"));
+        assert!(detail.contains("transport setup"));
     }
 
     #[test]

@@ -364,6 +364,7 @@ fn build_dashboard_data(
                 head_ref: pr.head_ref_name.clone(),
                 updated_at: pr.updated_at.clone(),
                 url: pr.url.clone(),
+                body: pr.body.clone(),
             })
             .collect(),
     }

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::linear::IssueSummary;
+use crate::linear::{AttachmentSummary, IssueSummary};
 
 use super::{compact_identifier, format_duration, format_number};
 
@@ -45,6 +45,101 @@ impl From<IssueSummary> for PendingIssue {
             team_key: value.team.key,
         }
     }
+}
+
+/// A Linear issue currently in `In Progress`, surfaced in the dashboard In Progress Issues pane.
+///
+/// This is a stable, dashboard-facing view model that contains only the data the TUI needs
+/// to render each row and the drill-in detail view, without requiring additional service lookups.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActiveIssue {
+    pub identifier: String,
+    pub title: String,
+    pub assignee: Option<String>,
+    pub state_name: String,
+    pub has_open_pr: bool,
+    pub pr_url: Option<String>,
+    pub description: Option<String>,
+    pub url: String,
+    pub team_key: String,
+    pub project: Option<String>,
+}
+
+impl ActiveIssue {
+    /// Build an `ActiveIssue` from a Linear `IssueSummary`.
+    ///
+    /// GitHub enrichment considers only open attached PRs. An attachment is
+    /// treated as an open GitHub PR when its URL matches the `github.com/.*/pull/`
+    /// pattern and the attachment metadata does not indicate a `closed` or `merged` state.
+    pub fn from_issue(issue: IssueSummary) -> Self {
+        let (has_open_pr, pr_url) = detect_open_github_pr(&issue.attachments);
+        Self {
+            identifier: issue.identifier,
+            title: issue.title,
+            assignee: issue.assignee.map(|a| a.name),
+            state_name: issue
+                .state
+                .as_ref()
+                .map(|s| s.name.clone())
+                .unwrap_or_else(|| "Unknown".to_string()),
+            has_open_pr,
+            pr_url,
+            description: issue.description,
+            url: issue.url,
+            team_key: issue.team.key,
+            project: issue.project.map(|p| p.name),
+        }
+    }
+
+    pub(super) fn short_title(&self, max_len: usize) -> String {
+        if self.title.len() <= max_len {
+            self.title.clone()
+        } else {
+            format!("{}...", &self.title[..max_len.saturating_sub(3)])
+        }
+    }
+
+    pub(super) fn assignee_label(&self) -> &str {
+        self.assignee.as_deref().unwrap_or("unassigned")
+    }
+
+    pub(super) fn pr_label(&self) -> &'static str {
+        if self.has_open_pr { "PR" } else { "-" }
+    }
+}
+
+/// Returns `(has_open_pr, pr_url)` by inspecting Linear issue attachments.
+///
+/// An attachment is considered an open GitHub PR when its URL contains
+/// `github.com/.*/pull/` and the attachment metadata does not explicitly
+/// mark the state as `closed` or `merged`.
+fn detect_open_github_pr(attachments: &[AttachmentSummary]) -> (bool, Option<String>) {
+    for attachment in attachments {
+        if !is_github_pr_url(&attachment.url) {
+            continue;
+        }
+        if is_attachment_closed_or_merged(attachment) {
+            continue;
+        }
+        return (true, Some(attachment.url.clone()));
+    }
+    (false, None)
+}
+
+fn is_github_pr_url(url: &str) -> bool {
+    url.contains("github.com/") && url.contains("/pull/")
+}
+
+fn is_attachment_closed_or_merged(attachment: &AttachmentSummary) -> bool {
+    if let Some(state) = attachment.metadata.get("state").and_then(|v| v.as_str()) {
+        let normalized = state.to_lowercase();
+        return normalized == "closed" || normalized == "merged";
+    }
+    if let Some(status) = attachment.metadata.get("status").and_then(|v| v.as_str()) {
+        let normalized = status.to_lowercase();
+        return normalized == "closed" || normalized == "merged";
+    }
+    false
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -467,5 +562,186 @@ mod tests {
             output: Some(40),
         };
         assert_eq!(session.table_tokens_label(), "12,340");
+    }
+
+    #[test]
+    fn active_issue_detects_open_github_pr_from_attachments() {
+        use crate::linear::{AttachmentSummary, IssueSummary, TeamRef, WorkflowState};
+        use serde_json::json;
+
+        let issue = IssueSummary {
+            id: "issue-1".to_string(),
+            identifier: "MET-99".to_string(),
+            title: "Active ticket with open PR".to_string(),
+            description: Some("A description".to_string()),
+            url: "https://linear.app/issues/MET-99".to_string(),
+            priority: None,
+            estimate: None,
+            updated_at: "2026-03-21T00:00:00Z".to_string(),
+            team: TeamRef {
+                key: "MET".to_string(),
+                id: "team-1".to_string(),
+                name: "MetaStack".to_string(),
+            },
+            project: None,
+            assignee: Some(crate::linear::UserRef {
+                id: "user-1".to_string(),
+                name: "Alice".to_string(),
+                email: None,
+            }),
+            labels: vec![],
+            comments: vec![],
+            state: Some(WorkflowState {
+                id: "state-1".to_string(),
+                name: "In Progress".to_string(),
+                kind: Some("started".to_string()),
+            }),
+            attachments: vec![AttachmentSummary {
+                id: "att-1".to_string(),
+                title: "PR #42".to_string(),
+                url: "https://github.com/org/repo/pull/42".to_string(),
+                source_type: Some("github".to_string()),
+                metadata: json!({}),
+            }],
+            parent: None,
+            children: vec![],
+        };
+
+        let active = super::ActiveIssue::from_issue(issue);
+        assert!(active.has_open_pr);
+        assert_eq!(
+            active.pr_url.as_deref(),
+            Some("https://github.com/org/repo/pull/42")
+        );
+        assert_eq!(active.assignee.as_deref(), Some("Alice"));
+        assert_eq!(active.state_name, "In Progress");
+    }
+
+    #[test]
+    fn active_issue_ignores_closed_pr_attachments() {
+        use crate::linear::{AttachmentSummary, IssueSummary, TeamRef, WorkflowState};
+        use serde_json::json;
+
+        let issue = IssueSummary {
+            id: "issue-2".to_string(),
+            identifier: "MET-100".to_string(),
+            title: "Issue with closed PR".to_string(),
+            description: None,
+            url: "https://linear.app/issues/MET-100".to_string(),
+            priority: None,
+            estimate: None,
+            updated_at: "2026-03-21T00:00:00Z".to_string(),
+            team: TeamRef {
+                key: "MET".to_string(),
+                id: "team-1".to_string(),
+                name: "MetaStack".to_string(),
+            },
+            project: None,
+            assignee: None,
+            labels: vec![],
+            comments: vec![],
+            state: Some(WorkflowState {
+                id: "state-1".to_string(),
+                name: "In Progress".to_string(),
+                kind: Some("started".to_string()),
+            }),
+            attachments: vec![AttachmentSummary {
+                id: "att-2".to_string(),
+                title: "PR #43".to_string(),
+                url: "https://github.com/org/repo/pull/43".to_string(),
+                source_type: Some("github".to_string()),
+                metadata: json!({"state": "closed"}),
+            }],
+            parent: None,
+            children: vec![],
+        };
+
+        let active = super::ActiveIssue::from_issue(issue);
+        assert!(!active.has_open_pr);
+        assert!(active.pr_url.is_none());
+        assert_eq!(active.assignee_label(), "unassigned");
+    }
+
+    #[test]
+    fn active_issue_ignores_merged_pr_attachments() {
+        use crate::linear::{AttachmentSummary, IssueSummary, TeamRef, WorkflowState};
+        use serde_json::json;
+
+        let issue = IssueSummary {
+            id: "issue-3".to_string(),
+            identifier: "MET-101".to_string(),
+            title: "Issue with merged PR".to_string(),
+            description: None,
+            url: "https://linear.app/issues/MET-101".to_string(),
+            priority: None,
+            estimate: None,
+            updated_at: "2026-03-21T00:00:00Z".to_string(),
+            team: TeamRef {
+                key: "MET".to_string(),
+                id: "team-1".to_string(),
+                name: "MetaStack".to_string(),
+            },
+            project: None,
+            assignee: None,
+            labels: vec![],
+            comments: vec![],
+            state: Some(WorkflowState {
+                id: "state-1".to_string(),
+                name: "In Progress".to_string(),
+                kind: Some("started".to_string()),
+            }),
+            attachments: vec![AttachmentSummary {
+                id: "att-3".to_string(),
+                title: "PR #44".to_string(),
+                url: "https://github.com/org/repo/pull/44".to_string(),
+                source_type: Some("github".to_string()),
+                metadata: json!({"state": "merged"}),
+            }],
+            parent: None,
+            children: vec![],
+        };
+
+        let active = super::ActiveIssue::from_issue(issue);
+        assert!(!active.has_open_pr);
+        assert!(active.pr_url.is_none());
+    }
+
+    #[test]
+    fn active_issue_short_title_truncates_long_titles() {
+        let active = super::ActiveIssue {
+            identifier: "MET-1".to_string(),
+            title: "A very long title that should be truncated for the table view".to_string(),
+            assignee: None,
+            state_name: "In Progress".to_string(),
+            has_open_pr: false,
+            pr_url: None,
+            description: None,
+            url: "https://linear.app/issues/MET-1".to_string(),
+            team_key: "MET".to_string(),
+            project: None,
+        };
+        let short = active.short_title(20);
+        assert!(short.len() <= 20);
+        assert!(short.ends_with("..."));
+    }
+
+    #[test]
+    fn active_issue_pr_label_shows_presence() {
+        let mut active = super::ActiveIssue {
+            identifier: "MET-1".to_string(),
+            title: "Test".to_string(),
+            assignee: None,
+            state_name: "In Progress".to_string(),
+            has_open_pr: true,
+            pr_url: Some("https://github.com/org/repo/pull/1".to_string()),
+            description: None,
+            url: "https://linear.app/issues/MET-1".to_string(),
+            team_key: "MET".to_string(),
+            project: None,
+        };
+        assert_eq!(active.pr_label(), "PR");
+
+        active.has_open_pr = false;
+        assert_eq!(active.pr_label(), "-");
     }
 }
