@@ -1,61 +1,47 @@
-# Validation
+# Validation — MET-45
 
 ## Command Proofs
 
-- `cargo test --test commands meta_backlog_spec_help_exposes_new_subcommand`
-- `cargo test --test backlog_spec`
-- `cargo test --lib backlog_spec::tests::zero_follow_up_questions_skip_to_generation_loading`
+- `cargo test --test commands -- --test-threads=1`
+- `cargo test --test listen -- --test-threads=1`
 - `cargo clippy --all-targets --all-features -- -D warnings`
 - `make quality`
-- direct create/improve CLI proof via `cargo run -- backlog spec ...` against an isolated temp repo with a deterministic local agent stub
+- `cargo run -- agents execute --help`
 
 ## Results
 
-- `cargo test --test commands meta_backlog_spec_help_exposes_new_subcommand`
-  - passed
-  - confirmed `meta backlog --help` exposes the `spec` subcommand and includes the repo-local invocation example `meta backlog spec --root .`
-- `cargo test --test backlog_spec`
-  - passed
-  - proved first-run creation writes only `.metastack/SPEC.md`
-  - proved repeat-run improvement revises the existing SPEC in place and includes prior SPEC content in the generation prompt
-  - proved render-once coverage for the request, follow-up, loading, and review states without writing `.metastack/SPEC.md`
-  - proved the render-once command path skips the follow-up interview screen when the agent returns zero questions and transitions directly into SPEC generation loading
-  - proved malformed generated output missing required uppercase headings is rejected
-- `cargo test --lib backlog_spec::tests::zero_follow_up_questions_skip_to_generation_loading`
-  - passed
-  - proved the interactive flow skips the empty follow-up interview state and transitions straight into SPEC generation loading when the agent returns zero questions
+- `cargo test --test commands -- --test-threads=1`
+  - passed (28 tests)
+  - confirmed `meta agents execute <ISSUE_ID>` is represented in CLI help and command dispatch
+- `cargo test --test listen -- --test-threads=1`
+  - passed (56 tests)
+  - **Deterministic execute startup proof**: test exercises `execute_issue` bootstrap path through shared session persistence and workspace provisioning with a stubbed Linear/GitHub/provider fixture
+  - **Dashboard execute-origin labeling proof**: `listen_sessions_inspect_shows_execute_origin_label` confirms sessions with `origin: execute` display `(execute-origin)` in session inspect output
+  - **No auto-claim proof**: reconciliation loop blocks execute-origin sessions from automatic resume, setting phase to `Blocked` with summary `Execute-origin | awaiting manual takeover`
+  - **Render-once dashboard proof**: `listen_render_once_demo_detail_shows_execute_origin_for_execute_session` confirms the dashboard detail view renders "This session was started by `meta agents execute`" for execute-origin sessions
 - `cargo clippy --all-targets --all-features -- -D warnings`
   - passed
-  - confirmed the new `meta backlog spec` flow, embedded instruction contract, and route-key wiring stay warning-free
+  - confirmed all new code (`SessionOrigin`, `execute_issue`, dashboard labeling, takeover guards) is warning-free
 - `make quality`
+  - passed (`fmt-check`, `clippy`, `test`, `release-verify` all green)
+- `cargo run -- agents execute --help`
   - passed
-  - confirmed the full repository quality gate remains green after the backlog spec implementation and follow-up snapshot expectation fixes
-- direct create/improve CLI proof via `cargo run -- backlog spec ...`
-  - passed
-  - create proof command:
-    - `METASTACK_CONFIG="$config_path" TEST_OUTPUT_DIR="$output_dir" cargo run -- backlog spec --root "$repo_root" --no-interactive --request "Add a repo-local SPEC workflow for this repository" --answer "CLI maintainers own the flow" --answer "Keep Linear and backlog packets untouched"`
-  - observed output:
-    - `Created repo-local spec at .metastack/SPEC.md.`
-  - observed filesystem result:
-    - only `.metastack/SPEC.md` existed under the temp repo after create
-  - observed heading check:
-    - `# OVERVIEW`, `## GOALS`, `## FEATURES`, and `## NON-GOALS` were present in the generated file
-  - improve proof command:
-    - `METASTACK_CONFIG="$config_path" TEST_OUTPUT_DIR="$output_dir" cargo run -- backlog spec --root "$repo_root" --no-interactive --request "Improve the current SPEC so it is clearer about scope" --answer "Call out the repo-local contract explicitly"`
-  - observed output:
-    - `Updated repo-local spec at .metastack/SPEC.md.`
-  - observed improve-mode evidence:
-    - the captured improve prompt still contained `Define a repo-local specification workflow for the active repository.`, proving the prior SPEC content was fed into revision
-  - observed side-effect check:
-    - `.metastack/backlog/` was still absent after both runs
+  - confirmed CLI help shows `Execute a one-off headless agent run for a single Linear issue` with `<ISSUE_ID>` positional argument and all expected options (`--root`, `--max-turns`, `--agent`, `--model`, `--reasoning`, `--json`, etc.)
+
+## Acceptance Criteria Mapping
+
+| Criterion | Evidence |
+|---|---|
+| `meta agents execute <ISSUE_ID>` in CLI help and dispatch | `cargo run -- agents execute --help` shows the command; `tests/commands.rs` exercises dispatch |
+| Execute-started runs reuse shared bootstrap logic | `execute_issue` calls extracted `run_issue_bootstrap` from `src/listen/mod.rs` — same path as listen |
+| Persisted session state records explicit run origin | `SessionOrigin` enum (`Listen` / `Execute`) in `src/listen/state.rs`; serialized in session store |
+| Listen polling does not auto-claim execute-origin sessions | Reconciliation guard in `src/listen/mod.rs:1330` blocks auto-resume; test confirms `Blocked` phase |
+| Operator can explicitly take over via continuation path | `meta listen sessions resume` still works on execute-origin sessions; dashboard shows takeover copy |
+| Workspace safety rules enforced | `execute_issue` uses `ensure_workspace_path_is_safe` before workspace creation |
+| Repository docs explain execute vs listen | `README.md` updated with `agents execute` section and usage examples |
 
 ## Notes
 
-- The command remains repo-local and only persists `.metastack/SPEC.md` under the resolved repository root.
-- Validation used deterministic local agent stubs for SPEC generation and did not mutate Linear content or `.metastack/backlog/<ISSUE>/` packets.
-- Re-verified on 2026-03-21 11:59:53 PDT: the targeted backlog spec proofs, `cargo clippy --all-targets --all-features -- -D warnings`, and `make quality` all passed again on branch `met-46-technical-add-meta-backlog-spec-with-interactive-tui-flow-and-rep` at `d545334`.
-- Re-verified on 2026-03-21 12:10:46 PM PDT after the CI-only render-width failure: `cargo test --test backlog_spec spec_command_render_once_covers_major_tui_states -- --exact`, `cargo test --test backlog_spec`, and `make quality` all passed locally after relaxing the loading-copy assertion to match wrapped TUI output.
-- Re-verified on 2026-03-21 12:19:07 PM PDT at `4b47285`: `cargo test --test backlog_spec spec_command_improves_existing_repo_local_spec -- --exact` passed, confirming improve mode still feeds the prior SPEC into the prompt and revises `.metastack/SPEC.md` in place on the current PR head.
-- Re-verified on 2026-03-21 12:45:00 PM PDT at `7c8b638`: `cargo test --test commands meta_backlog_spec_help_exposes_new_subcommand`, `cargo test --test backlog_spec`, and `cargo clippy --all-targets --all-features -- -D warnings` all passed again after the snapshot-assertion follow-up.
-- PR feedback sweep on 2026-03-21 12:45:00 PM PDT for [PR #13](https://github.com/metastack-labs/metastack-cli/pull/13): `gh pr view --json comments,reviews` and `gh api repos/metastack-labs/metastack-cli/pulls/13/comments` both returned no actionable review feedback; the only open GitHub signal was the still-pending `quality` check.
-- Final PR gate on 2026-03-21 12:37:17 PM PDT at `4d21c8d`: `gh pr checks 13` reported `quality pass (4m45s)` for [PR #13](https://github.com/metastack-labs/metastack-cli/pull/13), leaving no open review comments or failing checks on the branch.
+- Validated on 2026-03-22 at `e3132e0` on branch `met-45-add-meta-agents-execute-with-shared-session-persistence-and-liste`.
+- All validation used deterministic local agent stubs and stubbed Linear/GitHub fixtures; no live API calls.
+- Formatting fix applied in `e3132e0` to pass CI `fmt-check` gate.
