@@ -106,7 +106,11 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
         workpad_comment_id: &args.workpad_comment_id,
         backlog_issue: backlog_issue.as_ref(),
         pid: Some(worker_pid),
-        latest_resume_handle: None,
+        latest_resume_handle: load_existing_latest_resume_handle(
+            &source_root,
+            project_selector,
+            &args.issue,
+        )?,
         pull_request: load_existing_pull_request(&source_root, project_selector, &args.issue)?,
     };
     let mut session_tokens =
@@ -209,7 +213,6 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                 backlog_progress_for_issue_dir(&workspace_path, &backlog_issue.identifier)
             })
             .transpose()?;
-        session_context.latest_resume_handle = None;
         write_listen_session(
             &source_root,
             project_selector,
@@ -234,6 +237,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
             &issue,
             turn_number,
             &turn_context,
+            session_context.latest_resume_handle.as_ref(),
             |current_session_id| {
                 if session_id_state.borrow().as_deref() == Some(current_session_id) {
                     return Ok(());
@@ -306,7 +310,9 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                 return Err(error);
             }
         };
-        session_context.latest_resume_handle = turn_result.latest_resume_handle;
+        session_context.latest_resume_handle = turn_result
+            .latest_resume_handle
+            .or(session_context.latest_resume_handle);
         session_id = turn_result
             .session_id
             .or_else(|| session_id_state.into_inner());
@@ -876,6 +882,7 @@ fn execute_agent_turn(
     issue: &IssueSummary,
     turn_number: u32,
     context: &ListenTurnContext<'_>,
+    continuation_handle: Option<&LatestResumeHandle>,
     mut on_session_started: impl FnMut(&str) -> Result<()>,
     mut on_usage: impl FnMut(&AgentTokenUsage) -> Result<()>,
 ) -> Result<TurnExecutionResult> {
@@ -887,13 +894,16 @@ fn execute_agent_turn(
     )?;
     let capture_output = invocation.builtin_provider;
     let command_args = if capture_output {
+        let continuation = continuation_handle
+            .filter(|handle| handle.matches_agent(&invocation.agent))
+            .map(|handle| handle.id.clone());
         command_args_for_invocation_with_options(
             &invocation,
             AgentExecutionOptions {
                 working_dir: Some(context.workspace_path.to_path_buf()),
                 extra_env: Vec::new(),
                 capture_output: true,
-                continuation: None,
+                continuation,
             },
         )?
     } else {
@@ -1450,9 +1460,7 @@ fn build_worker_session(
         workpad_comment_id: Some(context.workpad_comment_id.to_string()),
         updated_at_epoch_seconds: now_epoch_seconds(),
         pid: context.pid.filter(|value| *value > 0),
-        session_id: session_id
-            .map(str::to_string)
-            .or_else(|| Some(issue.id.clone())),
+        session_id: session_id.map(str::to_string),
         latest_resume_handle: context.latest_resume_handle.clone(),
         turns: Some(turns),
         tokens: tokens.clone(),
@@ -1495,6 +1503,20 @@ fn load_existing_session_id(
         .into_iter()
         .find(|session| session.issue_matches(issue_identifier))
         .and_then(|session| session.session_id))
+}
+
+fn load_existing_latest_resume_handle(
+    root: &Path,
+    project_selector: Option<&str>,
+    issue_identifier: &str,
+) -> Result<Option<LatestResumeHandle>> {
+    let store = super::store::ListenProjectStore::resolve(root, project_selector)?;
+    let state = store.load_state()?;
+    Ok(state
+        .sessions
+        .into_iter()
+        .find(|session| session.issue_matches(issue_identifier))
+        .and_then(|session| session.latest_resume_handle))
 }
 
 fn load_existing_pull_request(

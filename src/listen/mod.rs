@@ -377,6 +377,11 @@ fn demo_session_details(reference_now: u64) -> HashMap<String, ListenSessionDeta
                     url: Some("https://github.com/metastack-labs/metastack-cli/pull/321".to_string()),
                     status: PullRequestStatus::Draft,
                 },
+                latest_resume_handle: Some(LatestResumeHandle {
+                    provider: ResumeProvider::Codex,
+                    id: "019cedb4-2293-7651-b0b4-dfac4af6a640-019cedb4-229b-7453-825e-3e3da4e1bf2a"
+                        .to_string(),
+                }),
                 references: store::SessionDetailReferences {
                     workspace_path: Some("/tmp/metastack-cli-workspace/MET-13".to_string()),
                     backlog_path: Some(".metastack/backlog/MET-14".to_string()),
@@ -449,6 +454,11 @@ fn demo_session_details(reference_now: u64) -> HashMap<String, ListenSessionDeta
                     output: Some(49_960),
                 },
                 pull_request: PullRequestSummary::default(),
+                latest_resume_handle: Some(LatestResumeHandle {
+                    provider: ResumeProvider::Claude,
+                    id: "019ceda5-0a41-7ef1-bf96-4f26683c1570-019ceda5-0a57-7820-b050-c05e112d66dd"
+                        .to_string(),
+                }),
                 references: store::SessionDetailReferences {
                     workspace_path: Some("/tmp/metastack-cli-workspace/MET-17".to_string()),
                     backlog_path: None,
@@ -528,7 +538,6 @@ impl CodexLiveTokenHydrator {
             let Some(thread_id) = self.resolve_thread_id(session)? else {
                 continue;
             };
-            session.session_id = Some(thread_id.clone());
             if let Some(usage) = self.load_usage(&thread_id)? {
                 session.tokens.accumulate(&usage);
             }
@@ -538,6 +547,16 @@ impl CodexLiveTokenHydrator {
     }
 
     fn resolve_thread_id(&mut self, session: &AgentSession) -> Result<Option<String>> {
+        if let Some(candidate) = session
+            .latest_resume_handle
+            .as_ref()
+            .filter(|resume| resume.provider == ResumeProvider::Codex)
+            .map(|resume| resume.id.as_str())
+            && self.session_file_path(candidate)?.is_some()
+        {
+            return Ok(Some(candidate.to_string()));
+        }
+
         if let Some(candidate) = session.session_id.as_deref()
             && self.session_file_path(candidate)?.is_some()
         {
@@ -1687,7 +1706,7 @@ where
             workpad_comment_id: artifacts.workpad_comment.map(|comment| comment.id.clone()),
             updated_at_epoch_seconds,
             pid: artifacts.pid.filter(|pid| *pid > 0),
-            session_id: Some(issue.id.clone()),
+            session_id: None,
             latest_resume_handle: None,
             turns: artifacts.turns.or(Some(0)),
             tokens: TokenUsage::default(),
@@ -2215,11 +2234,11 @@ pub fn run_listen_session_inspect(args: &ListenSessionInspectArgs) -> Result<Str
         ));
         lines.push(format!(
             "  - Resume provider: {}",
-            session.latest_resume_provider_label()
+            explicit_resume_provider_label(session.latest_resume_handle.as_ref())
         ));
         lines.push(format!(
             "  - Resume ID: {}",
-            session.latest_resume_id_label()
+            explicit_resume_id_label(session.latest_resume_handle.as_ref())
         ));
         if let Some(workspace_path) = session.workspace_path {
             lines.push(format!("  - Workspace: {workspace_path}"));
@@ -2266,6 +2285,14 @@ fn append_session_inspect_detail_lines(lines: &mut Vec<String>, detail: &ListenS
     lines.push(format!(
         "  - Detail PR: {}",
         detail.pull_request.compact_label()
+    ));
+    lines.push(format!(
+        "  - Detail resume provider: {}",
+        explicit_resume_provider_label(detail.latest_resume_handle.as_ref())
+    ));
+    lines.push(format!(
+        "  - Detail resume ID: {}",
+        explicit_resume_id_label(detail.latest_resume_handle.as_ref())
     ));
 
     if let Some(url) = detail.pull_request.url.as_deref() {
@@ -2333,6 +2360,18 @@ fn append_session_inspect_detail_lines(lines: &mut Vec<String>, detail: &ListenS
             ));
         }
     }
+}
+
+fn explicit_resume_provider_label(handle: Option<&LatestResumeHandle>) -> String {
+    handle
+        .map(|handle| handle.provider.label().to_string())
+        .unwrap_or_else(|| "unavailable".to_string())
+}
+
+fn explicit_resume_id_label(handle: Option<&LatestResumeHandle>) -> String {
+    handle
+        .map(|handle| handle.id.clone())
+        .unwrap_or_else(|| "unavailable".to_string())
 }
 
 pub fn run_listen_session_clear(args: &ListenSessionClearArgs) -> Result<String> {

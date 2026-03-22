@@ -685,6 +685,14 @@ fn render_session_detail_text(
         detail_line("Turns", &detail.turns.unwrap_or(0).to_string()),
         detail_line("Tokens", &detail.tokens.display_compact()),
         detail_line("PR", &detail.pull_request.compact_label()),
+        detail_line(
+            "Resume Provider",
+            &explicit_resume_provider_label(detail.latest_resume_handle.as_ref()),
+        ),
+        detail_line(
+            "Resume ID",
+            &explicit_resume_id_label(detail.latest_resume_handle.as_ref()),
+        ),
     ];
 
     if let Some(url) = detail.pull_request.url.as_deref() {
@@ -760,6 +768,18 @@ fn render_session_detail_text(
     )));
 
     Text::from(lines)
+}
+
+fn explicit_resume_provider_label(handle: Option<&super::LatestResumeHandle>) -> String {
+    handle
+        .map(|handle| handle.provider.label().to_string())
+        .unwrap_or_else(|| "unavailable".to_string())
+}
+
+fn explicit_resume_id_label(handle: Option<&super::LatestResumeHandle>) -> String {
+    handle
+        .map(|handle| handle.id.clone())
+        .unwrap_or_else(|| "unavailable".to_string())
 }
 
 fn render_footer(frame: &mut Frame<'_>, data: &ListenDashboardData, area: Rect) {
@@ -1035,6 +1055,47 @@ mod tests {
         assert!(snapshot.contains("n/a"));
         assert!(snapshot.contains("019c...e1bf2a"));
         assert!(snapshot.contains("Progress text stays clean"));
+    }
+
+    #[test]
+    fn detail_snapshot_shows_full_resume_handle() {
+        let data = build_dashboard_data(
+            &demo_cycle(),
+            &DashboardRuntimeContext {
+                started_at_epoch_seconds: 1_773_568_249,
+                now_epoch_seconds: 1_773_575_600,
+                poll_interval_seconds: 7,
+                dashboard_label: "terminal dashboard (TUI)",
+                dashboard_refresh_seconds: 1,
+                linear_refresh_seconds: 15,
+                vim_mode: false,
+            },
+        );
+
+        let state = SessionBrowserState {
+            detail_mode: true,
+            ..SessionBrowserState::default()
+        };
+        let session = state
+            .selected_session(&data)
+            .expect("demo data should include a selected session");
+        let detail = data
+            .detail_for_session(&session.issue_identifier)
+            .expect("demo data should include detail for the selected session");
+        let text = render_session_detail_text(session, detail);
+        let rendered = text
+            .lines
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("Resume Provider: codex"));
+        assert!(
+            rendered.contains(
+                "019cedb4-2293-7651-b0b4-dfac4af6a640-019cedb4-229b-7453-825e-3e3da4e1bf2a"
+            )
+        );
     }
 
     #[test]

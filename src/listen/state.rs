@@ -20,12 +20,26 @@ impl ResumeProvider {
             Self::Codex => "codex",
         }
     }
+
+    pub(super) fn for_agent(agent: &str) -> Option<Self> {
+        match agent {
+            "claude" => Some(Self::Claude),
+            "codex" => Some(Self::Codex),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LatestResumeHandle {
     pub provider: ResumeProvider,
     pub id: String,
+}
+
+impl LatestResumeHandle {
+    pub(super) fn matches_agent(&self, agent: &str) -> bool {
+        ResumeProvider::for_agent(agent) == Some(self.provider)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
