@@ -141,6 +141,8 @@ struct GhPrMetadata {
     deletions: u64,
     state: String,
     labels: Vec<GhPrLabel>,
+    #[serde(default)]
+    assignees: Vec<GhPrAuthor>,
     #[serde(rename = "reviewDecision", default)]
     review_decision: Option<String>,
 }
@@ -179,6 +181,12 @@ struct ReviewLaunchCandidate {
     deletions: u64,
     linear_identifier: Option<String>,
     linear_error: Option<String>,
+    /// Normalized PR state: `"open"` or `"closed"` (GitHub MERGED maps to `"closed"`).
+    candidate_state: String,
+    /// Label names attached to the PR.
+    candidate_labels: Vec<String>,
+    /// Assignee logins, empty when unassigned.
+    candidate_assignees: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -316,6 +324,14 @@ struct InteractiveReviewApp {
     refresh_requested: bool,
     dialog: Option<InteractiveReviewDialog>,
     ticket_review: Option<FollowUpTicketReviewApp>,
+    /// In-place candidate filter (retro flow only).
+    filter: CandidateFilter,
+    /// Whether the lightweight filter panel overlay is visible.
+    filter_panel_open: bool,
+    /// Rows displayed inside the filter panel.
+    filter_panel_rows: Vec<FilterPanelRow>,
+    /// Cursor position within `filter_panel_rows`.
+    filter_panel_cursor: usize,
 }
 
 #[derive(Debug)]
@@ -353,6 +369,138 @@ impl ReviewCommandKind {
         match self {
             Self::Review => "meta agents review",
             Self::Retro => "meta agents retro",
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Candidate filter model
+// ---------------------------------------------------------------------------
+
+const UNASSIGNED_FILTER_VALUE: &str = "(unassigned)";
+
+/// Filter state for narrowing the retro candidate list in-place.
+///
+/// All categories combine conjunctively: a candidate must satisfy every active
+/// category to remain visible.  Within a single category the semantics vary:
+/// - **state**: candidate state must be in the selected set.
+/// - **author**: candidate author must be in the selected set.
+/// - **labels**: candidate must contain *all* selected labels (AND).
+/// - **assignees**: candidate must match *any* selected assignee (OR), with an
+///   explicit `(unassigned)` option for PRs that have no assignees.
+#[derive(Debug, Clone, Default)]
+struct CandidateFilter {
+    states: BTreeSet<String>,
+    authors: BTreeSet<String>,
+    labels: BTreeSet<String>,
+    assignees: BTreeSet<String>,
+}
+
+impl CandidateFilter {
+    /// Returns `true` when at least one filter category is constraining results.
+    fn is_active(&self) -> bool {
+        !self.states.is_empty()
+            || !self.authors.is_empty()
+            || !self.labels.is_empty()
+            || !self.assignees.is_empty()
+    }
+
+    /// Test whether `candidate` passes every active filter category.
+    fn matches(&self, candidate: &ReviewLaunchCandidate) -> bool {
+        if !self.states.is_empty() && !self.states.contains(&candidate.candidate_state) {
+            return false;
+        }
+        if !self.authors.is_empty() && !self.authors.contains(&candidate.author) {
+            return false;
+        }
+        // Labels: candidate must have ALL selected labels.
+        if !self.labels.is_empty()
+            && !self
+                .labels
+                .iter()
+                .all(|label| candidate.candidate_labels.contains(label))
+        {
+            return false;
+        }
+        // Assignees: candidate must match ANY selected assignee.
+        if !self.assignees.is_empty() {
+            let matched = if candidate.candidate_assignees.is_empty() {
+                self.assignees.contains(UNASSIGNED_FILTER_VALUE)
+            } else {
+                candidate
+                    .candidate_assignees
+                    .iter()
+                    .any(|a| self.assignees.contains(a))
+            };
+            if !matched {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Reset all filters to the unfiltered state.
+    fn clear(&mut self) {
+        self.states.clear();
+        self.authors.clear();
+        self.labels.clear();
+        self.assignees.clear();
+    }
+
+    /// Compact human-readable summary of active filters for the dashboard chrome.
+    fn summary(&self) -> String {
+        let mut parts = Vec::new();
+        if !self.states.is_empty() {
+            parts.push(format!(
+                "state={}",
+                self.states.iter().cloned().collect::<Vec<_>>().join(",")
+            ));
+        }
+        if !self.authors.is_empty() {
+            parts.push(format!(
+                "author={}",
+                self.authors.iter().cloned().collect::<Vec<_>>().join(",")
+            ));
+        }
+        if !self.labels.is_empty() {
+            parts.push(format!(
+                "labels={}",
+                self.labels.iter().cloned().collect::<Vec<_>>().join(",")
+            ));
+        }
+        if !self.assignees.is_empty() {
+            parts.push(format!(
+                "assignee={}",
+                self.assignees.iter().cloned().collect::<Vec<_>>().join(",")
+            ));
+        }
+        parts.join("  ")
+    }
+}
+
+/// One selectable row inside the filter panel overlay.
+#[derive(Debug, Clone)]
+struct FilterPanelRow {
+    category: FilterCategory,
+    value: String,
+    selected: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FilterCategory {
+    State,
+    Author,
+    Label,
+    Assignee,
+}
+
+impl FilterCategory {
+    fn label(self) -> &'static str {
+        match self {
+            Self::State => "State",
+            Self::Author => "Author",
+            Self::Label => "Labels",
+            Self::Assignee => "Assignees",
         }
     }
 }
@@ -566,14 +714,15 @@ fn run_review_interactive(
             None => match command {
                 ReviewCommandKind::Review => "Finding open `metastack` pull requests that are ready for explicit review approval."
                     .to_string(),
-                ReviewCommandKind::Retro => "Finding open `metastack` pull requests that are ready for retro ticket analysis."
+                ReviewCommandKind::Retro => "Finding `metastack` pull requests for retro ticket analysis."
                     .to_string(),
             },
         },
     );
     terminal.draw_interactive(&app)?;
 
-    let candidates = discover_review_candidates(&root, &gh, pr_number, &mut app, &mut terminal)?;
+    let candidates =
+        discover_review_candidates(&root, &gh, pr_number, command, &mut app, &mut terminal)?;
     app.load_candidates(candidates);
 
     // Restore sessions from persistent state on dashboard re-entry.
@@ -590,8 +739,14 @@ fn run_review_interactive(
 
     loop {
         if app.refresh_requested {
-            let candidates =
-                discover_review_candidates(&root, &gh, pr_number, &mut app, &mut terminal)?;
+            let candidates = discover_review_candidates(
+                &root,
+                &gh,
+                pr_number,
+                command,
+                &mut app,
+                &mut terminal,
+            )?;
             app.refresh_candidates(candidates);
             terminal.draw_interactive(&app)?;
         }
@@ -1226,6 +1381,10 @@ impl InteractiveReviewApp {
             refresh_requested: false,
             dialog: None,
             ticket_review: None,
+            filter: CandidateFilter::default(),
+            filter_panel_open: false,
+            filter_panel_rows: Vec::new(),
+            filter_panel_cursor: 0,
         }
     }
 
@@ -1326,6 +1485,9 @@ impl InteractiveReviewApp {
                 deletions: 0,
                 linear_identifier: persistent.linear_identifier.clone(),
                 linear_error: None,
+                candidate_state: "open".to_string(),
+                candidate_labels: Vec::new(),
+                candidate_assignees: Vec::new(),
             };
             self.replace_candidate(candidate.clone());
             let session = self.upsert_session(InteractiveReviewSession {
@@ -1611,6 +1773,12 @@ impl InteractiveReviewApp {
         key: crossterm::event::KeyEvent,
         preview: Rect,
     ) -> Result<Option<InteractiveReviewAction>> {
+        // When the filter panel overlay is open, route all input to it.
+        if self.filter_panel_open {
+            self.handle_filter_panel_key(key);
+            return Ok(None);
+        }
+
         match self.stage {
             InteractiveReviewStage::Loading | InteractiveReviewStage::TicketLoading => Ok(None),
             InteractiveReviewStage::Empty => {
@@ -1856,6 +2024,12 @@ impl InteractiveReviewApp {
                             );
                         }
                     }
+                    KeyCode::Char('f') | KeyCode::Char('F')
+                        if self.command == ReviewCommandKind::Retro
+                            && self.tab == InteractiveReviewTab::Candidates =>
+                    {
+                        self.open_filter_panel();
+                    }
                     _ if self.tab == InteractiveReviewTab::Candidates
                         && self.handle_query_key(key) => {}
                     _ => {}
@@ -1988,6 +2162,10 @@ impl InteractiveReviewApp {
             .iter()
             .enumerate()
             .filter(|(_, candidate)| {
+                // Apply structured filter first.
+                if !self.filter.matches(candidate) {
+                    return false;
+                }
                 if query.is_empty() {
                     return true;
                 }
@@ -2037,6 +2215,24 @@ impl InteractiveReviewApp {
                             .clone()
                             .unwrap_or_else(|| "unresolved".to_string()),
                     ),
+                    Span::styled("  State ", label_style()),
+                    Span::raw(candidate.candidate_state.clone()),
+                ]),
+                Line::from(vec![
+                    Span::styled("Labels ", label_style()),
+                    Span::raw(if candidate.candidate_labels.is_empty() {
+                        "none".to_string()
+                    } else {
+                        candidate.candidate_labels.join(", ")
+                    }),
+                ]),
+                Line::from(vec![
+                    Span::styled("Assignees ", label_style()),
+                    Span::raw(if candidate.candidate_assignees.is_empty() {
+                        "unassigned".to_string()
+                    } else {
+                        candidate.candidate_assignees.join(", ")
+                    }),
                 ]),
             ];
 
@@ -2223,6 +2419,166 @@ impl InteractiveReviewApp {
             return true;
         }
         false
+    }
+
+    // -----------------------------------------------------------------------
+    // Filter panel helpers
+    // -----------------------------------------------------------------------
+
+    /// Build the filter panel rows from the current candidate set and filter state.
+    fn build_filter_panel_rows(&self) -> Vec<FilterPanelRow> {
+        let mut rows = Vec::new();
+
+        // State options.
+        for state in &["open", "closed"] {
+            rows.push(FilterPanelRow {
+                category: FilterCategory::State,
+                value: (*state).to_string(),
+                selected: self.filter.states.contains(*state),
+            });
+        }
+
+        // Author options (unique, sorted).
+        let mut authors: Vec<String> = self
+            .candidates
+            .iter()
+            .map(|c| c.author.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        authors.sort();
+        for author in authors {
+            rows.push(FilterPanelRow {
+                category: FilterCategory::Author,
+                value: author.clone(),
+                selected: self.filter.authors.contains(&author),
+            });
+        }
+
+        // Label options (unique, sorted).
+        let mut labels: Vec<String> = self
+            .candidates
+            .iter()
+            .flat_map(|c| c.candidate_labels.iter().cloned())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        labels.sort();
+        for label in labels {
+            rows.push(FilterPanelRow {
+                category: FilterCategory::Label,
+                value: label.clone(),
+                selected: self.filter.labels.contains(&label),
+            });
+        }
+
+        // Assignee options (unique, sorted) + unassigned.
+        let has_unassigned = self
+            .candidates
+            .iter()
+            .any(|c| c.candidate_assignees.is_empty());
+        let mut assignees: Vec<String> = self
+            .candidates
+            .iter()
+            .flat_map(|c| c.candidate_assignees.iter().cloned())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        assignees.sort();
+        if has_unassigned {
+            assignees.insert(0, UNASSIGNED_FILTER_VALUE.to_string());
+        }
+        for assignee in assignees {
+            rows.push(FilterPanelRow {
+                category: FilterCategory::Assignee,
+                value: assignee.clone(),
+                selected: self.filter.assignees.contains(&assignee),
+            });
+        }
+
+        rows
+    }
+
+    /// Open the filter panel and rebuild its row list.
+    fn open_filter_panel(&mut self) {
+        self.filter_panel_rows = self.build_filter_panel_rows();
+        self.filter_panel_cursor = 0;
+        self.filter_panel_open = true;
+    }
+
+    /// Close the filter panel and apply the toggled selections back to the filter.
+    fn close_filter_panel(&mut self) {
+        self.apply_filter_panel_selections();
+        self.filter_panel_open = false;
+        self.selected_index = 0;
+        self.preview_scroll.reset();
+        if self.filter.is_active() {
+            let visible = self.visible_candidate_indices().len();
+            self.status = format!(
+                "{} of {} candidates shown (filtered: {})",
+                visible,
+                self.candidates.len(),
+                self.filter.summary()
+            );
+        } else {
+            self.status = format!(
+                "All {} candidates shown (no active filters).",
+                self.candidates.len()
+            );
+        }
+    }
+
+    /// Write the panel row selections back into the `CandidateFilter`.
+    fn apply_filter_panel_selections(&mut self) {
+        self.filter.clear();
+        for row in &self.filter_panel_rows {
+            if !row.selected {
+                continue;
+            }
+            match row.category {
+                FilterCategory::State => {
+                    self.filter.states.insert(row.value.clone());
+                }
+                FilterCategory::Author => {
+                    self.filter.authors.insert(row.value.clone());
+                }
+                FilterCategory::Label => {
+                    self.filter.labels.insert(row.value.clone());
+                }
+                FilterCategory::Assignee => {
+                    self.filter.assignees.insert(row.value.clone());
+                }
+            }
+        }
+    }
+
+    /// Handle a key event while the filter panel is open. Returns `true` if consumed.
+    fn handle_filter_panel_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Up => {
+                self.filter_panel_cursor = self.filter_panel_cursor.saturating_sub(1);
+            }
+            KeyCode::Down => {
+                if self.filter_panel_cursor + 1 < self.filter_panel_rows.len() {
+                    self.filter_panel_cursor += 1;
+                }
+            }
+            KeyCode::Char(' ') => {
+                if let Some(row) = self.filter_panel_rows.get_mut(self.filter_panel_cursor) {
+                    row.selected = !row.selected;
+                }
+            }
+            KeyCode::Char('c') | KeyCode::Char('C') => {
+                for row in &mut self.filter_panel_rows {
+                    row.selected = false;
+                }
+            }
+            KeyCode::Enter | KeyCode::Char('f') | KeyCode::Char('F') | KeyCode::Esc => {
+                self.close_filter_panel();
+            }
+            _ => return false,
+        }
+        true
     }
 
     fn replace_candidate(&mut self, candidate: ReviewLaunchCandidate) {
@@ -2872,6 +3228,7 @@ fn discover_review_candidates(
     root: &Path,
     gh: &GhCli,
     pr_number: Option<u64>,
+    command: ReviewCommandKind,
     app: &mut InteractiveReviewApp,
     terminal: &mut ReviewTerminalDashboard,
 ) -> Result<Vec<ReviewLaunchCandidate>> {
@@ -2884,7 +3241,7 @@ fn discover_review_candidates(
             labels: metadata.labels.clone(),
         }]
     } else {
-        discover_eligible_prs(gh, root)?
+        discover_eligible_prs(gh, root, command)?
     };
 
     let mut candidates = Vec::new();
@@ -2912,6 +3269,9 @@ fn discover_review_candidates(
                 deletions: 0,
                 linear_identifier: None,
                 linear_error: Some(error.to_string()),
+                candidate_state: "open".to_string(),
+                candidate_labels: Vec::new(),
+                candidate_assignees: Vec::new(),
             }),
         }
     }
@@ -2938,6 +3298,17 @@ fn candidate_from_metadata(pr: &GhPrMetadata) -> ReviewLaunchCandidate {
         linear_error: resolve_linear_identifier(pr)
             .err()
             .map(|error| error.to_string()),
+        candidate_state: normalize_pr_state(&pr.state),
+        candidate_labels: pr.labels.iter().map(|l| l.name.clone()).collect(),
+        candidate_assignees: pr.assignees.iter().map(|a| a.login.clone()).collect(),
+    }
+}
+
+/// Normalize GitHub PR state (`OPEN`, `CLOSED`, `MERGED`) to `"open"` or `"closed"`.
+fn normalize_pr_state(state: &str) -> String {
+    match state {
+        "OPEN" => "open".to_string(),
+        _ => "closed".to_string(),
     }
 }
 
@@ -3911,17 +4282,24 @@ fn render_interactive_review(frame: &mut ratatui::Frame<'_>, app: &InteractiveRe
                 Span::styled(app.command.dashboard_title(), emphasis_style()),
             ]),
             Line::from(app.status.clone()),
-            Line::from(vec![
-                Span::styled("Mode ", label_style()),
-                Span::raw(match app.mode {
-                    InteractiveReviewMode::Direct => "single PR".to_string(),
-                    InteractiveReviewMode::Discovery => "guided queue".to_string(),
-                }),
-                Span::styled("  Candidates ", label_style()),
-                Span::raw(app.visible_candidate_indices().len().to_string()),
-                Span::styled("  Active ", label_style()),
-                Span::raw(app.active_session_count().to_string()),
-            ]),
+            {
+                let mut spans = vec![
+                    Span::styled("Mode ", label_style()),
+                    Span::raw(match app.mode {
+                        InteractiveReviewMode::Direct => "single PR".to_string(),
+                        InteractiveReviewMode::Discovery => "guided queue".to_string(),
+                    }),
+                    Span::styled("  Candidates ", label_style()),
+                    Span::raw(app.visible_candidate_indices().len().to_string()),
+                    Span::styled("  Active ", label_style()),
+                    Span::raw(app.active_session_count().to_string()),
+                ];
+                if app.filter.is_active() {
+                    spans.push(Span::raw("  "));
+                    spans.push(badge("filtered", Tone::Accent));
+                }
+                Line::from(spans)
+            },
         ]),
         panel_title(
             match app.command {
@@ -3966,6 +4344,11 @@ fn render_interactive_review(frame: &mut ratatui::Frame<'_>, app: &InteractiveRe
     let footer = paragraph(interactive_footer_text(app), panel_title("Controls", false))
         .wrap(Wrap { trim: false });
     frame.render_widget(footer, outer[3]);
+
+    // Filter panel overlay (retro flow only).
+    if app.filter_panel_open {
+        render_filter_panel_overlay(frame, app);
+    }
 }
 
 fn render_follow_up_ticket_review(frame: &mut ratatui::Frame<'_>, app: &FollowUpTicketReviewApp) {
@@ -4188,9 +4571,14 @@ fn render_interactive_candidate_list(
 ) {
     let visible = app.visible_candidate_indices();
     let items = if visible.is_empty() {
+        let hint = if app.filter.is_active() {
+            "Adjust the search text, press `F` to change filters, or `R` to refresh."
+        } else {
+            "Adjust the search text or press `R` to refresh the candidate queue."
+        };
         vec![ListItem::new(empty_state(
             "No pull requests matched the current candidate query.",
-            "Adjust the search text or press `R` to refresh the candidate queue.",
+            hint,
         ))]
     } else {
         visible
@@ -4218,14 +4606,25 @@ fn render_interactive_candidate_list(
                 } else {
                     badge("ready", Tone::Muted)
                 };
+                let mut first_line = vec![
+                    badge(format!("#{}", candidate.pr_number), Tone::Accent),
+                    Span::raw(" "),
+                    selected,
+                ];
+                // Show state badge in retro flow for mixed open/closed candidates.
+                if app.command == ReviewCommandKind::Retro {
+                    let state_tone = if candidate.candidate_state == "open" {
+                        Tone::Success
+                    } else {
+                        Tone::Muted
+                    };
+                    first_line.push(Span::raw(" "));
+                    first_line.push(badge(candidate.candidate_state.clone(), state_tone));
+                }
+                first_line.push(Span::raw(" "));
+                first_line.push(Span::styled(candidate.title.clone(), emphasis_style()));
                 ListItem::new(Text::from(vec![
-                    Line::from(vec![
-                        badge(format!("#{}", candidate.pr_number), Tone::Accent),
-                        Span::raw(" "),
-                        selected,
-                        Span::raw(" "),
-                        Span::styled(candidate.title.clone(), emphasis_style()),
-                    ]),
+                    Line::from(first_line),
                     Line::from(vec![
                         Span::styled("Linear ", label_style()),
                         Span::raw(linear),
@@ -4314,6 +4713,76 @@ fn render_interactive_session_list(
         ),
     );
     frame.render_stateful_widget(widget, area, &mut state);
+}
+
+/// Render the lightweight filter panel as a centred overlay.
+fn render_filter_panel_overlay(frame: &mut ratatui::Frame<'_>, app: &InteractiveReviewApp) {
+    let area = frame.area();
+    // Size the popup: 50% width, up to 80% height.
+    let popup_width = (area.width / 2).max(40).min(area.width.saturating_sub(4));
+    let popup_height = (app.filter_panel_rows.len() as u16 + 10)
+        .min(area.height * 80 / 100)
+        .max(10);
+    let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
+    let y = area.y + (area.height.saturating_sub(popup_height)) / 2;
+    let popup = Rect::new(x, y, popup_width, popup_height);
+
+    // Clear the popup area with a background block.
+    let clear = ratatui::widgets::Clear;
+    frame.render_widget(clear, popup);
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut current_category: Option<FilterCategory> = None;
+
+    for (index, row) in app.filter_panel_rows.iter().enumerate() {
+        // Section header when the category changes.
+        if current_category != Some(row.category) {
+            if current_category.is_some() {
+                lines.push(Line::from(""));
+            }
+            lines.push(Line::from(Span::styled(
+                row.category.label().to_string(),
+                emphasis_style(),
+            )));
+            current_category = Some(row.category);
+        }
+
+        let marker = if row.selected { "[x]" } else { "[ ]" };
+        let cursor = if index == app.filter_panel_cursor {
+            "> "
+        } else {
+            "  "
+        };
+        let style = if index == app.filter_panel_cursor {
+            Style::default()
+                .fg(ratatui::style::Color::Yellow)
+                .add_modifier(ratatui::style::Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(Span::styled(
+            format!("{cursor}{marker} {}", row.value),
+            style,
+        )));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(key_hints(&[
+        ("Space", "toggle"),
+        ("Up/Down", "move"),
+        ("C", "clear all"),
+        ("F/Enter/Esc", "close"),
+    ]));
+
+    let widget = ratatui::widgets::Paragraph::new(Text::from(lines))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(panel_title("Filter Candidates", true))
+                .padding(Padding::new(1, 1, 1, 0)),
+        )
+        .wrap(Wrap { trim: false });
+    frame.render_widget(widget, popup);
 }
 
 fn interactive_footer_text(app: &InteractiveReviewApp) -> Text<'static> {
@@ -4432,6 +4901,7 @@ fn interactive_key_hints(app: &InteractiveReviewApp) -> Vec<(&'static str, &'sta
                     ("Type", "search"),
                     ("Up/Down", "move"),
                     ("Space", "select"),
+                    ("F", "filter"),
                     ("Tab", "focus"),
                     ("PgUp/PgDn", "scroll"),
                     ("Enter", "queue retro"),
@@ -4574,7 +5044,7 @@ fn fetch_pr_metadata(gh: &GhCli, root: &Path, pr_number: u64) -> Result<GhPrMeta
             "view",
             &pr_number.to_string(),
             "--json",
-            "number,title,url,body,author,headRefName,baseRefName,changedFiles,additions,deletions,state,labels,reviewDecision",
+            "number,title,url,body,author,headRefName,baseRefName,changedFiles,additions,deletions,state,labels,assignees,reviewDecision",
         ],
     )
     .with_context(|| format!("failed to fetch PR #{pr_number} metadata — does the PR exist?"))
@@ -5550,7 +6020,7 @@ fn run_single_review_cycle(
     let mut state = store.load_state()?;
     let now = now_epoch_seconds();
 
-    let eligible_prs = discover_eligible_prs(&gh, root)?;
+    let eligible_prs = discover_eligible_prs(&gh, root, ReviewCommandKind::Review)?;
     let eligible_count = eligible_prs.len();
     let mut notes = Vec::new();
 
@@ -5717,14 +6187,26 @@ fn run_review_for_session(
     Ok(result)
 }
 
-fn discover_eligible_prs(gh: &GhCli, root: &Path) -> Result<Vec<GhPrListEntry>> {
+/// Discover PRs with the `metastack` label.
+///
+/// The retro flow loads both open and closed PRs so users can filter by state in
+/// the dashboard. The review flow keeps the original open-only behaviour.
+fn discover_eligible_prs(
+    gh: &GhCli,
+    root: &Path,
+    command: ReviewCommandKind,
+) -> Result<Vec<GhPrListEntry>> {
+    let state = match command {
+        ReviewCommandKind::Retro => "all",
+        ReviewCommandKind::Review => "open",
+    };
     gh.run_json(
         root,
         &[
             "pr",
             "list",
             "--state",
-            "open",
+            state,
             "--label",
             METASTACK_LABEL,
             "--json",
@@ -5897,6 +6379,7 @@ mod tests {
             deletions: 0,
             state: "OPEN".to_string(),
             labels: Vec::new(),
+            assignees: Vec::new(),
             review_decision: None,
         };
 
@@ -5925,6 +6408,7 @@ mod tests {
             labels: vec![GhPrLabel {
                 name: "id-MET-53".to_string(),
             }],
+            assignees: Vec::new(),
             review_decision: None,
         };
 
@@ -5958,6 +6442,7 @@ mod tests {
                     name: "id-MET-99".to_string(),
                 },
             ],
+            assignees: Vec::new(),
             review_decision: None,
         };
 
@@ -6039,6 +6524,9 @@ mod tests {
             deletions: 18,
             linear_identifier: Some("MET-74".to_string()),
             linear_error: None,
+            candidate_state: "open".to_string(),
+            candidate_labels: Vec::new(),
+            candidate_assignees: Vec::new(),
         }]);
 
         let backend = ratatui::backend::TestBackend::new(120, 36);
@@ -6065,6 +6553,36 @@ mod tests {
             deletions: 10,
             linear_identifier: Some(format!("MET-{pr_number}")),
             linear_error: None,
+            candidate_state: "open".to_string(),
+            candidate_labels: Vec::new(),
+            candidate_assignees: Vec::new(),
+        }
+    }
+
+    /// Build a candidate with explicit filter-relevant fields for filter tests.
+    fn make_filter_candidate(
+        pr_number: u64,
+        state: &str,
+        author: &str,
+        labels: &[&str],
+        assignees: &[&str],
+    ) -> ReviewLaunchCandidate {
+        ReviewLaunchCandidate {
+            pr_number,
+            title: format!("PR #{pr_number}"),
+            url: format!("https://example.test/pull/{pr_number}"),
+            author: author.to_string(),
+            head_ref: format!("branch-{pr_number}"),
+            base_ref: "main".to_string(),
+            review_state: "PENDING".to_string(),
+            changed_files: 1,
+            additions: 1,
+            deletions: 0,
+            linear_identifier: None,
+            linear_error: None,
+            candidate_state: state.to_string(),
+            candidate_labels: labels.iter().map(|l| l.to_string()).collect(),
+            candidate_assignees: assignees.iter().map(|a| a.to_string()).collect(),
         }
     }
 
@@ -6402,5 +6920,419 @@ mod tests {
             snapshot.contains("Fix Agent Running"),
             "snapshot should show 'Fix Agent Running'"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // CandidateFilter unit tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn filter_default_matches_everything() {
+        let filter = CandidateFilter::default();
+        assert!(!filter.is_active());
+        let candidate = make_filter_candidate(1, "open", "alice", &["bug"], &["alice"]);
+        assert!(filter.matches(&candidate));
+    }
+
+    #[test]
+    fn filter_state_open_only() {
+        let mut filter = CandidateFilter::default();
+        filter.states.insert("open".to_string());
+        assert!(filter.matches(&make_filter_candidate(1, "open", "alice", &[], &[])));
+        assert!(!filter.matches(&make_filter_candidate(2, "closed", "alice", &[], &[])));
+    }
+
+    #[test]
+    fn filter_state_closed_only() {
+        let mut filter = CandidateFilter::default();
+        filter.states.insert("closed".to_string());
+        assert!(!filter.matches(&make_filter_candidate(1, "open", "alice", &[], &[])));
+        assert!(filter.matches(&make_filter_candidate(2, "closed", "alice", &[], &[])));
+    }
+
+    #[test]
+    fn filter_state_both_open_and_closed() {
+        let mut filter = CandidateFilter::default();
+        filter.states.insert("open".to_string());
+        filter.states.insert("closed".to_string());
+        assert!(filter.matches(&make_filter_candidate(1, "open", "alice", &[], &[])));
+        assert!(filter.matches(&make_filter_candidate(2, "closed", "bob", &[], &[])));
+    }
+
+    #[test]
+    fn filter_author() {
+        let mut filter = CandidateFilter::default();
+        filter.authors.insert("alice".to_string());
+        assert!(filter.matches(&make_filter_candidate(1, "open", "alice", &[], &[])));
+        assert!(!filter.matches(&make_filter_candidate(2, "open", "bob", &[], &[])));
+    }
+
+    #[test]
+    fn filter_labels_requires_all_selected() {
+        let mut filter = CandidateFilter::default();
+        filter.labels.insert("bug".to_string());
+        filter.labels.insert("urgent".to_string());
+        // Has both labels.
+        assert!(filter.matches(&make_filter_candidate(
+            1,
+            "open",
+            "alice",
+            &["bug", "urgent", "extra"],
+            &[]
+        )));
+        // Missing "urgent".
+        assert!(!filter.matches(&make_filter_candidate(2, "open", "alice", &["bug"], &[])));
+        // Missing both.
+        assert!(!filter.matches(&make_filter_candidate(3, "open", "alice", &[], &[])));
+    }
+
+    #[test]
+    fn filter_assignee_matches_any() {
+        let mut filter = CandidateFilter::default();
+        filter.assignees.insert("alice".to_string());
+        filter.assignees.insert("bob".to_string());
+        assert!(filter.matches(&make_filter_candidate(1, "open", "eve", &[], &["alice"])));
+        assert!(filter.matches(&make_filter_candidate(
+            2,
+            "open",
+            "eve",
+            &[],
+            &["bob", "charlie"]
+        )));
+        assert!(!filter.matches(&make_filter_candidate(3, "open", "eve", &[], &["charlie"])));
+    }
+
+    #[test]
+    fn filter_assignee_unassigned() {
+        let mut filter = CandidateFilter::default();
+        filter.assignees.insert(UNASSIGNED_FILTER_VALUE.to_string());
+        // Unassigned candidate (empty assignees).
+        assert!(filter.matches(&make_filter_candidate(1, "open", "alice", &[], &[])));
+        // Assigned candidate.
+        assert!(!filter.matches(&make_filter_candidate(2, "open", "alice", &[], &["bob"])));
+    }
+
+    #[test]
+    fn filter_assignee_multi_assigned() {
+        let mut filter = CandidateFilter::default();
+        filter.assignees.insert("alice".to_string());
+        // PR assigned to both alice and bob — should match because alice is in filter.
+        assert!(filter.matches(&make_filter_candidate(
+            1,
+            "open",
+            "eve",
+            &[],
+            &["alice", "bob"]
+        )));
+    }
+
+    #[test]
+    fn filter_conjunctive_combination() {
+        let mut filter = CandidateFilter::default();
+        filter.states.insert("open".to_string());
+        filter.authors.insert("alice".to_string());
+        filter.labels.insert("bug".to_string());
+        filter.assignees.insert("alice".to_string());
+
+        // Passes all categories.
+        assert!(filter.matches(&make_filter_candidate(
+            1,
+            "open",
+            "alice",
+            &["bug"],
+            &["alice"]
+        )));
+        // Wrong state.
+        assert!(!filter.matches(&make_filter_candidate(
+            2,
+            "closed",
+            "alice",
+            &["bug"],
+            &["alice"]
+        )));
+        // Wrong author.
+        assert!(!filter.matches(&make_filter_candidate(
+            3,
+            "open",
+            "bob",
+            &["bug"],
+            &["alice"]
+        )));
+        // Missing label.
+        assert!(!filter.matches(&make_filter_candidate(4, "open", "alice", &[], &["alice"])));
+        // Wrong assignee.
+        assert!(!filter.matches(&make_filter_candidate(
+            5,
+            "open",
+            "alice",
+            &["bug"],
+            &["bob"]
+        )));
+    }
+
+    #[test]
+    fn filter_clear_resets_to_default() {
+        let mut filter = CandidateFilter::default();
+        filter.states.insert("open".to_string());
+        filter.authors.insert("alice".to_string());
+        filter.labels.insert("bug".to_string());
+        filter.assignees.insert("bob".to_string());
+        assert!(filter.is_active());
+        filter.clear();
+        assert!(!filter.is_active());
+        // After clear, matches everything.
+        assert!(filter.matches(&make_filter_candidate(1, "closed", "eve", &[], &[])));
+    }
+
+    #[test]
+    fn filter_summary_describes_active_filters() {
+        let mut filter = CandidateFilter::default();
+        assert!(filter.summary().is_empty());
+        filter.states.insert("open".to_string());
+        filter.authors.insert("alice".to_string());
+        let summary = filter.summary();
+        assert!(summary.contains("state=open"));
+        assert!(summary.contains("author=alice"));
+    }
+
+    #[test]
+    fn normalize_pr_state_maps_open_closed_merged() {
+        assert_eq!(normalize_pr_state("OPEN"), "open");
+        assert_eq!(normalize_pr_state("CLOSED"), "closed");
+        assert_eq!(normalize_pr_state("MERGED"), "closed");
+    }
+
+    // -----------------------------------------------------------------------
+    // Filter panel interaction tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn filter_panel_f_key_opens_panel() {
+        let mut app =
+            InteractiveReviewApp::new(InteractiveReviewMode::Discovery, ReviewCommandKind::Retro);
+        app.load_candidates(vec![
+            make_filter_candidate(1, "open", "alice", &["bug"], &["alice"]),
+            make_filter_candidate(2, "closed", "bob", &["feature"], &[]),
+        ]);
+        assert!(!app.filter_panel_open);
+
+        // Simulate pressing 'F'.
+        let f_key = crossterm::event::KeyEvent::new(KeyCode::Char('F'), KeyModifiers::NONE);
+        let _ = app.handle_key(f_key, Rect::default());
+        assert!(app.filter_panel_open);
+        assert!(!app.filter_panel_rows.is_empty());
+    }
+
+    #[test]
+    fn filter_panel_space_toggles_selection() {
+        let mut app =
+            InteractiveReviewApp::new(InteractiveReviewMode::Discovery, ReviewCommandKind::Retro);
+        app.load_candidates(vec![
+            make_filter_candidate(1, "open", "alice", &[], &[]),
+            make_filter_candidate(2, "closed", "bob", &[], &[]),
+        ]);
+        app.open_filter_panel();
+        // First row should be "open" state.
+        assert!(!app.filter_panel_rows[0].selected);
+
+        let space = crossterm::event::KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE);
+        app.handle_filter_panel_key(space);
+        assert!(app.filter_panel_rows[0].selected);
+
+        // Toggle off.
+        app.handle_filter_panel_key(space);
+        assert!(!app.filter_panel_rows[0].selected);
+    }
+
+    #[test]
+    fn filter_panel_close_applies_filter() {
+        let mut app =
+            InteractiveReviewApp::new(InteractiveReviewMode::Discovery, ReviewCommandKind::Retro);
+        app.load_candidates(vec![
+            make_filter_candidate(1, "open", "alice", &[], &[]),
+            make_filter_candidate(2, "closed", "bob", &[], &[]),
+        ]);
+        assert_eq!(app.visible_candidate_indices().len(), 2);
+
+        app.open_filter_panel();
+        // Select "open" state (first row).
+        let space = crossterm::event::KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE);
+        app.handle_filter_panel_key(space);
+        // Close with Enter.
+        let enter = crossterm::event::KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        app.handle_filter_panel_key(enter);
+
+        assert!(!app.filter_panel_open);
+        assert!(app.filter.is_active());
+        // Only the open candidate should be visible.
+        assert_eq!(app.visible_candidate_indices().len(), 1);
+    }
+
+    #[test]
+    fn filter_panel_clear_removes_all_selections() {
+        let mut app =
+            InteractiveReviewApp::new(InteractiveReviewMode::Discovery, ReviewCommandKind::Retro);
+        app.load_candidates(vec![
+            make_filter_candidate(1, "open", "alice", &[], &[]),
+            make_filter_candidate(2, "closed", "bob", &[], &[]),
+        ]);
+        app.open_filter_panel();
+        // Select some options.
+        let space = crossterm::event::KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE);
+        app.handle_filter_panel_key(space);
+        assert!(app.filter_panel_rows[0].selected);
+
+        // Clear all.
+        let c_key = crossterm::event::KeyEvent::new(KeyCode::Char('C'), KeyModifiers::NONE);
+        app.handle_filter_panel_key(c_key);
+        assert!(app.filter_panel_rows.iter().all(|row| !row.selected));
+    }
+
+    #[test]
+    fn filter_panel_navigation_up_down() {
+        let mut app =
+            InteractiveReviewApp::new(InteractiveReviewMode::Discovery, ReviewCommandKind::Retro);
+        app.load_candidates(vec![
+            make_filter_candidate(1, "open", "alice", &[], &[]),
+            make_filter_candidate(2, "closed", "bob", &[], &[]),
+        ]);
+        app.open_filter_panel();
+        assert_eq!(app.filter_panel_cursor, 0);
+
+        let down = crossterm::event::KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+        app.handle_filter_panel_key(down);
+        assert_eq!(app.filter_panel_cursor, 1);
+
+        let up = crossterm::event::KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
+        app.handle_filter_panel_key(up);
+        assert_eq!(app.filter_panel_cursor, 0);
+    }
+
+    #[test]
+    fn filter_preserves_selection_when_candidate_still_visible() {
+        let mut app =
+            InteractiveReviewApp::new(InteractiveReviewMode::Discovery, ReviewCommandKind::Retro);
+        app.load_candidates(vec![
+            make_filter_candidate(1, "open", "alice", &[], &[]),
+            make_filter_candidate(2, "open", "bob", &[], &[]),
+            make_filter_candidate(3, "closed", "eve", &[], &[]),
+        ]);
+        app.selected_prs.insert(2);
+
+        // Filter to open only.
+        app.filter.states.insert("open".to_string());
+        let visible = app.visible_candidate_indices();
+        // PR #2 is still in the visible set.
+        assert!(visible.iter().any(|&i| app.candidates[i].pr_number == 2));
+        assert!(app.selected_prs.contains(&2));
+    }
+
+    #[test]
+    fn filter_panel_rows_include_unassigned_when_applicable() {
+        let mut app =
+            InteractiveReviewApp::new(InteractiveReviewMode::Discovery, ReviewCommandKind::Retro);
+        app.load_candidates(vec![
+            make_filter_candidate(1, "open", "alice", &[], &[]), // unassigned
+            make_filter_candidate(2, "open", "bob", &[], &["charlie"]), // assigned
+        ]);
+        let rows = app.build_filter_panel_rows();
+        let assignee_rows: Vec<_> = rows
+            .iter()
+            .filter(|r| r.category == FilterCategory::Assignee)
+            .collect();
+        assert!(
+            assignee_rows
+                .iter()
+                .any(|r| r.value == UNASSIGNED_FILTER_VALUE),
+            "panel should include an unassigned option"
+        );
+        assert!(
+            assignee_rows.iter().any(|r| r.value == "charlie"),
+            "panel should include the assigned login"
+        );
+    }
+
+    #[test]
+    fn mixed_open_closed_dataset_filter_test() {
+        let candidates = vec![
+            make_filter_candidate(1, "open", "alice", &["bug"], &["alice"]),
+            make_filter_candidate(2, "closed", "bob", &["feature"], &["bob"]),
+            make_filter_candidate(3, "open", "alice", &["bug", "urgent"], &[]),
+            make_filter_candidate(4, "closed", "eve", &[], &["alice", "bob"]),
+        ];
+        let mut app =
+            InteractiveReviewApp::new(InteractiveReviewMode::Discovery, ReviewCommandKind::Retro);
+        app.load_candidates(candidates);
+        assert_eq!(app.visible_candidate_indices().len(), 4);
+
+        // Filter: open only.
+        app.filter.states.insert("open".to_string());
+        assert_eq!(app.visible_candidate_indices().len(), 2);
+
+        // Further narrow: author=alice.
+        app.filter.authors.insert("alice".to_string());
+        assert_eq!(app.visible_candidate_indices().len(), 2);
+
+        // Further narrow: label=urgent.
+        app.filter.labels.insert("urgent".to_string());
+        assert_eq!(app.visible_candidate_indices().len(), 1);
+
+        // Clear filters.
+        app.filter.clear();
+        assert_eq!(app.visible_candidate_indices().len(), 4);
+    }
+
+    #[test]
+    fn f_key_does_not_open_filter_panel_in_review_mode() {
+        let mut app =
+            InteractiveReviewApp::new(InteractiveReviewMode::Discovery, ReviewCommandKind::Review);
+        app.load_candidates(vec![make_test_candidate(1)]);
+        let f_key = crossterm::event::KeyEvent::new(KeyCode::Char('F'), KeyModifiers::NONE);
+        let _ = app.handle_key(f_key, Rect::default());
+        assert!(
+            !app.filter_panel_open,
+            "filter panel should not open in review mode"
+        );
+    }
+
+    #[test]
+    fn candidate_from_metadata_populates_filter_fields() {
+        let pr = GhPrMetadata {
+            number: 10,
+            title: "MET-10: Test".to_string(),
+            url: "https://example.test/pull/10".to_string(),
+            body: None,
+            author: GhPrAuthor {
+                login: "alice".to_string(),
+            },
+            head_ref_name: "met-10-test".to_string(),
+            base_ref_name: "main".to_string(),
+            changed_files: 1,
+            additions: 1,
+            deletions: 0,
+            state: "MERGED".to_string(),
+            labels: vec![
+                GhPrLabel {
+                    name: "bug".to_string(),
+                },
+                GhPrLabel {
+                    name: "metastack".to_string(),
+                },
+            ],
+            assignees: vec![
+                GhPrAuthor {
+                    login: "alice".to_string(),
+                },
+                GhPrAuthor {
+                    login: "bob".to_string(),
+                },
+            ],
+            review_decision: Some("APPROVED".to_string()),
+        };
+        let candidate = candidate_from_metadata(&pr);
+        assert_eq!(candidate.candidate_state, "closed"); // MERGED -> closed
+        assert_eq!(candidate.candidate_labels, vec!["bug", "metastack"]);
+        assert_eq!(candidate.candidate_assignees, vec!["alice", "bob"]);
+        assert_eq!(candidate.author, "alice");
     }
 }
