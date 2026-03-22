@@ -1,9 +1,12 @@
+use std::collections::BTreeSet;
 use std::io::{self, IsTerminal};
+use std::sync::mpsc;
 use std::time::Duration;
 
 use anyhow::{Result, bail};
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseEventKind,
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+    MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -19,11 +22,19 @@ use crate::backlog::BacklogSyncStatus;
 use crate::linear::IssueSummary;
 use crate::linear::browser::{
     IssueSearchResult, empty_search_result, render_issue_preview as render_linear_issue_preview,
-    render_issue_row, search_issues,
+    render_issue_row_with_prefix as render_sync_issue_row, search_issues,
 };
 use crate::tui::fields::InputFieldState;
 use crate::tui::scroll::{ScrollState, plain_text, scrollable_content_paragraph, wrapped_rows};
 use crate::tui::theme::{Tone, badge, empty_state, key_hints, list, panel_title, paragraph};
+
+/// Load state for a single backlog issue in the dashboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IssueLoadState {
+    Loading,
+    Loaded,
+    Failed,
+}
 
 #[derive(Debug, Clone)]
 pub struct SyncDashboardData {
@@ -37,6 +48,7 @@ pub struct SyncDashboardIssue {
     pub issue: IssueSummary,
     pub linked_issue_identifier: Option<String>,
     pub local_status: BacklogSyncStatus,
+    pub load_state: IssueLoadState,
 }
 
 #[derive(Debug, Clone)]
@@ -59,6 +71,10 @@ pub enum SyncDashboardAction {
     Tab,
     Enter,
     Back,
+    ToggleSelect,
+    SelectAll,
+    CycleStatusFilter,
+    CycleLabelFilter,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,11 +89,17 @@ pub struct SyncSelection {
     pub action: SyncSelectionAction,
 }
 
+/// Message sent from background loading tasks to the dashboard event loop.
+pub struct IssueUpdate {
+    pub index: usize,
+    pub issue: SyncDashboardIssue,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SyncDashboardExit {
     Snapshot(String),
     Cancelled,
-    Selected(SyncSelection),
+    Selected(Vec<SyncSelection>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,15 +116,23 @@ struct SyncDashboardApp {
     query: InputFieldState,
     issue_index: usize,
     action_index: usize,
-    completed: Option<SyncSelection>,
+    selected: BTreeSet<usize>,
+    completed: Vec<SyncSelection>,
     preview_scroll: ScrollState,
+    status_filter: Option<String>,
+    label_filter: Option<String>,
 }
 
 const ACTIONS: [SyncSelectionAction; 2] = [SyncSelectionAction::Pull, SyncSelectionAction::Push];
 
+/// Run the interactive sync dashboard, optionally receiving background issue updates.
+///
+/// When `issue_updates` is provided, the dashboard renders immediately and applies issue
+/// data as it arrives through the channel without blocking the first paint.
 pub fn run_sync_dashboard(
     data: SyncDashboardData,
     options: SyncDashboardOptions,
+    issue_updates: Option<mpsc::Receiver<IssueUpdate>>,
 ) -> Result<SyncDashboardExit> {
     let _ = options.vim_mode;
     if options.render_once {
@@ -125,6 +155,10 @@ pub fn run_sync_dashboard(
     let mut app = SyncDashboardApp::new(data);
 
     loop {
+        if let Some(ref rx) = issue_updates {
+            app.drain_updates(rx);
+        }
+
         terminal.draw(|frame| render_dashboard(frame, &app))?;
 
         if event::poll(Duration::from_millis(250))? {
@@ -132,6 +166,27 @@ pub fn run_sync_dashboard(
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
                     let action = match key.code {
                         KeyCode::Char('q') => return Ok(SyncDashboardExit::Cancelled),
+                        KeyCode::Char(' ') if app.focus == Focus::Issues => {
+                            Some(SyncDashboardAction::ToggleSelect)
+                        }
+                        KeyCode::Char('a')
+                            if key.modifiers.contains(KeyModifiers::CONTROL)
+                                && app.focus == Focus::Issues =>
+                        {
+                            Some(SyncDashboardAction::SelectAll)
+                        }
+                        KeyCode::Char('s')
+                            if key.modifiers.contains(KeyModifiers::CONTROL)
+                                && app.focus == Focus::Issues =>
+                        {
+                            Some(SyncDashboardAction::CycleStatusFilter)
+                        }
+                        KeyCode::Char('l')
+                            if key.modifiers.contains(KeyModifiers::CONTROL)
+                                && app.focus == Focus::Issues =>
+                        {
+                            Some(SyncDashboardAction::CycleLabelFilter)
+                        }
                         KeyCode::Up => Some(SyncDashboardAction::Up),
                         KeyCode::Down => Some(SyncDashboardAction::Down),
                         KeyCode::PageUp => Some(SyncDashboardAction::PageUp),
@@ -144,11 +199,12 @@ pub fn run_sync_dashboard(
                         _ => None,
                     };
 
-                    if let Some(action) = action
-                        && let Some(selection) =
-                            app.apply_in_viewport(action, preview_viewport(terminal.size()?.into()))
-                    {
-                        return Ok(SyncDashboardExit::Selected(selection));
+                    if let Some(action) = action {
+                        let result = app
+                            .apply_in_viewport(action, preview_viewport(terminal.size()?.into()));
+                        if !result.is_empty() {
+                            return Ok(SyncDashboardExit::Selected(result));
+                        }
                     } else {
                         let _ = app.handle_query_key(key);
                     }
@@ -189,7 +245,7 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &SyncDashboardApp) {
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(if narrow { 5 } else { 4 }),
+            Constraint::Length(if narrow { 6 } else { 5 }),
             Constraint::Length(3),
             Constraint::Min(0),
         ])
@@ -221,14 +277,15 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &SyncDashboardApp) {
             Line::from(app.summary_line()),
             key_hints(&[
                 ("Type", "search"),
+                ("Space", "select"),
+                ("Ctrl+A", "select all"),
                 ("Tab", "focus"),
                 ("Up/Down", "move"),
-                ("PgUp/PgDn", "scroll preview"),
-                ("Wheel", "scroll preview"),
                 ("Enter", "advance"),
                 ("Esc", "back"),
                 ("q", "exit"),
             ]),
+            Line::from(app.filter_hint_line()),
         ]),
         panel_title("meta sync", false),
     );
@@ -258,14 +315,22 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &SyncDashboardApp) {
 
 fn render_issue_list(frame: &mut Frame<'_>, area: Rect, app: &SyncDashboardApp) {
     let results = app.visible_issue_results();
-    let title = panel_title(
+    let selected_count = app.selected.len();
+    let title_text = if selected_count > 0 {
+        format!(
+            "Backlog Entries ({}/{}) [{} selected]",
+            results.len(),
+            app.data.issues.len(),
+            selected_count,
+        )
+    } else {
         format!(
             "Backlog Entries ({}/{})",
             results.len(),
             app.data.issues.len()
-        ),
-        app.focus == Focus::Issues,
-    );
+        )
+    };
+    let title = panel_title(title_text, app.focus == Focus::Issues);
     let items = if app.data.issues.is_empty() {
         vec![ListItem::new(empty_state(
             "No backlog entries were found under `.metastack/backlog/`.",
@@ -281,11 +346,26 @@ fn render_issue_list(frame: &mut Frame<'_>, area: Rect, app: &SyncDashboardApp) 
             .iter()
             .filter_map(|result| {
                 app.data.issues.get(result.issue_index).map(|issue| {
-                    render_issue_row(
-                        &issue.issue,
-                        Some(result),
-                        Some(issue.local_status.as_str()),
-                    )
+                    let is_selected = app.selected.contains(&result.issue_index);
+                    let prefix = checkbox_prefix(is_selected);
+                    if issue.load_state == IssueLoadState::Loading {
+                        ListItem::new(Text::from(vec![
+                            Line::from(vec![
+                                Span::raw(prefix),
+                                Span::raw(issue.entry_slug.clone()),
+                                Span::raw("  "),
+                                Span::styled("Loading...", loading_style()),
+                            ]),
+                            Line::from(""),
+                        ]))
+                    } else {
+                        render_sync_issue_row(
+                            &issue.issue,
+                            Some(result),
+                            Some(issue.local_status.as_str()),
+                            prefix,
+                        )
+                    }
                 })
             })
             .collect::<Vec<_>>()
@@ -345,13 +425,24 @@ impl SyncDashboardApp {
             query: InputFieldState::default(),
             issue_index: 0,
             action_index: 0,
-            completed: None,
+            selected: BTreeSet::new(),
+            completed: Vec::new(),
             preview_scroll: ScrollState::default(),
+            status_filter: None,
+            label_filter: None,
+        }
+    }
+
+    fn drain_updates(&mut self, rx: &mpsc::Receiver<IssueUpdate>) {
+        while let Ok(update) = rx.try_recv() {
+            if update.index < self.data.issues.len() {
+                self.data.issues[update.index] = update.issue;
+            }
         }
     }
 
     #[cfg(test)]
-    fn apply(&mut self, action: SyncDashboardAction) -> Option<SyncSelection> {
+    fn apply(&mut self, action: SyncDashboardAction) -> Vec<SyncSelection> {
         self.apply_in_viewport(action, preview_viewport(Rect::new(0, 0, 120, 32)))
     }
 
@@ -359,8 +450,8 @@ impl SyncDashboardApp {
         &mut self,
         action: SyncDashboardAction,
         preview_viewport: Rect,
-    ) -> Option<SyncSelection> {
-        self.completed = None;
+    ) -> Vec<SyncSelection> {
+        self.completed.clear();
 
         match action {
             SyncDashboardAction::Up => match self.focus {
@@ -416,31 +507,98 @@ impl SyncDashboardApp {
                 }
                 self.action_index = 0;
             }
+            SyncDashboardAction::ToggleSelect => {
+                if self.focus == Focus::Issues {
+                    let results = self.visible_issue_results();
+                    if let Some(result) = results.get(self.issue_index) {
+                        let issue_index = result.issue_index;
+                        if !self.selected.remove(&issue_index) {
+                            self.selected.insert(issue_index);
+                        }
+                    }
+                }
+            }
+            SyncDashboardAction::SelectAll => {
+                if self.focus == Focus::Issues {
+                    let visible_indices: BTreeSet<usize> = self
+                        .visible_issue_results()
+                        .iter()
+                        .map(|r| r.issue_index)
+                        .collect();
+                    let all_visible_selected =
+                        !visible_indices.is_empty() && visible_indices.is_subset(&self.selected);
+                    if all_visible_selected {
+                        for idx in &visible_indices {
+                            self.selected.remove(idx);
+                        }
+                    } else {
+                        self.selected.extend(visible_indices);
+                    }
+                }
+            }
+            SyncDashboardAction::CycleStatusFilter => {
+                if self.focus == Focus::Issues {
+                    let statuses = self.available_statuses();
+                    self.status_filter = cycle_filter(&self.status_filter, &statuses);
+                    self.issue_index = 0;
+                    self.preview_scroll.reset();
+                }
+            }
+            SyncDashboardAction::CycleLabelFilter => {
+                if self.focus == Focus::Issues {
+                    let labels = self.available_labels();
+                    self.label_filter = cycle_filter(&self.label_filter, &labels);
+                    self.issue_index = 0;
+                    self.preview_scroll.reset();
+                }
+            }
             SyncDashboardAction::Enter => match self.focus {
                 Focus::Issues => {
-                    if self.selected_issue().is_some() {
+                    if !self.selected.is_empty() || self.selected_issue().is_some() {
                         self.focus = Focus::Preview;
                     }
                 }
                 Focus::Preview => {
-                    if self.selected_issue().is_some() {
+                    if !self.selected.is_empty() || self.selected_issue().is_some() {
                         self.focus = Focus::Actions;
                     }
                 }
                 Focus::Actions => {
-                    let issue = self.selected_issue()?;
-                    let issue_identifier = issue.linked_issue_identifier.clone()?;
-                    let selection = SyncSelection {
-                        issue_identifier,
-                        action: ACTIONS[self.action_index],
-                    };
-                    self.completed = Some(selection.clone());
-                    return Some(selection);
+                    let selections = self.build_selections();
+                    if !selections.is_empty() {
+                        self.completed = selections.clone();
+                        return selections;
+                    }
                 }
             },
         }
 
-        None
+        Vec::new()
+    }
+
+    fn build_selections(&self) -> Vec<SyncSelection> {
+        let action = ACTIONS[self.action_index];
+        let target_indices = if self.selected.is_empty() {
+            let results = self.visible_issue_results();
+            results
+                .get(self.issue_index)
+                .map(|r| vec![r.issue_index])
+                .unwrap_or_default()
+        } else {
+            self.selected.iter().copied().collect()
+        };
+
+        target_indices
+            .into_iter()
+            .filter_map(|idx| {
+                let issue = self.data.issues.get(idx)?;
+                let identifier = issue.linked_issue_identifier.clone()?;
+                Some(SyncSelection {
+                    issue_identifier: identifier,
+                    action,
+                })
+            })
+            .collect()
     }
 
     fn handle_query_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
@@ -456,19 +614,74 @@ impl SyncDashboardApp {
     }
 
     fn visible_issue_results(&self) -> Vec<IssueSearchResult> {
-        if self.query.value().trim().is_empty() {
-            return (0..self.data.issues.len())
+        let base_results = if self.query.value().trim().is_empty() {
+            (0..self.data.issues.len())
                 .map(empty_search_result)
-                .collect();
+                .collect()
+        } else {
+            let issues = self
+                .data
+                .issues
+                .iter()
+                .map(SyncDashboardIssue::search_issue)
+                .collect::<Vec<_>>();
+            search_issues(&issues, self.query.value().trim())
+        };
+
+        if self.status_filter.is_none() && self.label_filter.is_none() {
+            return base_results;
         }
 
-        let issues = self
-            .data
-            .issues
-            .iter()
-            .map(SyncDashboardIssue::search_issue)
-            .collect::<Vec<_>>();
-        search_issues(&issues, self.query.value().trim())
+        base_results
+            .into_iter()
+            .filter(|result| {
+                let Some(issue) = self.data.issues.get(result.issue_index) else {
+                    return false;
+                };
+                if let Some(ref status) = self.status_filter {
+                    let issue_state = issue
+                        .issue
+                        .state
+                        .as_ref()
+                        .map(|s| s.name.as_str())
+                        .unwrap_or("None");
+                    if !issue_state.eq_ignore_ascii_case(status) {
+                        return false;
+                    }
+                }
+                if let Some(ref label) = self.label_filter {
+                    let has_label = issue
+                        .issue
+                        .labels
+                        .iter()
+                        .any(|l| l.name.eq_ignore_ascii_case(label));
+                    if !has_label {
+                        return false;
+                    }
+                }
+                true
+            })
+            .collect()
+    }
+
+    fn available_statuses(&self) -> Vec<String> {
+        let mut statuses = BTreeSet::new();
+        for issue in &self.data.issues {
+            if let Some(state) = &issue.issue.state {
+                statuses.insert(state.name.clone());
+            }
+        }
+        statuses.into_iter().collect()
+    }
+
+    fn available_labels(&self) -> Vec<String> {
+        let mut labels = BTreeSet::new();
+        for issue in &self.data.issues {
+            for label in &issue.issue.labels {
+                labels.insert(label.name.clone());
+            }
+        }
+        labels.into_iter().collect()
     }
 
     fn selected_issue(&self) -> Option<&SyncDashboardIssue> {
@@ -478,57 +691,135 @@ impl SyncDashboardApp {
     }
 
     fn summary_line(&self) -> String {
-        if let Some(selection) = &self.completed {
-            return format!(
-                "Ready to {} {}",
-                selection.action.verb(),
-                selection.issue_identifier
-            );
+        if !self.completed.is_empty() {
+            let verb = self
+                .completed
+                .first()
+                .map(|s| s.action.verb())
+                .unwrap_or("sync");
+            let identifiers = self
+                .completed
+                .iter()
+                .map(|s| s.issue_identifier.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return format!("Ready to {verb} {identifiers}");
         }
+
+        let loading = self
+            .data
+            .issues
+            .iter()
+            .filter(|i| i.load_state == IssueLoadState::Loading)
+            .count();
 
         match self.focus {
             Focus::Issues => {
                 if self.data.issues.is_empty() {
                     "No backlog entries were discovered under `.metastack/backlog/`.".to_string()
+                } else if loading > 0 {
+                    format!(
+                        "{} backlog entries ({} loading). Space selects, Ctrl+A selects all visible.",
+                        self.visible_issue_results().len(),
+                        loading,
+                    )
                 } else {
                     format!(
-                        "{} backlog entries loaded from local `.metastack/backlog/`. Search narrows the list before you choose pull or push.",
+                        "{} backlog entries loaded. Space selects, Ctrl+A selects all visible.",
                         self.visible_issue_results().len()
                     )
                 }
             }
             Focus::Preview => {
-                "Review the selected backlog preview. PgUp/PgDn/Home/End or the mouse wheel scroll when the panel overflows.".to_string()
+                let sel_count = self.selected.len();
+                if sel_count > 1 {
+                    format!(
+                        "{sel_count} issues selected. Review selection, then choose a sync action."
+                    )
+                } else {
+                    "Review the selected backlog preview. PgUp/PgDn/Home/End or the mouse wheel scroll when the panel overflows.".to_string()
+                }
             }
-            Focus::Actions => match self.selected_issue() {
-                Some(issue) if issue.is_linked() => format!(
-                    "Choose whether to pull or push {}.",
-                    issue.linked_issue_identifier.as_deref().unwrap_or_default()
-                ),
-                Some(issue) => format!(
-                    "{} is local-only. Link it before pull or push becomes available.",
-                    issue.entry_slug
-                ),
-                None => "No backlog entry is available to sync.".to_string(),
-            },
+            Focus::Actions => {
+                let sel_count = self.selected.len();
+                if sel_count > 1 {
+                    format!("Choose pull or push for all {sel_count} selected issues.")
+                } else {
+                    match self.selected_issue() {
+                        Some(issue) if issue.is_linked() => format!(
+                            "Choose whether to pull or push {}.",
+                            issue.linked_issue_identifier.as_deref().unwrap_or_default()
+                        ),
+                        Some(issue) => format!(
+                            "{} is local-only. Link it before pull or push becomes available.",
+                            issue.entry_slug
+                        ),
+                        None => "No backlog entry is available to sync.".to_string(),
+                    }
+                }
+            }
         }
     }
 
+    fn filter_hint_line(&self) -> Vec<Span<'static>> {
+        let mut hints = Vec::new();
+        hints.push(Span::raw("Ctrl+S: status filter"));
+        if let Some(ref status) = self.status_filter {
+            hints.push(Span::raw(format!(" [{status}]")));
+        }
+        hints.push(Span::raw("  Ctrl+L: label filter"));
+        if let Some(ref label) = self.label_filter {
+            hints.push(Span::raw(format!(" [{label}]")));
+        }
+        hints
+    }
+
     fn preview_text(&self) -> Text<'static> {
+        if self.selected.len() > 1 {
+            let mut lines = vec![Line::from(format!(
+                "{} issues selected:",
+                self.selected.len()
+            ))];
+            lines.push(Line::from(""));
+            for &idx in &self.selected {
+                if let Some(issue) = self.data.issues.get(idx) {
+                    let identifier = issue
+                        .linked_issue_identifier
+                        .as_deref()
+                        .unwrap_or(&issue.entry_slug);
+                    lines.push(Line::from(format!(
+                        "  {} - {} [{}]",
+                        identifier,
+                        issue.issue.title,
+                        issue.local_status.as_str(),
+                    )));
+                }
+            }
+            return Text::from(lines);
+        }
+
         let results = self.visible_issue_results();
         let Some(result) = results.get(self.issue_index) else {
             return Text::from("No backlog entry is available for the current search.");
         };
         let issue = &self.data.issues[result.issue_index];
+        if issue.load_state == IssueLoadState::Loading {
+            return Text::from("Loading issue data from Linear...");
+        }
         issue.preview_text(Some(result))
     }
 
     fn status_text(&self) -> String {
-        if let Some(selection) = &self.completed {
+        if !self.completed.is_empty() {
+            let verb = self
+                .completed
+                .first()
+                .map(|s| s.action.verb())
+                .unwrap_or("sync");
+            let count = self.completed.len();
             return format!(
-                "Ready to {} {}.\nRender-once stops at the chosen state; interactive mode executes this selection immediately.",
-                selection.action.verb(),
-                selection.issue_identifier,
+                "Ready to {verb} {count} issue{}.\nRender-once stops at the chosen state; interactive mode executes this selection immediately.",
+                plural_suffix(count),
             );
         }
 
@@ -538,19 +829,37 @@ impl SyncDashboardApp {
                     "Create or link backlog entries under `.metastack/backlog/`, then rerun `meta backlog sync`."
                         .to_string()
                 } else {
-                    "Step 1 of 3: search or choose a backlog entry sourced from local `.metastack/backlog/`."
+                    "Step 1 of 3: search or choose backlog entries sourced from local `.metastack/backlog/`. Space to select, Ctrl+A to select all visible."
                         .to_string()
                 }
             }
-            Focus::Preview => "Step 2 of 3: review or scroll the selected backlog preview with PgUp/PgDn/Home/End or the mouse wheel before choosing a sync action.".to_string(),
-            Focus::Actions => match self.selected_issue() {
-                Some(issue) if issue.is_linked() => "Step 3 of 3: choose pull to refresh local files or push to sync managed attachments. `index.md` only updates the Linear description when you run push with `--update-description`.".to_string(),
-                Some(issue) => format!(
-                    "This backlog entry is unlinked. Run `meta backlog sync link <ISSUE> --entry {}` before pull or push becomes available.",
-                    issue.entry_slug
-                ),
-                None => "No backlog entry is selected.".to_string(),
-            },
+            Focus::Preview => {
+                let sel_count = self.selected.len();
+                if sel_count > 1 {
+                    format!(
+                        "Step 2 of 3: {sel_count} issues selected. Press Enter to choose an action or Esc to go back and adjust selection."
+                    )
+                } else {
+                    "Step 2 of 3: review or scroll the selected backlog preview with PgUp/PgDn/Home/End or the mouse wheel before choosing a sync action.".to_string()
+                }
+            }
+            Focus::Actions => {
+                let sel_count = self.selected.len();
+                if sel_count > 1 {
+                    format!(
+                        "Step 3 of 3: choose pull or push for all {sel_count} selected issues. Only linked issues will be synced."
+                    )
+                } else {
+                    match self.selected_issue() {
+                        Some(issue) if issue.is_linked() => "Step 3 of 3: choose pull to refresh local files or push to sync managed attachments. `index.md` only updates the Linear description when you run push with `--update-description`.".to_string(),
+                        Some(issue) => format!(
+                            "This backlog entry is unlinked. Run `meta backlog sync link <ISSUE> --entry {}` before pull or push becomes available.",
+                            issue.entry_slug
+                        ),
+                        None => "No backlog entry is selected.".to_string(),
+                    }
+                }
+            }
         }
     }
 
@@ -579,6 +888,14 @@ impl SyncDashboardApp {
     }
 
     fn action_enabled(&self, _action: SyncSelectionAction) -> bool {
+        if !self.selected.is_empty() {
+            return self.selected.iter().any(|&idx| {
+                self.data
+                    .issues
+                    .get(idx)
+                    .is_some_and(SyncDashboardIssue::is_linked)
+            });
+        }
         self.selected_issue()
             .is_some_and(SyncDashboardIssue::is_linked)
     }
@@ -696,6 +1013,34 @@ impl SyncSelectionAction {
     }
 }
 
+fn checkbox_prefix(selected: bool) -> &'static str {
+    if selected { "[x] " } else { "[ ] " }
+}
+
+fn loading_style() -> ratatui::style::Style {
+    ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray)
+}
+
+fn plural_suffix(count: usize) -> &'static str {
+    if count == 1 { "" } else { "s" }
+}
+
+fn cycle_filter(current: &Option<String>, options: &[String]) -> Option<String> {
+    if options.is_empty() {
+        return None;
+    }
+    match current {
+        None => Some(options[0].clone()),
+        Some(current_value) => {
+            let current_pos = options.iter().position(|o| o == current_value);
+            match current_pos {
+                Some(pos) if pos + 1 < options.len() => Some(options[pos + 1].clone()),
+                _ => None,
+            }
+        }
+    }
+}
+
 fn shift_index(index: &mut usize, len: usize, delta: isize) {
     if len == 0 {
         *index = 0;
@@ -741,7 +1086,7 @@ fn preview_viewport(area: Rect) -> Rect {
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(if narrow { 5 } else { 4 }),
+            Constraint::Length(if narrow { 6 } else { 5 }),
             Constraint::Length(3),
             Constraint::Min(0),
         ])
@@ -773,13 +1118,15 @@ fn preview_viewport(area: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::{
-        Focus, SyncDashboardAction, SyncDashboardApp, SyncDashboardData, SyncDashboardExit,
-        SyncDashboardIssue, SyncDashboardOptions, preview_viewport, run_sync_dashboard,
+        Focus, IssueLoadState, IssueUpdate, SyncDashboardAction, SyncDashboardApp,
+        SyncDashboardData, SyncDashboardExit, SyncDashboardIssue, SyncDashboardOptions,
+        SyncSelectionAction, preview_viewport, run_sync_dashboard,
     };
     use crate::backlog::BacklogSyncStatus;
-    use crate::linear::{DashboardData, IssueSummary, ProjectRef, WorkflowState};
+    use crate::linear::{DashboardData, IssueSummary, LabelRef, ProjectRef, WorkflowState};
     use crate::tui::fields::InputFieldState;
     use ratatui::layout::Rect;
+    use std::sync::mpsc;
 
     fn demo_data() -> SyncDashboardData {
         let demo = DashboardData::demo();
@@ -833,6 +1180,7 @@ mod tests {
                         1 => BacklogSyncStatus::Diverged,
                         _ => BacklogSyncStatus::Unlinked,
                     },
+                    load_state: IssueLoadState::Loaded,
                 })
                 .collect(),
         }
@@ -845,7 +1193,7 @@ mod tests {
             SyncDashboardOptions {
                 render_once: true,
                 width: 120,
-                height: 32,
+                height: 36,
                 actions: vec![
                     SyncDashboardAction::Down,
                     SyncDashboardAction::Enter,
@@ -855,6 +1203,7 @@ mod tests {
                 ],
                 vim_mode: false,
             },
+            None,
         )
         .expect("render once should succeed");
 
@@ -898,7 +1247,7 @@ mod tests {
             SyncDashboardOptions {
                 render_once: true,
                 width: 120,
-                height: 32,
+                height: 36,
                 actions: vec![
                     SyncDashboardAction::Down,
                     SyncDashboardAction::Down,
@@ -908,6 +1257,7 @@ mod tests {
                 ],
                 vim_mode: false,
             },
+            None,
         )
         .expect("render once should succeed");
 
@@ -931,7 +1281,7 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("\n"),
         );
-        let viewport = preview_viewport(Rect::new(0, 0, 120, 20));
+        let viewport = preview_viewport(Rect::new(0, 0, 120, 24));
         let mut app = SyncDashboardApp::new(data);
         let _ = app.apply_in_viewport(SyncDashboardAction::Tab, viewport);
         let _ = app.apply_in_viewport(SyncDashboardAction::End, viewport);
@@ -947,10 +1297,11 @@ mod tests {
             SyncDashboardOptions {
                 render_once: true,
                 width: 120,
-                height: 32,
+                height: 36,
                 actions: vec![SyncDashboardAction::Enter],
                 vim_mode: false,
             },
+            None,
         )
         .expect("render once should succeed");
 
@@ -959,5 +1310,185 @@ mod tests {
         };
 
         assert!(snapshot.contains("mouse wheel"));
+    }
+
+    // --- Multi-select tests ---
+
+    #[test]
+    fn toggle_select_adds_and_removes_issue() {
+        let mut app = SyncDashboardApp::new(demo_data());
+
+        assert!(app.selected.is_empty());
+        app.apply(SyncDashboardAction::ToggleSelect);
+        assert_eq!(app.selected.len(), 1);
+        assert!(app.selected.contains(&0));
+
+        app.apply(SyncDashboardAction::ToggleSelect);
+        assert!(app.selected.is_empty());
+    }
+
+    #[test]
+    fn multi_select_returns_multiple_selections() {
+        let mut app = SyncDashboardApp::new(demo_data());
+
+        app.apply(SyncDashboardAction::ToggleSelect);
+        app.apply(SyncDashboardAction::Down);
+        app.apply(SyncDashboardAction::ToggleSelect);
+        assert_eq!(app.selected.len(), 2);
+
+        app.apply(SyncDashboardAction::Enter);
+        assert_eq!(app.focus, Focus::Preview);
+        app.apply(SyncDashboardAction::Enter);
+        assert_eq!(app.focus, Focus::Actions);
+
+        let selections = app.apply(SyncDashboardAction::Enter);
+        assert_eq!(selections.len(), 2);
+        assert_eq!(selections[0].issue_identifier, "MET-11");
+        assert_eq!(selections[1].issue_identifier, "MET-12");
+        assert_eq!(selections[0].action, SyncSelectionAction::Pull);
+    }
+
+    #[test]
+    fn select_all_selects_all_visible_issues() {
+        let mut app = SyncDashboardApp::new(demo_data());
+
+        app.apply(SyncDashboardAction::SelectAll);
+        let visible_count = app.visible_issue_results().len();
+        assert_eq!(app.selected.len(), visible_count);
+
+        app.apply(SyncDashboardAction::SelectAll);
+        assert!(app.selected.is_empty());
+    }
+
+    #[test]
+    fn select_all_respects_search_filter() {
+        let mut app = SyncDashboardApp::new(demo_data());
+        app.query = InputFieldState::new("MET-11");
+
+        let visible = app.visible_issue_results();
+        let visible_count = visible.len();
+        assert!(visible_count > 0);
+        assert!(visible_count < app.data.issues.len());
+
+        app.apply(SyncDashboardAction::SelectAll);
+        assert_eq!(app.selected.len(), visible_count);
+
+        for &idx in &app.selected {
+            assert!(visible.iter().any(|r| r.issue_index == idx));
+        }
+    }
+
+    // --- Filter tests ---
+
+    #[test]
+    fn status_filter_cycles_through_available_statuses() {
+        let mut app = SyncDashboardApp::new(demo_data());
+        let statuses = app.available_statuses();
+        assert!(!statuses.is_empty());
+
+        assert!(app.status_filter.is_none());
+        app.apply(SyncDashboardAction::CycleStatusFilter);
+        assert_eq!(app.status_filter, Some(statuses[0].clone()));
+
+        for _ in 0..statuses.len() {
+            app.apply(SyncDashboardAction::CycleStatusFilter);
+        }
+        assert!(app.status_filter.is_none());
+    }
+
+    #[test]
+    fn status_filter_narrows_visible_results() {
+        let mut app = SyncDashboardApp::new(demo_data());
+        let all_visible = app.visible_issue_results().len();
+
+        app.status_filter = Some("In Progress".to_string());
+        let filtered = app.visible_issue_results().len();
+        assert!(filtered > 0);
+        assert!(filtered <= all_visible);
+    }
+
+    #[test]
+    fn label_filter_cycles_through_available_labels() {
+        let mut data = demo_data();
+        data.issues[0].issue.labels = vec![LabelRef {
+            id: "label-1".to_string(),
+            name: "tech".to_string(),
+        }];
+        let mut app = SyncDashboardApp::new(data);
+
+        let labels = app.available_labels();
+        assert!(!labels.is_empty());
+
+        assert!(app.label_filter.is_none());
+        app.apply(SyncDashboardAction::CycleLabelFilter);
+        assert_eq!(app.label_filter, Some(labels[0].clone()));
+
+        app.apply(SyncDashboardAction::CycleLabelFilter);
+        assert!(app.label_filter.is_none());
+    }
+
+    // --- Async loading tests ---
+
+    #[test]
+    fn loading_state_renders_placeholder() {
+        let mut data = demo_data();
+        data.issues[0].load_state = IssueLoadState::Loading;
+        let exit = run_sync_dashboard(
+            data,
+            SyncDashboardOptions {
+                render_once: true,
+                width: 120,
+                height: 36,
+                actions: vec![],
+                vim_mode: false,
+            },
+            None,
+        )
+        .expect("render once should succeed");
+
+        let SyncDashboardExit::Snapshot(snapshot) = exit else {
+            panic!("render_once should return a snapshot");
+        };
+        assert!(snapshot.contains("Loading..."));
+    }
+
+    #[test]
+    fn issue_updates_replace_loading_entries() {
+        let mut data = demo_data();
+        let original = data.issues[0].clone();
+        data.issues[0].load_state = IssueLoadState::Loading;
+        data.issues[0].issue.title = "placeholder".to_string();
+
+        let mut app = SyncDashboardApp::new(data);
+        assert_eq!(app.data.issues[0].load_state, IssueLoadState::Loading);
+
+        let (tx, rx) = mpsc::channel();
+        tx.send(IssueUpdate {
+            index: 0,
+            issue: original.clone(),
+        })
+        .unwrap();
+        drop(tx);
+
+        app.drain_updates(&rx);
+        assert_eq!(app.data.issues[0].load_state, IssueLoadState::Loaded);
+        assert_eq!(app.data.issues[0].issue.title, original.issue.title);
+    }
+
+    // --- Repo-scoped config tests (config-level, covered separately) ---
+
+    #[test]
+    fn single_selection_remains_valid() {
+        let mut app = SyncDashboardApp::new(demo_data());
+
+        app.apply(SyncDashboardAction::Enter);
+        assert_eq!(app.focus, Focus::Preview);
+        app.apply(SyncDashboardAction::Enter);
+        assert_eq!(app.focus, Focus::Actions);
+        let selections = app.apply(SyncDashboardAction::Enter);
+
+        assert_eq!(selections.len(), 1);
+        assert_eq!(selections[0].issue_identifier, "MET-11");
+        assert_eq!(selections[0].action, SyncSelectionAction::Pull);
     }
 }

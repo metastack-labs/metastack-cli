@@ -1518,8 +1518,9 @@ pub struct SyncStatusArgs {
 
 #[derive(Debug, Clone, Args)]
 pub struct SyncPullArgs {
-    /// Existing issue identifier, for example MET-35.
-    #[arg(value_name = "IDENTIFIER", required_unless_present = "all")]
+    /// Existing issue identifier, for example MET-35. Omit when `--all` is set or when
+    /// `sync.sync_all` is enabled in repo metadata.
+    #[arg(value_name = "IDENTIFIER")]
     pub issue: Option<String>,
     /// Pull every linked backlog entry.
     #[arg(long, conflicts_with = "issue")]
@@ -1528,8 +1529,9 @@ pub struct SyncPullArgs {
 
 #[derive(Debug, Clone, Args)]
 pub struct SyncPushArgs {
-    /// Existing issue identifier, for example MET-35.
-    #[arg(value_name = "IDENTIFIER", required_unless_present = "all")]
+    /// Existing issue identifier, for example MET-35. Omit when `--all` is set or when
+    /// `sync.sync_all` is enabled in repo metadata.
+    #[arg(value_name = "IDENTIFIER")]
     pub issue: Option<String>,
     /// Push every linked backlog entry.
     #[arg(long, conflicts_with = "issue")]
