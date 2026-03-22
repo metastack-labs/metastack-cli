@@ -4319,9 +4319,10 @@ fn persist_review_session(
     session: &ReviewSession,
 ) -> Result<()> {
     if let Some(store) = store {
-        let mut state = store.load_state()?;
-        state.upsert(session.clone());
-        store.save_state(&state)?;
+        let session = session.clone();
+        store.update_state(|state| {
+            state.upsert(session);
+        })?;
     }
     Ok(())
 }
