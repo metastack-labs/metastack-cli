@@ -1665,6 +1665,12 @@ pub struct ReviewRunArgs {
     /// Override the resolved built-in reasoning option for review.
     #[arg(long)]
     pub reasoning: Option<String>,
+    /// Non-interactively dispatch the fix-agent for a previously reviewed PR.
+    #[arg(long, value_name = "PR_NUMBER", conflicts_with_all = ["skip_pr", "once", "render_once", "check", "dry_run"])]
+    pub fix_pr: Option<u64>,
+    /// Non-interactively skip remediation for a previously reviewed PR.
+    #[arg(long, value_name = "PR_NUMBER", conflicts_with_all = ["fix_pr", "once", "render_once", "check", "dry_run"])]
+    pub skip_pr: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]

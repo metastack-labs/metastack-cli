@@ -476,6 +476,12 @@ async fn run_review_command(
     pr_number: Option<u64>,
     args: &ReviewRunArgs,
 ) -> Result<()> {
+    if let Some(target_pr) = args.fix_pr {
+        return run_fix_pr(args, target_pr);
+    }
+    if let Some(target_pr) = args.skip_pr {
+        return run_skip_pr(args, target_pr);
+    }
     if let Some(pr_number) = pr_number {
         if should_launch_interactive_review_dashboard(args) {
             run_review_interactive(args, Some(pr_number), command)
@@ -569,6 +575,13 @@ fn run_review_interactive(
 
     let candidates = discover_review_candidates(&root, &gh, pr_number, &mut app, &mut terminal)?;
     app.load_candidates(candidates);
+
+    // Restore sessions from persistent state on dashboard re-entry.
+    if let Some(ref store) = store {
+        if let Ok(state) = store.load_state() {
+            app.restore_from_persistent_state(&state.sorted_sessions());
+        }
+    }
     terminal.draw_interactive(&app)?;
 
     let mut worker_rxs: Vec<InteractiveWorkerHandle> = Vec::new();
@@ -837,6 +850,230 @@ fn run_review_interactive(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Non-interactive remediation dispatch (--fix-pr / --skip-pr)
+// ---------------------------------------------------------------------------
+
+/// Dispatch the fix-agent for a previously reviewed PR without an interactive
+/// TUI session.
+///
+/// Loads the persistent review store, validates that the PR has a completed
+/// review awaiting a remediation decision, and runs the remediation pipeline
+/// synchronously. The session state is updated through
+/// `FixAgentPending -> FixAgentInProgress -> FixAgentComplete/FixAgentFailed`.
+///
+/// Returns an error when the PR has no eligible session, when the agent fails,
+/// or when the resulting PR cannot be published.
+fn run_fix_pr(args: &ReviewRunArgs, pr_number: u64) -> Result<()> {
+    let root = canonicalize_existing_dir(&args.root)?;
+    let config = AppConfig::load()?;
+    let planning_meta = crate::config::load_required_planning_meta(&root, "meta agents review")?;
+    let gh = GhCli;
+    let store = ReviewProjectStore::resolve(&root)?;
+    let state = store.load_state()?;
+
+    let persistent_session = state
+        .find_session(pr_number)
+        .ok_or_else(|| anyhow!("no review session found for PR #{pr_number}"))?;
+
+    let eligible = persistent_session.needs_remediation_decision()
+        || (persistent_session.phase == ReviewPhase::Completed
+            && persistent_session.remediation_required == Some(true)
+            && persistent_session.remediation_pr_url.is_none());
+
+    if !eligible {
+        bail!(
+            "PR #{pr_number} is not eligible for fix-agent dispatch (phase: {}, remediation_required: {:?})",
+            persistent_session.phase.display_label(),
+            persistent_session.remediation_required
+        );
+    }
+
+    let linear_identifier = persistent_session
+        .linear_identifier
+        .clone()
+        .ok_or_else(|| anyhow!("no Linear identifier found for PR #{pr_number}"))?;
+
+    verify_gh_auth(&root)?;
+
+    // Validate and transition to FixAgentPending.
+    if !persistent_session
+        .phase
+        .can_transition_to(ReviewPhase::FixAgentPending)
+    {
+        bail!(
+            "invalid state transition for PR #{pr_number}: {} -> Fix Agent Pending",
+            persistent_session.phase.display_label()
+        );
+    }
+    let mut session = persistent_session.clone();
+    session.phase = ReviewPhase::FixAgentPending;
+    session.summary = format!("Fix agent pending for PR #{pr_number}");
+    session.updated_at_epoch_seconds = now_epoch_seconds();
+    persist_review_session(Some(&store), &session)?;
+
+    eprintln!("Dispatching fix agent for PR #{pr_number}...");
+
+    // Re-fetch PR metadata and review diff for the remediation prompt.
+    let pr = fetch_pr_metadata(&gh, &root, pr_number)?;
+
+    // For scripted dispatch we re-run a lightweight review to get the review
+    // output (the full output is not persisted to disk).
+    let diff = fetch_pr_diff(&root, pr_number)?;
+    let context_bundle = load_codebase_context_bundle(&root).unwrap_or_default();
+    let workflow_contract = load_workflow_contract(&root).unwrap_or_default();
+    let repo_map = render_repo_map(&root).unwrap_or_default();
+    let ticket_context =
+        gather_linear_ticket_context(&root, &config, &planning_meta, &linear_identifier)?;
+    let review_prompt = assemble_review_prompt(
+        &pr,
+        &linear_identifier,
+        &diff,
+        &context_bundle,
+        &workflow_contract,
+        &repo_map,
+        &ticket_context,
+    );
+    let agent_args = RunAgentArgs {
+        root: Some(root.clone()),
+        route_key: Some(AGENT_ROUTE_AGENTS_REVIEW.to_string()),
+        agent: args.agent.clone(),
+        prompt: review_prompt,
+        instructions: Some(REVIEW_INSTRUCTIONS.to_string()),
+        model: args.model.clone(),
+        reasoning: args.reasoning.clone(),
+        transport: None,
+        attachments: Vec::new(),
+    };
+    let report = run_agent_capture(&agent_args)?;
+    let review_output = report.stdout.trim().to_string();
+
+    // Transition to FixAgentInProgress.
+    session.phase = ReviewPhase::FixAgentInProgress;
+    session.summary = format!("Fix agent running for PR #{pr_number}");
+    session.updated_at_epoch_seconds = now_epoch_seconds();
+    persist_review_session(Some(&store), &session)?;
+
+    match run_remediation(
+        &root,
+        &pr,
+        &linear_identifier,
+        &review_output,
+        &config,
+        &planning_meta,
+        args,
+    ) {
+        Ok(outcome) => {
+            session.phase = ReviewPhase::FixAgentComplete;
+            session.summary = format!("Remediation PR #{} created", outcome.pr_number);
+            session.remediation_pr_number = Some(outcome.pr_number);
+            session.remediation_pr_url = Some(outcome.pr_url.clone());
+            session.remediation_required = Some(true);
+            session.updated_at_epoch_seconds = now_epoch_seconds();
+            persist_review_session(Some(&store), &session)?;
+
+            if args.json {
+                println!(
+                    "{}",
+                    crate::output::render_json_success(
+                        "agents.review.fix_pr",
+                        &serde_json::json!({
+                            "pr_number": pr_number,
+                            "remediation_pr_number": outcome.pr_number,
+                            "remediation_pr_url": outcome.pr_url,
+                            "phase": "fix_agent_complete",
+                        }),
+                    )?
+                );
+            } else {
+                eprintln!(
+                    "Remediation PR #{} created: {}",
+                    outcome.pr_number, outcome.pr_url
+                );
+            }
+            Ok(())
+        }
+        Err(error) => {
+            session.phase = ReviewPhase::FixAgentFailed;
+            session.summary = format!("Fix agent failed: {error}");
+            session.updated_at_epoch_seconds = now_epoch_seconds();
+            persist_review_session(Some(&store), &session)?;
+
+            if args.json {
+                println!(
+                    "{}",
+                    crate::output::render_json_error("agents.review.fix_pr", &error,)
+                );
+                Ok(())
+            } else {
+                Err(error.context(format!(
+                    "fix-agent failed for PR #{pr_number}; session state updated to FixAgentFailed"
+                )))
+            }
+        }
+    }
+}
+
+/// Non-interactively skip remediation for a previously reviewed PR.
+///
+/// Transitions the persistent session state to `Skipped` and prints a
+/// confirmation message.
+///
+/// Returns an error when no eligible session exists for the given PR.
+fn run_skip_pr(args: &ReviewRunArgs, pr_number: u64) -> Result<()> {
+    let root = canonicalize_existing_dir(&args.root)?;
+    let store = ReviewProjectStore::resolve(&root)?;
+    let state = store.load_state()?;
+
+    let persistent_session = state
+        .find_session(pr_number)
+        .ok_or_else(|| anyhow!("no review session found for PR #{pr_number}"))?;
+
+    let eligible = persistent_session.needs_remediation_decision()
+        || (persistent_session.phase == ReviewPhase::Completed
+            && persistent_session.remediation_required == Some(true)
+            && persistent_session.remediation_pr_url.is_none());
+
+    if !eligible {
+        bail!(
+            "PR #{pr_number} is not eligible for skip (phase: {}, remediation_required: {:?})",
+            persistent_session.phase.display_label(),
+            persistent_session.remediation_required
+        );
+    }
+
+    if !persistent_session
+        .phase
+        .can_transition_to(ReviewPhase::Skipped)
+    {
+        bail!(
+            "invalid state transition for PR #{pr_number}: {} -> Skipped",
+            persistent_session.phase.display_label()
+        );
+    }
+    let mut session = persistent_session.clone();
+    session.phase = ReviewPhase::Skipped;
+    session.summary = format!("Remediation skipped for PR #{pr_number}");
+    session.updated_at_epoch_seconds = now_epoch_seconds();
+    persist_review_session(Some(&store), &session)?;
+
+    if args.json {
+        println!(
+            "{}",
+            crate::output::render_json_success(
+                "agents.review.skip_pr",
+                &serde_json::json!({
+                    "pr_number": pr_number,
+                    "phase": "skipped",
+                }),
+            )?
+        );
+    } else {
+        eprintln!("Remediation skipped for PR #{pr_number}.");
+    }
+    Ok(())
+}
+
 fn run_review_one_shot(args: &ReviewRunArgs, pr_number: u64) -> Result<()> {
     let root = canonicalize_existing_dir(&args.root)?;
     let config = AppConfig::load()?;
@@ -1068,6 +1305,63 @@ impl InteractiveReviewApp {
         );
     }
 
+    /// Restore in-memory sessions from persistent review state so the
+    /// dashboard shows previously processed PRs on re-entry.
+    fn restore_from_persistent_state(&mut self, sessions: &[ReviewSession]) {
+        let mut restored = 0usize;
+        for persistent in sessions {
+            if persistent.phase.is_completed() && !persistent.needs_remediation_decision() {
+                continue;
+            }
+            let candidate = ReviewLaunchCandidate {
+                pr_number: persistent.pr_number,
+                title: persistent.pr_title.clone(),
+                url: persistent.pr_url.clone().unwrap_or_default(),
+                author: persistent.pr_author.clone().unwrap_or_default(),
+                head_ref: persistent.head_branch.clone().unwrap_or_default(),
+                base_ref: persistent.base_branch.clone().unwrap_or_default(),
+                review_state: "UNKNOWN".to_string(),
+                changed_files: 0,
+                additions: 0,
+                deletions: 0,
+                linear_identifier: persistent.linear_identifier.clone(),
+                linear_error: None,
+            };
+            self.replace_candidate(candidate.clone());
+            let session = self.upsert_session(InteractiveReviewSession {
+                kind: InteractiveSessionKind::Review,
+                candidate,
+                phase: persistent.phase,
+                summary: persistent.summary.clone(),
+                notes: Vec::new(),
+                review_output: None,
+                follow_up_ticket_set: None,
+                created_follow_up_issues: Vec::new(),
+                remediation_required: persistent.remediation_required,
+                remediation_pr_number: persistent.remediation_pr_number,
+                remediation_pr_url: persistent.remediation_pr_url.clone(),
+                remediation_declined: persistent.phase == ReviewPhase::Skipped,
+                cancel_requested: false,
+                error: if persistent.phase == ReviewPhase::FixAgentFailed {
+                    Some(persistent.summary.clone())
+                } else {
+                    None
+                },
+                updated_at_epoch_seconds: persistent.updated_at_epoch_seconds,
+            });
+            session.push_note(format!(
+                "Restored from previous session (phase: {}).",
+                persistent.phase.display_label()
+            ));
+            restored += 1;
+        }
+        if restored > 0 {
+            self.tab = InteractiveReviewTab::Sessions;
+            self.focus = InteractiveReviewFocus::SessionList;
+            self.push_note(format!("Restored {restored} session(s) from previous run."));
+        }
+    }
+
     fn begin_running(&mut self, candidates: &[ReviewLaunchCandidate]) {
         self.begin_running_with_kind(candidates, InteractiveSessionKind::Review);
     }
@@ -1174,10 +1468,19 @@ impl InteractiveReviewApp {
                 candidate.linear_identifier = outcome.linear_identifier.clone();
                 candidate.linear_error = None;
                 self.replace_candidate(candidate.clone());
+                let completed_phase = if outcome.remediation_pr_url.is_some() {
+                    ReviewPhase::FixAgentComplete
+                } else if outcome.remediation_required
+                    && outcome.kind == InteractiveSessionKind::Review
+                {
+                    ReviewPhase::ReviewComplete
+                } else {
+                    ReviewPhase::Completed
+                };
                 let session = self.upsert_session(InteractiveReviewSession {
                     kind: outcome.kind,
                     candidate,
-                    phase: ReviewPhase::Completed,
+                    phase: completed_phase,
                     summary: outcome.summary.clone(),
                     notes: Vec::new(),
                     review_output: Some(outcome.review_output.clone()),
@@ -1954,6 +2257,7 @@ impl InteractiveReviewApp {
             return;
         };
         session.remediation_declined = true;
+        session.phase = ReviewPhase::Skipped;
         session.summary = "Recommendation kept without remediation PR".to_string();
         session
             .push_note("User kept the review report without opening a remediation PR.".to_string());
@@ -1964,7 +2268,9 @@ impl InteractiveReviewApp {
     }
 
     fn session_needs_remediation_decision(session: &InteractiveReviewSession) -> bool {
-        session.remediation_required == Some(true)
+        (session.phase == ReviewPhase::ReviewComplete
+            || (session.phase == ReviewPhase::Completed
+                && session.remediation_required == Some(true)))
             && session.remediation_pr_url.is_none()
             && !session.remediation_declined
             && !session.cancel_requested
@@ -1972,7 +2278,8 @@ impl InteractiveReviewApp {
     }
 
     fn session_can_cancel(session: &InteractiveReviewSession) -> bool {
-        !matches!(session.phase, ReviewPhase::Completed | ReviewPhase::Blocked)
+        !session.phase.is_terminal()
+            || session.phase.is_fix_agent_active()
             || Self::session_needs_remediation_decision(session)
     }
 
@@ -2002,9 +2309,7 @@ impl InteractiveReviewApp {
     fn active_session_count(&self) -> usize {
         self.sessions
             .iter()
-            .filter(|session| {
-                !matches!(session.phase, ReviewPhase::Completed | ReviewPhase::Blocked)
-            })
+            .filter(|session| !session.phase.is_terminal())
             .count()
     }
 
@@ -2878,6 +3183,11 @@ fn execute_review_with_progress(
         return Ok(());
     }
 
+    let completion_phase = if remediation_required {
+        ReviewPhase::ReviewComplete
+    } else {
+        ReviewPhase::Completed
+    };
     let outcome = InteractiveReviewOutcome {
         kind: InteractiveSessionKind::Review,
         candidate: candidate.clone(),
@@ -2895,7 +3205,7 @@ fn execute_review_with_progress(
     };
     session = review_session_from_candidate(
         &candidate,
-        ReviewPhase::Completed,
+        completion_phase,
         if remediation_required {
             "Review report ready"
         } else {
@@ -2932,13 +3242,12 @@ fn execute_remediation_with_progress(
 
     let gh = GhCli;
     let pr = fetch_pr_metadata(&gh, context.root, request.candidate.pr_number)?;
+
+    // FixAgentPending -> FixAgentInProgress
     let mut session = review_session_from_candidate(
         &request.candidate,
-        ReviewPhase::Running,
-        format!(
-            "Creating remediation PR for #{}",
-            request.candidate.pr_number
-        ),
+        ReviewPhase::FixAgentPending,
+        format!("Fix agent pending for PR #{}", request.candidate.pr_number),
     );
     session.remediation_required = Some(true);
     session.linear_identifier = Some(request.linear_identifier.clone());
@@ -2946,16 +3255,28 @@ fn execute_remediation_with_progress(
     emit(ReviewExecutionEvent::Progress {
         kind: InteractiveSessionKind::Review,
         candidate: request.candidate.clone(),
-        phase: ReviewPhase::Running,
-        summary: format!("Creating remediation PR for #{}", request.candidate.pr_number),
+        phase: ReviewPhase::FixAgentPending,
+        summary: format!("Fix agent pending for PR #{}", request.candidate.pr_number),
+        note: Some("Preparing remediation workspace and branch for the fix agent.".to_string()),
+        remediation_required: Some(true),
+    });
+
+    session.phase = ReviewPhase::FixAgentInProgress;
+    session.summary = format!("Fix agent running for PR #{}", request.candidate.pr_number);
+    session.updated_at_epoch_seconds = now_epoch_seconds();
+    persist_review_session(context.store, &session)?;
+    emit(ReviewExecutionEvent::Progress {
+        kind: InteractiveSessionKind::Review,
+        candidate: request.candidate.clone(),
+        phase: ReviewPhase::FixAgentInProgress,
+        summary: format!("Fix agent running for PR #{}", request.candidate.pr_number),
         note: Some(
-            "Opening a remediation branch and follow-up pull request from the approved review report."
-                .to_string(),
+            "Running the fix agent to apply required changes from the review report.".to_string(),
         ),
         remediation_required: Some(true),
     });
 
-    let remediation = run_remediation(
+    match run_remediation(
         context.root,
         &pr,
         &request.linear_identifier,
@@ -2963,29 +3284,51 @@ fn execute_remediation_with_progress(
         context.config,
         context.planning_meta,
         context.args,
-    )?;
-    let outcome = InteractiveReviewOutcome {
-        kind: InteractiveSessionKind::Review,
-        candidate: request.candidate.clone(),
-        summary: "Remediation PR created".to_string(),
-        review_output: request.review_output.clone(),
-        follow_up_ticket_set: None,
-        remediation_required: true,
-        linear_identifier: Some(request.linear_identifier.clone()),
-        remediation_pr_number: Some(remediation.pr_number),
-        remediation_pr_url: Some(remediation.pr_url),
-    };
-    session = review_session_from_candidate(
-        &request.candidate,
-        ReviewPhase::Completed,
-        "Remediation PR created",
-    );
-    session.remediation_required = Some(true);
-    session.remediation_pr_number = outcome.remediation_pr_number;
-    session.remediation_pr_url = outcome.remediation_pr_url.clone();
-    session.linear_identifier = Some(request.linear_identifier.clone());
-    persist_review_session(context.store, &session)?;
-    emit(ReviewExecutionEvent::Completed(outcome));
+    ) {
+        Ok(remediation) => {
+            let outcome = InteractiveReviewOutcome {
+                kind: InteractiveSessionKind::Review,
+                candidate: request.candidate.clone(),
+                summary: "Remediation PR created".to_string(),
+                review_output: request.review_output.clone(),
+                follow_up_ticket_set: None,
+                remediation_required: true,
+                linear_identifier: Some(request.linear_identifier.clone()),
+                remediation_pr_number: Some(remediation.pr_number),
+                remediation_pr_url: Some(remediation.pr_url),
+            };
+            session = review_session_from_candidate(
+                &request.candidate,
+                ReviewPhase::FixAgentComplete,
+                "Remediation PR created",
+            );
+            session.remediation_required = Some(true);
+            session.remediation_pr_number = outcome.remediation_pr_number;
+            session.remediation_pr_url = outcome.remediation_pr_url.clone();
+            session.linear_identifier = Some(request.linear_identifier.clone());
+            persist_review_session(context.store, &session)?;
+            emit(ReviewExecutionEvent::Completed(outcome));
+        }
+        Err(error) => {
+            session = review_session_from_candidate(
+                &request.candidate,
+                ReviewPhase::FixAgentFailed,
+                format!("Fix agent failed: {error}"),
+            );
+            session.remediation_required = Some(true);
+            session.linear_identifier = Some(request.linear_identifier.clone());
+            persist_review_session(context.store, &session)?;
+            emit(ReviewExecutionEvent::Failed {
+                kind: InteractiveSessionKind::Review,
+                candidate: request.candidate.clone(),
+                error: format!(
+                    "Fix agent failed for PR #{}: {error}",
+                    request.candidate.pr_number
+                ),
+            });
+            return Ok(());
+        }
+    }
 
     Ok(())
 }
@@ -5417,6 +5760,8 @@ fn should_launch_interactive_review_dashboard(args: &ReviewRunArgs) -> bool {
         && !args.once
         && !args.json
         && !args.render_once
+        && args.fix_pr.is_none()
+        && args.skip_pr.is_none()
 }
 
 fn initial_listener_dashboard_data(root: &Path, store: &ReviewProjectStore) -> ReviewDashboardData {
@@ -5704,5 +6049,358 @@ mod tests {
         assert!(snapshot.contains("Navigation"));
         assert!(snapshot.contains("candidate list"));
         Ok(())
+    }
+
+    fn make_test_candidate(pr_number: u64) -> ReviewLaunchCandidate {
+        ReviewLaunchCandidate {
+            pr_number,
+            title: format!("MET-{pr_number} Test PR"),
+            url: format!("https://example.test/pull/{pr_number}"),
+            author: "metasudo".to_string(),
+            head_ref: format!("met-{pr_number}-test"),
+            base_ref: "main".to_string(),
+            review_state: "PENDING".to_string(),
+            changed_files: 3,
+            additions: 40,
+            deletions: 10,
+            linear_identifier: Some(format!("MET-{pr_number}")),
+            linear_error: None,
+        }
+    }
+
+    fn make_test_session(
+        pr_number: u64,
+        kind: InteractiveSessionKind,
+        phase: ReviewPhase,
+        summary: &str,
+    ) -> InteractiveReviewSession {
+        InteractiveReviewSession {
+            kind,
+            candidate: make_test_candidate(pr_number),
+            phase,
+            summary: summary.to_string(),
+            notes: Vec::new(),
+            review_output: Some("Test review output".to_string()),
+            follow_up_ticket_set: None,
+            created_follow_up_issues: Vec::new(),
+            remediation_required: Some(true),
+            remediation_pr_number: None,
+            remediation_pr_url: None,
+            remediation_declined: false,
+            cancel_requested: false,
+            error: None,
+            updated_at_epoch_seconds: now_epoch_seconds(),
+        }
+    }
+
+    #[test]
+    fn snapshot_shows_fix_agent_pending_session() -> Result<()> {
+        let mut app =
+            InteractiveReviewApp::new(InteractiveReviewMode::Discovery, ReviewCommandKind::Review);
+        app.load_candidates(vec![make_test_candidate(42)]);
+        app.upsert_session(make_test_session(
+            42,
+            InteractiveSessionKind::Review,
+            ReviewPhase::FixAgentPending,
+            "Fix agent pending for PR #42",
+        ));
+        app.tab = InteractiveReviewTab::Sessions;
+        app.focus = InteractiveReviewFocus::SessionList;
+
+        let backend = ratatui::backend::TestBackend::new(120, 36);
+        let mut terminal = ratatui::Terminal::new(backend)?;
+        terminal.draw(|frame| render_interactive_review(frame, &app))?;
+        let snapshot = format!("{}", terminal.backend());
+
+        assert!(
+            snapshot.contains("Fix Agent Pending"),
+            "snapshot should show 'Fix Agent Pending'"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn snapshot_shows_fix_agent_complete_with_pr_url() -> Result<()> {
+        let mut app =
+            InteractiveReviewApp::new(InteractiveReviewMode::Discovery, ReviewCommandKind::Review);
+        app.load_candidates(vec![make_test_candidate(42)]);
+        let mut session = make_test_session(
+            42,
+            InteractiveSessionKind::Review,
+            ReviewPhase::FixAgentComplete,
+            "Remediation PR #99 created",
+        );
+        session.remediation_pr_number = Some(99);
+        session.remediation_pr_url = Some("https://example.test/pull/99".to_string());
+        app.upsert_session(session);
+        app.tab = InteractiveReviewTab::Sessions;
+        app.focus = InteractiveReviewFocus::SessionList;
+
+        let backend = ratatui::backend::TestBackend::new(120, 36);
+        let mut terminal = ratatui::Terminal::new(backend)?;
+        terminal.draw(|frame| render_interactive_review(frame, &app))?;
+        let snapshot = format!("{}", terminal.backend());
+
+        assert!(
+            snapshot.contains("Fix Agent Complete"),
+            "snapshot should show 'Fix Agent Complete'"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn snapshot_shows_skipped_session() -> Result<()> {
+        let mut app =
+            InteractiveReviewApp::new(InteractiveReviewMode::Discovery, ReviewCommandKind::Review);
+        app.load_candidates(vec![make_test_candidate(42)]);
+        let mut session = make_test_session(
+            42,
+            InteractiveSessionKind::Review,
+            ReviewPhase::Skipped,
+            "Remediation skipped for PR #42",
+        );
+        session.remediation_declined = true;
+        app.upsert_session(session);
+        app.tab = InteractiveReviewTab::Sessions;
+        app.focus = InteractiveReviewFocus::SessionList;
+
+        let backend = ratatui::backend::TestBackend::new(120, 36);
+        let mut terminal = ratatui::Terminal::new(backend)?;
+        terminal.draw(|frame| render_interactive_review(frame, &app))?;
+        let snapshot = format!("{}", terminal.backend());
+
+        assert!(
+            snapshot.contains("Skipped"),
+            "snapshot should show 'Skipped'"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn snapshot_shows_review_complete_with_remediation_hints() -> Result<()> {
+        let mut app =
+            InteractiveReviewApp::new(InteractiveReviewMode::Discovery, ReviewCommandKind::Review);
+        app.load_candidates(vec![make_test_candidate(42)]);
+        app.upsert_session(make_test_session(
+            42,
+            InteractiveSessionKind::Review,
+            ReviewPhase::ReviewComplete,
+            "Review report ready for PR #42",
+        ));
+        app.tab = InteractiveReviewTab::Sessions;
+        app.focus = InteractiveReviewFocus::SessionList;
+
+        let backend = ratatui::backend::TestBackend::new(120, 36);
+        let mut terminal = ratatui::Terminal::new(backend)?;
+        terminal.draw(|frame| render_interactive_review(frame, &app))?;
+        let snapshot = format!("{}", terminal.backend());
+
+        assert!(
+            snapshot.contains("Review Complete"),
+            "snapshot should show 'Review Complete'"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn session_needs_remediation_decision_for_review_complete() {
+        let session = make_test_session(
+            42,
+            InteractiveSessionKind::Review,
+            ReviewPhase::ReviewComplete,
+            "Review report ready",
+        );
+        assert!(InteractiveReviewApp::session_needs_remediation_decision(
+            &session
+        ));
+    }
+
+    #[test]
+    fn session_no_remediation_decision_after_skip() {
+        let mut session = make_test_session(
+            42,
+            InteractiveSessionKind::Review,
+            ReviewPhase::Skipped,
+            "Skipped",
+        );
+        session.remediation_declined = true;
+        assert!(!InteractiveReviewApp::session_needs_remediation_decision(
+            &session
+        ));
+    }
+
+    #[test]
+    fn session_no_remediation_decision_with_fix_pr() {
+        let mut session = make_test_session(
+            42,
+            InteractiveSessionKind::Review,
+            ReviewPhase::FixAgentComplete,
+            "Fix agent complete",
+        );
+        session.remediation_pr_url = Some("https://example.test/pull/99".to_string());
+        assert!(!InteractiveReviewApp::session_needs_remediation_decision(
+            &session
+        ));
+    }
+
+    #[test]
+    fn multiple_sessions_maintain_independent_state() {
+        let mut app =
+            InteractiveReviewApp::new(InteractiveReviewMode::Discovery, ReviewCommandKind::Review);
+        app.load_candidates(vec![make_test_candidate(42), make_test_candidate(99)]);
+
+        app.upsert_session(make_test_session(
+            42,
+            InteractiveSessionKind::Review,
+            ReviewPhase::ReviewComplete,
+            "Review complete for PR #42",
+        ));
+        app.upsert_session(make_test_session(
+            99,
+            InteractiveSessionKind::Review,
+            ReviewPhase::FixAgentInProgress,
+            "Fix agent running for PR #99",
+        ));
+
+        assert_eq!(app.sessions.len(), 2);
+        assert_eq!(app.sessions[0].phase, ReviewPhase::ReviewComplete);
+        assert_eq!(app.sessions[1].phase, ReviewPhase::FixAgentInProgress);
+        assert_eq!(app.active_session_count(), 2);
+    }
+
+    #[test]
+    fn restore_from_persistent_state_creates_sessions() {
+        let mut app =
+            InteractiveReviewApp::new(InteractiveReviewMode::Discovery, ReviewCommandKind::Review);
+        app.load_candidates(vec![make_test_candidate(42)]);
+
+        let persistent = vec![ReviewSession {
+            pr_number: 42,
+            pr_title: "Test PR #42".to_string(),
+            pr_url: Some("https://example.test/pull/42".to_string()),
+            pr_author: Some("metasudo".to_string()),
+            head_branch: Some("met-42-test".to_string()),
+            base_branch: Some("main".to_string()),
+            linear_identifier: Some("MET-42".to_string()),
+            phase: ReviewPhase::ReviewComplete,
+            summary: "Review complete".to_string(),
+            updated_at_epoch_seconds: 1000,
+            remediation_required: Some(true),
+            remediation_pr_number: None,
+            remediation_pr_url: None,
+        }];
+
+        app.restore_from_persistent_state(&persistent);
+        assert_eq!(app.sessions.len(), 1);
+        assert_eq!(app.sessions[0].phase, ReviewPhase::ReviewComplete);
+        assert!(app.tab == InteractiveReviewTab::Sessions);
+    }
+
+    #[test]
+    fn restore_skips_fully_completed_sessions() {
+        let mut app =
+            InteractiveReviewApp::new(InteractiveReviewMode::Discovery, ReviewCommandKind::Review);
+        app.load_candidates(vec![make_test_candidate(42)]);
+
+        let persistent = vec![ReviewSession {
+            pr_number: 42,
+            pr_title: "Test PR #42".to_string(),
+            pr_url: Some("https://example.test/pull/42".to_string()),
+            pr_author: Some("metasudo".to_string()),
+            head_branch: Some("met-42-test".to_string()),
+            base_branch: Some("main".to_string()),
+            linear_identifier: Some("MET-42".to_string()),
+            phase: ReviewPhase::Completed,
+            summary: "No remediation required".to_string(),
+            updated_at_epoch_seconds: 1000,
+            remediation_required: Some(false),
+            remediation_pr_number: None,
+            remediation_pr_url: None,
+        }];
+
+        app.restore_from_persistent_state(&persistent);
+        assert_eq!(
+            app.sessions.len(),
+            0,
+            "fully completed sessions should not be restored"
+        );
+    }
+
+    #[test]
+    fn decline_sets_skipped_phase() {
+        let mut app =
+            InteractiveReviewApp::new(InteractiveReviewMode::Discovery, ReviewCommandKind::Review);
+        app.load_candidates(vec![make_test_candidate(42)]);
+        app.upsert_session(make_test_session(
+            42,
+            InteractiveSessionKind::Review,
+            ReviewPhase::ReviewComplete,
+            "Review report ready",
+        ));
+        app.session_index = 0;
+        app.tab = InteractiveReviewTab::Sessions;
+        app.focus = InteractiveReviewFocus::SessionList;
+
+        app.decline_selected_session_remediation();
+
+        assert_eq!(app.sessions[0].phase, ReviewPhase::Skipped);
+        assert!(app.sessions[0].remediation_declined);
+    }
+
+    #[test]
+    fn listener_dashboard_snapshot_shows_fix_agent_states() {
+        let data = ReviewDashboardData {
+            scope: "origin/main".to_string(),
+            cycle_summary: "Review cycle complete".to_string(),
+            eligible_prs: 2,
+            sessions: vec![
+                ReviewSession {
+                    pr_number: 42,
+                    pr_title: "MET-42 fix agent test".to_string(),
+                    pr_url: Some("https://example.test/pull/42".to_string()),
+                    pr_author: Some("metasudo".to_string()),
+                    head_branch: Some("met-42-test".to_string()),
+                    base_branch: Some("main".to_string()),
+                    linear_identifier: Some("MET-42".to_string()),
+                    phase: ReviewPhase::FixAgentInProgress,
+                    summary: "Fix agent running".to_string(),
+                    updated_at_epoch_seconds: 1,
+                    remediation_required: Some(true),
+                    remediation_pr_number: None,
+                    remediation_pr_url: None,
+                },
+                ReviewSession {
+                    pr_number: 99,
+                    pr_title: "MET-99 skipped test".to_string(),
+                    pr_url: Some("https://example.test/pull/99".to_string()),
+                    pr_author: Some("metasudo".to_string()),
+                    head_branch: Some("met-99-test".to_string()),
+                    base_branch: Some("main".to_string()),
+                    linear_identifier: Some("MET-99".to_string()),
+                    phase: ReviewPhase::Skipped,
+                    summary: "Remediation skipped".to_string(),
+                    updated_at_epoch_seconds: 1,
+                    remediation_required: Some(true),
+                    remediation_pr_number: None,
+                    remediation_pr_url: None,
+                },
+            ],
+            now_epoch_seconds: 5,
+            notes: vec![],
+            state_file: "/tmp/review-session.json".to_string(),
+        };
+
+        let snapshot = render_review_dashboard_snapshot(
+            120,
+            32,
+            &data,
+            &dashboard::ReviewBrowserState::default(),
+        )
+        .expect("snapshot should render");
+
+        assert!(
+            snapshot.contains("Fix Agent Running"),
+            "snapshot should show 'Fix Agent Running'"
+        );
     }
 }
