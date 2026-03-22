@@ -268,7 +268,7 @@ pub(crate) fn render(
     } else {
         0
     };
-    let header_height = if area.width >= 120 { 10 } else { 12 };
+    let header_height = if area.width >= 120 { 11 } else { 12 };
     let show_active_issues = data.show_active_issues && !data.active_issues.is_empty();
     let active_issue_detail =
         state.detail_mode && matches!(state.focus, FocusPane::ActiveIssues) && data.show_preview;

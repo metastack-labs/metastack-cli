@@ -1062,12 +1062,8 @@ printf '%s' "{command_name}" > /dev/null
         .assert()
         .success()
         .stdout(predicate::str::contains("Dashboard: terminal summary"))
-        .stdout(predicate::str::contains(
-            "Execution agent: listen-stub",
-        ))
-        .stdout(predicate::str::contains(
-            "Execution agent: global-stub",
-        ).not());
+        .stdout(predicate::str::contains("Execution agent: listen-stub"))
+        .stdout(predicate::str::contains("Execution agent: global-stub").not());
 
     assert!(viewer_mock.calls() >= 1);
     assert!(issues_mock.calls() >= 1);
