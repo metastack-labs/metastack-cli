@@ -25,7 +25,16 @@ fn init_test_repo() -> tempfile::TempDir {
         .output()
         .unwrap();
     std::process::Command::new("git")
-        .args(["commit", "--allow-empty", "-m", "init"])
+        .args([
+            "-c",
+            "user.email=test@test.local",
+            "-c",
+            "user.name=Test",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "init",
+        ])
         .current_dir(tmp.path())
         .output()
         .unwrap();

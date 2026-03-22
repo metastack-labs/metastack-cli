@@ -48,8 +48,9 @@ use crate::repo_target::RepoTarget;
 use crate::scaffold::ensure_planning_layout;
 use crate::tui::fields::InputFieldState;
 use crate::tui::scroll::{ScrollState, plain_text, scrollable_content_paragraph, wrapped_rows};
+use crate::tui::spaced_list::spaced_list;
 use crate::tui::theme::{
-    Tone, badge, emphasis_style, empty_state, key_hints, label_style, list, muted_style, panel,
+    Tone, badge, emphasis_style, empty_state, key_hints, label_style, muted_style, panel,
     panel_title, paragraph, tone_style,
 };
 use crate::{LinearCommandContext, load_linear_command_context};
@@ -353,6 +354,14 @@ enum InstructionPromptFocus {
     Preview,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum InstructionPromptExit {
+    /// User pressed Escape or triggered quit — exit the TUI without continuing.
+    Cancelled,
+    /// User pressed Enter or Ctrl+S — continue with optional instructions.
+    Continue(Option<String>),
+}
+
 #[derive(Debug, Clone)]
 struct InstructionPromptApp {
     input: InputFieldState,
@@ -493,7 +502,12 @@ async fn run_interactive_improvement_session(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let instructions = run_instruction_prompt(&mut terminal, &issues)?;
+    let instructions = match run_instruction_prompt(&mut terminal, &issues)? {
+        InstructionPromptExit::Cancelled => {
+            return Ok(render_improvement_reports(root, &[]));
+        }
+        InstructionPromptExit::Continue(text) => text,
+    };
 
     let mut reports = Vec::with_capacity(issues.len());
 
@@ -914,7 +928,7 @@ fn render_improvement_issue_list(frame: &mut Frame<'_>, area: Rect, app: &Improv
 
     let mut state = ListState::default();
     state.select(Some(app.cursor.min(filtered.len().saturating_sub(1))));
-    let list_widget = list(items, title);
+    let list_widget = spaced_list(items, title);
     frame.render_stateful_widget(list_widget, area, &mut state);
 }
 
@@ -1773,7 +1787,7 @@ impl Drop for ImprovementReviewCleanup {
 fn run_instruction_prompt(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     issues: &[IssueSummary],
-) -> Result<Option<String>> {
+) -> Result<InstructionPromptExit> {
     let mut app = InstructionPromptApp::new(issues.to_vec());
     let mut preview_viewport = Rect::default();
 
@@ -1793,13 +1807,24 @@ fn run_instruction_prompt(
                         && app.focus == InstructionPromptFocus::Editor =>
                 {
                     let text = app.input.display_value().trim().to_string();
-                    return Ok(if text.is_empty() { None } else { Some(text) });
+                    return Ok(InstructionPromptExit::Continue(if text.is_empty() {
+                        None
+                    } else {
+                        Some(text)
+                    }));
                 }
                 KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     let text = app.input.display_value().trim().to_string();
-                    return Ok(if text.is_empty() { None } else { Some(text) });
+                    return Ok(InstructionPromptExit::Continue(if text.is_empty() {
+                        None
+                    } else {
+                        Some(text)
+                    }));
                 }
-                KeyCode::Esc => return Ok(None),
+                KeyCode::Esc => return Ok(InstructionPromptExit::Cancelled),
+                KeyCode::Char('q') if app.focus == InstructionPromptFocus::Preview => {
+                    return Ok(InstructionPromptExit::Cancelled);
+                }
                 KeyCode::Tab => {
                     app.focus = match app.focus {
                         InstructionPromptFocus::Editor => InstructionPromptFocus::Preview,
@@ -1877,10 +1902,13 @@ fn render_instruction_prompt(frame: &mut Frame<'_>, app: &InstructionPromptApp) 
         ("Enter", "continue"),
         ("Shift+Enter", "newline"),
         ("Ctrl+S", "submit"),
-        ("Esc", "skip"),
+        ("Esc", "cancel"),
     ];
-    if app.issues.len() > 1 && app.focus == InstructionPromptFocus::Preview {
-        hints.insert(1, ("\u{2190}/\u{2192}", "prev/next issue"));
+    if app.focus == InstructionPromptFocus::Preview {
+        hints.push(("q", "cancel"));
+        if app.issues.len() > 1 {
+            hints.insert(1, ("\u{2190}/\u{2192}", "prev/next issue"));
+        }
     }
 
     let header = paragraph(
@@ -3257,6 +3285,7 @@ fn improvement_run_id() -> Result<String> {
 mod tests {
     use super::*;
     use crate::linear::{IssueLink, LabelRef, ProjectRef, TeamRef, WorkflowState};
+    use crossterm::event::KeyEvent;
 
     fn demo_issue(identifier: &str, title: &str) -> IssueSummary {
         IssueSummary {
@@ -3692,5 +3721,139 @@ mod tests {
         assert_eq!(app.recommendation_scroll.offset(), 0);
         assert_eq!(app.proposal_scroll.offset(), 0);
         assert_eq!(app.review_focus, ImprovementReviewFocus::Proposal);
+    }
+
+    /// Simulates the key-event decision logic from `run_instruction_prompt` for a single
+    /// key press and returns the exit action when the key would cause the prompt to return.
+    fn simulate_instruction_key(
+        app: &mut InstructionPromptApp,
+        key: KeyEvent,
+    ) -> Option<InstructionPromptExit> {
+        if key.kind != KeyEventKind::Press {
+            return None;
+        }
+        match key.code {
+            KeyCode::Enter
+                if !key.modifiers.contains(KeyModifiers::SHIFT)
+                    && app.focus == InstructionPromptFocus::Editor =>
+            {
+                let text = app.input.display_value().trim().to_string();
+                Some(InstructionPromptExit::Continue(if text.is_empty() {
+                    None
+                } else {
+                    Some(text)
+                }))
+            }
+            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                let text = app.input.display_value().trim().to_string();
+                Some(InstructionPromptExit::Continue(if text.is_empty() {
+                    None
+                } else {
+                    Some(text)
+                }))
+            }
+            KeyCode::Esc => Some(InstructionPromptExit::Cancelled),
+            KeyCode::Char('q') if app.focus == InstructionPromptFocus::Preview => {
+                Some(InstructionPromptExit::Cancelled)
+            }
+            _ => {
+                if app.focus == InstructionPromptFocus::Editor {
+                    app.input.handle_key(key);
+                }
+                None
+            }
+        }
+    }
+
+    #[test]
+    fn instruction_prompt_escape_returns_cancelled() {
+        let mut app = InstructionPromptApp::new(vec![demo_issue("ENG-10170", "First")]);
+        let key = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        let exit = simulate_instruction_key(&mut app, key);
+        assert_eq!(exit, Some(InstructionPromptExit::Cancelled));
+    }
+
+    #[test]
+    fn instruction_prompt_q_in_preview_returns_cancelled() {
+        let mut app = InstructionPromptApp::new(vec![demo_issue("ENG-10170", "First")]);
+        app.focus = InstructionPromptFocus::Preview;
+        let key = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
+        let exit = simulate_instruction_key(&mut app, key);
+        assert_eq!(exit, Some(InstructionPromptExit::Cancelled));
+    }
+
+    #[test]
+    fn instruction_prompt_q_in_editor_types_character_not_cancel() {
+        let mut app = InstructionPromptApp::new(vec![demo_issue("ENG-10170", "First")]);
+        assert_eq!(app.focus, InstructionPromptFocus::Editor);
+        let key = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
+        let exit = simulate_instruction_key(&mut app, key);
+        assert_eq!(exit, None, "q in editor mode should type, not cancel");
+        assert!(
+            app.input.display_value().contains('q'),
+            "q should be typed into the editor"
+        );
+    }
+
+    #[test]
+    fn instruction_prompt_empty_enter_returns_continue_none() {
+        let mut app = InstructionPromptApp::new(vec![demo_issue("ENG-10170", "First")]);
+        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let exit = simulate_instruction_key(&mut app, key);
+        assert_eq!(exit, Some(InstructionPromptExit::Continue(None)));
+    }
+
+    #[test]
+    fn instruction_prompt_enter_with_text_returns_continue_some() {
+        let mut app = InstructionPromptApp::new(vec![demo_issue("ENG-10170", "First")]);
+        // Type some instruction text.
+        for ch in "focus on labels".chars() {
+            let key = KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE);
+            simulate_instruction_key(&mut app, key);
+        }
+        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let exit = simulate_instruction_key(&mut app, key);
+        assert_eq!(
+            exit,
+            Some(InstructionPromptExit::Continue(Some(
+                "focus on labels".to_string()
+            )))
+        );
+    }
+
+    #[test]
+    fn instruction_prompt_escape_cancels_regardless_of_focus() {
+        // Escape should cancel from both editor and preview focus.
+        for focus in [
+            InstructionPromptFocus::Editor,
+            InstructionPromptFocus::Preview,
+        ] {
+            let mut app = InstructionPromptApp::new(vec![demo_issue("ENG-10170", "First")]);
+            app.focus = focus;
+            let key = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+            let exit = simulate_instruction_key(&mut app, key);
+            assert_eq!(
+                exit,
+                Some(InstructionPromptExit::Cancelled),
+                "Esc should cancel in {focus:?} mode"
+            );
+        }
+    }
+
+    #[test]
+    fn instruction_prompt_escape_exits_regardless_of_typed_text() {
+        let mut app = InstructionPromptApp::new(vec![demo_issue("ENG-10170", "First")]);
+        // Type some text first.
+        for ch in "hello".chars() {
+            simulate_instruction_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+            );
+        }
+        assert!(!app.input.display_value().trim().is_empty());
+        // Escape should still cancel, ignoring the typed text.
+        let exit =
+            simulate_instruction_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(exit, Some(InstructionPromptExit::Cancelled));
     }
 }

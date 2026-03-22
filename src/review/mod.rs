@@ -25,6 +25,8 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, ListItem, ListState, Padding, Wrap};
+
+use crate::tui::spaced_list::{render_github_session_row, spaced_list, spaced_list_item};
 use serde::Serialize;
 
 use crate::agents::{
@@ -4648,7 +4650,7 @@ fn render_interactive_candidate_list(
                 }
                 first_line.push(Span::raw(" "));
                 first_line.push(Span::styled(candidate.title.clone(), emphasis_style()));
-                ListItem::new(Text::from(vec![
+                spaced_list_item(vec![
                     Line::from(first_line),
                     Line::from(vec![
                         Span::styled("Linear ", label_style()),
@@ -4660,7 +4662,7 @@ fn render_interactive_candidate_list(
                         format!("{} -> {}", candidate.head_ref, candidate.base_ref),
                         muted_style(),
                     )),
-                ]))
+                ])
             })
             .collect()
     };
@@ -4676,7 +4678,7 @@ fn render_interactive_candidate_list(
         InteractiveReviewMode::Direct => "Review Candidate",
         InteractiveReviewMode::Discovery => "Candidate PRs",
     };
-    let widget = list(
+    let widget = spaced_list(
         items,
         panel_title(title, app.focus == InteractiveReviewFocus::CandidateList),
     );
@@ -4702,23 +4704,17 @@ fn render_interactive_session_list(
                     ReviewPhase::Blocked => Tone::Danger,
                     _ => Tone::Info,
                 };
-                ListItem::new(Text::from(vec![
-                    Line::from(vec![
+                render_github_session_row(
+                    vec![
                         badge(format!("#{}", session.candidate.pr_number), Tone::Accent),
                         Span::raw(" "),
                         badge(session.kind.label(), session.kind.tone()),
                         Span::raw(" "),
                         badge(session.phase.display_label(), tone),
-                    ]),
-                    Line::from(Span::styled(
-                        session.candidate.title.clone(),
-                        emphasis_style(),
-                    )),
-                    Line::from(vec![
-                        Span::styled("Summary ", label_style()),
-                        Span::raw(session.summary.clone()),
-                    ]),
-                ]))
+                    ],
+                    &session.candidate.title,
+                    &session.summary,
+                )
             })
             .collect()
     };
@@ -4730,7 +4726,7 @@ fn render_interactive_session_list(
         ));
     }
 
-    let widget = list(
+    let widget = spaced_list(
         items,
         panel_title(
             "Agent Sessions",

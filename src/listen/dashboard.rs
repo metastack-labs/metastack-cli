@@ -8,6 +8,7 @@ use ratatui::{Frame, Terminal};
 
 use super::{ActiveIssue, ListenDashboardData, ListenSessionDetail, SessionListView, SessionPhase};
 use crate::tui::scroll::{clamp_offset, plain_text, wrapped_rows};
+use crate::tui::spaced_list::spaced_list_item;
 use crate::tui::theme::{Tone, badge, content_panel, empty_state, key_hints, panel, panel_title};
 
 /// Which pane currently owns keyboard focus.
@@ -1044,7 +1045,7 @@ fn render_footer(frame: &mut Frame<'_>, data: &ListenDashboardData, area: Rect) 
             .iter()
             .map(|issue| {
                 let project = issue.project.as_deref().unwrap_or("No project");
-                ListItem::new(vec![
+                spaced_list_item(vec![
                     Line::from(vec![
                         Span::styled(
                             issue.identifier.clone(),
