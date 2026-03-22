@@ -1174,7 +1174,7 @@ Re-entering the interactive dashboard restores existing review and remediation s
 Analyze completed PRs for non-blocking follow-up backlog opportunities. Interactive TTY runs stay inside a guided retro dashboard:
 
 - **Direct retro**: `meta agents retro <PR_NUMBER>` loads one PR into the dashboard and waits for explicit approval before the retro analysis starts.
-- **Guided queue retro**: `meta agents retro` (no PR number) discovers open PRs with the `metastack` label via `gh`, shows a searchable candidate queue, and waits for a human to approve starting each retro session.
+- **Guided queue retro**: `meta agents retro` (no PR number) discovers both open and closed PRs with the `metastack` label via `gh`, shows a searchable candidate queue, and waits for a human to approve starting each retro session.
 
 After a retro analysis finishes, selecting that session and pressing `Enter` opens a dedicated backlog-plan-style review screen. From there you can keep, skip, or merge suggested tickets before creating the curated batch in Linear.
 
@@ -1185,10 +1185,25 @@ meta agents retro --root .
 
 Interactive runs now show explicit loading states for auth, PR discovery, context assembly, agent review, and remediation so the current phase stays visible throughout the session.
 
+#### Filter panel (`F`)
+
+Press `F` in the retro candidate view to open a lightweight filter panel overlay without leaving the dashboard. The panel lets you narrow the loaded candidate list by:
+
+| Category   | Semantics |
+|------------|-----------|
+| **State**  | `open`, `closed`, or both |
+| **Author** | Match against the PR author login |
+| **Labels** | Multi-select; candidates must contain **all** selected labels |
+| **Assignees** | Multi-select; candidates must match **any** selected assignee, with an explicit `(unassigned)` option |
+
+Filters combine conjunctively across categories: a candidate must satisfy every active category to remain visible. Applying or clearing filters updates the candidate list in place, keeps your current selection when it is still visible, and shows a `[filtered]` badge in the header when active.
+
+Panel controls: `Space` toggle, `Up/Down` navigate, `C` clear all, `F`/`Enter`/`Esc` close.
+
 Prerequisites:
 - `gh` CLI installed and authenticated (`gh auth login`)
 - Repository with a configured `.metastack/meta.json`
-- For guided queue mode: open PRs must carry the `metastack` label
+- For guided queue mode: PRs must carry the `metastack` label
 
 ### `agents listen`
 
