@@ -371,7 +371,7 @@ impl InputFieldState {
         self.preferred_column = None;
     }
 
-    fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.value.clear();
         self.cursor = 0;
         self.attachments.clear();

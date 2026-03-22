@@ -118,6 +118,10 @@ pub async fn run_sync_dashboard_command(
     } = load_linear_command_context(client_args, None)?;
     let title = sync_dashboard_title(project_override, default_project_id.as_deref());
 
+    /// Maximum number of concurrent Linear API fetches when loading dashboard
+    /// issues.  Bounding this prevents unbounded fan-out for large backlogs.
+    const MAX_CONCURRENT_FETCHES: usize = 8;
+
     let (issues, rx) = if options.render_once {
         let mut issues = Vec::with_capacity(entries.len());
         for entry in &entries {
@@ -128,12 +132,15 @@ pub async fn run_sync_dashboard_command(
         let placeholder_issues = build_placeholder_issues(&entries);
         let (tx, rx) = std::sync::mpsc::channel();
         let service = Arc::new(service);
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_FETCHES));
 
         for (index, entry) in entries.iter().enumerate() {
             let entry = entry.clone();
             let service = Arc::clone(&service);
             let tx = tx.clone();
+            let semaphore = Arc::clone(&semaphore);
             tokio::spawn(async move {
+                let _permit = semaphore.acquire().await;
                 let loaded = load_single_sync_dashboard_issue(&service, &entry).await;
                 let _ = tx.send(IssueUpdate {
                     index,
@@ -152,32 +159,68 @@ pub async fn run_sync_dashboard_command(
         SyncDashboardExit::Snapshot(snapshot) => println!("{snapshot}"),
         SyncDashboardExit::Cancelled => println!("Sync canceled."),
         SyncDashboardExit::Selected(selections) => {
-            for selection in selections {
-                match selection.action {
+            let total = selections.len();
+            let mut summary = BatchSyncSummary::default();
+
+            for (index, selection) in selections.iter().enumerate() {
+                let verb = selection.action.verb();
+                let seq = index + 1;
+                eprintln!("[{seq}/{total}] {verb} {}...", selection.issue_identifier,);
+                let result = match selection.action {
                     SyncSelectionAction::Pull => {
                         run_sync_pull(
                             client_args,
                             false,
                             &SyncPullArgs {
-                                issue: Some(selection.issue_identifier),
+                                issue: Some(selection.issue_identifier.clone()),
                                 all: false,
                             },
                         )
-                        .await?
+                        .await
                     }
                     SyncSelectionAction::Push => {
                         run_sync_push(
                             client_args,
                             false,
                             &SyncPushArgs {
-                                issue: Some(selection.issue_identifier),
+                                issue: Some(selection.issue_identifier.clone()),
                                 all: false,
                                 update_description: false,
                             },
                         )
-                        .await?
+                        .await
+                    }
+                };
+                match result {
+                    Ok(()) => {
+                        summary.synced += 1;
+                        eprintln!("[{seq}/{total}] {verb} {} done", selection.issue_identifier,);
+                    }
+                    Err(err) => {
+                        summary.errors += 1;
+                        eprintln!(
+                            "[{seq}/{total}] {verb} {} failed: {err:#}",
+                            selection.issue_identifier,
+                        );
                     }
                 }
+            }
+
+            if total > 1 {
+                eprintln!();
+                eprintln!(
+                    "Sync complete: {} synced, {} failed out of {total} issue{}.",
+                    summary.synced,
+                    summary.errors,
+                    plural_suffix(total),
+                );
+            }
+            if summary.errors > 0 {
+                bail!(
+                    "{} of {total} sync operation{} failed",
+                    summary.errors,
+                    plural_suffix(total),
+                );
             }
         }
     }
