@@ -373,7 +373,9 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     branch,
                 )
                 .await?;
-                session_context.pull_request = PullRequestSummary::from(pull_request);
+                session_context.pull_request = pull_request
+                    .map(PullRequestSummary::from)
+                    .unwrap_or_default();
                 let transitioned_issue =
                     try_transition_issue_to_review_state(&service, &issue).await?;
                 if let Some(backlog_issue) = backlog_issue.as_ref()
@@ -564,14 +566,14 @@ where
         ..IssueListFilters::default()
     };
 
-    for attempt in 0..2 {
+    for attempt in 0..3 {
         match service
             .find_issue_by_identifier(identifier, filters.clone())
             .await
         {
             Ok(Some(issue)) => return Ok(issue),
             Ok(None) => return Err(anyhow!("issue `{identifier}` was not found in Linear")),
-            Err(error) if attempt == 0 && is_transient_linear_read_failure(&error) => {
+            Err(error) if attempt < 2 && is_transient_linear_read_failure(&error) => {
                 sleep(Duration::from_millis(100)).await;
             }
             Err(error) => return Err(error),
@@ -782,24 +784,34 @@ async fn prepare_listener_pull_request_for_review<C>(
     issue: &IssueSummary,
     workspace_path: &Path,
     branch: &str,
-) -> Result<PullRequestLifecycleResult>
+) -> Result<Option<PullRequestLifecycleResult>>
 where
     C: LinearClient,
 {
-    let pull_request = publish_listener_pull_request(
-        service,
-        issue,
-        workspace_path,
-        branch,
-        PullRequestPublishMode::Draft,
-    )
-    .await?
-    .ok_or_else(|| {
-        anyhow!(
-            "branch `{branch}` has not been pushed to origin, so the review handoff has no PR to promote"
-        )
-    })?;
+    if branch.eq_ignore_ascii_case(LISTEN_PULL_REQUEST_BASE_BRANCH) {
+        return Ok(None);
+    }
+    if !workspace_branch_is_published(workspace_path, branch)? {
+        return Ok(None);
+    }
+
     let gh = GhCli;
+    let body_path = write_listener_pull_request_body(workspace_path, issue)?;
+    let title = listener_pull_request_title(issue);
+    let Some(_existing) = gh.refresh_existing_branch_pull_request(
+        workspace_path,
+        PullRequestPublishRequest {
+            head_branch: branch,
+            base_branch: LISTEN_PULL_REQUEST_BASE_BRANCH,
+            title: &title,
+            body_path: &body_path,
+            mode: PullRequestPublishMode::Draft,
+        },
+    )?
+    else {
+        return Ok(None);
+    };
+
     let ready = gh.promote_branch_pull_request_to_ready(
         workspace_path,
         branch,
@@ -807,12 +819,12 @@ where
     )?;
     ensure_listener_pull_request_label(&gh, workspace_path, &ready)?;
     ensure_listener_pull_request_attachment(service, issue, &ready).await?;
-    Ok(match ready.action {
+    Ok(Some(match ready.action {
         PullRequestLifecycleAction::PromotedToReady | PullRequestLifecycleAction::AlreadyReady => {
             ready
         }
-        _ => pull_request,
-    })
+        _ => unreachable!("review handoff promotion should only return ready states"),
+    }))
 }
 
 fn build_listen_run_args(

@@ -34,7 +34,7 @@ The initial implementation delivered in `MET-13` focuses on the smallest end-to-
 13. The hidden listen worker keeps refreshing the Linear issue and re-running the agent with first-turn and continuation prompts while the issue remains active.
 14. The hidden listen worker keeps looping while the issue remains active, but it treats repeated planning-only or no-op turns as a local stall instead of silently spinning.
 15. Once the ticket branch is pushed, the worker creates or updates the matching branch PR as a draft, keeps the `metastack` label attached, and reuses the same PR on continuation instead of replacing it.
-16. When the technical backlog is complete and meaningful non-`.metastack/` workspace progress was observed, the worker promotes that same branch PR to ready for review and then attempts to move both the parent issue and backlog child into a review-style state.
+16. When the technical backlog is complete and meaningful non-`.metastack/` workspace progress was observed, the worker promotes that same branch PR to ready for review and then attempts to move both the parent issue and backlog child into a review-style state. If no matching open branch PR exists, the handoff keeps PR state at `none` and does not create a new PR during completion.
 17. The worker records `completed` or `blocked` state locally, including stall summaries and recent agent log output for unattended failures.
 18. During reconciliation, a stored `running` session with a dead worker PID is marked `blocked`
     with stale/worker-died context preserved in its summary and log references instead of being

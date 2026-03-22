@@ -878,7 +878,7 @@ default_reasoning = "medium"
             "--width",
             "110",
             "--height",
-            "52",
+            "70",
         ])
         .assert()
         .success()

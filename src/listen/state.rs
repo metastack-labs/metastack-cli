@@ -447,6 +447,17 @@ mod tests {
     }
 
     #[test]
+    fn pull_request_summary_compact_label_surfaces_ready_status() {
+        let pull_request = PullRequestSummary {
+            number: Some(321),
+            url: Some("https://github.com/metastack-labs/metastack-cli/pull/321".to_string()),
+            status: PullRequestStatus::Ready,
+        };
+
+        assert_eq!(pull_request.compact_label(), "ready #321");
+    }
+
+    #[test]
     fn session_table_tokens_label_prefers_total_only() {
         let mut session = session();
         assert_eq!(session.table_tokens_label(), "n/a");

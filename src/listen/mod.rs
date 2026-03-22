@@ -2032,23 +2032,28 @@ where
     C: LinearClient,
 {
     for candidate in REVIEW_STATE_CANDIDATES {
-        match service
-            .edit_issue(IssueEditSpec {
-                identifier: issue.identifier.clone(),
-                title: None,
-                description: None,
-                project: None,
-                state: Some((*candidate).to_string()),
-                priority: None,
-                estimate: None,
-                labels: None,
-                parent_identifier: None,
-            })
-            .await
-        {
-            Ok(updated) => return Ok(Some(updated)),
-            Err(error) if is_missing_review_state_error(&error) => continue,
-            Err(error) => return Err(error),
+        for attempt in 0..3 {
+            match service
+                .edit_issue(IssueEditSpec {
+                    identifier: issue.identifier.clone(),
+                    title: None,
+                    description: None,
+                    project: None,
+                    state: Some((*candidate).to_string()),
+                    priority: None,
+                    estimate: None,
+                    labels: None,
+                    parent_identifier: None,
+                })
+                .await
+            {
+                Ok(updated) => return Ok(Some(updated)),
+                Err(error) if is_missing_review_state_error(&error) => break,
+                Err(error) if attempt < 2 && is_transient_linear_read_failure(&error) => {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                Err(error) => return Err(error),
+            }
         }
     }
 
@@ -2058,6 +2063,14 @@ where
 fn is_missing_review_state_error(error: &anyhow::Error) -> bool {
     let message = error.to_string();
     message.contains("state `") && message.contains("was not found on team")
+}
+
+fn is_transient_linear_read_failure(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .to_string()
+            .contains("failed to reach the Linear GraphQL endpoint")
+    })
 }
 
 fn git_stdout(workspace_path: &Path, args: &[&str]) -> Result<String> {

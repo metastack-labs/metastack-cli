@@ -197,10 +197,10 @@ pub(super) async fn verify_linear_api_access<C>(service: &LinearService<C>) -> R
 where
     C: LinearClient,
 {
-    for attempt in 0..2 {
+    for attempt in 0..3 {
         match service.viewer().await {
             Ok(viewer) => return Ok(viewer),
-            Err(error) if attempt == 0 && is_transient_linear_read_failure(&error) => {
+            Err(error) if attempt < 2 && is_transient_linear_read_failure(&error) => {
                 sleep(Duration::from_millis(100)).await;
             }
             Err(error) => {

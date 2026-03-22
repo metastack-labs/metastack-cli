@@ -675,8 +675,11 @@ impl DynamicLinearServer {
             while !thread_shutdown.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
-                        let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
-                        let _ = handle_dynamic_linear_connection(&mut stream, &state);
+                        let state = Arc::clone(&state);
+                        thread::spawn(move || {
+                            let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+                            let _ = handle_dynamic_linear_connection(&mut stream, &state);
+                        });
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(25));
@@ -757,6 +760,7 @@ fn handle_dynamic_linear_connection(
 #[cfg(unix)]
 fn read_http_request(stream: &mut TcpStream, pending: &mut Vec<u8>) -> Result<String, Box<dyn Error>> {
     let mut chunk = [0u8; 4096];
+    let mut idle_reads_before_data = 0usize;
     let mut idle_reads_after_data = 0usize;
 
     loop {
@@ -778,7 +782,11 @@ fn read_http_request(stream: &mut TcpStream, pending: &mut Vec<u8>) -> Result<St
                 ) =>
             {
                 if pending.is_empty() {
-                    return Ok(String::new());
+                    idle_reads_before_data += 1;
+                    if idle_reads_before_data >= 5 {
+                        return Ok(String::new());
+                    }
+                    continue;
                 }
                 idle_reads_after_data += 1;
                 if idle_reads_after_data >= 20 {
@@ -808,6 +816,7 @@ fn read_http_request(stream: &mut TcpStream, pending: &mut Vec<u8>) -> Result<St
             )
             .into());
         }
+        idle_reads_before_data = 0;
         pending.extend_from_slice(&chunk[..read]);
     }
 }

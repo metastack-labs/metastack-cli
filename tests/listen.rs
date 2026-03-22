@@ -5006,7 +5006,7 @@ fn listen_once_relaunches_agent_until_issue_leaves_active_states() -> Result<(),
     let config_path = temp.path().join("metastack.toml");
     let bin_dir = temp.path().join("bin");
     let stub_dir = temp.path().join("stub-output");
-    let server = DynamicLinearServer::start_with_completion_after_refreshes(4)?;
+    let server = DynamicLinearServer::start_with_completion_after_refreshes(8)?;
     fs::create_dir_all(&repo_root)?;
     fs::create_dir_all(&bin_dir)?;
     fs::create_dir_all(&stub_dir)?;
@@ -5508,6 +5508,22 @@ transport = "arg"
     let state = fs::read_to_string(listen_state_path(&config_path, &repo_root)?)?;
     assert!(state.contains("\"phase\": \"completed\""));
     assert!(state.contains("Human Review"));
+    assert!(state.contains("\"status\": \"ready\""));
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "inspect",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ready #321"))
+        .stdout(predicate::str::contains("draft #321").not());
 
     Ok(())
 }
@@ -5636,6 +5652,139 @@ transport = "arg"
     assert!(gh_log.contains("pr edit 321 --title MET-32: Continuation loop --body-file"));
     assert!(!gh_log.contains("pr create --base main --head met-32-continuation-loop"));
     assert!(!gh_log.contains("pr ready 321"));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_worker_handles_a_missing_matching_pull_request_during_review_handoff()
+-> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let stub_dir = temp.path().join("stub-output");
+    let server = DynamicLinearServer::start_with_completion_after_refreshes(1_000_000)?;
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&stub_dir)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+    write_onboarded_config(
+        &config_path,
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+
+[agents]
+default_agent = "stub"
+
+[agents.commands.stub]
+command = "agent-stub"
+args = ["{{{{payload}}}}"]
+transport = "arg"
+"#,
+            api_url = server.url.as_str(),
+        ),
+    )?;
+    fs::write(bin_dir.join("agent-stub"), "#!/bin/sh\n:\n")?;
+    write_listen_github_stub(
+        &bin_dir.join("gh"),
+        "none",
+        "https://github.com/example/repo/pull/321",
+    )?;
+    let mut permissions = fs::metadata(bin_dir.join("agent-stub"))?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(bin_dir.join("agent-stub"), permissions)?;
+    init_repo_with_origin(&repo_root)?;
+
+    let workspace = create_workspace_clone_checkout(&repo_root, "repo-workspace/MET-32")?;
+    let branch = "met-32-continuation-loop";
+    ProcessCommand::new("git")
+        .args([
+            "-C",
+            workspace.to_str().expect("utf8"),
+            "checkout",
+            "-B",
+            branch,
+            "main",
+        ])
+        .status()?;
+    fs::write(workspace.join("src.rs"), "pub fn no_pr() {}\n")?;
+    ProcessCommand::new("git")
+        .args(["-C", workspace.to_str().expect("utf8"), "add", "src.rs"])
+        .status()?;
+    ProcessCommand::new("git")
+        .args([
+            "-C",
+            workspace.to_str().expect("utf8"),
+            "commit",
+            "-m",
+            "Complete without an open PR",
+        ])
+        .status()?;
+    ProcessCommand::new("git")
+        .args([
+            "-C",
+            workspace.to_str().expect("utf8"),
+            "push",
+            "--set-upstream",
+            "origin",
+            branch,
+        ])
+        .status()?;
+    let backlog_dir = workspace.join(".metastack/backlog/MET-32");
+    fs::create_dir_all(&backlog_dir)?;
+    fs::write(
+        backlog_dir.join("index.md"),
+        "# MET-32\n\n## Tasks\n\n- [x] Complete\n",
+    )?;
+
+    let current_path = std::env::var("PATH")?;
+    meta()
+        .current_dir(&workspace)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &stub_dir)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "listen-worker",
+            "--source-root",
+            repo_root.to_str().expect("utf8"),
+            "--workspace",
+            workspace.to_str().expect("utf8"),
+            "--issue",
+            "MET-32",
+            "--workpad-comment-id",
+            "comment-32",
+            "--backlog-issue",
+            "MET-32",
+            "--max-turns",
+            "1",
+        ])
+        .assert()
+        .success();
+
+    let gh_log = fs::read_to_string(stub_dir.join("gh.log"))?;
+    assert!(gh_log.contains("pr list --state open --head met-32-continuation-loop --base main"));
+    assert!(!gh_log.contains("pr edit 321"));
+    assert!(!gh_log.contains("pr create --base main --head met-32-continuation-loop"));
+    assert!(!gh_log.contains("pr ready 321"));
+
+    let state = fs::read_to_string(listen_state_path(&config_path, &repo_root)?)?;
+    assert!(state.contains("\"phase\": \"completed\""));
+    assert!(state.contains("\"status\": \"unpublished\""));
 
     Ok(())
 }
