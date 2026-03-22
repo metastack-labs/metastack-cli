@@ -55,6 +55,10 @@ impl ListenPreflightReport {
         self.viewer.as_ref()
     }
 
+    pub(super) fn provider(&self) -> &str {
+        &self.provider
+    }
+
     pub(super) fn render(&self) -> String {
         let mut lines = vec![format!(
             "Listen preflight passed for provider `{}`.",
@@ -418,11 +422,12 @@ mod tests {
 
     use super::{
         ListenPreflightReport, ListenPreflightRequest, display_setting,
-        load_codex_global_config_status, run_listen_preflight, verify_claude_listen_prerequisites,
-        verify_listen_command_capabilities,
+        load_codex_global_config_status, run_listen_preflight, run_listen_provider_preflight,
+        verify_claude_listen_prerequisites, verify_listen_command_capabilities,
     };
     use crate::config::{
-        AgentCommandConfig, AgentSettings, AppConfig, LinearConfig, PlanningMeta, PromptTransport,
+        AGENT_ROUTE_AGENTS_LISTEN, AgentCommandConfig, AgentRouteConfig, AgentRoutingSettings,
+        AgentSettings, AppConfig, LinearConfig, PlanningMeta, PromptTransport,
     };
     use crate::linear::{
         AttachmentCreateRequest, AttachmentSummary, IssueComment, IssueCreateRequest,
@@ -447,6 +452,47 @@ mod tests {
                         transport: PromptTransport::Arg,
                     },
                 )]),
+                ..AgentSettings::default()
+            },
+            ..AppConfig::default()
+        }
+    }
+
+    fn route_app_config(provider: &str) -> AppConfig {
+        let mut commands = BTreeMap::from([(
+            "stub".to_string(),
+            AgentCommandConfig {
+                command: "stub-agent".to_string(),
+                args: vec!["{{payload}}".to_string()],
+                transport: PromptTransport::Arg,
+            },
+        )]);
+        if provider == "route-stub" {
+            commands.insert(
+                provider.to_string(),
+                AgentCommandConfig {
+                    command: "route-stub-agent".to_string(),
+                    args: vec!["{{payload}}".to_string()],
+                    transport: PromptTransport::Arg,
+                },
+            );
+        }
+
+        AppConfig {
+            agents: AgentSettings {
+                default_agent: Some("codex".to_string()),
+                commands,
+                routing: AgentRoutingSettings {
+                    commands: BTreeMap::from([(
+                        AGENT_ROUTE_AGENTS_LISTEN.to_string(),
+                        AgentRouteConfig {
+                            provider: Some(provider.to_string()),
+                            model: None,
+                            reasoning: None,
+                        },
+                    )]),
+                    ..AgentRoutingSettings::default()
+                },
                 ..AgentSettings::default()
             },
             ..AppConfig::default()
@@ -710,6 +756,44 @@ enabled = true
     fn display_setting_formats_missing_and_present_values() {
         assert_eq!(display_setting(None), "<missing>");
         assert_eq!(display_setting(Some("never")), "\"never\"");
+    }
+
+    #[test]
+    fn listen_provider_preflight_uses_listen_route_agent() -> Result<()> {
+        let temp = tempdir()?;
+        let report = run_listen_provider_preflight(
+            &route_app_config("route-stub"),
+            &PlanningMeta::default(),
+            ListenPreflightRequest {
+                working_dir: temp.path(),
+                agent: None,
+                model: None,
+                reasoning: None,
+                require_write_access: false,
+            },
+        )?;
+
+        assert_eq!(report.provider(), "route-stub");
+        Ok(())
+    }
+
+    #[test]
+    fn listen_provider_preflight_prefers_explicit_agent_override() -> Result<()> {
+        let temp = tempdir()?;
+        let report = run_listen_provider_preflight(
+            &route_app_config("route-stub"),
+            &PlanningMeta::default(),
+            ListenPreflightRequest {
+                working_dir: temp.path(),
+                agent: Some("stub"),
+                model: None,
+                reasoning: None,
+                require_write_access: false,
+            },
+        )?;
+
+        assert_eq!(report.provider(), "stub");
+        Ok(())
     }
 
     #[test]
