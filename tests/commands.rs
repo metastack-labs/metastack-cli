@@ -134,6 +134,7 @@ fn agents_help_lists_listen_and_workflows() {
         .assert()
         .success()
         .stdout(predicate::str::contains("\n  listen "))
+        .stdout(predicate::str::contains("\n  improve "))
         .stdout(predicate::str::contains("\n  workflows "));
 }
 
@@ -526,4 +527,24 @@ fn scaffold_creates_planning_layout_and_is_repeat_safe() -> Result<(), Box<dyn E
         .stdout(predicate::str::contains("\"metastack_meta_path\""));
 
     Ok(())
+}
+
+#[test]
+fn agents_help_lists_improve_subcommand() {
+    cli()
+        .args(["agents", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\n  improve "));
+}
+
+#[test]
+fn agents_improve_help_describes_root_and_render_once() {
+    cli()
+        .args(["agents", "improve", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--root"))
+        .stdout(predicate::str::contains("--render-once"))
+        .stdout(predicate::str::contains("Improve an existing PR"));
 }

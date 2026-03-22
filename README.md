@@ -33,6 +33,7 @@ Most planning tools split work across issue trackers, docs, scripts, and ad hoc 
 - `meta linear ...` and `meta backlog sync` keep Linear and local files aligned.
 - `meta agents review` audits GitHub PRs in a guided dashboard, queues `metastack`-labeled PRs for explicit human approval, and can open remediation PRs when required.
 - `meta agents retro` analyzes shipped PRs for follow-up backlog opportunities and opens a plan-style Linear ticket curation flow.
+- `meta agents improve` inspects open PRs, accepts improvement instructions, and publishes stacked PRs targeting the source PR branch from an isolated workspace.
 - `meta agents listen` runs unattended ticket execution in dedicated workspace clones instead of your source checkout.
 - `meta workspace` inventories and cleans those sibling listener workspace clones after the listener finishes.
 
@@ -1141,6 +1142,35 @@ Prerequisites:
 - `gh` CLI installed and authenticated (`gh auth login`)
 - Repository with a configured `.metastack/meta.json`
 - For guided queue mode: PRs must carry the `metastack` label
+
+### `agents improve`
+
+Inspect open PRs for the current repository, describe an improvement request, and publish the result as a stacked PR targeting the source PR branch. Interactive TTY runs stay inside one TUI dashboard:
+
+- The left panel lists open PRs discovered via `gh pr list`.
+- The right panel lists persisted improve sessions loaded from `.metastack/agents/improve/sessions/state.json`.
+- `Enter` on a PR opens a detail view with branch info and body preview.
+- `Tab` toggles focus between the PR list and session list.
+- `Enter` on a session opens a detail view with phase, instructions, and stacked PR link.
+- `Backspace` returns from a detail view to the parent list.
+
+Sessions persist across restarts. Each session records the source PR metadata, user instructions, execution phase, workspace path, improve branch, and stacked PR URL.
+
+When an improve session executes, it:
+1. Clones the repository into an isolated sibling workspace under `<repo>-workspace/improve-<session-id>/`.
+2. Checks out the source PR branch and creates an `improve/<source-branch>` branch.
+3. Publishes a stacked PR targeting the source PR branch with a title and body linking back to the original PR.
+
+```bash
+meta agents improve --root .
+meta agents improve --root . --render-once
+meta agents improve --root . --render-once --events enter
+meta agents improve --root . --render-once --events tab,enter
+```
+
+Prerequisites:
+- `gh` CLI installed and authenticated (`gh auth login`)
+- Repository with a GitHub remote
 
 ### `agents listen`
 
