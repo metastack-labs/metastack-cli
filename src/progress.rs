@@ -12,14 +12,14 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::backend::TestBackend;
 use ratatui::layout::{Constraint, Direction, Flex, Layout, Rect};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::ListItem;
 use ratatui::{Frame, Terminal};
 use serde::{Deserialize, Serialize};
 
 use crate::fs::write_text_file;
+use crate::tui::spaced_list::{spaced_list, spaced_list_item};
 use crate::tui::theme::{
-    Tone, badge, emphasis_style, empty_state, key_hints, label_style, list, muted_style,
-    panel_title, paragraph, tone_style,
+    Tone, badge, emphasis_style, empty_state, key_hints, label_style, muted_style, panel_title,
+    paragraph, tone_style,
 };
 
 pub(crate) const SPINNER_FRAMES: &[&str] = &[
@@ -512,7 +512,7 @@ pub(crate) fn render_progress_dashboard(frame: &mut Frame<'_>, data: &ProgressVi
             } else {
                 Span::raw(step.label.clone())
             };
-            ListItem::new(Text::from(vec![
+            spaced_list_item(vec![
                 Line::from(vec![
                     Span::styled(format!("{:02}. ", index + 1), label_style()),
                     badge(step.state.label(), tone),
@@ -535,10 +535,10 @@ pub(crate) fn render_progress_dashboard(frame: &mut Frame<'_>, data: &ProgressVi
                         .unwrap_or_else(|| "Waiting for this phase to start.".to_string()),
                     muted_style(),
                 )),
-            ]))
+            ])
         })
         .collect::<Vec<_>>();
-    let steps = list(step_items, panel_title("Phase Timeline", false));
+    let steps = spaced_list(step_items, panel_title("Phase Timeline", false));
     frame.render_widget(steps, body[0]);
 
     let active_text = if let Some(detail) = &data.active_detail {

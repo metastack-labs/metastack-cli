@@ -17,8 +17,9 @@ use ratatui::{Frame, Terminal};
 
 use crate::tui::fields::InputFieldState;
 use crate::tui::scroll::{ScrollState, plain_text, scrollable_content_paragraph, wrapped_rows};
+use crate::tui::spaced_list::{spaced_list, spaced_list_item};
 use crate::tui::theme::{
-    Tone, badge, empty_state, key_hints, label_style, list, muted_style, panel_title, paragraph,
+    Tone, badge, empty_state, key_hints, label_style, muted_style, panel_title, paragraph,
     tone_style,
 };
 
@@ -347,7 +348,7 @@ fn render_workspace_list(frame: &mut Frame<'_>, area: Rect, app: &WorkspaceDashb
                         Tone::Danger
                     };
 
-                    ListItem::new(Text::from(vec![
+                    spaced_list_item(vec![
                         Line::from(vec![
                             selected_marker,
                             Span::styled(
@@ -371,7 +372,7 @@ fn render_workspace_list(frame: &mut Frame<'_>, area: Rect, app: &WorkspaceDashb
                                 Span::raw("")
                             },
                         ]),
-                    ]))
+                    ])
                 })
             })
             .collect::<Vec<_>>()
@@ -384,8 +385,8 @@ fn render_workspace_list(frame: &mut Frame<'_>, area: Rect, app: &WorkspaceDashb
         state.select(Some(app.workspace_index.min(results.len() - 1)));
     }
 
-    let list = list(items, title);
-    frame.render_stateful_widget(list, area, &mut state);
+    let list_widget = spaced_list(items, title);
+    frame.render_stateful_widget(list_widget, area, &mut state);
 }
 
 fn render_workspace_preview(frame: &mut Frame<'_>, area: Rect, app: &WorkspaceDashboardApp) {
@@ -468,17 +469,17 @@ fn render_action_list(frame: &mut Frame<'_>, area: Rect, app: &WorkspaceDashboar
     let items = ACTIONS
         .iter()
         .map(|action| {
-            ListItem::new(Text::from(vec![
+            spaced_list_item(vec![
                 Line::from(vec![badge(action.label(), Tone::Accent)]),
                 Line::from(action.description()),
-            ]))
+            ])
         })
         .collect::<Vec<_>>();
     let mut state = ListState::default();
     state.select(Some(app.action_index.min(ACTIONS.len() - 1)));
 
-    let list = list(items, title);
-    frame.render_stateful_widget(list, area, &mut state);
+    let list_widget = spaced_list(items, title);
+    frame.render_stateful_widget(list_widget, area, &mut state);
 }
 
 fn render_status(frame: &mut Frame<'_>, area: Rect, app: &WorkspaceDashboardApp) {

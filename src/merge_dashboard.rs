@@ -17,9 +17,10 @@ use ratatui::{Frame, Terminal};
 
 use crate::tui::markdown::render_markdown;
 use crate::tui::scroll::{ScrollState, plain_text, scrollable_content_paragraph, wrapped_rows};
+use crate::tui::spaced_list::{render_github_pr_row, spaced_list};
 use crate::tui::theme::{
-    Tone, badge, emphasis_style, empty_state, key_hints, label_style, list, muted_style,
-    panel_title, paragraph,
+    Tone, badge, emphasis_style, empty_state, key_hints, label_style, muted_style, panel_title,
+    paragraph,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -238,23 +239,16 @@ fn render_pr_list(frame: &mut Frame<'_>, area: Rect, app: &MergeDashboardApp) {
                 } else {
                     ("queued", Tone::Muted)
                 };
-                ListItem::new(Text::from(vec![
-                    Line::from(vec![
-                        badge(state_label, tone),
-                        Span::raw(" "),
-                        Span::styled(format!("#{} {}", pr.number, pr.title), emphasis_style()),
-                    ]),
-                    Line::from(vec![
-                        Span::styled("Author ", label_style()),
-                        Span::raw(pr.author.clone()),
-                        Span::styled("  Branch ", label_style()),
-                        Span::raw(pr.head_ref.clone()),
-                    ]),
-                    Line::from(Span::styled(
-                        format!("Updated {}", pr.updated_at),
-                        muted_style(),
-                    )),
-                ]))
+                render_github_pr_row(
+                    pr.number,
+                    &pr.title,
+                    badge(state_label, tone),
+                    &[
+                        ("Author", pr.author.clone()),
+                        ("Branch", pr.head_ref.clone()),
+                    ],
+                    &format!("Updated {}", pr.updated_at),
+                )
             })
             .collect::<Vec<_>>()
     };
@@ -264,10 +258,10 @@ fn render_pr_list(frame: &mut Frame<'_>, area: Rect, app: &MergeDashboardApp) {
         app.pr_index
             .min(app.data.pull_requests.len().saturating_sub(1)),
     ));
-    let list = list(items, title)
+    let list_widget = spaced_list(items, title)
         .highlight_style(Style::default())
         .highlight_symbol(">> ");
-    frame.render_stateful_widget(list, area, &mut state);
+    frame.render_stateful_widget(list_widget, area, &mut state);
 }
 
 fn render_selection_summary(frame: &mut Frame<'_>, area: Rect, app: &MergeDashboardApp) {
