@@ -896,9 +896,7 @@ fn execute_agent_turn(
     )?;
     let capture_output = invocation.builtin_provider;
     let command_args = if capture_output {
-        let continuation = continuation_handle
-            .filter(|handle| handle.matches_agent(&invocation.agent))
-            .map(|handle| handle.id.clone());
+        let continuation = continuation_id_for_invocation(&invocation.agent, continuation_handle);
         command_args_for_invocation_with_options(
             &invocation,
             AgentExecutionOptions {
@@ -1157,6 +1155,15 @@ fn execute_agent_turn(
     }
 
     Ok(TurnExecutionResult::default())
+}
+
+fn continuation_id_for_invocation(
+    agent: &str,
+    continuation_handle: Option<&LatestResumeHandle>,
+) -> Option<String> {
+    continuation_handle
+        .filter(|handle| handle.matches_agent(agent))
+        .map(|handle| handle.id.clone())
 }
 
 fn parse_resume_handle_line(agent: &str, line: &[u8]) -> Option<LatestResumeHandle> {
@@ -1540,8 +1547,8 @@ fn load_existing_pull_request(
 mod tests {
     use super::{
         LatestResumeHandle, Path, ResumeProvider, Value, WorkerSessionContext,
-        build_worker_session, parse_claude_resume_handle, parse_codex_resume_handle,
-        query_codex_threads, read_codex_session_index,
+        build_worker_session, continuation_id_for_invocation, parse_claude_resume_handle,
+        parse_codex_resume_handle, query_codex_threads, read_codex_session_index,
     };
     use crate::linear::{IssueSummary, TeamRef};
     use crate::listen::{PullRequestSummary, SessionPhase, TokenUsage};
@@ -1713,6 +1720,29 @@ mod tests {
                 id: "019d0766-1ca5-70c3-ae80-afafe1fb7bff".to_string(),
             })
         );
+    }
+
+    #[test]
+    fn continuation_id_for_invocation_reuses_matching_resume_handle() {
+        let handle = LatestResumeHandle {
+            provider: ResumeProvider::Codex,
+            id: "thread-123".to_string(),
+        };
+
+        assert_eq!(
+            continuation_id_for_invocation("codex", Some(&handle)),
+            Some("thread-123".to_string())
+        );
+    }
+
+    #[test]
+    fn continuation_id_for_invocation_rejects_mismatched_provider() {
+        let handle = LatestResumeHandle {
+            provider: ResumeProvider::Claude,
+            id: "session-123".to_string(),
+        };
+
+        assert_eq!(continuation_id_for_invocation("codex", Some(&handle)), None);
     }
 
     #[test]
