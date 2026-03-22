@@ -2196,6 +2196,19 @@ impl InteractiveReviewApp {
             .collect()
     }
 
+    fn restore_selected_candidate(&mut self, pr_number: Option<u64>) {
+        let visible = self.visible_candidate_indices();
+        self.selected_index = pr_number
+            .and_then(|selected_pr| {
+                visible.iter().position(|index| {
+                    self.candidates
+                        .get(*index)
+                        .is_some_and(|candidate| candidate.pr_number == selected_pr)
+                })
+            })
+            .unwrap_or(0);
+    }
+
     fn selected_candidate_text(&self) -> Text<'static> {
         if let Some(candidate) = self.selected_candidate() {
             let mut lines = vec![
@@ -2424,8 +2437,9 @@ impl InteractiveReviewApp {
         {
             return false;
         }
+        let selected_pr = self.selected_candidate().map(|candidate| candidate.pr_number);
         if self.query.handle_key(key) {
-            self.selected_index = 0;
+            self.restore_selected_candidate(selected_pr);
             self.preview_scroll.reset();
             return true;
         }
@@ -6597,6 +6611,15 @@ mod tests {
         }
     }
 
+    fn type_query(app: &mut InteractiveReviewApp, query: &str) {
+        for ch in query.chars() {
+            assert!(app.handle_query_key(crossterm::event::KeyEvent::new(
+                KeyCode::Char(ch),
+                KeyModifiers::NONE,
+            )));
+        }
+    }
+
     fn make_test_session(
         pr_number: u64,
         kind: InteractiveSessionKind,
@@ -6795,6 +6818,43 @@ mod tests {
         assert_eq!(app.sessions[0].phase, ReviewPhase::ReviewComplete);
         assert_eq!(app.sessions[1].phase, ReviewPhase::FixAgentInProgress);
         assert_eq!(app.active_session_count(), 2);
+    }
+
+    #[test]
+    fn query_filter_preserves_selected_candidate_when_still_visible() {
+        let mut app =
+            InteractiveReviewApp::new(InteractiveReviewMode::Discovery, ReviewCommandKind::Review);
+        let mut first = make_test_candidate(42);
+        first.title = "Alpha change".to_string();
+        let mut second = make_test_candidate(99);
+        second.title = "Beta cleanup".to_string();
+        let mut third = make_test_candidate(123);
+        third.title = "Beta release".to_string();
+        app.load_candidates(vec![first, second, third]);
+        app.selected_index = 2;
+
+        type_query(&mut app, "beta");
+
+        assert_eq!(
+            app.selected_candidate().map(|candidate| candidate.pr_number),
+            Some(123),
+            "filtering in place should keep the cursor on the previously selected PR"
+        );
+        assert_eq!(app.selected_index, 1);
+
+        for _ in 0..4 {
+            assert!(app.handle_query_key(crossterm::event::KeyEvent::new(
+                KeyCode::Backspace,
+                KeyModifiers::NONE,
+            )));
+        }
+
+        assert_eq!(
+            app.selected_candidate().map(|candidate| candidate.pr_number),
+            Some(123),
+            "clearing the filter should restore the same selected PR when it is still visible"
+        );
+        assert_eq!(app.selected_index, 2);
     }
 
     #[test]
