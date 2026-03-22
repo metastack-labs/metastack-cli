@@ -5,6 +5,11 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
+use crate::session_runtime::{
+    ActiveSessionFile, WorkflowRootLayout, WorkflowSessionLayout, load_json_records, read_json,
+    read_optional_json, write_json,
+};
+
 /// Version tag for forward-compatible state schema evolution.
 const STATE_VERSION: u32 = 1;
 
@@ -298,6 +303,7 @@ pub struct CurrentSession {
 /// Paths for orchestrator durable state under `.metastack/orchestrate/`.
 #[derive(Debug, Clone)]
 pub struct OrchestratePaths {
+    layout: WorkflowSessionLayout,
     pub root: PathBuf,
     pub sessions_dir: PathBuf,
     pub current_path: PathBuf,
@@ -306,10 +312,14 @@ pub struct OrchestratePaths {
 impl OrchestratePaths {
     /// Derive orchestrator paths from a repository root.
     pub fn new(repo_root: &Path) -> Self {
-        let root = repo_root.join(".metastack").join("orchestrate");
-        let sessions_dir = root.join("sessions");
-        let current_path = root.join("current.json");
+        let workflow =
+            WorkflowRootLayout::repo_scoped(repo_root, ".metastack/orchestrate", "current.json");
+        let layout = WorkflowSessionLayout::with_sessions_dir(workflow, "sessions");
+        let root = layout.workflow().root().to_path_buf();
+        let sessions_dir = layout.sessions_dir().to_path_buf();
+        let current_path = layout.workflow().active_session_path().to_path_buf();
         Self {
+            layout,
             root,
             sessions_dir,
             current_path,
@@ -318,7 +328,7 @@ impl OrchestratePaths {
 
     /// Directory for a specific session.
     pub fn session_dir(&self, session_id: &str) -> PathBuf {
-        self.sessions_dir.join(session_id)
+        self.layout.session_dir(session_id)
     }
 
     /// Session manifest path.
@@ -366,26 +376,22 @@ impl OrchestratePaths {
         }
         Ok(())
     }
+
+    fn current_session_file(&self) -> ActiveSessionFile<CurrentSession> {
+        self.layout.workflow().active_session_file()
+    }
 }
 
 /// Save a session to disk.
 pub fn save_session(paths: &OrchestratePaths, session: &OrchestrateSession) -> Result<()> {
     let path = paths.session_path(&session.session_id);
-    let json =
-        serde_json::to_string_pretty(session).context("failed to serialize orchestrate session")?;
-    fs::write(&path, json)
-        .with_context(|| format!("failed to write orchestrate session: {}", path.display()))?;
-    Ok(())
+    write_json(&path, session)
 }
 
 /// Load a session from disk.
 pub fn load_session(paths: &OrchestratePaths, session_id: &str) -> Result<OrchestrateSession> {
     let path = paths.session_path(session_id);
-    let content = fs::read_to_string(&path)
-        .with_context(|| format!("failed to read orchestrate session: {}", path.display()))?;
-    let session: OrchestrateSession = serde_json::from_str(&content)
-        .with_context(|| format!("failed to parse orchestrate session: {}", path.display()))?;
-    Ok(session)
+    read_json(&path)
 }
 
 /// Save the current-session pointer.
@@ -394,35 +400,17 @@ pub fn save_current_pointer(paths: &OrchestratePaths, session: &OrchestrateSessi
         session_id: session.session_id.clone(),
         started_at: session.started_at.clone(),
     };
-    let json = serde_json::to_string_pretty(&pointer)
-        .context("failed to serialize current session pointer")?;
-    fs::write(&paths.current_path, json).with_context(|| {
-        format!(
-            "failed to write current session pointer: {}",
-            paths.current_path.display()
-        )
-    })?;
-    Ok(())
+    paths.current_session_file().store(&pointer)
 }
 
 /// Load the current-session pointer, returning None if it does not exist.
 pub fn load_current_pointer(paths: &OrchestratePaths) -> Result<Option<CurrentSession>> {
-    if !paths.current_path.exists() {
-        return Ok(None);
-    }
-    let content = fs::read_to_string(&paths.current_path).with_context(|| {
-        format!(
-            "failed to read current session pointer: {}",
-            paths.current_path.display()
-        )
-    })?;
-    let pointer: CurrentSession = serde_json::from_str(&content).with_context(|| {
-        format!(
+    read_optional_json(paths.current_session_file().path()).map_err(|error| {
+        error.context(format!(
             "corrupted current session pointer: {}",
             paths.current_path.display()
-        )
-    })?;
-    Ok(Some(pointer))
+        ))
+    })
 }
 
 /// Save a cycle record.
@@ -434,11 +422,7 @@ pub fn save_cycle(
     let path = paths
         .cycles_dir(session_id)
         .join(format!("{}.json", cycle.cycle_id));
-    let json =
-        serde_json::to_string_pretty(cycle).context("failed to serialize orchestrate cycle")?;
-    fs::write(&path, json)
-        .with_context(|| format!("failed to write orchestrate cycle: {}", path.display()))?;
-    Ok(())
+    write_json(&path, cycle)
 }
 
 /// Save an issue readiness record.
@@ -450,11 +434,7 @@ pub fn save_issue_readiness(
     let path = paths
         .issues_dir(session_id)
         .join(format!("{}.json", record.issue_identifier));
-    let json =
-        serde_json::to_string_pretty(record).context("failed to serialize issue readiness")?;
-    fs::write(&path, json)
-        .with_context(|| format!("failed to write issue readiness: {}", path.display()))?;
-    Ok(())
+    write_json(&path, record)
 }
 
 /// Load an issue readiness record, returning None if it does not exist.
@@ -466,14 +446,7 @@ pub fn load_issue_readiness(
     let path = paths
         .issues_dir(session_id)
         .join(format!("{issue_identifier}.json"));
-    if !path.exists() {
-        return Ok(None);
-    }
-    let content = fs::read_to_string(&path)
-        .with_context(|| format!("failed to read issue readiness: {}", path.display()))?;
-    let record: IssueReadiness = serde_json::from_str(&content)
-        .with_context(|| format!("corrupted issue readiness record: {}", path.display()))?;
-    Ok(Some(record))
+    read_optional_json(&path)
 }
 
 /// Load all issue readiness records for a session.
@@ -482,29 +455,8 @@ pub fn load_all_issue_readiness(
     session_id: &str,
 ) -> Result<Vec<IssueReadiness>> {
     let dir = paths.issues_dir(session_id);
-    if !dir.exists() {
-        return Ok(Vec::new());
-    }
-    let mut records = Vec::new();
-    for entry in fs::read_dir(&dir)
-        .with_context(|| format!("failed to read issues directory: {}", dir.display()))?
-    {
-        let entry = entry.context("failed to read issues directory entry")?;
-        let path = entry.path();
-        if path.extension().is_some_and(|ext| ext == "json") {
-            let content = fs::read_to_string(&path)
-                .with_context(|| format!("failed to read issue readiness: {}", path.display()))?;
-            match serde_json::from_str::<IssueReadiness>(&content) {
-                Ok(record) => records.push(record),
-                Err(err) => {
-                    eprintln!(
-                        "warning: skipping corrupted issue readiness at {}: {err}",
-                        path.display()
-                    );
-                }
-            }
-        }
-    }
+    let mut records: Vec<IssueReadiness> =
+        load_json_records(&dir, "issues directory", "issue readiness")?;
     records.sort_by(|a, b| a.issue_identifier.cmp(&b.issue_identifier));
     Ok(records)
 }
@@ -518,10 +470,7 @@ pub fn save_review_record(
     let path = paths
         .reviews_dir(session_id)
         .join(format!("{}.json", record.pr_number));
-    let json = serde_json::to_string_pretty(record).context("failed to serialize review record")?;
-    fs::write(&path, json)
-        .with_context(|| format!("failed to write review record: {}", path.display()))?;
-    Ok(())
+    write_json(&path, record)
 }
 
 /// Load all review records for a session.
@@ -530,29 +479,8 @@ pub fn load_all_review_records(
     session_id: &str,
 ) -> Result<Vec<ReviewRecord>> {
     let dir = paths.reviews_dir(session_id);
-    if !dir.exists() {
-        return Ok(Vec::new());
-    }
-    let mut records = Vec::new();
-    for entry in fs::read_dir(&dir)
-        .with_context(|| format!("failed to read reviews directory: {}", dir.display()))?
-    {
-        let entry = entry.context("failed to read reviews directory entry")?;
-        let path = entry.path();
-        if path.extension().is_some_and(|ext| ext == "json") {
-            let content = fs::read_to_string(&path)
-                .with_context(|| format!("failed to read review record: {}", path.display()))?;
-            match serde_json::from_str::<ReviewRecord>(&content) {
-                Ok(record) => records.push(record),
-                Err(err) => {
-                    eprintln!(
-                        "warning: skipping corrupted review record at {}: {err}",
-                        path.display()
-                    );
-                }
-            }
-        }
-    }
+    let mut records: Vec<ReviewRecord> =
+        load_json_records(&dir, "reviews directory", "review record")?;
     records.sort_by_key(|r| r.pr_number);
     Ok(records)
 }
@@ -564,10 +492,7 @@ pub fn save_staging_state(
     state: &StagingState,
 ) -> Result<()> {
     let path = paths.staging_path(session_id);
-    let json = serde_json::to_string_pretty(state).context("failed to serialize staging state")?;
-    fs::write(&path, json)
-        .with_context(|| format!("failed to write staging state: {}", path.display()))?;
-    Ok(())
+    write_json(&path, state)
 }
 
 /// Load the staging state, returning None if it does not exist.
@@ -576,14 +501,7 @@ pub fn load_staging_state(
     session_id: &str,
 ) -> Result<Option<StagingState>> {
     let path = paths.staging_path(session_id);
-    if !path.exists() {
-        return Ok(None);
-    }
-    let content = fs::read_to_string(&path)
-        .with_context(|| format!("failed to read staging state: {}", path.display()))?;
-    let state: StagingState = serde_json::from_str(&content)
-        .with_context(|| format!("corrupted staging state: {}", path.display()))?;
-    Ok(Some(state))
+    read_optional_json(&path)
 }
 
 /// Append an event to the session event log.

@@ -6,6 +6,7 @@ use crate::orchestrate::state::{
     IssueReadiness, OrchestrateEvent, OrchestratePhase, OrchestrateSession, ReviewRecord,
     StagingMergeResult, StagingState,
 };
+use crate::session_runtime::{SummaryField, write_summary_fields};
 
 /// Structured status snapshot that can be rendered as human-readable text or
 /// serialized to JSON for machine consumption.
@@ -164,13 +165,16 @@ pub fn build_status(
 /// Render the status snapshot as human-readable text.
 pub fn render_status_text(status: &OrchestrateStatus) -> String {
     let mut out = String::new();
-    writeln!(out, "Orchestrate Session: {}", status.session_id).unwrap();
-    writeln!(out, "Phase:            {}", status.phase).unwrap();
-    writeln!(out, "Started:          {}", status.started_at).unwrap();
-    writeln!(out, "Updated:          {}", status.updated_at).unwrap();
-    writeln!(out, "Cycles:           {}", status.cycles_completed).unwrap();
-    writeln!(out, "Staging branch:   {}", status.staging_branch).unwrap();
-    writeln!(out, "Main SHA:         {}", status.main_sha).unwrap();
+    let header = vec![
+        SummaryField::new("Orchestrate Session", status.session_id.clone()),
+        SummaryField::new("Phase", status.phase.to_string()),
+        SummaryField::new("Started", status.started_at.clone()),
+        SummaryField::new("Updated", status.updated_at.clone()),
+        SummaryField::new("Cycles", status.cycles_completed.to_string()),
+        SummaryField::new("Staging branch", status.staging_branch.clone()),
+        SummaryField::new("Main SHA", status.main_sha.clone()),
+    ];
+    write_summary_fields(&mut out, &header, 18).unwrap();
 
     if !status.issues.is_empty() {
         writeln!(out).unwrap();
