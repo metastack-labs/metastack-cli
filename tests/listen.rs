@@ -1071,6 +1071,128 @@ printf '%s' "{command_name}" > /dev/null
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn listen_once_summary_prefers_explicit_execution_agent_override() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  },
+  "listen": {
+    "assignment_scope": "viewer"
+  }
+}
+"#,
+    )?;
+    write_onboarded_config(
+        &config_path,
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+
+[agents]
+default_agent = "global-stub"
+
+[agents.routing.commands."agents.listen"]
+provider = "listen-stub"
+
+[agents.commands.global-stub]
+command = "global-stub"
+args = ["{{{{payload}}}}"]
+transport = "arg"
+
+[agents.commands.listen-stub]
+command = "listen-stub"
+args = ["{{{{payload}}}}"]
+transport = "arg"
+"#,
+        ),
+    )?;
+
+    for command_name in ["global-stub", "listen-stub"] {
+        let path = bin_dir.join(command_name);
+        fs::write(
+            &path,
+            format!(
+                r#"#!/bin/sh
+printf '%s' "{command_name}" > /dev/null
+"#
+            ),
+        )?;
+        let mut permissions = fs::metadata(&path)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&path, permissions)?;
+    }
+
+    init_repo_with_origin(&repo_root)?;
+
+    let viewer_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Viewer");
+        then.status(200).json_body(json!({
+            "data": {
+                "viewer": {
+                    "id": "viewer-1",
+                    "name": "Kames",
+                    "email": "sudo@example.com"
+                }
+            }
+        }));
+    });
+    let issues_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issues");
+        then.status(200).json_body(json!({
+            "data": {
+                "issues": {
+                    "nodes": []
+                }
+            }
+        }));
+    });
+
+    let current_path = std::env::var("PATH")?;
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "agents",
+            "listen",
+            "--once",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+            "--agent",
+            "global-stub",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Dashboard: terminal summary"))
+        .stdout(predicate::str::contains("Execution agent: global-stub"))
+        .stdout(predicate::str::contains("Execution agent: listen-stub").not());
+
+    assert!(viewer_mock.calls() >= 1);
+    assert!(issues_mock.calls() >= 1);
+
+    Ok(())
+}
+
 #[test]
 fn listen_sessions_inspect_surfaces_detail_pr_ref_without_url() -> Result<(), Box<dyn Error>> {
     let _guard = listen_test_lock();
