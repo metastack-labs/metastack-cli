@@ -1132,7 +1132,7 @@ fn listen_render_once_demo_can_snapshot_selected_session_detail() -> Result<(), 
             "--width",
             "200",
             "--height",
-            "44",
+            "56",
             "--root",
             repo_root.to_str().expect("temp path should be utf-8"),
         ])
@@ -1199,13 +1199,15 @@ fn agents_listen_help_omits_browser_dashboard_flags() {
         .assert()
         .success()
         .stdout(predicate::str::contains("--all-assignees"))
-        .stdout(predicate::str::contains("interactive session browser"))
+        .stdout(predicate::str::contains("Agent Sessions and Active Issues"))
         .stdout(predicate::str::contains(
-            "Press Enter on the selected session",
+            "Press Enter on a selected item to open its detail pane",
         ))
         .stdout(predicate::str::contains(
-            "Press P to pause the selected running session",
+            "Press P to pause a running session",
         ))
+        .stdout(predicate::str::contains("--hide-active-issues"))
+        .stdout(predicate::str::contains("--hide-preview"))
         .stdout(predicate::str::contains("--dashboard-port").not())
         .stdout(predicate::str::contains("http://").not());
 }
@@ -1219,7 +1221,7 @@ fn legacy_listen_help_omits_browser_dashboard_flags() {
         .success()
         .stdout(predicate::str::contains("Interactive dashboard:"))
         .stdout(predicate::str::contains(
-            "Press Enter on the selected session",
+            "Press Enter on a selected item to open its detail pane",
         ))
         .stdout(predicate::str::contains("meta listen sessions list"))
         .stdout(predicate::str::contains(
@@ -1994,9 +1996,7 @@ team = "PER"
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "Observed 1 Todo issue(s) from Linear.",
-        ))
+        .stdout(predicate::str::contains("Observed 1 Todo issue(s) and"))
         .stdout(predicate::str::contains("Dashboard: terminal summary"))
         .stdout(predicate::str::contains(
             "Skipped MET-401: missing required label `agent`.",
@@ -2007,7 +2007,7 @@ team = "PER"
         .stdout(predicate::str::contains("MET-402").not())
         .stdout(predicate::str::contains("PER-403").not());
 
-    issues_mock.assert();
+    assert_eq!(issues_mock.calls(), 2);
     Ok(())
 }
 

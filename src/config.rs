@@ -188,6 +188,12 @@ pub struct PlanningListenSettings {
     pub refresh_policy: Option<ListenRefreshPolicy>,
     pub instructions_path: Option<String>,
     pub poll_interval_seconds: Option<u64>,
+    /// Show or hide the Active Issues pane in the interactive dashboard.
+    #[serde(default)]
+    pub dashboard_active_issues: Option<bool>,
+    /// Show or hide the preview/detail pane in the interactive dashboard.
+    #[serde(default)]
+    pub dashboard_preview: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -388,6 +394,10 @@ struct PlanningListenSettingsWire {
     refresh_policy: Option<ListenRefreshPolicy>,
     instructions_path: Option<String>,
     poll_interval_seconds: Option<u64>,
+    #[serde(default)]
+    dashboard_active_issues: Option<bool>,
+    #[serde(default)]
+    dashboard_preview: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -534,6 +544,8 @@ impl<'de> Deserialize<'de> for PlanningListenSettings {
             refresh_policy: wire.refresh_policy,
             instructions_path: wire.instructions_path,
             poll_interval_seconds: wire.poll_interval_seconds,
+            dashboard_active_issues: wire.dashboard_active_issues,
+            dashboard_preview: wire.dashboard_preview,
         })
     }
 }
@@ -964,6 +976,16 @@ impl PlanningListenSettings {
     /// Returns the repo-scoped refresh policy, falling back to the built-in default.
     pub fn refresh_policy(&self) -> ListenRefreshPolicy {
         self.refresh_policy.unwrap_or_default()
+    }
+
+    /// Whether the Active Issues pane is enabled in the interactive dashboard (default: true).
+    pub fn dashboard_active_issues_enabled(&self) -> bool {
+        self.dashboard_active_issues.unwrap_or(true)
+    }
+
+    /// Whether the preview/detail pane is enabled in the interactive dashboard (default: true).
+    pub fn dashboard_preview_enabled(&self) -> bool {
+        self.dashboard_preview.unwrap_or(true)
     }
 }
 
