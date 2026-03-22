@@ -180,6 +180,73 @@ pub(crate) fn render_issue_row(
     ]))
 }
 
+/// Render a shared issue row with a leading prefix (e.g. checkbox) before the identifier.
+pub(crate) fn render_issue_row_with_prefix(
+    issue: &IssueSummary,
+    result: Option<&IssueSearchResult>,
+    sync_status: Option<&str>,
+    prefix: &str,
+) -> ListItem<'static> {
+    let identifier = highlighted_spans(
+        &issue.identifier,
+        result.map_or(&[], |value| value.highlights.identifier.as_slice()),
+        identifier_style(),
+    );
+    let title = highlighted_spans(
+        &issue.title,
+        result.map_or(&[], |value| value.highlights.title.as_slice()),
+        title_style(),
+    );
+
+    let mut first_line = Vec::new();
+    first_line.push(Span::raw(prefix.to_string()));
+    first_line.extend(identifier);
+    first_line.push(Span::raw("  "));
+    first_line.extend(title);
+
+    let state = issue_state_label(issue);
+    let project = issue_project_label(issue);
+    let mut detail_line = Vec::new();
+    detail_line.extend(label_value_spans(
+        "state",
+        highlighted_spans(
+            &state,
+            result.map_or(&[], |value| value.highlights.state.as_slice()),
+            state_style(issue),
+        ),
+    ));
+    detail_line.push(Span::raw("  "));
+    detail_line.extend(label_value_spans(
+        "priority",
+        vec![Span::styled(priority_label(issue), priority_style(issue))],
+    ));
+    detail_line.push(Span::raw("  "));
+    detail_line.extend(label_value_spans(
+        "project",
+        highlighted_spans(
+            &project,
+            result.map_or(&[], |value| value.highlights.project.as_slice()),
+            project_style(),
+        ),
+    ));
+
+    if let Some(sync_status) = sync_status {
+        detail_line.push(Span::raw("  "));
+        detail_line.extend(label_value_spans(
+            "sync",
+            vec![Span::styled(
+                sync_status.to_string(),
+                sync_status_style(sync_status),
+            )],
+        ));
+    }
+
+    ListItem::new(Text::from(vec![
+        Line::from(first_line),
+        Line::from(detail_line),
+    ]))
+}
+
 /// Render a shared issue preview with consistent semantic styling.
 pub(crate) fn render_issue_preview(
     issue: &IssueSummary,

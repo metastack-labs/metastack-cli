@@ -216,11 +216,15 @@ fn meta_backlog_spec_help_exposes_new_subcommand() {
         .stdout(predicate::str::contains("\n  spec "))
         .stdout(predicate::str::contains("\n  plan "))
         .stdout(predicate::str::contains("\n  dependencies "))
+        .stdout(predicate::str::contains("\n  release "))
         .stdout(predicate::str::contains("\n  tech "))
         .stdout(predicate::str::contains("\n  sync "))
         .stdout(predicate::str::contains("meta backlog spec --root ."))
         .stdout(predicate::str::contains(
             "meta backlog dependencies --root . --fetch --json",
+        ))
+        .stdout(predicate::str::contains(
+            "meta backlog release --root . --fetch --json",
         ))
         .stdout(predicate::str::contains("meta backlog tech MET-35"));
 }
