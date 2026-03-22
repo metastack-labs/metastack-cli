@@ -1,6 +1,8 @@
 mod dashboard;
+pub(crate) mod execution;
 pub(crate) mod state;
 mod store;
+mod workspace;
 
 use std::io;
 use std::io::IsTerminal;
