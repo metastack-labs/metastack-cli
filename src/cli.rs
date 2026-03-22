@@ -64,6 +64,10 @@ acceptance criteria, priority/estimate, and parent-child structure opportunities
 const AGENTS_HELP_EXAMPLES: &str = "\
 Examples:
   meta agents listen --team MET --project \"MetaStack CLI\"
+  meta agents orchestrate --root .
+  meta agents orchestrate --root . --staging-branch staging/release-v2
+  meta agents orchestrate --root . --render-once
+  meta agents orchestrate --root . --status --json
   meta agents workflows list --root .
   meta agents workflows run ticket-implementation --root .
   meta agents workflows run ticket-implementation --root . --no-interactive --param issue=MET-93
@@ -491,9 +495,30 @@ pub struct UpgradeArgs {
 pub enum AgentsCommands {
     /// Listen for eligible Linear issues and supervise them through the interactive session browser.
     Listen(ListenArgs),
+    /// Orchestrate backlog promotion, PR review coordination, and staging-branch integration.
+    Orchestrate(OrchestrateArgs),
     /// List, explain, and run reusable workflow playbooks.
     #[command(alias = "workflow")]
     Workflows(WorkflowsArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct OrchestrateArgs {
+    /// Repository root containing the `.metastack/` workspace.
+    #[arg(long, value_name = "PATH", default_value = ".")]
+    pub root: std::path::PathBuf,
+    /// Override the staging branch name instead of auto-generating one.
+    #[arg(long, value_name = "BRANCH")]
+    pub staging_branch: Option<String>,
+    /// Show the current orchestrator session status and exit.
+    #[arg(long, conflicts_with = "render_once")]
+    pub status: bool,
+    /// Render the status dashboard once and print the snapshot.
+    #[arg(long)]
+    pub render_once: bool,
+    /// Emit status output as JSON.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -2021,6 +2046,7 @@ impl Cli {
             },
             Command::Agents(args) => match &args.command {
                 AgentsCommands::Listen(args) if args.run.json => Some("agents.listen"),
+                AgentsCommands::Orchestrate(args) if args.json => Some("agents.orchestrate"),
                 _ => None,
             },
             Command::Linear(args) => match &args.command {
@@ -2138,6 +2164,7 @@ fn infer_agents_machine_output(tokens: &[String]) -> Option<&'static str> {
     let (command, rest) = tokens.split_first()?;
     match command.as_str() {
         "listen" if has_flag(rest, "--json") => Some("agents.listen"),
+        "orchestrate" if has_flag(rest, "--json") => Some("agents.orchestrate"),
         _ => None,
     }
 }
