@@ -82,12 +82,12 @@ Non-interactive mode:
 
 const LISTEN_HELP_EXAMPLES: &str = "\
 Interactive dashboard:
-  - The dashboard has two primary panes: Agent Sessions and Active Issues (In Progress from Linear)
+  - The dashboard has two primary panes: Agent Sessions and In Progress Issues - All Users (from Linear)
   - Tab switches focus between panes; Left/Right switches Active/Completed views within Agent Sessions
-  - Active Issues rows show short title, assignee, and open-PR indicator for each In Progress issue
+  - In Progress Issues rows show short title, assignee, and open-PR indicator for each In Progress issue
   - Press Enter on a selected item to open its detail pane; Esc or Backspace closes it
   - Session detail includes milestones, references, prompt context, log excerpts, and PR info
-  - Active Issue detail shows the issue description, assignee, PR URL, and Linear link
+  - In Progress Issue detail shows the issue description, assignee, PR URL, and Linear link
   - Use Up/Down (or j/k in vim mode) to navigate, PgUp/PgDn to scroll detail content
   - Press P to pause a running session, R to resume a paused session or retry a blocked one
   - Use --hide-active-issues or --hide-preview to simplify the dashboard layout
@@ -1361,7 +1361,7 @@ pub struct ListenRunArgs {
     /// Override the resolved built-in reasoning option for launched listen workers.
     #[arg(long)]
     pub reasoning: Option<String>,
-    /// Hide the Active Issues pane in the interactive dashboard.
+    /// Hide the In Progress Issues pane in the interactive dashboard.
     #[arg(long)]
     pub hide_active_issues: bool,
     /// Hide the preview/detail pane in the interactive dashboard.

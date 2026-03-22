@@ -1199,7 +1199,7 @@ fn agents_listen_help_omits_browser_dashboard_flags() {
         .assert()
         .success()
         .stdout(predicate::str::contains("--all-assignees"))
-        .stdout(predicate::str::contains("Agent Sessions and Active Issues"))
+        .stdout(predicate::str::contains("Agent Sessions and In Progress Issues"))
         .stdout(predicate::str::contains(
             "Press Enter on a selected item to open its detail pane",
         ))

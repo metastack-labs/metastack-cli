@@ -276,7 +276,7 @@ pub(crate) fn render(
         if active_issue_detail {
             (rows + 4).clamp(16, 24)
         } else {
-            (rows + 4).min(12)
+            (rows + 4).min(16)
         }
     } else {
         0
@@ -562,7 +562,7 @@ fn render_active_issues(
     state: &SessionBrowserState,
 ) {
     let is_focused = matches!(state.focus, FocusPane::ActiveIssues);
-    let block = panel(panel_title("Active Issues", is_focused));
+    let block = panel(panel_title("In Progress Issues - All Users", is_focused));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -1726,7 +1726,7 @@ mod tests {
 
         let snapshot = render_dashboard(&data, 140, 48).expect("snapshot should render");
 
-        assert!(snapshot.contains("Active Issues"));
+        assert!(snapshot.contains("In Progress Issues - All Users"));
         assert!(snapshot.contains("MET-22"));
         assert!(snapshot.contains("MET-25"));
         assert!(snapshot.contains("MET-30"));
@@ -1756,7 +1756,7 @@ mod tests {
 
         let snapshot = render_dashboard(&data, 140, 48).expect("snapshot should render");
 
-        assert!(!snapshot.contains("Active Issues"));
+        assert!(!snapshot.contains("In Progress Issues - All Users"));
         assert!(snapshot.contains("Agent Sessions"));
     }
 

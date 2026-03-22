@@ -47,7 +47,7 @@ impl From<IssueSummary> for PendingIssue {
     }
 }
 
-/// A Linear issue currently in `In Progress`, surfaced in the dashboard Active Issues pane.
+/// A Linear issue currently in `In Progress`, surfaced in the dashboard In Progress Issues pane.
 ///
 /// This is a stable, dashboard-facing view model that contains only the data the TUI needs
 /// to render each row and the drill-in detail view, without requiring additional service lookups.

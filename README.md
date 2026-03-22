@@ -1092,20 +1092,20 @@ The live terminal dashboard refreshes locally every second so session-state chan
 
 When built-in `codex` or `claude` workers emit structured usage telemetry, `meta agents listen` accumulates session-level input and output tokens across repeated turns. Runtime summaries, detail panes, and textual inspection output render `in`, `out`, and `total`, while the session table keeps a compact total-only token column. When exact counts are unavailable, the dashboard and textual summaries continue to show `n/a`.
 The interactive dashboard has two primary panes: **Agent Sessions** (active and completed listener
-workers) and **Active Issues** (all Linear issues currently in `In Progress`). The Active Issues
+workers) and **In Progress Issues - All Users** (all Linear issues currently in `In Progress`). The In Progress Issues
 pane displays each issue's short title, assignee, and whether an open GitHub PR is attached.
 GitHub enrichment considers only open PRs; closed or merged PRs are not shown as active
 attachments. Issues with no assignee or no PR attachment are handled gracefully.
 
-Use `Tab` to switch focus between the Agent Sessions and Active Issues panes. When focused on
+Use `Tab` to switch focus between the Agent Sessions and In Progress Issues panes. When focused on
 Agent Sessions, `Left`/`Right` (or `h`/`l` in vim mode) switch between Active and Completed
 session views. Press `Enter` on a selected item to open a detail/preview pane: session detail
-shows milestones, references, prompt context, PR state, and log excerpts; active issue detail
+shows milestones, references, prompt context, PR state, and log excerpts; In Progress Issue detail
 shows the full issue description, assignee, PR link, and Linear URL. `Esc` or `Backspace` closes
 detail mode, and `PgUp`/`PgDn` scrolls the focused detail pane.
 
 Both panes can be independently hidden via CLI flags or config:
-- `--hide-active-issues` hides the Active Issues pane for this run
+- `--hide-active-issues` hides the In Progress Issues pane for this run
 - `--hide-preview` hides the preview/detail pane for this run
 - Set `listen.dashboard_active_issues` or `listen.dashboard_preview` to `false` in
   `.metastack/meta.json` to change the default

@@ -188,7 +188,7 @@ pub struct PlanningListenSettings {
     pub refresh_policy: Option<ListenRefreshPolicy>,
     pub instructions_path: Option<String>,
     pub poll_interval_seconds: Option<u64>,
-    /// Show or hide the Active Issues pane in the interactive dashboard.
+    /// Show or hide the In Progress Issues pane in the interactive dashboard.
     #[serde(default)]
     pub dashboard_active_issues: Option<bool>,
     /// Show or hide the preview/detail pane in the interactive dashboard.
@@ -978,7 +978,7 @@ impl PlanningListenSettings {
         self.refresh_policy.unwrap_or_default()
     }
 
-    /// Whether the Active Issues pane is enabled in the interactive dashboard (default: true).
+    /// Whether the In Progress Issues pane is enabled in the interactive dashboard (default: true).
     pub fn dashboard_active_issues_enabled(&self) -> bool {
         self.dashboard_active_issues.unwrap_or(true)
     }
