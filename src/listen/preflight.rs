@@ -459,17 +459,29 @@ mod tests {
     }
 
     fn route_app_config(provider: &str) -> AppConfig {
+        let mut commands = BTreeMap::from([(
+            "stub".to_string(),
+            AgentCommandConfig {
+                command: "stub-agent".to_string(),
+                args: vec!["{{payload}}".to_string()],
+                transport: PromptTransport::Arg,
+            },
+        )]);
+        if provider == "route-stub" {
+            commands.insert(
+                provider.to_string(),
+                AgentCommandConfig {
+                    command: "route-stub-agent".to_string(),
+                    args: vec!["{{payload}}".to_string()],
+                    transport: PromptTransport::Arg,
+                },
+            );
+        }
+
         AppConfig {
             agents: AgentSettings {
                 default_agent: Some("codex".to_string()),
-                commands: BTreeMap::from([(
-                    "stub".to_string(),
-                    AgentCommandConfig {
-                        command: "stub-agent".to_string(),
-                        args: vec!["{{payload}}".to_string()],
-                        transport: PromptTransport::Arg,
-                    },
-                )]),
+                commands,
                 routing: AgentRoutingSettings {
                     commands: BTreeMap::from([(
                         AGENT_ROUTE_AGENTS_LISTEN.to_string(),
@@ -750,7 +762,7 @@ enabled = true
     fn listen_provider_preflight_uses_listen_route_agent() -> Result<()> {
         let temp = tempdir()?;
         let report = run_listen_provider_preflight(
-            &route_app_config("claude"),
+            &route_app_config("route-stub"),
             &PlanningMeta::default(),
             ListenPreflightRequest {
                 working_dir: temp.path(),
@@ -761,7 +773,7 @@ enabled = true
             },
         )?;
 
-        assert_eq!(report.provider(), "claude");
+        assert_eq!(report.provider(), "route-stub");
         Ok(())
     }
 
@@ -769,7 +781,7 @@ enabled = true
     fn listen_provider_preflight_prefers_explicit_agent_override() -> Result<()> {
         let temp = tempdir()?;
         let report = run_listen_provider_preflight(
-            &route_app_config("claude"),
+            &route_app_config("route-stub"),
             &PlanningMeta::default(),
             ListenPreflightRequest {
                 working_dir: temp.path(),
