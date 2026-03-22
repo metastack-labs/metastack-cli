@@ -35,6 +35,7 @@ Examples:
   meta backlog dependencies --root . --fetch --json
   meta backlog dependencies --root . --fetch --apply --yes
   meta backlog tech MET-35
+  meta backlog release --root . --name sprint-1 --batch-size 5
   meta backlog split MET-35
   meta backlog sync status
   meta backlog sync link MET-35 --entry manual-notes --pull
