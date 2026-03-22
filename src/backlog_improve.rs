@@ -5,7 +5,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use crossterm::cursor::{Hide, Show};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, KeyCode, KeyEventKind, KeyModifiers,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -34,17 +37,20 @@ use crate::config::AGENT_ROUTE_BACKLOG_IMPROVE;
 use crate::fs::{
     PlanningPaths, canonicalize_existing_dir, display_path, ensure_dir, write_text_file,
 };
+use crate::linear::browser::{
+    IssueSearchResult, render_issue_preview, render_issue_row, search_issues,
+};
 use crate::linear::{
     IssueEditSpec, IssueListFilters, IssueSummary, LinearService, ReqwestLinearClient,
 };
 use crate::progress::{LoadingPanelData, SPINNER_FRAMES, render_loading_panel};
 use crate::repo_target::RepoTarget;
 use crate::scaffold::ensure_planning_layout;
-use crate::text_diff::render_text_diff;
 use crate::tui::fields::InputFieldState;
+use crate::tui::scroll::{ScrollState, plain_text, scrollable_content_paragraph, wrapped_rows};
 use crate::tui::theme::{
-    Tone, badge, emphasis_style, empty_state, key_hints, label_style, list, muted_style,
-    panel_title, paragraph,
+    Tone, badge, emphasis_style, empty_state, key_hints, label_style, list, muted_style, panel,
+    panel_title, paragraph, tone_style,
 };
 use crate::{LinearCommandContext, load_linear_command_context};
 
@@ -179,6 +185,12 @@ struct ImprovementQuestionAnswer {
     answer: InputFieldState,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImprovementReviewFocus {
+    Recommendation,
+    Proposal,
+}
+
 #[derive(Debug, Clone)]
 struct ImprovementReviewApp {
     issue_position: usize,
@@ -188,6 +200,9 @@ struct ImprovementReviewApp {
     questions: Vec<ImprovementQuestionAnswer>,
     selected_question: usize,
     question_round: usize,
+    review_focus: ImprovementReviewFocus,
+    recommendation_scroll: ScrollState,
+    proposal_scroll: ScrollState,
     error: Option<String>,
 }
 
@@ -333,11 +348,9 @@ struct ImprovementIssueSelection {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ImprovementDashboardAction {
-    Up,
-    Down,
-    Toggle,
-    Enter,
+enum ImprovementPickerFocus {
+    List,
+    Preview,
 }
 
 #[derive(Debug, Clone)]
@@ -348,9 +361,12 @@ enum ImprovementDashboardExit {
 
 #[derive(Debug, Clone)]
 struct ImprovementDashboardApp {
+    query: InputFieldState,
     issues: Vec<IssueSummary>,
-    issue_index: usize,
+    cursor: usize,
     selected: Vec<bool>,
+    focus: ImprovementPickerFocus,
+    preview_scroll: ScrollState,
     completed: Option<ImprovementIssueSelection>,
 }
 
@@ -449,12 +465,21 @@ async fn run_interactive_improvement_session(
 ) -> Result<String> {
     let mut stdout = io::stdout();
     enable_raw_mode().context("failed to enable raw mode for backlog improve review session")?;
-    execute!(stdout, EnterAlternateScreen, Hide)
-        .context("failed to enter alternate screen for backlog improve review session")?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        Hide,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )
+    .context("failed to enter alternate screen for backlog improve review session")?;
     let _cleanup = ImprovementReviewCleanup;
 
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
+
+    let instructions = run_instruction_prompt(&mut terminal)?;
+
     let mut reports = Vec::with_capacity(issues.len());
 
     for (index, issue) in issues.iter().enumerate() {
@@ -467,6 +492,7 @@ async fn run_interactive_improvement_session(
             &related_backlog_issues,
             args,
             &mut continuation,
+            instructions.as_deref(),
             ImprovementReviewProgress {
                 issue_position: index + 1,
                 issue_total: issues.len(),
@@ -551,6 +577,7 @@ async fn run_interactive_improvement_session(
                         args,
                         &answers,
                         &mut continuation,
+                        instructions.as_deref(),
                         ImprovementReviewProgress {
                             issue_position: index + 1,
                             issue_total: issues.len(),
@@ -661,41 +688,99 @@ fn run_improvement_dashboard(issues: Vec<IssueSummary>) -> Result<ImprovementDas
 
     let mut stdout = io::stdout();
     enable_raw_mode().context("failed to enable raw mode for backlog improve dashboard")?;
-    execute!(stdout, EnterAlternateScreen)
-        .context("failed to enter alternate screen for backlog improve dashboard")?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )
+    .context("failed to enter alternate screen for backlog improve dashboard")?;
     let _cleanup = ImprovementDashboardCleanup;
 
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     let mut app = ImprovementDashboardApp::new(issues);
+    let mut preview_viewport = Rect::default();
 
     loop {
-        terminal.draw(|frame| render_improvement_dashboard(frame, &app))?;
+        terminal.draw(|frame| {
+            preview_viewport = render_improvement_dashboard(frame, &app);
+        })?;
 
-        if event::poll(Duration::from_millis(250))?
-            && let Event::Key(key) = event::read()?
-            && key.kind == KeyEventKind::Press
-        {
-            match key.code {
+        if !event::poll(Duration::from_millis(250))? {
+            continue;
+        }
+
+        match event::read()? {
+            Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => {
                     return Ok(ImprovementDashboardExit::Cancelled);
                 }
+                KeyCode::Tab => {
+                    app.focus = match app.focus {
+                        ImprovementPickerFocus::List => ImprovementPickerFocus::Preview,
+                        ImprovementPickerFocus::Preview => ImprovementPickerFocus::List,
+                    };
+                }
                 KeyCode::Up => {
-                    let _ = app.apply(ImprovementDashboardAction::Up);
-                }
-                KeyCode::Down => {
-                    let _ = app.apply(ImprovementDashboardAction::Down);
-                }
-                KeyCode::Char(' ') => {
-                    let _ = app.apply(ImprovementDashboardAction::Toggle);
-                }
-                KeyCode::Enter => {
-                    if let Some(selection) = app.apply(ImprovementDashboardAction::Enter) {
-                        return Ok(ImprovementDashboardExit::Selected(selection));
+                    if app.focus == ImprovementPickerFocus::Preview {
+                        let _ = app.preview_scroll.apply_key_code_in_viewport(
+                            KeyCode::Up,
+                            preview_viewport,
+                            app.preview_content_rows(preview_viewport.width.max(1)),
+                        );
+                    } else {
+                        app.move_up();
                     }
                 }
-                _ => {}
+                KeyCode::Down => {
+                    if app.focus == ImprovementPickerFocus::Preview {
+                        let _ = app.preview_scroll.apply_key_code_in_viewport(
+                            KeyCode::Down,
+                            preview_viewport,
+                            app.preview_content_rows(preview_viewport.width.max(1)),
+                        );
+                    } else {
+                        app.move_down();
+                    }
+                }
+                KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End
+                    if app.focus == ImprovementPickerFocus::Preview =>
+                {
+                    let _ = app.preview_scroll.apply_key_in_viewport(
+                        key,
+                        preview_viewport,
+                        app.preview_content_rows(preview_viewport.width.max(1)),
+                    );
+                }
+                KeyCode::Char(' ') if app.focus == ImprovementPickerFocus::List => {
+                    app.toggle();
+                }
+                KeyCode::Enter => {
+                    let selection = app.select();
+                    return Ok(ImprovementDashboardExit::Selected(selection));
+                }
+                _ => {
+                    if app.focus == ImprovementPickerFocus::List && app.query.handle_key(key) {
+                        app.cursor = 0;
+                        app.preview_scroll.reset();
+                    }
+                }
+            },
+            Event::Paste(text) => {
+                if app.focus == ImprovementPickerFocus::List && app.query.paste(&text) {
+                    app.cursor = 0;
+                    app.preview_scroll.reset();
+                }
             }
+            Event::Mouse(mouse) => {
+                let _ = app.preview_scroll.apply_mouse_in_viewport(
+                    mouse,
+                    preview_viewport,
+                    app.preview_content_rows(preview_viewport.width.max(1)),
+                );
+            }
+            _ => {}
         }
     }
 }
@@ -705,30 +790,30 @@ fn render_improvement_dashboard_once(
     issues: Vec<IssueSummary>,
     width: u16,
     height: u16,
-    actions: Vec<ImprovementDashboardAction>,
 ) -> Result<String> {
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend)?;
-    let mut app = ImprovementDashboardApp::new(issues);
-    for action in actions {
-        if let Some(selection) = app.apply(action) {
-            app.completed = Some(selection);
-            break;
-        }
-    }
-    terminal.draw(|frame| render_improvement_dashboard(frame, &app))?;
+    let app = ImprovementDashboardApp::new(issues);
+    terminal.draw(|frame| {
+        render_improvement_dashboard(frame, &app);
+    })?;
     Ok(improvement_dashboard_snapshot(terminal.backend()))
 }
 
-fn render_improvement_dashboard(frame: &mut Frame<'_>, app: &ImprovementDashboardApp) {
+/// Renders the search-first improvement dashboard and returns the preview pane viewport rect.
+fn render_improvement_dashboard(frame: &mut Frame<'_>, app: &ImprovementDashboardApp) -> Rect {
     let outer = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(6), Constraint::Min(0)])
+        .constraints([Constraint::Length(4), Constraint::Min(0)])
         .split(frame.area());
     let body = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(48), Constraint::Percentage(52)])
+        .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
         .split(outer[1]);
+    let left_split = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(0)])
+        .split(body[0]);
 
     let header = paragraph(
         Text::from(vec![
@@ -745,11 +830,8 @@ fn render_improvement_dashboard(frame: &mut Frame<'_>, app: &ImprovementDashboar
                 ),
             ]),
             Line::from(Span::styled(app.summary_line(), emphasis_style())),
-            Line::from(
-                "Press Enter to review all listed issues unless you explicitly toggle a subset.",
-            ),
             key_hints(&[
-                ("Up/Down", "move"),
+                ("Tab", "focus"),
                 ("Space", "select"),
                 ("Enter", "start review"),
                 ("Esc", "cancel"),
@@ -759,81 +841,66 @@ fn render_improvement_dashboard(frame: &mut Frame<'_>, app: &ImprovementDashboar
     );
     frame.render_widget(header, outer[0]);
 
-    render_improvement_issue_list(frame, body[0], app);
-    render_improvement_issue_preview(frame, body[1], app);
+    let list_focused = app.focus == ImprovementPickerFocus::List;
+    let query_block = panel(panel_title("Search", list_focused));
+    let query_inner = query_block.inner(left_split[0]);
+    let rendered_query = app.query.render_with_width(
+        "Search by identifier, title, or description...",
+        list_focused,
+        query_inner.width,
+    );
+    let query_widget = rendered_query.paragraph(query_block);
+    frame.render_widget(query_widget, left_split[0]);
+    if list_focused {
+        rendered_query.set_cursor(frame, query_inner);
+    }
+
+    let preview_area = body[1];
+    render_improvement_issue_list(frame, left_split[1], app);
+    render_improvement_issue_preview(frame, preview_area, app);
+    preview_area
 }
 
 fn render_improvement_issue_list(frame: &mut Frame<'_>, area: Rect, app: &ImprovementDashboardApp) {
-    let title = panel_title(format!("Issue Queue ({})", app.issues.len()), true);
-    let items = if app.issues.is_empty() {
+    let filtered = dashboard_search_results(app);
+    let title = panel_title(
+        format!("Issues ({}/{})", filtered.len(), app.issues.len()),
+        app.focus == ImprovementPickerFocus::List,
+    );
+    let items = if filtered.is_empty() {
         vec![ListItem::new(empty_state(
-            "No backlog issues matched the requested state.",
-            "Adjust the state filter or backlog scope and try again.",
+            "No issues match the current search.",
+            "Adjust the search query or clear it to see all issues.",
         ))]
     } else {
-        app.issues
+        filtered
             .iter()
-            .enumerate()
-            .map(|(index, issue)| {
-                let explicitly_selected = app.selected.get(index).copied().unwrap_or(false);
-                let (state_label, tone) = if app.any_selected() {
-                    if explicitly_selected {
-                        ("selected", Tone::Accent)
+            .filter_map(|result| {
+                app.issues.get(result.issue_index).map(|issue| {
+                    let explicitly_selected = app
+                        .selected
+                        .get(result.issue_index)
+                        .copied()
+                        .unwrap_or(false);
+                    let status_label = if app.any_selected() {
+                        if explicitly_selected {
+                            Some("selected")
+                        } else {
+                            Some("skipped")
+                        }
                     } else {
-                        ("skipped", Tone::Muted)
-                    }
-                } else {
-                    ("default", Tone::Info)
-                };
-                let labels = if issue.labels.is_empty() {
-                    "none".to_string()
-                } else {
-                    issue
-                        .labels
-                        .iter()
-                        .map(|label| label.name.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                };
-                ListItem::new(Text::from(vec![
-                    Line::from(vec![
-                        badge(state_label, tone),
-                        Span::raw(" "),
-                        Span::styled(
-                            format!("{} {}", issue.identifier, issue.title),
-                            emphasis_style(),
-                        ),
-                    ]),
-                    Line::from(vec![
-                        Span::styled("Priority ", label_style()),
-                        Span::raw(
-                            issue
-                                .priority
-                                .map(|value| value.to_string())
-                                .unwrap_or_else(|| "None".to_string()),
-                        ),
-                        Span::styled("  Estimate ", label_style()),
-                        Span::raw(
-                            issue
-                                .estimate
-                                .map(|value| value.to_string())
-                                .unwrap_or_else(|| "None".to_string()),
-                        ),
-                    ]),
-                    Line::from(Span::styled(format!("Labels {labels}"), muted_style())),
-                ]))
+                        None
+                    };
+                    render_issue_row(issue, Some(result), status_label)
+                })
             })
             .collect::<Vec<_>>()
     };
 
     let mut state = ListState::default();
-    state.select(Some(
-        app.issue_index.min(app.issues.len().saturating_sub(1)),
-    ));
-    let list = list(items, title)
-        .highlight_style(Style::default())
-        .highlight_symbol(">> ");
-    frame.render_stateful_widget(list, area, &mut state);
+    state.select(Some(app.cursor.min(filtered.len().saturating_sub(1))));
+    let list_widget = list(items, title);
+    frame.render_stateful_widget(list_widget, area, &mut state);
 }
 
 fn render_improvement_issue_preview(
@@ -841,72 +908,46 @@ fn render_improvement_issue_preview(
     area: Rect,
     app: &ImprovementDashboardApp,
 ) {
-    let Some(issue) = app.selected_issue() else {
-        let preview = paragraph(
+    let filtered = dashboard_search_results(app);
+    let preview_focused = app.focus == ImprovementPickerFocus::Preview;
+    let preview = filtered
+        .get(app.cursor)
+        .and_then(|result| {
+            app.issues.get(result.issue_index).map(|issue| {
+                let status_label = if app
+                    .selected
+                    .get(result.issue_index)
+                    .copied()
+                    .unwrap_or(false)
+                {
+                    Some("selected")
+                } else {
+                    None
+                };
+                render_issue_preview(
+                    issue,
+                    Some(result),
+                    status_label,
+                    "_No description provided._",
+                )
+            })
+        })
+        .unwrap_or_else(|| {
             empty_state(
                 "No issue is available to preview.",
-                "Load backlog issues first, then choose what to review.",
-            ),
-            panel_title("Issue Preview", false),
-        );
-        frame.render_widget(preview, area);
-        return;
-    };
-
-    let description = issue
-        .description
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("_No description provided._");
-    let labels = if issue.labels.is_empty() {
-        "none".to_string()
-    } else {
-        issue
-            .labels
-            .iter()
-            .map(|label| label.name.as_str())
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    let preview = paragraph(
-        Text::from(vec![
-            Line::from(vec![
-                Span::styled("Identifier ", label_style()),
-                Span::raw(issue.identifier.clone()),
-            ]),
-            Line::from(vec![
-                Span::styled("State ", label_style()),
-                Span::raw(
-                    issue
-                        .state
-                        .as_ref()
-                        .map(|state| state.name.clone())
-                        .unwrap_or_else(|| "Unknown".to_string()),
-                ),
-                Span::styled("  Parent ", label_style()),
-                Span::raw(
-                    issue
-                        .parent
-                        .as_ref()
-                        .map(|parent| parent.identifier.clone())
-                        .unwrap_or_else(|| "None".to_string()),
-                ),
-            ]),
-            Line::from(vec![
-                Span::styled("Labels ", label_style()),
-                Span::raw(labels),
-            ]),
-            Line::from(""),
-            Line::from(Span::styled("Description", label_style())),
-            Line::from(description.to_string()),
-        ]),
-        panel_title("Issue Preview", false),
+                "Type to search or clear the query to see all issues.",
+            )
+        });
+    let widget = scrollable_content_paragraph(
+        preview,
+        panel_title("Issue Preview", preview_focused),
+        &app.preview_scroll,
     )
-    .wrap(ratatui::widgets::Wrap { trim: false });
-    frame.render_widget(preview, area);
+    .wrap(Wrap { trim: false });
+    frame.render_widget(widget, area);
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn analyze_issue_with_loading(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     root: &Path,
@@ -914,6 +955,7 @@ async fn analyze_issue_with_loading(
     related_backlog_issues: &[IssueSummary],
     args: &BacklogImproveArgs,
     continuation: &mut Option<AgentContinuation>,
+    instructions: Option<&str>,
     progress: ImprovementReviewProgress,
 ) -> Result<ImprovementIssueRun> {
     let detail = if progress.question_round == 0 {
@@ -951,10 +993,12 @@ async fn analyze_issue_with_loading(
         related_backlog_issues,
         args,
         Some(continuation),
+        instructions,
         None,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn continue_issue_with_follow_up_loading(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     root: &Path,
@@ -962,6 +1006,7 @@ fn continue_issue_with_follow_up_loading(
     args: &BacklogImproveArgs,
     answers: &[(String, String)],
     continuation: &mut Option<AgentContinuation>,
+    instructions: Option<&str>,
     progress: ImprovementReviewProgress,
 ) -> Result<ImprovementIssueRun> {
     terminal.draw(|frame| {
@@ -998,7 +1043,7 @@ fn continue_issue_with_follow_up_loading(
             route_key: Some(AGENT_ROUTE_BACKLOG_IMPROVE.to_string()),
             agent: args.agent.clone(),
             prompt,
-            instructions: None,
+            instructions: instructions.map(str::to_string),
             model: args.model.clone(),
             reasoning: args.reasoning.clone(),
             transport: None,
@@ -1057,15 +1102,19 @@ fn run_improvement_review_dashboard(
         output.clone(),
         question_round,
     );
+    let mut review_viewports = ReviewViewports::default();
 
     loop {
-        terminal.draw(|frame| render_improvement_review(frame, &app))?;
+        terminal.draw(|frame| {
+            review_viewports = render_improvement_review(frame, &app);
+        })?;
 
-        if event::poll(Duration::from_millis(250))?
-            && let Event::Key(key) = event::read()?
-            && key.kind == KeyEventKind::Press
-        {
-            match key.code {
+        if !event::poll(Duration::from_millis(250))? {
+            continue;
+        }
+
+        match event::read()? {
+            Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
                 KeyCode::Char('q') | KeyCode::Esc if app.questions.is_empty() => {
                     return Ok(ImprovementReviewExit::Cancelled);
                 }
@@ -1073,6 +1122,46 @@ fn run_improvement_review_dashboard(
                     app.error = None;
                     app.questions.clear();
                     app.selected_question = 0;
+                }
+                KeyCode::Tab if app.questions.is_empty() => {
+                    app.review_focus = match app.review_focus {
+                        ImprovementReviewFocus::Recommendation => ImprovementReviewFocus::Proposal,
+                        ImprovementReviewFocus::Proposal => ImprovementReviewFocus::Recommendation,
+                    };
+                }
+                KeyCode::Tab if !app.questions.is_empty() => {
+                    app.selected_question = (app.selected_question + 1) % app.questions.len();
+                }
+                KeyCode::BackTab if !app.questions.is_empty() => {
+                    app.selected_question = app
+                        .selected_question
+                        .checked_sub(1)
+                        .unwrap_or(app.questions.len().saturating_sub(1));
+                }
+                KeyCode::Up
+                | KeyCode::Down
+                | KeyCode::PageUp
+                | KeyCode::PageDown
+                | KeyCode::Home
+                | KeyCode::End
+                    if app.questions.is_empty() =>
+                {
+                    match app.review_focus {
+                        ImprovementReviewFocus::Recommendation => {
+                            let _ = app.recommendation_scroll.apply_key_in_viewport(
+                                key,
+                                review_viewports.left,
+                                app.recommendation_content_rows(review_viewports.left.width),
+                            );
+                        }
+                        ImprovementReviewFocus::Proposal => {
+                            let _ = app.proposal_scroll.apply_key_in_viewport(
+                                key,
+                                review_viewports.right,
+                                app.proposal_content_rows(review_viewports.right.width),
+                            );
+                        }
+                    }
                 }
                 KeyCode::Enter
                     if !app.questions.is_empty()
@@ -1133,7 +1222,7 @@ fn run_improvement_review_dashboard(
                         apply_requested: false,
                     });
                 }
-                KeyCode::Char('r') | KeyCode::Char('s') => {
+                KeyCode::Char('r') | KeyCode::Char('s') if app.questions.is_empty() => {
                     return Ok(ImprovementReviewExit::Accepted {
                         decision: if key.code == KeyCode::Char('s') {
                             format!("skipped_{}", app.output.route().as_str())
@@ -1143,15 +1232,6 @@ fn run_improvement_review_dashboard(
                         apply_requested: false,
                     });
                 }
-                KeyCode::Tab if !app.questions.is_empty() => {
-                    app.selected_question = (app.selected_question + 1) % app.questions.len();
-                }
-                KeyCode::BackTab if !app.questions.is_empty() => {
-                    app.selected_question = app
-                        .selected_question
-                        .checked_sub(1)
-                        .unwrap_or(app.questions.len().saturating_sub(1));
-                }
                 _ if !app.questions.is_empty() => {
                     let input_width = 60;
                     if let Some(selected) = app.questions.get_mut(app.selected_question) {
@@ -1159,18 +1239,46 @@ fn run_improvement_review_dashboard(
                     }
                 }
                 _ => {}
+            },
+            Event::Mouse(mouse) => {
+                if app.questions.is_empty() {
+                    match app.review_focus {
+                        ImprovementReviewFocus::Recommendation => {
+                            let _ = app.recommendation_scroll.apply_mouse_in_viewport(
+                                mouse,
+                                review_viewports.left,
+                                app.recommendation_content_rows(review_viewports.left.width),
+                            );
+                        }
+                        ImprovementReviewFocus::Proposal => {
+                            let _ = app.proposal_scroll.apply_mouse_in_viewport(
+                                mouse,
+                                review_viewports.right,
+                                app.proposal_content_rows(review_viewports.right.width),
+                            );
+                        }
+                    }
+                }
             }
+            _ => {}
         }
     }
 }
 
-fn render_improvement_review(frame: &mut Frame<'_>, app: &ImprovementReviewApp) {
+#[derive(Debug, Clone, Copy, Default)]
+struct ReviewViewports {
+    left: Rect,
+    right: Rect,
+}
+
+/// Renders the improvement review dashboard and returns viewport rects for scroll handling.
+fn render_improvement_review(frame: &mut Frame<'_>, app: &ImprovementReviewApp) -> ReviewViewports {
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(5),
+            Constraint::Length(4),
             Constraint::Min(0),
-            Constraint::Length(9),
+            Constraint::Length(7),
         ])
         .split(frame.area());
     let body = Layout::default()
@@ -1199,17 +1307,23 @@ fn render_improvement_review(frame: &mut Frame<'_>, app: &ImprovementReviewApp) 
     );
     frame.render_widget(header, outer[0]);
 
-    let left = paragraph(
+    let left_focused =
+        app.questions.is_empty() && app.review_focus == ImprovementReviewFocus::Recommendation;
+    let left = scrollable_content_paragraph(
         render_review_overview(app),
-        panel_title("Recommendation", false),
+        panel_title("Findings & Recommendation", left_focused),
+        &app.recommendation_scroll,
     )
     .wrap(Wrap { trim: false });
     frame.render_widget(left, body[0]);
 
+    let right_focused =
+        app.questions.is_empty() && app.review_focus == ImprovementReviewFocus::Proposal;
     let right = if app.questions.is_empty() {
-        paragraph(
-            render_review_preview(app),
-            panel_title("Proposal Preview", false),
+        scrollable_content_paragraph(
+            render_review_comparison(app),
+            panel_title("Before / After", right_focused),
+            &app.proposal_scroll,
         )
         .wrap(Wrap { trim: false })
     } else {
@@ -1224,6 +1338,11 @@ fn render_improvement_review(frame: &mut Frame<'_>, app: &ImprovementReviewApp) 
     let footer = paragraph(render_decision_panel(app), panel_title("Decision", false))
         .wrap(Wrap { trim: false });
     frame.render_widget(footer, outer[2]);
+
+    ReviewViewports {
+        left: body[0],
+        right: body[1],
+    }
 }
 
 fn review_key_hints(
@@ -1242,6 +1361,7 @@ fn review_key_hints(
         match route {
             ImprovementRoute::ReadyForUpdate => {
                 vec![
+                    ("Tab", "focus"),
                     ("Enter", "apply"),
                     ("s", "skip"),
                     ("r", "reject"),
@@ -1250,6 +1370,7 @@ fn review_key_hints(
             }
             ImprovementRoute::NeedsQuestions => {
                 vec![
+                    ("Tab", "focus"),
                     ("Enter", "answer questions"),
                     ("s", "skip"),
                     ("r", "reject"),
@@ -1257,6 +1378,7 @@ fn review_key_hints(
                 ]
             }
             _ => vec![
+                ("Tab", "focus"),
                 ("Enter", "accept"),
                 ("s", "skip"),
                 ("r", "reject"),
@@ -1271,18 +1393,12 @@ fn render_decision_panel(app: &ImprovementReviewApp) -> Text<'static> {
     let status = if let Some(error) = app.error.as_deref() {
         error.to_string()
     } else if app.questions.is_empty() {
-        format!(
-            "Primary action: Enter will {}. Use `s` to skip this issue without accepting the recommendation, or `r` to reject the recommendation.",
-            primary.verb
-        )
+        format!("Enter will {}.", primary.verb)
     } else {
-        let progress = format!(
-            "Question {} of {}",
+        format!(
+            "Question {}/{}. Enter saves the current answer and advances.",
             app.selected_question + 1,
             app.questions.len()
-        );
-        format!(
-            "{progress}. Enter saves the current answer and advances. On the last answered question, Enter reruns the agent with your answers."
         )
     };
 
@@ -1291,25 +1407,15 @@ fn render_decision_panel(app: &ImprovementReviewApp) -> Text<'static> {
             badge("enter", Tone::Accent),
             Span::raw(" "),
             Span::styled(primary.title.to_string(), emphasis_style()),
+            Span::raw("  "),
+            badge("s", Tone::Muted),
+            Span::raw(" Skip  "),
+            badge("r", Tone::Danger),
+            Span::raw(" Reject"),
         ]),
         Line::from(primary.detail.to_string()),
         Line::from(""),
-        Line::from(vec![
-            badge("s", Tone::Muted),
-            Span::raw(" "),
-            Span::raw(
-                "Skip this issue for now. Keep the artifacts, make no local or Linear changes, and move to the next issue.",
-            ),
-        ]),
-        Line::from(vec![
-            badge("r", Tone::Danger),
-            Span::raw(" "),
-            Span::raw(
-                "Reject the recommendation. Record that you chose not to act on this agent guidance and move to the next issue.",
-            ),
-        ]),
-        Line::from(""),
-        Line::from(status),
+        Line::from(Span::styled(status, muted_style())),
     ])
 }
 
@@ -1390,61 +1496,159 @@ fn render_review_overview(app: &ImprovementReviewApp) -> Text<'static> {
     Text::from(lines)
 }
 
-fn render_review_preview(app: &ImprovementReviewApp) -> Text<'static> {
+fn render_review_comparison(app: &ImprovementReviewApp) -> Text<'static> {
+    let original_title = app.issue.title.clone();
+    let proposed_title = app
+        .output
+        .proposal
+        .title
+        .clone()
+        .unwrap_or_else(|| original_title.clone());
+    let original_description = app
+        .issue
+        .description
+        .clone()
+        .unwrap_or_else(|| "_No description provided._".to_string());
     let proposed_description = app
         .output
         .proposal
         .description
         .clone()
-        .unwrap_or_else(|| app.issue.description.clone().unwrap_or_default());
-    Text::from(vec![
+        .unwrap_or_else(|| original_description.clone());
+    let original_priority = app
+        .issue
+        .priority
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "None".to_string());
+    let proposed_priority = app
+        .output
+        .proposal
+        .priority
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| original_priority.clone());
+    let original_estimate = app
+        .issue
+        .estimate
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "None".to_string());
+    let proposed_estimate = app
+        .output
+        .proposal
+        .estimate
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| original_estimate.clone());
+    let original_labels = render_labels(&app.issue);
+    let proposed_labels = app
+        .output
+        .proposal
+        .labels
+        .as_ref()
+        .map(|l| l.join(", "))
+        .unwrap_or_else(|| original_labels.clone());
+
+    let changed = tone_style(Tone::Success);
+    let muted = muted_style();
+
+    let mut lines = vec![
+        Line::from(vec![
+            badge("original", Tone::Muted),
+            Span::raw(" "),
+            Span::styled("Current issue content", label_style()),
+        ]),
         Line::from(vec![
             Span::styled("Title ", label_style()),
-            Span::raw(
-                app.output
-                    .proposal
-                    .title
-                    .clone()
-                    .unwrap_or_else(|| app.issue.title.clone()),
-            ),
+            Span::styled(original_title.clone(), muted),
         ]),
         Line::from(vec![
             Span::styled("Priority ", label_style()),
-            Span::raw(
-                app.output
-                    .proposal
-                    .priority
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| {
-                        app.issue
-                            .priority
-                            .map(|value| value.to_string())
-                            .unwrap_or_else(|| "None".to_string())
-                    }),
-            ),
+            Span::styled(original_priority.clone(), muted),
             Span::styled("  Estimate ", label_style()),
-            Span::raw(
-                app.output
-                    .proposal
-                    .estimate
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| {
-                        app.issue
-                            .estimate
-                            .map(|value| value.to_string())
-                            .unwrap_or_else(|| "None".to_string())
-                    }),
-            ),
+            Span::styled(original_estimate.clone(), muted),
+        ]),
+        Line::from(vec![
+            Span::styled("Labels ", label_style()),
+            Span::styled(original_labels.clone(), muted),
         ]),
         Line::from(""),
-        Line::from(Span::styled("Description diff", label_style())),
-        Line::from(render_text_diff(
-            "linear/current",
-            "linear/proposed",
-            app.issue.description.as_deref().unwrap_or_default(),
-            &proposed_description,
-        )),
-    ])
+    ];
+    for line in original_description.lines() {
+        lines.push(Line::from(Span::styled(line.to_string(), muted)));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(""));
+
+    lines.push(Line::from(vec![
+        badge("proposed", Tone::Accent),
+        Span::raw(" "),
+        Span::styled("Proposed changes", label_style()),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Title ", label_style()),
+        Span::styled(
+            proposed_title.clone(),
+            if proposed_title != original_title {
+                changed
+            } else {
+                Style::default()
+            },
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Priority ", label_style()),
+        Span::styled(
+            proposed_priority.clone(),
+            if proposed_priority != original_priority {
+                changed
+            } else {
+                Style::default()
+            },
+        ),
+        Span::styled("  Estimate ", label_style()),
+        Span::styled(
+            proposed_estimate.clone(),
+            if proposed_estimate != original_estimate {
+                changed
+            } else {
+                Style::default()
+            },
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Labels ", label_style()),
+        Span::styled(
+            proposed_labels.clone(),
+            if proposed_labels != original_labels {
+                changed
+            } else {
+                Style::default()
+            },
+        ),
+    ]));
+    lines.push(Line::from(""));
+    let desc_changed = proposed_description != original_description;
+    for line in proposed_description.lines() {
+        lines.push(Line::from(Span::styled(
+            line.to_string(),
+            if desc_changed {
+                changed
+            } else {
+                Style::default()
+            },
+        )));
+    }
+
+    if !app.output.proposal.acceptance_criteria.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Acceptance Criteria",
+            label_style(),
+        )));
+        for criterion in &app.output.proposal.acceptance_criteria {
+            lines.push(Line::from(Span::styled(format!("- {criterion}"), changed)));
+        }
+    }
+
+    Text::from(lines)
 }
 
 fn render_questions_panel(app: &ImprovementReviewApp) -> Text<'static> {
@@ -1522,7 +1726,12 @@ struct ImprovementDashboardCleanup;
 impl Drop for ImprovementDashboardCleanup {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        let _ = execute!(
+            io::stdout(),
+            DisableBracketedPaste,
+            DisableMouseCapture,
+            LeaveAlternateScreen
+        );
     }
 }
 
@@ -1531,53 +1740,147 @@ struct ImprovementReviewCleanup;
 impl Drop for ImprovementReviewCleanup {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), Show, LeaveAlternateScreen);
+        let _ = execute!(
+            io::stdout(),
+            Show,
+            DisableBracketedPaste,
+            DisableMouseCapture,
+            LeaveAlternateScreen
+        );
     }
+}
+
+/// Collects optional free-form instructions before the improvement analysis begins.
+///
+/// Returns `None` when the user presses Enter with an empty field or Esc to skip.
+fn run_instruction_prompt(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+) -> Result<Option<String>> {
+    let mut input = InputFieldState::new(String::new());
+    loop {
+        terminal.draw(|frame| render_instruction_prompt(frame, &input))?;
+
+        if !event::poll(Duration::from_millis(250))? {
+            continue;
+        }
+        if let Event::Key(key) = event::read()?
+            && key.kind == KeyEventKind::Press
+        {
+            match key.code {
+                KeyCode::Enter => {
+                    let text = input.display_value().trim().to_string();
+                    return Ok(if text.is_empty() { None } else { Some(text) });
+                }
+                KeyCode::Esc => return Ok(None),
+                _ => {
+                    input.handle_key(key);
+                }
+            }
+        }
+    }
+}
+
+fn render_instruction_prompt(frame: &mut Frame<'_>, input: &InputFieldState) {
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(4),
+            Constraint::Length(3),
+            Constraint::Min(0),
+        ])
+        .split(frame.area());
+
+    let header = paragraph(
+        Text::from(vec![
+            Line::from(Span::styled(
+                "Improvement Instructions (optional)",
+                emphasis_style(),
+            )),
+            Line::from(
+                "Add free-form guidance for the improvement analysis. Leave empty for default behavior.",
+            ),
+            key_hints(&[("Enter", "continue"), ("Esc", "skip")]),
+        ]),
+        panel_title("meta backlog improve", false),
+    );
+    frame.render_widget(header, layout[0]);
+
+    let input_block = panel(panel_title("Instructions", true));
+    let input_inner = input_block.inner(layout[1]);
+    let rendered = input.render_with_width(
+        "Type optional instructions for the agent...",
+        true,
+        input_inner.width,
+    );
+    let widget = rendered.paragraph(input_block);
+    frame.render_widget(widget, layout[1]);
+    rendered.set_cursor(frame, input_inner);
+}
+
+#[cfg(test)]
+fn render_instruction_prompt_snapshot(width: u16, height: u16) -> Result<String> {
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend)?;
+    let input = InputFieldState::new(String::new());
+    terminal.draw(|frame| render_instruction_prompt(frame, &input))?;
+    Ok(improvement_dashboard_snapshot(terminal.backend()))
 }
 
 impl ImprovementDashboardApp {
     fn new(issues: Vec<IssueSummary>) -> Self {
         let issue_count = issues.len();
         Self {
+            query: InputFieldState::new(String::new()),
             issues,
-            issue_index: 0,
+            cursor: 0,
             selected: vec![false; issue_count],
+            focus: ImprovementPickerFocus::List,
+            preview_scroll: ScrollState::default(),
             completed: None,
         }
     }
 
-    fn apply(&mut self, action: ImprovementDashboardAction) -> Option<ImprovementIssueSelection> {
-        match action {
-            ImprovementDashboardAction::Up => {
-                self.issue_index = self.issue_index.saturating_sub(1);
-                None
-            }
-            ImprovementDashboardAction::Down => {
-                self.issue_index = (self.issue_index + 1).min(self.issues.len().saturating_sub(1));
-                None
-            }
-            ImprovementDashboardAction::Toggle => {
-                if let Some(selected) = self.selected.get_mut(self.issue_index) {
-                    *selected = !*selected;
-                }
-                None
-            }
-            ImprovementDashboardAction::Enter => {
-                let selection = ImprovementIssueSelection {
-                    issues: self.selected_issues(),
-                };
-                self.completed = Some(selection.clone());
-                Some(selection)
+    fn move_up(&mut self) {
+        let filtered = dashboard_search_results(self);
+        if filtered.is_empty() {
+            self.cursor = 0;
+        } else if self.cursor == 0 {
+            self.cursor = filtered.len().saturating_sub(1);
+        } else {
+            self.cursor -= 1;
+        }
+        self.preview_scroll.reset();
+    }
+
+    fn move_down(&mut self) {
+        let filtered = dashboard_search_results(self);
+        if filtered.is_empty() {
+            self.cursor = 0;
+        } else {
+            self.cursor = (self.cursor + 1) % filtered.len();
+        }
+        self.preview_scroll.reset();
+    }
+
+    fn toggle(&mut self) {
+        let filtered = dashboard_search_results(self);
+        if let Some(result) = filtered.get(self.cursor) {
+            if let Some(selected) = self.selected.get_mut(result.issue_index) {
+                *selected = !*selected;
             }
         }
     }
 
-    fn any_selected(&self) -> bool {
-        self.selected.iter().any(|selected| *selected)
+    fn select(&mut self) -> ImprovementIssueSelection {
+        let selection = ImprovementIssueSelection {
+            issues: self.selected_issues(),
+        };
+        self.completed = Some(selection.clone());
+        selection
     }
 
-    fn selected_issue(&self) -> Option<&IssueSummary> {
-        self.issues.get(self.issue_index)
+    fn any_selected(&self) -> bool {
+        self.selected.iter().any(|selected| *selected)
     }
 
     fn selected_issues(&self) -> Vec<IssueSummary> {
@@ -1590,6 +1893,24 @@ impl ImprovementDashboardApp {
         } else {
             self.issues.clone()
         }
+    }
+
+    fn preview_content_rows(&self, width: u16) -> usize {
+        let filtered = dashboard_search_results(self);
+        let preview = filtered
+            .get(self.cursor)
+            .and_then(|result| {
+                self.issues.get(result.issue_index).map(|issue| {
+                    render_issue_preview(issue, Some(result), None, "_No description provided._")
+                })
+            })
+            .unwrap_or_else(|| {
+                empty_state(
+                    "No issue is available to preview.",
+                    "Type to search or clear the query to see all issues.",
+                )
+            });
+        wrapped_rows(&plain_text(&preview), width.max(1))
     }
 
     fn summary_line(&self) -> String {
@@ -1610,6 +1931,17 @@ impl ImprovementDashboardApp {
             .and_then(|issue| issue.state.as_ref().map(|state| state.name.as_str()))
             .unwrap_or("Unknown")
     }
+
+    #[cfg(test)]
+    fn set_search_query(&mut self, query: &str) {
+        self.query = InputFieldState::new(query.to_string());
+        self.cursor = 0;
+        self.preview_scroll.reset();
+    }
+}
+
+fn dashboard_search_results(app: &ImprovementDashboardApp) -> Vec<IssueSearchResult> {
+    search_issues(&app.issues, &app.query.display_value())
 }
 
 impl ImprovementReviewApp {
@@ -1633,8 +1965,21 @@ impl ImprovementReviewApp {
             questions: Vec::new(),
             selected_question: 0,
             question_round,
+            review_focus: ImprovementReviewFocus::Proposal,
+            recommendation_scroll: ScrollState::default(),
+            proposal_scroll: ScrollState::default(),
             error: None,
         }
+    }
+
+    fn recommendation_content_rows(&self, width: u16) -> usize {
+        let text = render_review_overview(self);
+        wrapped_rows(&plain_text(&text), width.max(1))
+    }
+
+    fn proposal_content_rows(&self, width: u16) -> usize {
+        let text = render_review_comparison(self);
+        wrapped_rows(&plain_text(&text), width.max(1))
     }
 
     fn collected_answers(&self) -> Option<Vec<(String, String)>> {
@@ -1752,7 +2097,9 @@ fn review_dashboard_snapshot(app: &ImprovementReviewApp, width: u16, height: u16
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).expect("terminal");
     terminal
-        .draw(|frame| render_improvement_review(frame, app))
+        .draw(|frame| {
+            render_improvement_review(frame, app);
+        })
         .expect("review should render");
     improvement_dashboard_snapshot(terminal.backend())
 }
@@ -1795,7 +2142,15 @@ async fn improve_issue(
     args: &BacklogImproveArgs,
     progress: Option<&UnboundedSender<ImprovementProgressUpdate>>,
 ) -> Result<ImprovementReport> {
-    let issue_run = analyze_issue(root, issue, related_backlog_issues, args, None, progress)?;
+    let issue_run = analyze_issue(
+        root,
+        issue,
+        related_backlog_issues,
+        args,
+        None,
+        None,
+        progress,
+    )?;
     let apply = if args.apply && issue_run.output.route() == ImprovementRoute::ReadyForUpdate {
         if let Some(progress) = progress {
             send_improvement_progress(
@@ -1846,6 +2201,7 @@ fn analyze_issue(
     related_backlog_issues: &[IssueSummary],
     args: &BacklogImproveArgs,
     continuation: Option<&mut Option<AgentContinuation>>,
+    instructions: Option<&str>,
     progress: Option<&UnboundedSender<ImprovementProgressUpdate>>,
 ) -> Result<ImprovementIssueRun> {
     let started_at = now_rfc3339()?;
@@ -1909,7 +2265,7 @@ fn analyze_issue(
         route_key: Some(AGENT_ROUTE_BACKLOG_IMPROVE.to_string()),
         agent: args.agent.clone(),
         prompt,
-        instructions: None,
+        instructions: instructions.map(str::to_string),
         model: args.model.clone(),
         reasoning: args.reasoning.clone(),
         transport: None,
@@ -2873,9 +3229,7 @@ mod tests {
         ];
         let mut app = ImprovementDashboardApp::new(issues.clone());
 
-        let selection = app
-            .apply(ImprovementDashboardAction::Enter)
-            .expect("selection should exist");
+        let selection = app.select();
 
         assert_eq!(
             selection
@@ -2898,14 +3252,12 @@ mod tests {
             demo_issue("ENG-10172", "Third"),
         ];
         let mut app = ImprovementDashboardApp::new(issues.clone());
-        let _ = app.apply(ImprovementDashboardAction::Toggle);
-        let _ = app.apply(ImprovementDashboardAction::Down);
-        let _ = app.apply(ImprovementDashboardAction::Down);
-        let _ = app.apply(ImprovementDashboardAction::Toggle);
+        app.toggle();
+        app.move_down();
+        app.move_down();
+        app.toggle();
 
-        let selection = app
-            .apply(ImprovementDashboardAction::Enter)
-            .expect("selection should exist");
+        let selection = app.select();
 
         assert_eq!(
             selection
@@ -2918,7 +3270,7 @@ mod tests {
     }
 
     #[test]
-    fn improvement_dashboard_snapshot_mentions_default_all_behavior() {
+    fn improvement_dashboard_snapshot_shows_search_and_issue_list() {
         let snapshot = render_improvement_dashboard_once(
             vec![
                 demo_issue("ENG-10170", "First"),
@@ -2926,18 +3278,67 @@ mod tests {
             ],
             120,
             36,
-            Vec::new(),
         )
         .expect("snapshot");
 
-        assert!(snapshot.contains(
-            "Press Enter to review all listed issues unless you explicitly toggle a subset."
-        ));
         assert!(
             snapshot
                 .contains("No explicit subset selected. Enter will review all 2 listed issues.")
         );
-        assert!(snapshot.contains("ENG-10170 First"));
+        assert!(snapshot.contains("ENG-10170"));
+        assert!(snapshot.contains("Search"));
+        assert!(snapshot.contains("Issue Preview"));
+    }
+
+    #[test]
+    fn improvement_dashboard_search_filters_issue_list() {
+        let issues = vec![
+            demo_issue("ENG-10170", "Fix authentication bug"),
+            demo_issue("ENG-10171", "Add dark mode toggle"),
+            demo_issue("ENG-10172", "Refactor auth middleware"),
+        ];
+        let mut app = ImprovementDashboardApp::new(issues);
+        app.set_search_query("auth");
+
+        let filtered = dashboard_search_results(&app);
+        let identifiers = filtered
+            .iter()
+            .map(|r| app.issues[r.issue_index].identifier.as_str())
+            .collect::<Vec<_>>();
+        assert!(identifiers.contains(&"ENG-10170"));
+        assert!(identifiers.contains(&"ENG-10172"));
+        assert!(!identifiers.contains(&"ENG-10171"));
+    }
+
+    #[test]
+    fn improvement_dashboard_toggle_respects_search_filtered_position() {
+        let issues = vec![
+            demo_issue("ENG-10170", "Fix authentication bug"),
+            demo_issue("ENG-10171", "Add dark mode toggle"),
+            demo_issue("ENG-10172", "Refactor auth middleware"),
+        ];
+        let mut app = ImprovementDashboardApp::new(issues);
+        app.set_search_query("auth");
+
+        let filtered = dashboard_search_results(&app);
+        assert!(filtered.len() >= 2);
+
+        app.toggle();
+
+        let toggled_index = filtered[0].issue_index;
+        assert!(app.selected[toggled_index]);
+        assert!(!app.selected[1]); // ENG-10171 is never matched by "auth"
+    }
+
+    #[test]
+    fn instruction_prompt_renders_without_panic() {
+        let snapshot =
+            render_instruction_prompt_snapshot(120, 20).expect("instruction prompt snapshot");
+        assert!(snapshot.contains("Instructions"));
+        assert!(
+            snapshot.contains("optional"),
+            "snapshot should mention optional instructions"
+        );
     }
 
     #[test]
@@ -2965,7 +3366,7 @@ mod tests {
     }
 
     #[test]
-    fn review_dashboard_shows_explicit_enter_skip_and_reject_actions() {
+    fn review_dashboard_shows_enter_skip_and_reject_actions() {
         let issue = demo_issue("ENG-10170", "First");
         let app = ImprovementReviewApp::new(
             1,
@@ -2989,8 +3390,63 @@ mod tests {
 
         let snapshot = review_dashboard_snapshot(&app, 140, 40);
         assert!(snapshot.contains("Apply Update"));
-        assert!(snapshot.contains("Enter will apply the proposed update."));
-        assert!(snapshot.contains("Skip this issue for now."));
-        assert!(snapshot.contains("Reject the recommendation."));
+        assert!(snapshot.contains("Skip"));
+        assert!(snapshot.contains("Reject"));
+    }
+
+    #[test]
+    fn review_dashboard_shows_before_after_comparison() {
+        let issue = demo_issue("ENG-10170", "Original title");
+        let app = ImprovementReviewApp::new(
+            1,
+            1,
+            issue,
+            ImprovementOutput {
+                summary: "Description needs improvement.".to_string(),
+                needs_improvement: true,
+                route: Some(ImprovementRoute::ReadyForUpdate),
+                recommendation: Some("Rewrite the description.".to_string()),
+                findings: ImprovementFindings::default(),
+                context_requirements: Vec::new(),
+                follow_up_questions: Vec::new(),
+                proposal: ImprovementProposal {
+                    title: Some("Improved title".to_string()),
+                    description: Some("Better description content.".to_string()),
+                    ..ImprovementProposal::default()
+                },
+            },
+            0,
+        );
+
+        let snapshot = review_dashboard_snapshot(&app, 140, 40);
+        assert!(snapshot.contains("[original]"));
+        assert!(snapshot.contains("[proposed]"));
+        assert!(snapshot.contains("Before / After"));
+        assert!(snapshot.contains("Findings & Recommendation"));
+    }
+
+    #[test]
+    fn review_scrollable_panes_initialize_at_zero() {
+        let issue = demo_issue("ENG-10170", "First");
+        let app = ImprovementReviewApp::new(
+            1,
+            1,
+            issue,
+            ImprovementOutput {
+                summary: "Summary.".to_string(),
+                needs_improvement: true,
+                route: Some(ImprovementRoute::ReadyForUpdate),
+                recommendation: None,
+                findings: ImprovementFindings::default(),
+                context_requirements: Vec::new(),
+                follow_up_questions: Vec::new(),
+                proposal: ImprovementProposal::default(),
+            },
+            0,
+        );
+
+        assert_eq!(app.recommendation_scroll.offset(), 0);
+        assert_eq!(app.proposal_scroll.offset(), 0);
+        assert_eq!(app.review_focus, ImprovementReviewFocus::Proposal);
     }
 }
