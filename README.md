@@ -31,7 +31,7 @@ Most planning tools split work across issue trackers, docs, scripts, and ad hoc 
 - `meta backlog spec`, `meta backlog plan`, `meta backlog improve`, `meta backlog dependencies`, `meta backlog tech`, `meta linear issues refine`, and `meta agents workflows` generate structured backlog work.
 - `meta merge` batches open GitHub PRs into one isolated aggregate merge run and publish step.
 - `meta linear ...` and `meta backlog sync` keep Linear and local files aligned.
-- `meta agents review` audits GitHub PRs with one-shot review or a listener/dashboard for `metastack`-labeled PRs, with optional remediation PR creation.
+- `meta agents review` audits GitHub PRs in a guided dashboard, queues `metastack`-labeled PRs for explicit human approval, and can open remediation PRs when required.
 - `meta agents listen` runs unattended ticket execution in dedicated workspace clones instead of your source checkout.
 - `meta workspace` inventories and cleans those sibling listener workspace clones after the listener finishes.
 
@@ -1081,10 +1081,10 @@ Required auth:
 
 ### `agents review`
 
-Review open GitHub PRs with a holistic audit pipeline that gathers PR metadata, review state, changed files, diff scope, linked Linear ticket details, and repository context. Supports two modes:
+Review open GitHub PRs with a holistic audit pipeline that gathers PR metadata, review state, changed files, diff scope, linked Linear ticket details, and repository context. Interactive TTY runs stay inside one guided dashboard flow:
 
-- **One-shot PR review**: `meta agents review <PR_NUMBER>` audits a single PR, initializes the review dashboard immediately on interactive TTY runs, produces structured output separating required fixes from optional recommendations, and optionally creates a remediation PR when required fixes are found.
-- **Listener/dashboard mode**: `meta agents review` (no PR number) discovers open PRs with the `metastack` label via `gh`, initializes a live terminal dashboard before the first poll completes, and reviews eligible PRs as they appear.
+- **Direct review**: `meta agents review <PR_NUMBER>` loads one PR into the dashboard, shows a review preview, and waits for explicit approval before the audit starts.
+- **Guided queue review**: `meta agents review` (no PR number) discovers open PRs with the `metastack` label via `gh`, shows a candidate queue, and waits for a human to approve starting each review session.
 
 ```bash
 # One-shot review
@@ -1095,7 +1095,7 @@ meta agents review 42 --root . --agent claude --model opus
 # Prerequisite check
 meta agents review --check --root .
 
-# Listener mode
+# Guided queue mode
 meta agents review --root .
 meta agents review --root . --once
 meta agents review --root . --once --json
@@ -1106,10 +1106,12 @@ The review instructions are stored as a source-controlled artifact at `src/artif
 
 When required fixes are found, the command creates a workspace-safe follow-up branch from the original PR context, applies agent-authored fixes, commits and pushes them, opens a remediation PR, and posts a Linear comment describing why the remediation PR was opened. When no remediation is required, the command exits cleanly without creating a branch, PR, or Linear comment.
 
+Interactive runs now show explicit loading states for auth, PR discovery, context assembly, agent review, and remediation so the current phase stays visible throughout the session.
+
 Prerequisites:
 - `gh` CLI installed and authenticated (`gh auth login`)
 - Repository with a configured `.metastack/meta.json`
-- For listener mode: open PRs must carry the `metastack` label
+- For guided queue mode: open PRs must carry the `metastack` label
 
 ### `agents listen`
 

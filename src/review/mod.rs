@@ -7,16 +7,22 @@ use std::io;
 use std::io::IsTerminal;
 use std::path::Path;
 use std::process::Command;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::style::Style;
+use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::{ListItem, ListState, Wrap};
 use serde::Serialize;
 
 use crate::agents::{
@@ -32,6 +38,11 @@ use crate::fs::{
 };
 use crate::github_pr::GhCli;
 use crate::linear::{IssueComment, IssueSummary, LinearService, ReqwestLinearClient};
+use crate::tui::scroll::{ScrollState, scrollable_content_paragraph, wrapped_rows};
+use crate::tui::theme::{
+    Tone, badge, emphasis_style, empty_state, key_hints, label_style, list, muted_style,
+    panel_title, paragraph,
+};
 
 use dashboard::{
     ReviewBrowserAction, ReviewBrowserState, ReviewListView, render,
@@ -143,6 +154,84 @@ struct GhPrListEntry {
     labels: Vec<GhPrLabel>,
 }
 
+#[derive(Debug, Clone)]
+struct ReviewLaunchCandidate {
+    pr_number: u64,
+    title: String,
+    url: String,
+    author: String,
+    head_ref: String,
+    base_ref: String,
+    review_state: String,
+    changed_files: u64,
+    additions: u64,
+    deletions: u64,
+    linear_identifier: Option<String>,
+    linear_error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct InteractiveReviewOutcome {
+    candidate: ReviewLaunchCandidate,
+    summary: String,
+    review_output: String,
+    remediation_required: bool,
+    remediation_pr_number: Option<u64>,
+    remediation_pr_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InteractiveReviewStage {
+    Loading,
+    Select,
+    Confirm,
+    Running,
+    Completed,
+    Empty,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InteractiveReviewMode {
+    Direct,
+    Discovery,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InteractiveReviewFocus {
+    Candidates,
+    Preview,
+}
+
+#[derive(Debug, Clone)]
+struct InteractiveReviewApp {
+    mode: InteractiveReviewMode,
+    stage: InteractiveReviewStage,
+    focus: InteractiveReviewFocus,
+    candidates: Vec<ReviewLaunchCandidate>,
+    selected_index: usize,
+    preview_scroll: ScrollState,
+    status: String,
+    notes: Vec<String>,
+    outcome: Option<InteractiveReviewOutcome>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+enum ReviewExecutionEvent {
+    Progress {
+        candidate: ReviewLaunchCandidate,
+        phase: ReviewPhase,
+        summary: String,
+        note: Option<String>,
+        remediation_required: Option<bool>,
+    },
+    Completed(InteractiveReviewOutcome),
+    Failed {
+        candidate: ReviewLaunchCandidate,
+        error: String,
+    },
+}
+
 /// Run the unified `meta agents review` command.
 ///
 /// Dispatches between one-shot PR review (when `pr_number` is provided) and
@@ -153,10 +242,12 @@ struct GhPrListEntry {
 pub(crate) async fn run_review(args: &ReviewArgs) -> Result<()> {
     if let Some(pr_number) = args.pr_number {
         if should_launch_interactive_review_dashboard(&args.run) {
-            run_review_one_shot_with_dashboard(&args.run, pr_number)
+            run_review_interactive(&args.run, Some(pr_number))
         } else {
             run_review_one_shot(&args.run, pr_number)
         }
+    } else if should_launch_interactive_review_dashboard(&args.run) {
+        run_review_interactive(&args.run, None)
     } else {
         run_review_listener(&args.run).await
     }
@@ -165,6 +256,129 @@ pub(crate) async fn run_review(args: &ReviewArgs) -> Result<()> {
 // ---------------------------------------------------------------------------
 // One-shot PR review
 // ---------------------------------------------------------------------------
+
+fn run_review_interactive(args: &ReviewRunArgs, pr_number: Option<u64>) -> Result<()> {
+    let root = canonicalize_existing_dir(&args.root)?;
+    let config = AppConfig::load()?;
+    let planning_meta = crate::config::load_required_planning_meta(&root, "meta agents review")?;
+    let gh = GhCli;
+    let store = ReviewProjectStore::resolve(&root).ok();
+    let mode = if pr_number.is_some() {
+        InteractiveReviewMode::Direct
+    } else {
+        InteractiveReviewMode::Discovery
+    };
+
+    let mut terminal = ReviewTerminalDashboard::open()?;
+    let mut app = InteractiveReviewApp::new(mode);
+    app.set_loading(
+        "Preparing review dashboard".to_string(),
+        "Opening the review workflow and resolving prerequisites.".to_string(),
+    );
+    terminal.draw_interactive(&app)?;
+
+    app.set_loading(
+        "Verifying GitHub authentication".to_string(),
+        "Checking `gh auth status` before discovery begins.".to_string(),
+    );
+    terminal.draw_interactive(&app)?;
+    verify_gh_auth(&root).inspect_err(|error| {
+        app.fail(error.to_string());
+        let _ = terminal.draw_interactive(&app);
+    })?;
+
+    app.set_loading(
+        "Discovering review candidates".to_string(),
+        match pr_number {
+            Some(number) => format!("Loading PR #{number} and linked review context."),
+            None => "Finding open `metastack` pull requests that are ready for explicit review approval."
+                .to_string(),
+        },
+    );
+    terminal.draw_interactive(&app)?;
+
+    let candidates = discover_review_candidates(&root, &gh, pr_number, &mut app, &mut terminal)?;
+    app.load_candidates(candidates);
+    terminal.draw_interactive(&app)?;
+
+    let mut worker_rx: Option<Receiver<ReviewExecutionEvent>> = None;
+    let mut next_pulse_at = Instant::now() + Duration::from_millis(150);
+
+    loop {
+        if next_pulse_at <= Instant::now() {
+            app.tick();
+            terminal.draw_interactive(&app)?;
+            next_pulse_at = Instant::now() + Duration::from_millis(150);
+        }
+
+        if let Some(ref receiver) = worker_rx {
+            match receiver.try_recv() {
+                Ok(event) => {
+                    app.apply_worker_event(event);
+                    terminal.draw_interactive(&app)?;
+                    if app.stage != InteractiveReviewStage::Running {
+                        worker_rx = None;
+                    }
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => {
+                    app.fail("review worker disconnected unexpectedly".to_string());
+                    worker_rx = None;
+                    terminal.draw_interactive(&app)?;
+                }
+            }
+        }
+
+        if !event::poll(Duration::from_millis(INPUT_POLL_INTERVAL_MILLIS))? {
+            continue;
+        }
+
+        match event::read()? {
+            Event::Key(key) if key.kind == KeyEventKind::Press => {
+                let preview = interactive_preview_viewport(terminal.size()?);
+                if let Some(selection) = app.handle_key(key.code, preview)? {
+                    let receiver = spawn_review_execution(
+                        root.clone(),
+                        config.clone(),
+                        planning_meta.clone(),
+                        args.clone(),
+                        selection.clone(),
+                        store.clone(),
+                    );
+                    worker_rx = Some(receiver);
+                    app.begin_running(selection);
+                    terminal.draw_interactive(&app)?;
+                } else if app.should_exit(key.code) {
+                    break;
+                }
+            }
+            Event::Mouse(mouse)
+                if matches!(
+                    mouse.kind,
+                    MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                ) =>
+            {
+                let viewport = interactive_preview_viewport(terminal.size()?);
+                let _ = app.handle_preview_mouse(mouse, viewport);
+            }
+            _ => {}
+        }
+    }
+
+    terminal.close()?;
+    if let Some(outcome) = app.outcome {
+        println!("{}", outcome.review_output);
+        if let Some(pr_url) = outcome.remediation_pr_url {
+            println!(
+                "\nRemediation PR #{} opened: {}",
+                outcome.remediation_pr_number.unwrap_or_default(),
+                pr_url
+            );
+        }
+    }
+
+    Ok(())
+}
 
 fn run_review_one_shot(args: &ReviewRunArgs, pr_number: u64) -> Result<()> {
     let root = canonicalize_existing_dir(&args.root)?;
@@ -252,73 +466,506 @@ fn run_review_one_shot(args: &ReviewRunArgs, pr_number: u64) -> Result<()> {
     Ok(())
 }
 
-fn run_review_one_shot_with_dashboard(args: &ReviewRunArgs, pr_number: u64) -> Result<()> {
-    let root = canonicalize_existing_dir(&args.root)?;
-    let config = AppConfig::load()?;
-    let planning_meta = crate::config::load_required_planning_meta(&root, "meta agents review")?;
-    let gh = GhCli;
-    let mut dashboard = ReviewTerminalDashboard::open()?;
-    let mut data = one_shot_dashboard_data(
-        &root,
-        ReviewSession {
-            pr_number,
-            pr_title: format!("PR #{pr_number}"),
-            pr_url: None,
-            pr_author: None,
-            head_branch: None,
-            base_branch: None,
-            linear_identifier: None,
-            phase: ReviewPhase::Claimed,
-            summary: "Initializing review dashboard".to_string(),
-            updated_at_epoch_seconds: now_epoch_seconds(),
-            remediation_required: None,
-            remediation_pr_number: None,
-            remediation_pr_url: None,
-        },
-        vec!["Initializing one-shot review dashboard.".to_string()],
-    );
-    dashboard.draw(&data)?;
+impl InteractiveReviewApp {
+    fn new(mode: InteractiveReviewMode) -> Self {
+        Self {
+            mode,
+            stage: InteractiveReviewStage::Loading,
+            focus: InteractiveReviewFocus::Candidates,
+            candidates: Vec::new(),
+            selected_index: 0,
+            preview_scroll: ScrollState::default(),
+            status: "Preparing review dashboard".to_string(),
+            notes: Vec::new(),
+            outcome: None,
+            error: None,
+        }
+    }
 
-    set_session_status(
-        &mut data,
-        ReviewPhase::Claimed,
-        "Verifying GitHub CLI authentication",
-        "Checking `gh auth status` before review starts.",
-    );
-    dashboard.draw(&data)?;
-    verify_gh_auth(&root)?;
+    fn set_loading(&mut self, status: String, note: String) {
+        self.stage = InteractiveReviewStage::Loading;
+        self.status = status;
+        self.push_note(note);
+        self.error = None;
+    }
 
-    set_session_status(
-        &mut data,
-        ReviewPhase::ReviewStarted,
-        "Loading pull request metadata",
-        format!("Fetching PR #{pr_number} metadata from GitHub."),
-    );
-    dashboard.draw(&data)?;
-    let pr = fetch_pr_metadata(&gh, &root, pr_number)?;
-    populate_session_metadata(&mut data.sessions[0], &pr);
-    let linear_identifier = resolve_linear_identifier(&pr)?;
-    data.sessions[0].linear_identifier = Some(linear_identifier.clone());
-    dashboard.draw(&data)?;
+    fn load_candidates(&mut self, candidates: Vec<ReviewLaunchCandidate>) {
+        self.candidates = candidates;
+        self.selected_index = 0;
+        self.preview_scroll.reset();
+        self.error = None;
+        self.outcome = None;
+        if self.candidates.is_empty() {
+            self.stage = InteractiveReviewStage::Empty;
+            self.status = "No review candidates found".to_string();
+        } else {
+            self.stage = InteractiveReviewStage::Select;
+            self.status = match self.mode {
+                InteractiveReviewMode::Direct => {
+                    "Review candidate loaded. Confirm when you want to start the audit.".to_string()
+                }
+                InteractiveReviewMode::Discovery => {
+                    "Select a PR to review, inspect the preview, then explicitly start the audit."
+                        .to_string()
+                }
+            };
+        }
+    }
 
-    let diff = {
-        set_session_status(
-            &mut data,
-            ReviewPhase::ReviewStarted,
-            "Loading pull request diff and repository context",
-            format!(
-                "Resolving linked Linear ticket `{linear_identifier}` and gathering repository context."
-            ),
+    fn begin_running(&mut self, candidate: ReviewLaunchCandidate) {
+        self.stage = InteractiveReviewStage::Running;
+        self.status = format!(
+            "Reviewing PR #{} — {}",
+            candidate.pr_number, candidate.title
         );
-        dashboard.draw(&data)?;
-        fetch_pr_diff(&root, pr_number)?
+        self.outcome = None;
+        self.error = None;
+        self.replace_candidate(candidate);
+        self.preview_scroll.reset();
+    }
+
+    fn apply_worker_event(&mut self, event: ReviewExecutionEvent) {
+        match event {
+            ReviewExecutionEvent::Progress {
+                candidate,
+                phase,
+                summary,
+                note,
+                remediation_required,
+            } => {
+                self.stage = InteractiveReviewStage::Running;
+                self.status = summary.clone();
+                self.error = None;
+                self.replace_candidate(candidate.clone());
+                if let Some(candidate) = self.candidates.get_mut(self.selected_index) {
+                    candidate.linear_identifier = candidate.linear_identifier.clone();
+                }
+                if let Some(session) = self
+                    .candidates
+                    .iter_mut()
+                    .find(|entry| entry.pr_number == candidate.pr_number)
+                {
+                    session.linear_identifier = candidate.linear_identifier.clone();
+                    if remediation_required.is_some() {
+                        session.linear_error = None;
+                    }
+                }
+                if let Some(note) = note {
+                    self.push_note(note);
+                }
+                self.push_note(format!(
+                    "PR #{} is now in `{}`.",
+                    candidate.pr_number,
+                    phase.display_label()
+                ));
+            }
+            ReviewExecutionEvent::Completed(outcome) => {
+                self.stage = InteractiveReviewStage::Completed;
+                self.status = outcome.summary.clone();
+                self.error = None;
+                self.replace_candidate(outcome.candidate.clone());
+                self.outcome = Some(outcome.clone());
+                self.push_note(match outcome.remediation_pr_url.as_deref() {
+                    Some(url) => format!(
+                        "Remediation PR #{} opened at {}.",
+                        outcome.remediation_pr_number.unwrap_or_default(),
+                        url
+                    ),
+                    None => format!(
+                        "Review finished for PR #{} without remediation.",
+                        outcome.candidate.pr_number
+                    ),
+                });
+                self.preview_scroll.reset();
+            }
+            ReviewExecutionEvent::Failed { candidate, error } => {
+                self.stage = InteractiveReviewStage::Completed;
+                self.status = format!("Review failed for PR #{}", candidate.pr_number);
+                self.error = Some(error.clone());
+                self.outcome = None;
+                self.replace_candidate(candidate);
+                self.push_note(error);
+                self.preview_scroll.reset();
+            }
+        }
+    }
+
+    fn fail(&mut self, error: String) {
+        self.stage = InteractiveReviewStage::Completed;
+        self.status = "Review dashboard failed".to_string();
+        self.error = Some(error.clone());
+        self.push_note(error);
+    }
+
+    fn tick(&mut self) {}
+
+    fn handle_key(
+        &mut self,
+        code: KeyCode,
+        preview: Rect,
+    ) -> Result<Option<ReviewLaunchCandidate>> {
+        match self.stage {
+            InteractiveReviewStage::Loading => Ok(None),
+            InteractiveReviewStage::Empty => {
+                if matches!(code, KeyCode::Char('r') | KeyCode::Char('R')) {
+                    self.stage = InteractiveReviewStage::Loading;
+                    self.status = "Refreshing review candidates".to_string();
+                    self.notes.clear();
+                    self.push_note("Refreshing candidate discovery.".to_string());
+                }
+                Ok(None)
+            }
+            InteractiveReviewStage::Select => {
+                match code {
+                    KeyCode::Up => {
+                        if self.focus == InteractiveReviewFocus::Candidates {
+                            self.selected_index = self.selected_index.saturating_sub(1);
+                            self.preview_scroll.reset();
+                        } else {
+                            let _ = self.preview_scroll.apply_key_code_in_viewport(
+                                KeyCode::Up,
+                                preview,
+                                self.preview_rows(preview.width),
+                            );
+                        }
+                    }
+                    KeyCode::Down => {
+                        if self.focus == InteractiveReviewFocus::Candidates {
+                            if self.selected_index + 1 < self.candidates.len() {
+                                self.selected_index += 1;
+                                self.preview_scroll.reset();
+                            }
+                        } else {
+                            let _ = self.preview_scroll.apply_key_code_in_viewport(
+                                KeyCode::Down,
+                                preview,
+                                self.preview_rows(preview.width),
+                            );
+                        }
+                    }
+                    KeyCode::Tab => {
+                        self.focus = match self.focus {
+                            InteractiveReviewFocus::Candidates => InteractiveReviewFocus::Preview,
+                            InteractiveReviewFocus::Preview => InteractiveReviewFocus::Candidates,
+                        };
+                    }
+                    KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End
+                        if self.focus == InteractiveReviewFocus::Preview =>
+                    {
+                        let _ = self.preview_scroll.apply_key_code_in_viewport(
+                            code,
+                            preview,
+                            self.preview_rows(preview.width),
+                        );
+                    }
+                    KeyCode::Enter if self.selected_candidate().is_some() => {
+                        self.stage = InteractiveReviewStage::Confirm;
+                        self.status = format!(
+                            "Confirm review start for PR #{}.",
+                            self.selected_candidate()
+                                .map(|candidate| candidate.pr_number)
+                                .unwrap_or_default()
+                        );
+                    }
+                    _ => {}
+                }
+                Ok(None)
+            }
+            InteractiveReviewStage::Confirm => match code {
+                KeyCode::Enter => Ok(self.selected_candidate().cloned()),
+                KeyCode::Esc | KeyCode::Backspace => {
+                    self.stage = InteractiveReviewStage::Select;
+                    Ok(None)
+                }
+                _ => Ok(None),
+            },
+            InteractiveReviewStage::Running => Ok(None),
+            InteractiveReviewStage::Completed => {
+                if matches!(code, KeyCode::Esc | KeyCode::Backspace)
+                    && self.mode == InteractiveReviewMode::Discovery
+                    && !self.candidates.is_empty()
+                {
+                    self.stage = InteractiveReviewStage::Select;
+                    self.status =
+                        "Select another PR to review, or exit when you are done.".to_string();
+                    self.error = None;
+                    self.outcome = None;
+                    self.preview_scroll.reset();
+                }
+                Ok(None)
+            }
+        }
+    }
+
+    fn should_exit(&self, code: KeyCode) -> bool {
+        match self.stage {
+            InteractiveReviewStage::Running => false,
+            InteractiveReviewStage::Completed if self.mode == InteractiveReviewMode::Direct => {
+                matches!(code, KeyCode::Char('q') | KeyCode::Esc | KeyCode::Enter)
+            }
+            InteractiveReviewStage::Completed => matches!(code, KeyCode::Char('q')),
+            _ => matches!(code, KeyCode::Char('q') | KeyCode::Esc),
+        }
+    }
+
+    fn handle_preview_mouse(
+        &mut self,
+        mouse: crossterm::event::MouseEvent,
+        viewport: Rect,
+    ) -> bool {
+        self.preview_scroll.apply_mouse_in_viewport(
+            mouse,
+            viewport,
+            self.preview_rows(viewport.width),
+        )
+    }
+
+    fn selected_candidate(&self) -> Option<&ReviewLaunchCandidate> {
+        self.candidates.get(self.selected_index)
+    }
+
+    fn selected_candidate_text(&self) -> Text<'static> {
+        if let Some(outcome) = &self.outcome {
+            return Text::from(outcome.review_output.clone());
+        }
+
+        if let Some(candidate) = self.selected_candidate() {
+            let mut lines = vec![
+                Line::from(vec![Span::styled(
+                    format!("PR #{} — {}", candidate.pr_number, candidate.title),
+                    emphasis_style(),
+                )]),
+                Line::from(vec![
+                    Span::styled("Author ", label_style()),
+                    Span::raw(candidate.author.clone()),
+                    Span::styled("  Branch ", label_style()),
+                    Span::raw(format!("{} -> {}", candidate.head_ref, candidate.base_ref)),
+                ]),
+                Line::from(vec![
+                    Span::styled("Review ", label_style()),
+                    Span::raw(candidate.review_state.clone()),
+                    Span::styled("  Files ", label_style()),
+                    Span::raw(format!(
+                        "{} (+{}, -{})",
+                        candidate.changed_files, candidate.additions, candidate.deletions
+                    )),
+                ]),
+                Line::from(vec![
+                    Span::styled("Linear ", label_style()),
+                    Span::raw(
+                        candidate
+                            .linear_identifier
+                            .clone()
+                            .unwrap_or_else(|| "unresolved".to_string()),
+                    ),
+                ]),
+            ];
+
+            if let Some(error) = candidate.linear_error.as_deref() {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    "Linear linkage needs attention before remediation can proceed.",
+                    Style::default().fg(ratatui::style::Color::Red),
+                )));
+                lines.push(Line::from(error.to_string()));
+            }
+
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled("Recent status", label_style())));
+            if self.notes.is_empty() {
+                lines.push(Line::from("No progress notes recorded yet."));
+            } else {
+                for note in self.notes.iter().take(8) {
+                    lines.push(Line::from(format!("- {note}")));
+                }
+            }
+
+            return Text::from(lines);
+        }
+
+        empty_state(
+            "No review candidate selected.",
+            "Use Up/Down to select a pull request when candidates are available.",
+        )
+    }
+
+    fn preview_rows(&self, width: u16) -> usize {
+        wrapped_rows(&self.selected_candidate_text().to_string(), width.max(1))
+    }
+
+    fn push_note(&mut self, note: String) {
+        if self.notes.first().is_some_and(|existing| existing == &note) {
+            return;
+        }
+        self.notes.insert(0, note);
+        self.notes.truncate(10);
+    }
+
+    fn replace_candidate(&mut self, candidate: ReviewLaunchCandidate) {
+        if let Some(existing) = self
+            .candidates
+            .iter_mut()
+            .find(|entry| entry.pr_number == candidate.pr_number)
+        {
+            *existing = candidate;
+        } else {
+            self.candidates.push(candidate);
+            self.selected_index = self.candidates.len().saturating_sub(1);
+        }
+    }
+}
+
+fn discover_review_candidates(
+    root: &Path,
+    gh: &GhCli,
+    pr_number: Option<u64>,
+    app: &mut InteractiveReviewApp,
+    terminal: &mut ReviewTerminalDashboard,
+) -> Result<Vec<ReviewLaunchCandidate>> {
+    let entries = if let Some(pr_number) = pr_number {
+        let metadata = fetch_pr_metadata(gh, root, pr_number)?;
+        vec![GhPrListEntry {
+            number: metadata.number,
+            title: metadata.title.clone(),
+            url: metadata.url.clone(),
+            labels: metadata.labels.clone(),
+        }]
+    } else {
+        discover_eligible_prs(gh, root)?
     };
 
-    let context_bundle = load_codebase_context_bundle(&root).unwrap_or_default();
-    let workflow_contract = load_workflow_contract(&root).unwrap_or_default();
-    let repo_map = render_repo_map(&root).unwrap_or_default();
+    let mut candidates = Vec::new();
+    for (index, entry) in entries.iter().enumerate() {
+        app.set_loading(
+            format!("Inspecting PR #{}/{}", index + 1, entries.len()),
+            format!(
+                "Loading metadata for PR #{} so the dashboard can show a concrete review preview.",
+                entry.number
+            ),
+        );
+        terminal.draw_interactive(app)?;
+        match fetch_pr_metadata(gh, root, entry.number) {
+            Ok(metadata) => candidates.push(candidate_from_metadata(&metadata)),
+            Err(error) => candidates.push(ReviewLaunchCandidate {
+                pr_number: entry.number,
+                title: entry.title.clone(),
+                url: entry.url.clone(),
+                author: "unknown".to_string(),
+                head_ref: "unknown".to_string(),
+                base_ref: "unknown".to_string(),
+                review_state: "unknown".to_string(),
+                changed_files: 0,
+                additions: 0,
+                deletions: 0,
+                linear_identifier: None,
+                linear_error: Some(error.to_string()),
+            }),
+        }
+    }
+
+    Ok(candidates)
+}
+
+fn candidate_from_metadata(pr: &GhPrMetadata) -> ReviewLaunchCandidate {
+    ReviewLaunchCandidate {
+        pr_number: pr.number,
+        title: pr.title.clone(),
+        url: pr.url.clone(),
+        author: pr.author.login.clone(),
+        head_ref: pr.head_ref_name.clone(),
+        base_ref: pr.base_ref_name.clone(),
+        review_state: pr
+            .review_decision
+            .clone()
+            .unwrap_or_else(|| "PENDING".to_string()),
+        changed_files: pr.changed_files,
+        additions: pr.additions,
+        deletions: pr.deletions,
+        linear_identifier: resolve_linear_identifier(pr).ok(),
+        linear_error: resolve_linear_identifier(pr)
+            .err()
+            .map(|error| error.to_string()),
+    }
+}
+
+fn spawn_review_execution(
+    root: std::path::PathBuf,
+    config: AppConfig,
+    planning_meta: PlanningMeta,
+    args: ReviewRunArgs,
+    candidate: ReviewLaunchCandidate,
+    store: Option<ReviewProjectStore>,
+) -> Receiver<ReviewExecutionEvent> {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let result = execute_review_with_progress(
+            &root,
+            &config,
+            &planning_meta,
+            &args,
+            &candidate,
+            store.as_ref(),
+            |event| {
+                let _ = tx.send(event);
+            },
+        );
+
+        if let Err(error) = result {
+            let _ = tx.send(ReviewExecutionEvent::Failed {
+                candidate,
+                error: error.to_string(),
+            });
+        }
+    });
+    rx
+}
+
+fn execute_review_with_progress(
+    root: &Path,
+    config: &AppConfig,
+    planning_meta: &PlanningMeta,
+    args: &ReviewRunArgs,
+    initial_candidate: &ReviewLaunchCandidate,
+    store: Option<&ReviewProjectStore>,
+    mut emit: impl FnMut(ReviewExecutionEvent),
+) -> Result<()> {
+    let gh = GhCli;
+    let mut candidate = initial_candidate.clone();
+    let mut session =
+        review_session_from_candidate(&candidate, ReviewPhase::Claimed, "Queued for review");
+    persist_review_session(store, &session)?;
+
+    emit(ReviewExecutionEvent::Progress {
+        candidate: candidate.clone(),
+        phase: ReviewPhase::Claimed,
+        summary: format!("Queued review for PR #{}", candidate.pr_number),
+        note: Some("Human approval received. Starting review workflow.".to_string()),
+        remediation_required: None,
+    });
+
+    let pr = fetch_pr_metadata(&gh, root, candidate.pr_number)?;
+    candidate = candidate_from_metadata(&pr);
+    session = review_session_from_candidate(
+        &candidate,
+        ReviewPhase::ReviewStarted,
+        "Loading pull request and Linear context",
+    );
+    persist_review_session(store, &session)?;
+    emit(ReviewExecutionEvent::Progress {
+        candidate: candidate.clone(),
+        phase: ReviewPhase::ReviewStarted,
+        summary: format!("Loading review context for PR #{}", candidate.pr_number),
+        note: Some("Resolving PR metadata, diff scope, and linked Linear context.".to_string()),
+        remediation_required: None,
+    });
+
+    let linear_identifier = resolve_linear_identifier(&pr)?;
+    let diff = fetch_pr_diff(root, candidate.pr_number)?;
+    let context_bundle = load_codebase_context_bundle(root).unwrap_or_default();
+    let workflow_contract = load_workflow_contract(root).unwrap_or_default();
+    let repo_map = render_repo_map(root).unwrap_or_default();
     let ticket_context =
-        gather_linear_ticket_context(&root, &config, &planning_meta, &linear_identifier)?;
+        gather_linear_ticket_context(root, config, planning_meta, &linear_identifier)?;
 
     let review_prompt = assemble_review_prompt(
         &pr,
@@ -329,9 +976,8 @@ fn run_review_one_shot_with_dashboard(args: &ReviewRunArgs, pr_number: u64) -> R
         &repo_map,
         &ticket_context,
     );
-
     let agent_args = RunAgentArgs {
-        root: Some(root.clone()),
+        root: Some(root.to_path_buf()),
         route_key: Some(AGENT_ROUTE_AGENTS_REVIEW.to_string()),
         agent: args.agent.clone(),
         prompt: review_prompt,
@@ -341,73 +987,367 @@ fn run_review_one_shot_with_dashboard(args: &ReviewRunArgs, pr_number: u64) -> R
         transport: None,
         attachments: Vec::new(),
     };
+    let invocation = resolve_agent_invocation_for_planning(config, planning_meta, &agent_args)?;
 
-    let invocation = resolve_agent_invocation_for_planning(&config, &planning_meta, &agent_args)?;
-    set_session_status(
-        &mut data,
+    candidate.linear_identifier = Some(linear_identifier.clone());
+    candidate.linear_error = None;
+    session = review_session_from_candidate(
+        &candidate,
         ReviewPhase::Running,
         format!("Running agent review with {}", invocation.agent),
-        format!(
-            "Resolved provider `{}` with model `{}` and reasoning `{}`.",
-            invocation.agent,
-            invocation.model.as_deref().unwrap_or("unset"),
-            invocation.reasoning.as_deref().unwrap_or("unset")
-        ),
     );
-    dashboard.draw(&data)?;
+    persist_review_session(store, &session)?;
+    emit(ReviewExecutionEvent::Progress {
+        candidate: candidate.clone(),
+        phase: ReviewPhase::Running,
+        summary: format!("Running agent review with {}", invocation.agent),
+        note: Some(format!(
+            "Provider `{}` is auditing the PR against repository context and ticket criteria.",
+            invocation.agent
+        )),
+        remediation_required: None,
+    });
 
     let report = run_agent_capture(&agent_args)?;
     let review_output = report.stdout.trim().to_string();
     let remediation_required = review_output_requires_remediation(&review_output);
 
     if remediation_required {
-        set_session_status(
-            &mut data,
-            ReviewPhase::Running,
-            "Creating remediation branch and PR",
-            "Required fixes were found. Opening a remediation branch and follow-up PR.",
-        );
-        data.sessions[0].remediation_required = Some(true);
-        dashboard.draw(&data)?;
-
-        let outcome = run_remediation(
-            &root,
+        emit(ReviewExecutionEvent::Progress {
+            candidate: candidate.clone(),
+            phase: ReviewPhase::Running,
+            summary: format!("Creating remediation PR for #{}", candidate.pr_number),
+            note: Some(
+                "Required fixes were found. Preparing the remediation branch and follow-up PR."
+                    .to_string(),
+            ),
+            remediation_required: Some(true),
+        });
+        let remediation = run_remediation(
+            root,
             &pr,
             &linear_identifier,
             &review_output,
-            &config,
-            &planning_meta,
+            config,
+            planning_meta,
             args,
         )?;
-        data.sessions[0].phase = ReviewPhase::Completed;
-        data.sessions[0].summary = "Remediation PR created".to_string();
-        data.sessions[0].remediation_pr_number = Some(outcome.pr_number);
-        data.sessions[0].remediation_pr_url = Some(outcome.pr_url.clone());
-        data.sessions[0].updated_at_epoch_seconds = now_epoch_seconds();
-        push_note(
-            &mut data,
-            format!(
-                "Opened remediation PR #{} for original PR #{pr_number}.",
-                outcome.pr_number
-            ),
+        let outcome = InteractiveReviewOutcome {
+            candidate: candidate.clone(),
+            summary: "Remediation PR created".to_string(),
+            review_output,
+            remediation_required: true,
+            remediation_pr_number: Some(remediation.pr_number),
+            remediation_pr_url: Some(remediation.pr_url),
+        };
+        session = review_session_from_candidate(
+            &candidate,
+            ReviewPhase::Completed,
+            "Remediation PR created",
         );
-        dashboard.draw(&data)?;
+        session.remediation_required = Some(true);
+        session.remediation_pr_number = outcome.remediation_pr_number;
+        session.remediation_pr_url = outcome.remediation_pr_url.clone();
+        session.linear_identifier = Some(linear_identifier);
+        persist_review_session(store, &session)?;
+        emit(ReviewExecutionEvent::Completed(outcome));
     } else {
-        data.sessions[0].phase = ReviewPhase::Completed;
-        data.sessions[0].summary = "No remediation required".to_string();
-        data.sessions[0].remediation_required = Some(false);
-        data.sessions[0].updated_at_epoch_seconds = now_epoch_seconds();
-        push_note(
-            &mut data,
-            format!("Review finished for PR #{pr_number} without remediation."),
+        let outcome = InteractiveReviewOutcome {
+            candidate: candidate.clone(),
+            summary: "No remediation required".to_string(),
+            review_output,
+            remediation_required: false,
+            remediation_pr_number: None,
+            remediation_pr_url: None,
+        };
+        session = review_session_from_candidate(
+            &candidate,
+            ReviewPhase::Completed,
+            "No remediation required",
         );
-        dashboard.draw(&data)?;
+        session.remediation_required = Some(false);
+        session.linear_identifier = Some(linear_identifier);
+        persist_review_session(store, &session)?;
+        emit(ReviewExecutionEvent::Completed(outcome));
     }
 
-    dashboard.close()?;
-    println!("{review_output}");
-
     Ok(())
+}
+
+fn persist_review_session(
+    store: Option<&ReviewProjectStore>,
+    session: &ReviewSession,
+) -> Result<()> {
+    if let Some(store) = store {
+        let mut state = store.load_state()?;
+        state.upsert(session.clone());
+        store.save_state(&state)?;
+    }
+    Ok(())
+}
+
+fn review_session_from_candidate(
+    candidate: &ReviewLaunchCandidate,
+    phase: ReviewPhase,
+    summary: impl Into<String>,
+) -> ReviewSession {
+    ReviewSession {
+        pr_number: candidate.pr_number,
+        pr_title: candidate.title.clone(),
+        pr_url: Some(candidate.url.clone()),
+        pr_author: Some(candidate.author.clone()),
+        head_branch: Some(candidate.head_ref.clone()),
+        base_branch: Some(candidate.base_ref.clone()),
+        linear_identifier: candidate.linear_identifier.clone(),
+        phase,
+        summary: summary.into(),
+        updated_at_epoch_seconds: now_epoch_seconds(),
+        remediation_required: None,
+        remediation_pr_number: None,
+        remediation_pr_url: None,
+    }
+}
+
+fn interactive_preview_viewport(area: Rect) -> Rect {
+    let outer = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(6),
+            Constraint::Min(0),
+            Constraint::Length(7),
+        ])
+        .split(area);
+    let body = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
+        .split(outer[1]);
+    body[1]
+}
+
+fn render_interactive_review(frame: &mut ratatui::Frame<'_>, app: &InteractiveReviewApp) {
+    let outer = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(6),
+            Constraint::Min(0),
+            Constraint::Length(7),
+        ])
+        .split(frame.area());
+    let body = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
+        .split(outer[1]);
+
+    let status_badge = match app.stage {
+        InteractiveReviewStage::Loading => badge("loading", Tone::Info),
+        InteractiveReviewStage::Select => badge("select", Tone::Accent),
+        InteractiveReviewStage::Confirm => badge("confirm", Tone::Accent),
+        InteractiveReviewStage::Running => badge("running", Tone::Info),
+        InteractiveReviewStage::Completed => {
+            if app.error.is_some() {
+                badge("failed", Tone::Danger)
+            } else {
+                badge("complete", Tone::Success)
+            }
+        }
+        InteractiveReviewStage::Empty => badge("empty", Tone::Muted),
+    };
+    let header = paragraph(
+        Text::from(vec![
+            Line::from(vec![
+                status_badge,
+                Span::raw(" "),
+                Span::styled("meta agents review", emphasis_style()),
+            ]),
+            Line::from(app.status.clone()),
+            Line::from(vec![
+                Span::styled("Mode ", label_style()),
+                Span::raw(match app.mode {
+                    InteractiveReviewMode::Direct => "single PR".to_string(),
+                    InteractiveReviewMode::Discovery => "guided queue".to_string(),
+                }),
+                Span::styled("  Candidates ", label_style()),
+                Span::raw(app.candidates.len().to_string()),
+            ]),
+            key_hints(&interactive_key_hints(app)),
+        ]),
+        panel_title("Review Flow", false),
+    );
+    frame.render_widget(header, outer[0]);
+
+    render_interactive_candidate_list(frame, body[0], app);
+    let preview = scrollable_content_paragraph(
+        app.selected_candidate_text(),
+        panel_title(
+            match app.outcome {
+                Some(_) => "Review Output",
+                None => "Selected PR Preview",
+            },
+            app.focus == InteractiveReviewFocus::Preview,
+        ),
+        &app.preview_scroll,
+    )
+    .wrap(Wrap { trim: false });
+    frame.render_widget(preview, body[1]);
+
+    let footer = paragraph(
+        interactive_footer_text(app),
+        panel_title("Next Step", false),
+    )
+    .wrap(Wrap { trim: false });
+    frame.render_widget(footer, outer[2]);
+}
+
+fn render_interactive_candidate_list(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    app: &InteractiveReviewApp,
+) {
+    let items = if app.candidates.is_empty() {
+        vec![ListItem::new(empty_state(
+            "No pull requests are currently queued for review.",
+            "Add the `metastack` label to a PR or press `q` to exit.",
+        ))]
+    } else {
+        app.candidates
+            .iter()
+            .map(|candidate| {
+                let linear = candidate
+                    .linear_identifier
+                    .clone()
+                    .unwrap_or_else(|| "unresolved".to_string());
+                ListItem::new(Text::from(vec![
+                    Line::from(vec![
+                        badge(format!("#{}", candidate.pr_number), Tone::Accent),
+                        Span::raw(" "),
+                        Span::styled(candidate.title.clone(), emphasis_style()),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("Linear ", label_style()),
+                        Span::raw(linear),
+                        Span::styled("  Review ", label_style()),
+                        Span::raw(candidate.review_state.clone()),
+                    ]),
+                    Line::from(Span::styled(
+                        format!("{} -> {}", candidate.head_ref, candidate.base_ref),
+                        muted_style(),
+                    )),
+                ]))
+            })
+            .collect()
+    };
+
+    let mut state = ListState::default();
+    if !app.candidates.is_empty() {
+        state.select(Some(
+            app.selected_index
+                .min(app.candidates.len().saturating_sub(1)),
+        ));
+    }
+
+    let widget = list(
+        items,
+        panel_title(
+            match app.mode {
+                InteractiveReviewMode::Direct => "Review Candidate",
+                InteractiveReviewMode::Discovery => "Candidate PRs",
+            },
+            app.focus == InteractiveReviewFocus::Candidates,
+        ),
+    );
+    frame.render_stateful_widget(widget, area, &mut state);
+}
+
+fn interactive_footer_text(app: &InteractiveReviewApp) -> Text<'static> {
+    if let Some(error) = app.error.as_deref() {
+        return Text::from(vec![
+            Line::from(Span::styled("The review flow failed.", emphasis_style())),
+            Line::from(""),
+            Line::from(error.to_string()),
+            Line::from(""),
+            Line::from(
+                "Press `q` to exit, or `Esc` to return to the candidate list when available.",
+            ),
+        ]);
+    }
+
+    match app.stage {
+        InteractiveReviewStage::Loading => Text::from(vec![
+            Line::from("The dashboard is gathering discovery and prerequisite state."),
+            Line::from(""),
+            Line::from(
+                "Stay in this screen while MetaStack verifies auth, loads PR metadata, and prepares review previews.",
+            ),
+        ]),
+        InteractiveReviewStage::Select => Text::from(vec![
+            Line::from("Review is human-gated."),
+            Line::from(""),
+            Line::from(
+                "Use Up/Down to choose a PR. Tab moves into the preview pane. Enter opens the approval screen; no review work starts until you confirm.",
+            ),
+        ]),
+        InteractiveReviewStage::Confirm => Text::from(vec![
+            Line::from("This PR will be reviewed only after explicit approval."),
+            Line::from(""),
+            Line::from(
+                "Press Enter to start the audit and possible remediation flow, or Esc to go back without launching anything.",
+            ),
+        ]),
+        InteractiveReviewStage::Running => Text::from(vec![
+            Line::from("A review session is active."),
+            Line::from(""),
+            Line::from(
+                "The dashboard will stay on this screen until the review completes so the current phase and remediation status remain visible.",
+            ),
+        ]),
+        InteractiveReviewStage::Completed => Text::from(vec![
+            Line::from("The review session finished."),
+            Line::from(""),
+            Line::from(match app.outcome.as_ref() {
+                Some(outcome) if outcome.remediation_required => {
+                    "Required fixes were found and a remediation PR was opened."
+                }
+                Some(_) => "No remediation PR was needed for the selected review.",
+                None => "The session ended without a completed review artifact.",
+            }),
+            Line::from(""),
+            Line::from(match app.mode {
+                InteractiveReviewMode::Direct => "Press Enter or q to exit this review session.",
+                InteractiveReviewMode::Discovery => {
+                    "Press Esc to return to the candidate list for another review, or q to exit."
+                }
+            }),
+        ]),
+        InteractiveReviewStage::Empty => Text::from(vec![
+            Line::from("No review candidates were found."),
+            Line::from(""),
+            Line::from("Press q to exit. Run the command again after PRs are labeled for review."),
+        ]),
+    }
+}
+
+fn interactive_key_hints(app: &InteractiveReviewApp) -> Vec<(&'static str, &'static str)> {
+    match app.stage {
+        InteractiveReviewStage::Loading => vec![("q", "exit after load")],
+        InteractiveReviewStage::Select => vec![
+            ("Up/Down", "move"),
+            ("Tab", "focus"),
+            ("PgUp/PgDn", "scroll preview"),
+            ("Enter", "approve screen"),
+            ("q", "exit"),
+        ],
+        InteractiveReviewStage::Confirm => {
+            vec![("Enter", "start review"), ("Esc", "back"), ("q", "exit")]
+        }
+        InteractiveReviewStage::Running => vec![("q", "disabled while running")],
+        InteractiveReviewStage::Completed => match app.mode {
+            InteractiveReviewMode::Direct => vec![("Enter", "exit"), ("q", "exit")],
+            InteractiveReviewMode::Discovery => {
+                vec![("Esc", "back to list"), ("q", "exit")]
+            }
+        },
+        InteractiveReviewStage::Empty => vec![("q", "exit")],
+    }
 }
 
 fn verify_gh_auth(root: &Path) -> Result<()> {
@@ -1149,6 +2089,12 @@ async fn run_review_listener(args: &ReviewRunArgs) -> Result<()> {
         return run_review_render_once(&root, &store, args);
     }
 
+    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+        bail!(
+            "the interactive review dashboard requires a TTY; use `meta agents review <PR_NUMBER> --dry-run`, `meta agents review --once`, or `meta agents review --once --json` for scripted runs"
+        );
+    }
+
     run_review_daemon(&root, &store, args).await
 }
 
@@ -1514,22 +2460,6 @@ fn should_launch_interactive_review_dashboard(args: &ReviewRunArgs) -> bool {
         && !args.render_once
 }
 
-fn one_shot_dashboard_data(
-    root: &Path,
-    session: ReviewSession,
-    notes: Vec<String>,
-) -> ReviewDashboardData {
-    ReviewDashboardData {
-        scope: store::resolve_origin_remote(root).unwrap_or_else(|_| root.display().to_string()),
-        cycle_summary: format!("Reviewing PR #{}", session.pr_number),
-        eligible_prs: 1,
-        sessions: vec![session],
-        now_epoch_seconds: now_epoch_seconds(),
-        notes,
-        state_file: "one-shot review".to_string(),
-    }
-}
-
 fn initial_listener_dashboard_data(root: &Path, store: &ReviewProjectStore) -> ReviewDashboardData {
     let sessions = store
         .load_state()
@@ -1546,33 +2476,10 @@ fn initial_listener_dashboard_data(root: &Path, store: &ReviewProjectStore) -> R
     }
 }
 
-fn set_session_status(
-    data: &mut ReviewDashboardData,
-    phase: ReviewPhase,
-    summary: impl Into<String>,
-    note: impl Into<String>,
-) {
-    if let Some(session) = data.sessions.first_mut() {
-        session.phase = phase;
-        session.summary = summary.into();
-        session.updated_at_epoch_seconds = now_epoch_seconds();
-    }
-    push_note(data, note.into());
-}
-
 fn push_note(data: &mut ReviewDashboardData, note: impl Into<String>) {
     data.now_epoch_seconds = now_epoch_seconds();
     data.notes.insert(0, note.into());
     data.notes.truncate(6);
-}
-
-fn populate_session_metadata(session: &mut ReviewSession, pr: &GhPrMetadata) {
-    session.pr_title = pr.title.clone();
-    session.pr_url = Some(pr.url.clone());
-    session.pr_author = Some(pr.author.login.clone());
-    session.head_branch = Some(pr.head_ref_name.clone());
-    session.base_branch = Some(pr.base_ref_name.clone());
-    session.updated_at_epoch_seconds = now_epoch_seconds();
 }
 
 struct ReviewTerminalDashboard {
@@ -1608,11 +2515,14 @@ impl ReviewTerminalDashboard {
         Ok(())
     }
 
-    /// Draw a one-shot review frame using the default browser state.
-    ///
-    /// Returns an error when the terminal backend cannot render the frame.
-    fn draw(&mut self, data: &ReviewDashboardData) -> Result<()> {
-        self.draw_dashboard(data, &ReviewBrowserState::default())
+    fn draw_interactive(&mut self, app: &InteractiveReviewApp) -> Result<()> {
+        self.terminal
+            .draw(|frame| render_interactive_review(frame, app))?;
+        Ok(())
+    }
+
+    fn size(&self) -> Result<Rect> {
+        Ok(self.terminal.size()?.into())
     }
 
     /// Restore the normal terminal screen and cursor.
@@ -1745,5 +2655,33 @@ mod tests {
         let summary = data.render_summary();
         assert!(summary.contains("Review Dashboard: test-repo"));
         assert!(summary.contains("1 eligible PR"));
+    }
+
+    #[test]
+    fn interactive_dashboard_copy_mentions_explicit_approval() -> Result<()> {
+        let mut app = InteractiveReviewApp::new(InteractiveReviewMode::Discovery);
+        app.load_candidates(vec![ReviewLaunchCandidate {
+            pr_number: 42,
+            title: "MET-74 Improve review UX".to_string(),
+            url: "https://example.test/pull/42".to_string(),
+            author: "metasudo".to_string(),
+            head_ref: "met-74-review".to_string(),
+            base_ref: "main".to_string(),
+            review_state: "PENDING".to_string(),
+            changed_files: 7,
+            additions: 120,
+            deletions: 18,
+            linear_identifier: Some("MET-74".to_string()),
+            linear_error: None,
+        }]);
+
+        let backend = ratatui::backend::TestBackend::new(120, 36);
+        let mut terminal = ratatui::Terminal::new(backend)?;
+        terminal.draw(|frame| render_interactive_review(frame, &app))?;
+        let snapshot = format!("{}", terminal.backend());
+
+        assert!(snapshot.contains("Review is human-gated"));
+        assert!(snapshot.contains("Enter opens the approval screen"));
+        Ok(())
     }
 }

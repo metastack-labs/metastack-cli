@@ -468,7 +468,7 @@ pub struct UpgradeArgs {
 pub enum AgentsCommands {
     /// Listen for eligible Linear issues and supervise them through the interactive session browser.
     Listen(ListenArgs),
-    /// Review open GitHub PRs: one-shot audit with remediation, or listener/dashboard mode.
+    /// Review open GitHub PRs through a guided dashboard with explicit human approval.
     Review(ReviewArgs),
     /// List, explain, and run reusable workflow playbooks.
     #[command(alias = "workflow")]
@@ -1541,7 +1541,7 @@ pub struct ListenWorkerArgs {
 
 #[derive(Debug, Clone, Args)]
 pub struct ReviewArgs {
-    /// GitHub PR number for one-shot review. Omit for listener/dashboard mode.
+    /// GitHub PR number for one-shot review. Omit to discover candidate PRs in the dashboard first.
     #[arg(value_name = "PR_NUMBER")]
     pub pr_number: Option<u64>,
     #[command(flatten)]
