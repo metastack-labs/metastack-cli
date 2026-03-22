@@ -8,6 +8,7 @@ pub struct PlanningPaths {
     pub metastack_dir: PathBuf,
     pub agent_dir: PathBuf,
     pub backlog_dir: PathBuf,
+    pub releases_dir: PathBuf,
     pub merge_runs_dir: PathBuf,
     pub backlog_template_dir: PathBuf,
     pub agent_briefs_dir: PathBuf,
@@ -28,6 +29,7 @@ impl PlanningPaths {
         let metastack_dir = root.join(".metastack");
         let agent_dir = metastack_dir.join("agents");
         let backlog_dir = metastack_dir.join("backlog");
+        let releases_dir = metastack_dir.join("releases");
         let merge_runs_dir = metastack_dir.join("merge-runs");
         let backlog_template_dir = backlog_dir.join("_TEMPLATE");
         let agent_briefs_dir = agent_dir.join("briefs");
@@ -45,6 +47,7 @@ impl PlanningPaths {
             metastack_dir,
             agent_dir,
             backlog_dir,
+            releases_dir,
             merge_runs_dir,
             backlog_template_dir,
             agent_briefs_dir,

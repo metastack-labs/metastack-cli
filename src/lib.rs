@@ -4,6 +4,7 @@ mod backlog;
 mod backlog_defaults;
 mod backlog_dependencies;
 mod backlog_improve;
+mod backlog_release;
 mod backlog_spec;
 mod cli;
 mod config;
@@ -48,6 +49,7 @@ use clap::error::ErrorKind;
 
 use crate::backlog_dependencies::run_backlog_dependencies;
 use crate::backlog_improve::run_backlog_improve;
+use crate::backlog_release::run_backlog_release;
 use crate::backlog_spec::{BacklogSpecOutput, run_backlog_spec};
 use crate::cli::{
     AgentsCommands, BacklogCommands, Cli, Command, ConfigEventArg, DashboardCommands,
@@ -172,6 +174,9 @@ async fn dispatch(cli: Cli) -> Result<()> {
             }
             BacklogCommands::Dependencies(args) => {
                 run_backlog_dependencies(&args).await?;
+            }
+            BacklogCommands::Release(args) => {
+                run_backlog_release(&args).await?;
             }
             BacklogCommands::Tech(args) => {
                 let report = run_technical(&args).await?;
