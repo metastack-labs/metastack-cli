@@ -116,9 +116,7 @@ impl ImproveState {
     /// Look up a session by ID.
     #[allow(dead_code)]
     pub fn find_session(&self, session_id: &str) -> Option<&ImproveSession> {
-        self.sessions
-            .iter()
-            .find(|s| s.session_id == session_id)
+        self.sessions.iter().find(|s| s.session_id == session_id)
     }
 
     /// Return sessions sorted by most recently updated first.
@@ -246,7 +244,8 @@ mod tests {
 
     #[test]
     fn upsert_replaces_existing_session() {
-        let mut state = ImproveState::from_sessions(vec![test_session("sess-1", ImprovePhase::Queued)]);
+        let mut state =
+            ImproveState::from_sessions(vec![test_session("sess-1", ImprovePhase::Queued)]);
         let mut updated = test_session("sess-1", ImprovePhase::Running);
         updated.instructions = "Updated".to_string();
         state.upsert(updated);
@@ -256,7 +255,8 @@ mod tests {
 
     #[test]
     fn upsert_appends_new_session() {
-        let mut state = ImproveState::from_sessions(vec![test_session("sess-1", ImprovePhase::Queued)]);
+        let mut state =
+            ImproveState::from_sessions(vec![test_session("sess-1", ImprovePhase::Queued)]);
         state.upsert(test_session("sess-2", ImprovePhase::Running));
         assert_eq!(state.sessions.len(), 2);
     }

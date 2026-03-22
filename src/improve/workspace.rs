@@ -114,10 +114,7 @@ fn refresh_improve_workspace(
         workspace_path,
         &["reset", "--hard", &format!("origin/{source_branch}")],
     )?;
-    run_git(
-        workspace_path,
-        &["clean", "-fd", "--exclude=.metastack/"],
-    )?;
+    run_git(workspace_path, &["clean", "-fd", "--exclude=.metastack/"])?;
 
     Ok(())
 }
@@ -163,7 +160,13 @@ fn git_stdout(root: &Path, args: &[&str]) -> Result<String> {
 pub fn push_improve_branch(workspace_path: &Path, improve_branch: &str) -> Result<()> {
     run_git(
         workspace_path,
-        &["push", "--set-upstream", "origin", improve_branch, "--force-with-lease"],
+        &[
+            "push",
+            "--set-upstream",
+            "origin",
+            improve_branch,
+            "--force-with-lease",
+        ],
     )
     .with_context(|| format!("failed to push improve branch `{improve_branch}`"))
 }

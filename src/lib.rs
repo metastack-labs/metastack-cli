@@ -54,12 +54,12 @@ use crate::cli::{
     ListenAssignmentScopeArg, MergeDashboardEventArg, RuntimeCommands, SpecEventArg, SyncCommands,
     SyncDashboardEventArg,
 };
-use crate::improve::run_improve;
 use crate::config::ListenAssignmentScope;
 use crate::config_command::{ConfigAction, ConfigCommandOutput, run_config};
 use crate::context::run_context_command;
 use crate::cron::run_cron;
 use crate::doctor::run_doctor;
+use crate::improve::run_improve;
 use crate::linear::create::IssueCreateAction;
 use crate::linear::dashboard::DashboardAction;
 use crate::linear::edit::IssueEditAction;

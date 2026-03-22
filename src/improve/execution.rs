@@ -73,7 +73,11 @@ pub fn run_improve_session(
     let workspace = match ensure_improve_workspace(root, &source_branch, session_id) {
         Ok(ws) => ws,
         Err(err) => {
-            fail_session(state, session_id, &format!("workspace provisioning failed: {err}"));
+            fail_session(
+                state,
+                session_id,
+                &format!("workspace provisioning failed: {err}"),
+            );
             save_improve_state(paths, state)?;
             return Ok(());
         }
@@ -102,7 +106,11 @@ pub fn run_improve_session(
             save_improve_state(paths, state)?;
         }
         Err(err) => {
-            fail_session(state, session_id, &format!("stacked PR publication failed: {err}"));
+            fail_session(
+                state,
+                session_id,
+                &format!("stacked PR publication failed: {err}"),
+            );
             save_improve_state(paths, state)?;
         }
     }
@@ -235,13 +243,9 @@ mod tests {
         let paths = PlanningPaths::new(temp.path());
         let mut state = ImproveState::default();
 
-        let session_id = create_improve_session(
-            &paths,
-            &mut state,
-            &test_source_pr(),
-            "Fix the flaky test",
-        )
-        .unwrap();
+        let session_id =
+            create_improve_session(&paths, &mut state, &test_source_pr(), "Fix the flaky test")
+                .unwrap();
 
         assert_eq!(state.sessions.len(), 1);
         let session = state.find_session(&session_id).unwrap();
@@ -276,13 +280,8 @@ mod tests {
         let paths = PlanningPaths::new(temp.path());
         let mut state = ImproveState::default();
 
-        let session_id = create_improve_session(
-            &paths,
-            &mut state,
-            &test_source_pr(),
-            "Fix tests",
-        )
-        .unwrap();
+        let session_id =
+            create_improve_session(&paths, &mut state, &test_source_pr(), "Fix tests").unwrap();
 
         fail_session(&mut state, &session_id, "clone failed");
         let session = state.find_session(&session_id).unwrap();
@@ -296,13 +295,8 @@ mod tests {
         let paths = PlanningPaths::new(temp.path());
         let mut state = ImproveState::default();
 
-        let session_id = create_improve_session(
-            &paths,
-            &mut state,
-            &test_source_pr(),
-            "Fix tests",
-        )
-        .unwrap();
+        let session_id =
+            create_improve_session(&paths, &mut state, &test_source_pr(), "Fix tests").unwrap();
 
         update_session_phase(&mut state, &session_id, ImprovePhase::Running);
         assert_eq!(

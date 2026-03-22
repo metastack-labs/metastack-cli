@@ -14,12 +14,8 @@ use super::state::ImproveState;
 pub fn load_improve_state(paths: &PlanningPaths) -> Result<ImproveState> {
     let state_path = paths.improve_sessions_dir.join("state.json");
     match fs::read_to_string(&state_path) {
-        Ok(content) => serde_json::from_str(&content).with_context(|| {
-            format!(
-                "invalid improve state JSON at `{}`",
-                state_path.display()
-            )
-        }),
+        Ok(content) => serde_json::from_str(&content)
+            .with_context(|| format!("invalid improve state JSON at `{}`", state_path.display())),
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(ImproveState::default()),
         Err(error) => Err(error).with_context(|| {
             format!(
@@ -39,17 +35,27 @@ pub fn save_improve_state(paths: &PlanningPaths, state: &ImproveState) -> Result
     let state_path = paths.improve_sessions_dir.join("state.json");
     let content =
         serde_json::to_string_pretty(state).context("failed to serialize improve state")?;
-    fs::write(&state_path, content)
-        .with_context(|| format!("failed to write improve state to `{}`", state_path.display()))
+    fs::write(&state_path, content).with_context(|| {
+        format!(
+            "failed to write improve state to `{}`",
+            state_path.display()
+        )
+    })
 }
 
 /// Write the stacked PR body to a temp-like file under the improve sessions directory.
 ///
 /// Returns the path to the written file.
 #[allow(dead_code)]
-pub fn write_pr_body_file(paths: &PlanningPaths, session_id: &str, body: &str) -> Result<std::path::PathBuf> {
+pub fn write_pr_body_file(
+    paths: &PlanningPaths,
+    session_id: &str,
+    body: &str,
+) -> Result<std::path::PathBuf> {
     ensure_dir(&paths.improve_sessions_dir)?;
-    let body_path = paths.improve_sessions_dir.join(format!("{session_id}.pr-body.md"));
+    let body_path = paths
+        .improve_sessions_dir
+        .join(format!("{session_id}.pr-body.md"));
     fs::write(&body_path, body)
         .with_context(|| format!("failed to write PR body to `{}`", body_path.display()))?;
     Ok(body_path)

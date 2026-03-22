@@ -24,8 +24,8 @@ use crate::fs::{PlanningPaths, canonicalize_existing_dir};
 use crate::github_pr::GhCli;
 
 use dashboard::{
-    ImproveAction, ImproveBrowserState, ImproveDashboardData, ImprovePrEntry,
-    render, render_improve_dashboard_snapshot,
+    ImproveAction, ImproveBrowserState, ImproveDashboardData, ImprovePrEntry, render,
+    render_improve_dashboard_snapshot,
 };
 use state::ImproveState;
 use store::{load_improve_state, state_file_display};
@@ -77,12 +77,8 @@ pub(crate) async fn run_improve(args: &ImproveArgs) -> Result<()> {
             };
             browser_state.apply_action(action, &data);
         }
-        let snapshot = render_improve_dashboard_snapshot(
-            args.width,
-            args.height,
-            &data,
-            &browser_state,
-        )?;
+        let snapshot =
+            render_improve_dashboard_snapshot(args.width, args.height, &data, &browser_state)?;
         println!("{snapshot}");
         return Ok(());
     }
@@ -162,7 +158,11 @@ fn build_dashboard_data(
 fn render_text_summary(data: &ImproveDashboardData) -> String {
     let mut lines = vec![
         format!("Improve: {}", data.scope),
-        format!("{} open PR(s), {} session(s)", data.prs.len(), data.sessions.len()),
+        format!(
+            "{} open PR(s), {} session(s)",
+            data.prs.len(),
+            data.sessions.len()
+        ),
         format!("State file: {}", data.state_file),
     ];
     if !data.prs.is_empty() {
@@ -209,8 +209,7 @@ fn run_interactive_dashboard(
                     continue;
                 }
                 match key.code {
-                    KeyCode::Char('q')
-                    | KeyCode::Char('c')
+                    KeyCode::Char('q') | KeyCode::Char('c')
                         if key.modifiers.contains(KeyModifiers::CONTROL) =>
                     {
                         break;

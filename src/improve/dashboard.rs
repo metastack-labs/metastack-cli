@@ -187,15 +187,9 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, data: &ImproveDashboardData)
     let title = format!(" Improve: {} ", data.scope);
     let pr_count = data.prs.len();
     let session_count = data.sessions.len();
-    let summary = format!(
-        "{} open PR(s), {} session(s)",
-        pr_count, session_count
-    );
+    let summary = format!("{} open PR(s), {} session(s)", pr_count, session_count);
 
-    let header = Paragraph::new(Line::from(vec![
-        Span::styled(summary, emphasis_style()),
-    ]))
-    .block(
+    let header = Paragraph::new(Line::from(vec![Span::styled(summary, emphasis_style())])).block(
         Block::default()
             .title(panel_title(&title, true))
             .borders(Borders::ALL),
@@ -281,11 +275,7 @@ fn render_pr_list(
         .iter()
         .enumerate()
         .map(|(i, pr)| {
-            let marker = if focused && i == selected {
-                ">"
-            } else {
-                " "
-            };
+            let marker = if focused && i == selected { ">" } else { " " };
             let style = if focused && i == selected {
                 Style::default().add_modifier(Modifier::BOLD)
             } else {
@@ -303,7 +293,9 @@ fn render_pr_list(
         .borders(Borders::ALL)
         .border_style(border_style);
 
-    let p = Paragraph::new(Text::from(items)).block(block).wrap(Wrap { trim: true });
+    let p = Paragraph::new(Text::from(items))
+        .block(block)
+        .wrap(Wrap { trim: true });
     frame.render_widget(p, area);
 }
 
@@ -342,11 +334,7 @@ fn render_session_list(
         .iter()
         .enumerate()
         .map(|(i, session)| {
-            let marker = if focused && i == selected {
-                ">"
-            } else {
-                " "
-            };
+            let marker = if focused && i == selected { ">" } else { " " };
             let style = if focused && i == selected {
                 Style::default().add_modifier(Modifier::BOLD)
             } else {
@@ -369,7 +357,9 @@ fn render_session_list(
         .borders(Borders::ALL)
         .border_style(border_style);
 
-    let p = Paragraph::new(Text::from(items)).block(block).wrap(Wrap { trim: true });
+    let p = Paragraph::new(Text::from(items))
+        .block(block)
+        .wrap(Wrap { trim: true });
     frame.render_widget(p, area);
 }
 
@@ -484,16 +474,11 @@ fn render_session_detail(
 fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &ImproveBrowserState) {
     let hints = match state.view {
         ImproveView::PrList => "Tab: Sessions | Up/Down: Navigate | Enter: Select PR | q: Quit",
-        ImproveView::Sessions => {
-            "Tab: PRs | Up/Down: Navigate | Enter: View Session | q: Quit"
-        }
+        ImproveView::Sessions => "Tab: PRs | Up/Down: Navigate | Enter: View Session | q: Quit",
         ImproveView::PrDetail => "Backspace: Back to PRs | q: Quit",
         ImproveView::SessionDetail => "Backspace: Back to Sessions | q: Quit",
     };
-    let footer = Paragraph::new(Line::from(Span::styled(
-        hints,
-        muted_style(),
-    )));
+    let footer = Paragraph::new(Line::from(Span::styled(hints, muted_style())));
     frame.render_widget(footer, area);
 }
 

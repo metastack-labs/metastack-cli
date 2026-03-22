@@ -12,10 +12,7 @@ fn improve_render_once_empty_state() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo = temp.path().join("repo");
     let config_path = temp.path().join("meta.toml");
-    fs::write(
-        &config_path,
-        "[onboarding]\ncompleted = true\n",
-    )?;
+    fs::write(&config_path, "[onboarding]\ncompleted = true\n")?;
 
     fs::create_dir_all(&repo)?;
     fs::write(repo.join("README.md"), "# test\n")?;
@@ -58,10 +55,7 @@ fn improve_render_once_with_open_prs() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo = temp.path().join("repo");
     let config_path = temp.path().join("meta.toml");
-    fs::write(
-        &config_path,
-        "[onboarding]\ncompleted = true\n",
-    )?;
+    fs::write(&config_path, "[onboarding]\ncompleted = true\n")?;
 
     fs::create_dir_all(&repo)?;
     fs::write(repo.join("README.md"), "# test\n")?;
@@ -107,10 +101,7 @@ fn improve_render_once_tab_switches_to_sessions() -> Result<(), Box<dyn Error>> 
     let temp = tempdir()?;
     let repo = temp.path().join("repo");
     let config_path = temp.path().join("meta.toml");
-    fs::write(
-        &config_path,
-        "[onboarding]\ncompleted = true\n",
-    )?;
+    fs::write(&config_path, "[onboarding]\ncompleted = true\n")?;
 
     fs::create_dir_all(&repo)?;
     fs::write(repo.join("README.md"), "# test\n")?;
@@ -153,10 +144,7 @@ fn improve_render_once_enter_shows_pr_detail() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo = temp.path().join("repo");
     let config_path = temp.path().join("meta.toml");
-    fs::write(
-        &config_path,
-        "[onboarding]\ncompleted = true\n",
-    )?;
+    fs::write(&config_path, "[onboarding]\ncompleted = true\n")?;
 
     fs::create_dir_all(&repo)?;
     fs::write(repo.join("README.md"), "# test\n")?;
@@ -206,10 +194,7 @@ fn improve_render_once_enter_then_back_returns_to_list() -> Result<(), Box<dyn E
     let temp = tempdir()?;
     let repo = temp.path().join("repo");
     let config_path = temp.path().join("meta.toml");
-    fs::write(
-        &config_path,
-        "[onboarding]\ncompleted = true\n",
-    )?;
+    fs::write(&config_path, "[onboarding]\ncompleted = true\n")?;
 
     fs::create_dir_all(&repo)?;
     fs::write(repo.join("README.md"), "# test\n")?;
@@ -256,10 +241,7 @@ fn improve_render_once_session_detail() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo = temp.path().join("repo");
     let config_path = temp.path().join("meta.toml");
-    fs::write(
-        &config_path,
-        "[onboarding]\ncompleted = true\n",
-    )?;
+    fs::write(&config_path, "[onboarding]\ncompleted = true\n")?;
 
     let meta_dir = repo.join(".metastack");
     let improve_sessions_dir = meta_dir.join("agents").join("improve").join("sessions");
@@ -337,10 +319,7 @@ fn improve_render_once_with_persisted_session() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo = temp.path().join("repo");
     let config_path = temp.path().join("meta.toml");
-    fs::write(
-        &config_path,
-        "[onboarding]\ncompleted = true\n",
-    )?;
+    fs::write(&config_path, "[onboarding]\ncompleted = true\n")?;
 
     let meta_dir = repo.join(".metastack");
     let improve_sessions_dir = meta_dir.join("agents").join("improve").join("sessions");

@@ -915,7 +915,10 @@ fn run_review_interactive(
                                         pr_author: Some(session.candidate.author.clone()),
                                         head_branch: Some(session.candidate.head_ref.clone()),
                                         base_branch: Some(session.candidate.base_ref.clone()),
-                                        linear_identifier: session.candidate.linear_identifier.clone(),
+                                        linear_identifier: session
+                                            .candidate
+                                            .linear_identifier
+                                            .clone(),
                                         phase: session.phase,
                                         summary: session.summary.clone(),
                                         updated_at_epoch_seconds: session.updated_at_epoch_seconds,
@@ -2075,8 +2078,7 @@ impl InteractiveReviewApp {
                             .map(|session| session.candidate.pr_number)
                         {
                             self.stage = InteractiveReviewStage::Confirm;
-                            self.dialog =
-                                Some(InteractiveReviewDialog::SkipRemediation(pr_number));
+                            self.dialog = Some(InteractiveReviewDialog::SkipRemediation(pr_number));
                             self.status = format!(
                                 "Confirm keeping the report without remediation for PR #{pr_number}."
                             );
@@ -2100,7 +2102,10 @@ impl InteractiveReviewApp {
                             );
                         }
                     }
-                    KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Char('x') | KeyCode::Char('X')
+                    KeyCode::Char('c')
+                    | KeyCode::Char('C')
+                    | KeyCode::Char('x')
+                    | KeyCode::Char('X')
                         if self.tab == InteractiveReviewTab::Sessions
                             && self
                                 .selected_session()
@@ -2747,9 +2752,15 @@ impl InteractiveReviewApp {
                 self.focus = InteractiveReviewFocus::CandidateList;
                 self.tab = InteractiveReviewTab::Candidates;
             } else {
-                self.session_index = self.session_index.min(self.sessions.len().saturating_sub(1));
+                self.session_index = self
+                    .session_index
+                    .min(self.sessions.len().saturating_sub(1));
             }
-            self.status = format!("Deleted stored {} session for PR #{}.", kind.label(), pr_number);
+            self.status = format!(
+                "Deleted stored {} session for PR #{}.",
+                kind.label(),
+                pr_number
+            );
         }
     }
 
@@ -3788,10 +3799,7 @@ fn execute_remediation_with_progress(
                 kind: InteractiveSessionKind::Review,
                 candidate: request.candidate.clone(),
                 phase: ReviewPhase::FixAgentInProgress,
-                summary: format!(
-                    "Fix agent retrying for PR #{}",
-                    request.candidate.pr_number
-                ),
+                summary: format!("Fix agent retrying for PR #{}", request.candidate.pr_number),
                 note: Some(format!(
                     "Remediation attempt #{attempt} failed: {error}. Retrying until the PR is created or you cancel the session."
                 )),
@@ -5110,10 +5118,7 @@ fn interactive_action_line(app: &InteractiveReviewApp) -> Line<'static> {
         ]);
     }
 
-    let mut spans = vec![
-        badge("D", Tone::Muted),
-        Span::raw(" delete stored session"),
-    ];
+    let mut spans = vec![badge("D", Tone::Muted), Span::raw(" delete stored session")];
     if let Some(session) = app.selected_session() {
         if InteractiveReviewApp::session_needs_remediation_decision(session) {
             spans = vec![
@@ -5853,15 +5858,17 @@ fn run_remediation_attempt(
     let report = run_agent_capture(&fix_args)?;
     eprintln!("{}", report.stdout.trim());
 
-    ensure_remediation_commits_created(
-        &workspace_path,
-        &starting_head,
-        remediation_branch_exists,
-    )?;
+    ensure_remediation_commits_created(&workspace_path, &starting_head, remediation_branch_exists)?;
 
     run_git(
         &workspace_path,
-        &["push", "--force-with-lease", "-u", "origin", &remediation_branch],
+        &[
+            "push",
+            "--force-with-lease",
+            "-u",
+            "origin",
+            &remediation_branch,
+        ],
     )
     .map_err(|e| {
         anyhow!(
@@ -5871,13 +5878,12 @@ fn run_remediation_attempt(
     })?;
 
     let pr_title = format!("review: remediation for PR #{}", context.pr.number);
-    let pr_body =
-        remediation_pull_request_body(
-            context.pr.number,
-            remediation_base_branch,
-            context.review_output,
-            context.linear_identifier,
-        );
+    let pr_body = remediation_pull_request_body(
+        context.pr.number,
+        remediation_base_branch,
+        context.review_output,
+        context.linear_identifier,
+    );
     let body_path = workspace_path.join(".metastack").join("review-pr-body.md");
     ensure_dir(&workspace_path.join(".metastack"))?;
     std::fs::write(&body_path, &pr_body).context("failed to write remediation PR body")?;
@@ -6045,13 +6051,15 @@ fn materialize_pull_request_head(
     }
     let branch_exists = remote_branch_exists(workspace_path, remediation_branch)?;
     if branch_exists {
+        run_git(workspace_path, &["fetch", "origin", remediation_branch])?;
         run_git(
             workspace_path,
-            &["fetch", "origin", remediation_branch],
-        )?;
-        run_git(
-            workspace_path,
-            &["checkout", "-B", remediation_branch, &format!("origin/{remediation_branch}")],
+            &[
+                "checkout",
+                "-B",
+                remediation_branch,
+                &format!("origin/{remediation_branch}"),
+            ],
         )?;
     } else {
         run_git(
@@ -7786,7 +7794,10 @@ mod tests {
         app.load_candidates(vec![make_test_candidate(1)]);
         let f_key = crossterm::event::KeyEvent::new(KeyCode::Char('F'), KeyModifiers::NONE);
         let _ = app.handle_key(f_key, Rect::default());
-        assert!(app.filter_panel_open, "filter panel should open in review mode");
+        assert!(
+            app.filter_panel_open,
+            "filter panel should open in review mode"
+        );
     }
 
     #[test]

@@ -274,7 +274,8 @@ impl ReviewState {
 
     pub(super) fn remove_session(&mut self, pr_number: u64) -> bool {
         let original_len = self.sessions.len();
-        self.sessions.retain(|session| !session.pr_matches(pr_number));
+        self.sessions
+            .retain(|session| !session.pr_matches(pr_number));
         self.sessions.len() != original_len
     }
 }
