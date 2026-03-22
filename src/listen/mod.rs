@@ -51,8 +51,8 @@ use crate::listen::workspace::{TicketWorkspace, ensure_ticket_workspace};
 use crate::output::render_json_success;
 use crate::scaffold::ensure_planning_layout;
 pub use state::{
-    AgentSession, LatestResumeHandle, PendingIssue, PullRequestStatus, PullRequestSummary,
-    ResumeProvider, SessionPhase, TokenUsage,
+    ActiveIssue, AgentSession, LatestResumeHandle, PendingIssue, PullRequestStatus,
+    PullRequestSummary, ResumeProvider, SessionPhase, TokenUsage,
 };
 use state::{COMPLETED_SESSION_TTL_SECONDS, ListenState};
 use store::{
@@ -81,10 +81,13 @@ pub struct ListenDashboardData {
     pub vim_mode: bool,
     pub runtime: ListenRuntimeSummary,
     pub pending_issues: Vec<PendingIssue>,
+    pub active_issues: Vec<ActiveIssue>,
     pub sessions: Vec<AgentSession>,
     pub session_details: HashMap<String, ListenSessionDetail>,
     pub notes: Vec<String>,
     pub state_file: String,
+    pub show_active_issues: bool,
+    pub show_preview: bool,
 }
 
 impl ListenDashboardData {
@@ -213,6 +216,7 @@ struct ListenCycleData {
     watch_scope: String,
     claimed_this_cycle: usize,
     pending_issues: Vec<PendingIssue>,
+    active_issues: Vec<ActiveIssue>,
     sessions: Vec<AgentSession>,
     session_details: HashMap<String, ListenSessionDetail>,
     notes: Vec<String>,
@@ -227,6 +231,7 @@ impl ListenCycleData {
             watch_scope,
             claimed_this_cycle: 0,
             pending_issues: Vec::new(),
+            active_issues: Vec::new(),
             sessions: Vec::new(),
             session_details: HashMap::new(),
             notes: vec![
@@ -254,6 +259,55 @@ impl ListenCycleData {
                 project: Some("MetaStack CLI".to_string()),
                 team_key: "MET".to_string(),
             }],
+            active_issues: vec![
+                ActiveIssue {
+                    identifier: "MET-22".to_string(),
+                    title: "Integrate backlog sync with cron scheduler".to_string(),
+                    assignee: Some("Alice Chen".to_string()),
+                    state_name: "In Progress".to_string(),
+                    has_open_pr: true,
+                    pr_url: Some(
+                        "https://github.com/metastack-labs/metastack-cli/pull/45".to_string(),
+                    ),
+                    description: Some(
+                        "Wire the backlog sync polling into the cron scheduler so recurring refreshes happen automatically.\n\nAcceptance criteria:\n- Cron job triggers backlog sync at the configured interval\n- Sync results appear in the dashboard notes\n- Manual sync still works independently"
+                            .to_string(),
+                    ),
+                    url: "https://linear.app/metastack-backlog/issue/MET-22/integrate-backlog-sync"
+                        .to_string(),
+                    team_key: "MET".to_string(),
+                    project: Some("MetaStack CLI".to_string()),
+                },
+                ActiveIssue {
+                    identifier: "MET-25".to_string(),
+                    title: "Add workspace prune dry-run mode".to_string(),
+                    assignee: Some("Bob Taylor".to_string()),
+                    state_name: "In Progress".to_string(),
+                    has_open_pr: false,
+                    pr_url: None,
+                    description: Some(
+                        "Add a --dry-run flag to `meta workspace prune` that lists what would be deleted without actually removing anything."
+                            .to_string(),
+                    ),
+                    url: "https://linear.app/metastack-backlog/issue/MET-25/workspace-prune-dry-run"
+                        .to_string(),
+                    team_key: "MET".to_string(),
+                    project: Some("MetaStack CLI".to_string()),
+                },
+                ActiveIssue {
+                    identifier: "MET-30".to_string(),
+                    title: "Config migration for deprecated listen fields".to_string(),
+                    assignee: None,
+                    state_name: "In Progress".to_string(),
+                    has_open_pr: false,
+                    pr_url: None,
+                    description: None,
+                    url: "https://linear.app/metastack-backlog/issue/MET-30/config-migration"
+                        .to_string(),
+                    team_key: "MET".to_string(),
+                    project: Some("MetaStack CLI".to_string()),
+                },
+            ],
             sessions: vec![
                 AgentSession {
                     issue_id: Some("019cedb422937651b0b4dfac4af6a640".to_string()),
@@ -487,6 +541,8 @@ struct DashboardRuntimeContext {
     dashboard_refresh_seconds: u64,
     linear_refresh_seconds: u64,
     vim_mode: bool,
+    show_active_issues: bool,
+    show_preview: bool,
 }
 
 struct ListenLoopConfig {
@@ -494,6 +550,8 @@ struct ListenLoopConfig {
     started_at_epoch_seconds: u64,
     refresh_immediately: bool,
     vim_mode: bool,
+    show_active_issues: bool,
+    show_preview: bool,
 }
 
 #[derive(Debug, Default)]
@@ -1033,9 +1091,22 @@ where
         self.store.ensure_layout()?;
         let mut state = self.store.load_state()?;
         let pending = self.service.list_issues(self.filters.clone()).await?;
+        let in_progress_issues = self
+            .service
+            .list_issues(IssueListFilters {
+                state: Some(IN_PROGRESS_STATE.to_string()),
+                ..self.filters.clone()
+            })
+            .await
+            .unwrap_or_default();
+        let active_issues: Vec<ActiveIssue> = in_progress_issues
+            .into_iter()
+            .map(ActiveIssue::from_issue)
+            .collect();
         let mut notes = vec![format!(
-            "Observed {} Todo issue(s) from Linear.",
-            pending.len()
+            "Observed {} Todo issue(s) and {} In Progress issue(s) from Linear.",
+            pending.len(),
+            active_issues.len()
         )];
         self.reconcile_sessions(&mut state, &mut notes).await?;
         let required_labels = self.listen_settings.required_label_names();
@@ -1108,6 +1179,7 @@ where
             watch_scope: self.watch_scope_label(),
             claimed_this_cycle,
             pending_issues,
+            active_issues,
             sessions,
             session_details,
             notes,
@@ -2405,6 +2477,9 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
     if args.all_assignees {
         listen_settings.assignment_scope = Some(ListenAssignmentScope::Any);
     }
+    let show_active_issues =
+        !args.hide_active_issues && listen_settings.dashboard_active_issues_enabled();
+    let show_preview = !args.hide_preview && listen_settings.dashboard_preview_enabled();
 
     if args.demo {
         let store = resolve_project_store_for_run(
@@ -2429,6 +2504,8 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
                     dashboard_refresh_seconds: TERMINAL_REFRESH_INTERVAL_SECONDS,
                     linear_refresh_seconds: poll_interval_seconds,
                     vim_mode: app_config.vim_mode_enabled(),
+                    show_active_issues,
+                    show_preview,
                 },
             );
             println!(
@@ -2449,6 +2526,8 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
                     dashboard_refresh_seconds: TERMINAL_REFRESH_INTERVAL_SECONDS,
                     linear_refresh_seconds: poll_interval_seconds,
                     vim_mode: app_config.vim_mode_enabled(),
+                    show_active_issues,
+                    show_preview,
                 },
             );
             if args.json {
@@ -2467,6 +2546,8 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
                 started_at_epoch_seconds: demo_now - 7_351,
                 refresh_immediately: false,
                 vim_mode: app_config.vim_mode_enabled(),
+                show_active_issues,
+                show_preview,
             },
             initial_cycle,
             move || {
@@ -2605,6 +2686,8 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
                 dashboard_refresh_seconds: TERMINAL_REFRESH_INTERVAL_SECONDS,
                 linear_refresh_seconds: 0,
                 vim_mode: daemon.app_config.vim_mode_enabled(),
+                show_active_issues,
+                show_preview,
             },
         );
         println!(
@@ -2627,6 +2710,8 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
                 dashboard_refresh_seconds: TERMINAL_REFRESH_INTERVAL_SECONDS,
                 linear_refresh_seconds: 0,
                 vim_mode: daemon.app_config.vim_mode_enabled(),
+                show_active_issues,
+                show_preview,
             },
         );
         if args.json {
@@ -2655,6 +2740,8 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
             started_at_epoch_seconds,
             refresh_immediately: true,
             vim_mode: daemon.app_config.vim_mode_enabled(),
+            show_active_issues,
+            show_preview,
         },
         initial_cycle,
         || daemon.run_cycle(),
@@ -2834,6 +2921,8 @@ where
                 loop_config.poll_interval_seconds
             },
             vim_mode: loop_config.vim_mode,
+            show_active_issues: loop_config.show_active_issues,
+            show_preview: loop_config.show_preview,
         },
     );
     let linear_refresh_interval = Duration::from_secs(loop_config.poll_interval_seconds);
@@ -2871,6 +2960,8 @@ where
                 dashboard_refresh_seconds: TERMINAL_REFRESH_INTERVAL_SECONDS,
                 linear_refresh_seconds,
                 vim_mode: loop_config.vim_mode,
+                show_active_issues: loop_config.show_active_issues,
+                show_preview: loop_config.show_preview,
             },
         );
         browser_state.normalize(&data);
@@ -3019,10 +3110,13 @@ fn build_dashboard_data(
             current_epoch_seconds: runtime.now_epoch_seconds,
         },
         pending_issues: cycle.pending_issues.clone(),
+        active_issues: cycle.active_issues.clone(),
         sessions: cycle.sessions.clone(),
         session_details: cycle.session_details.clone(),
         notes: cycle.notes.clone(),
         state_file: cycle.state_file.clone(),
+        show_active_issues: runtime.show_active_issues,
+        show_preview: runtime.show_preview,
     }
 }
 
@@ -3650,6 +3744,7 @@ mod tests {
             scope: "MET".to_string(),
             watch_scope: "all assignees".to_string(),
             pending_issues: Vec::new(),
+            active_issues: Vec::new(),
             session_details: HashMap::new(),
             sessions: vec![AgentSession {
                 issue_id: Some("issue-1".to_string()),
@@ -3692,6 +3787,8 @@ mod tests {
             dashboard_refresh_seconds: 1,
             linear_refresh_seconds: 5,
             vim_mode: false,
+            show_active_issues: true,
+            show_preview: true,
         };
 
         let dashboard = super::build_dashboard_data(&cycle, &runtime);
@@ -4125,6 +4222,8 @@ mod tests {
                 refresh_policy: Some(ListenRefreshPolicy::ReuseAndRefresh),
                 instructions_path: None,
                 poll_interval_seconds: None,
+                dashboard_active_issues: None,
+                dashboard_preview: None,
             },
             viewer: Some(UserRef {
                 id: "viewer-1".to_string(),
@@ -4302,6 +4401,8 @@ mod tests {
                 refresh_policy: Some(ListenRefreshPolicy::ReuseAndRefresh),
                 instructions_path: None,
                 poll_interval_seconds: None,
+                dashboard_active_issues: None,
+                dashboard_preview: None,
             },
             viewer: Some(UserRef {
                 id: "viewer-1".to_string(),

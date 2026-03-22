@@ -6,15 +6,34 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Cell, List, ListItem, Paragraph, Row, Table, Wrap};
 use ratatui::{Frame, Terminal};
 
-use super::{ListenDashboardData, ListenSessionDetail, SessionListView, SessionPhase};
+use super::{ActiveIssue, ListenDashboardData, ListenSessionDetail, SessionListView, SessionPhase};
 use crate::tui::scroll::{clamp_offset, plain_text, wrapped_rows};
 use crate::tui::theme::{Tone, badge, content_panel, empty_state, key_hints, panel, panel_title};
 
+/// Which pane currently owns keyboard focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum FocusPane {
+    #[default]
+    Sessions,
+    ActiveIssues,
+}
+
+impl FocusPane {
+    pub(crate) fn toggle(self) -> Self {
+        match self {
+            Self::Sessions => Self::ActiveIssues,
+            Self::ActiveIssues => Self::Sessions,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SessionBrowserState {
+    pub(crate) focus: FocusPane,
     pub(crate) view: SessionListView,
     pub(crate) selected_active: usize,
     pub(crate) selected_completed: usize,
+    pub(crate) selected_active_issue: usize,
     pub(crate) detail_mode: bool,
     pub(crate) detail_scroll: u16,
 }
@@ -36,9 +55,11 @@ pub(crate) enum SessionBrowserAction {
 impl Default for SessionBrowserState {
     fn default() -> Self {
         Self {
+            focus: FocusPane::default(),
             view: SessionListView::Active,
             selected_active: 0,
             selected_completed: 0,
+            selected_active_issue: 0,
             detail_mode: false,
             detail_scroll: 0,
         }
@@ -51,9 +72,21 @@ impl SessionBrowserState {
         let completed_len = data.sessions_for_view(SessionListView::Completed).len();
         self.selected_active = clamp_index(self.selected_active, active_len);
         self.selected_completed = clamp_index(self.selected_completed, completed_len);
-        if self.selected_session(data).is_none() {
+        self.selected_active_issue =
+            clamp_index(self.selected_active_issue, data.active_issues.len());
+        if !data.show_active_issues && matches!(self.focus, FocusPane::ActiveIssues) {
+            self.focus = FocusPane::Sessions;
+        }
+        if self.detail_mode && self.has_no_detail_target(data) {
             self.detail_mode = false;
             self.detail_scroll = 0;
+        }
+    }
+
+    fn has_no_detail_target(&self, data: &ListenDashboardData) -> bool {
+        match self.focus {
+            FocusPane::Sessions => self.selected_session(data).is_none(),
+            FocusPane::ActiveIssues => self.selected_active_issue(data).is_none(),
         }
     }
 
@@ -73,12 +106,17 @@ impl SessionBrowserState {
     }
 
     pub(crate) fn select_previous(&mut self, data: &ListenDashboardData) {
-        match self.view {
-            SessionListView::Active => {
-                self.selected_active = self.selected_active.saturating_sub(1);
-            }
-            SessionListView::Completed => {
-                self.selected_completed = self.selected_completed.saturating_sub(1);
+        match self.focus {
+            FocusPane::Sessions => match self.view {
+                SessionListView::Active => {
+                    self.selected_active = self.selected_active.saturating_sub(1);
+                }
+                SessionListView::Completed => {
+                    self.selected_completed = self.selected_completed.saturating_sub(1);
+                }
+            },
+            FocusPane::ActiveIssues => {
+                self.selected_active_issue = self.selected_active_issue.saturating_sub(1);
             }
         }
         self.detail_scroll = 0;
@@ -86,12 +124,17 @@ impl SessionBrowserState {
     }
 
     pub(crate) fn select_next(&mut self, data: &ListenDashboardData) {
-        match self.view {
-            SessionListView::Active => {
-                self.selected_active = self.selected_active.saturating_add(1);
-            }
-            SessionListView::Completed => {
-                self.selected_completed = self.selected_completed.saturating_add(1);
+        match self.focus {
+            FocusPane::Sessions => match self.view {
+                SessionListView::Active => {
+                    self.selected_active = self.selected_active.saturating_add(1);
+                }
+                SessionListView::Completed => {
+                    self.selected_completed = self.selected_completed.saturating_add(1);
+                }
+            },
+            FocusPane::ActiveIssues => {
+                self.selected_active_issue = self.selected_active_issue.saturating_add(1);
             }
         }
         self.detail_scroll = 0;
@@ -108,6 +151,13 @@ impl SessionBrowserState {
             SessionListView::Completed => self.selected_completed,
         };
         sessions.get(index).copied()
+    }
+
+    pub(crate) fn selected_active_issue<'a>(
+        &self,
+        data: &'a ListenDashboardData,
+    ) -> Option<&'a ActiveIssue> {
+        data.active_issues.get(self.selected_active_issue)
     }
 
     pub(crate) fn apply_action(
@@ -131,20 +181,32 @@ impl SessionBrowserState {
                 }
             }
             SessionBrowserAction::Tab => {
-                self.view = self.view.toggle();
-                self.detail_scroll = 0;
+                if data.show_active_issues {
+                    self.focus = self.focus.toggle();
+                    self.detail_mode = false;
+                    self.detail_scroll = 0;
+                } else {
+                    self.view = self.view.toggle();
+                    self.detail_scroll = 0;
+                }
             }
             SessionBrowserAction::Left => {
-                self.view = SessionListView::Active;
+                if matches!(self.focus, FocusPane::Sessions) {
+                    self.view = SessionListView::Active;
+                }
                 self.detail_scroll = 0;
             }
             SessionBrowserAction::Right => {
-                self.view = SessionListView::Completed;
+                if matches!(self.focus, FocusPane::Sessions) {
+                    self.view = SessionListView::Completed;
+                }
                 self.detail_scroll = 0;
             }
             SessionBrowserAction::Enter => {
-                self.detail_mode = !self.detail_mode;
-                self.detail_scroll = 0;
+                if data.show_preview {
+                    self.detail_mode = !self.detail_mode;
+                    self.detail_scroll = 0;
+                }
             }
             SessionBrowserAction::Pause => {}
             SessionBrowserAction::Back => {
@@ -206,15 +268,26 @@ pub(crate) fn render(
         0
     };
     let header_height = if area.width >= 120 { 10 } else { 12 };
-    let constraints = if footer_height > 0 {
-        vec![
-            Constraint::Length(header_height),
-            Constraint::Min(8),
-            Constraint::Length(footer_height),
-        ]
+    let show_active_issues = data.show_active_issues && !data.active_issues.is_empty();
+    let active_issue_detail =
+        state.detail_mode && matches!(state.focus, FocusPane::ActiveIssues) && data.show_preview;
+    let active_issues_height: u16 = if show_active_issues {
+        let rows = data.active_issues.len() as u16;
+        if active_issue_detail {
+            (rows + 4).clamp(16, 24)
+        } else {
+            (rows + 4).min(16)
+        }
     } else {
-        vec![Constraint::Length(header_height), Constraint::Min(8)]
+        0
     };
+    let mut constraints = vec![Constraint::Length(header_height), Constraint::Min(8)];
+    if active_issues_height > 0 {
+        constraints.push(Constraint::Length(active_issues_height));
+    }
+    if footer_height > 0 {
+        constraints.push(Constraint::Length(footer_height));
+    }
     let sections = Layout::default()
         .direction(Direction::Vertical)
         .constraints(constraints)
@@ -223,8 +296,13 @@ pub(crate) fn render(
     render_header(frame, data, sections[0]);
     render_sessions(frame, data, sections[1], state);
 
-    if footer_height > 0 {
-        render_footer(frame, data, sections[2]);
+    let mut next_section = 2;
+    if active_issues_height > 0 {
+        render_active_issues(frame, data, sections[next_section], state);
+        next_section += 1;
+    }
+    if footer_height > 0 && next_section < sections.len() {
+        render_footer(frame, data, sections[next_section]);
     }
 }
 
@@ -325,14 +403,21 @@ fn render_header(frame: &mut Frame<'_>, data: &ListenDashboardData, area: Rect) 
             Span::styled(data.state_file.clone(), value_style(Color::Green)),
         ]),
         key_hints(&[
-            ("Tab", "toggle view"),
+            (
+                "Tab",
+                if data.show_active_issues {
+                    "switch pane"
+                } else {
+                    "toggle view"
+                },
+            ),
             (
                 if data.vim_mode {
                     "←/→/h/l"
                 } else {
                     "←/→"
                 },
-                "switch tabs",
+                "switch views",
             ),
             ("p", "pause running"),
             ("r", "resume paused / retry blocked"),
@@ -378,7 +463,8 @@ fn render_sessions(
     let view = state.view;
     let counts = data.session_counts();
     let sessions = data.sessions_for_view(view);
-    let block = panel(panel_title("Agent Sessions", false));
+    let is_focused = matches!(state.focus, FocusPane::Sessions);
+    let block = panel(panel_title("Agent Sessions", is_focused));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -391,19 +477,24 @@ fn render_sessions(
         .constraints([Constraint::Length(2), Constraint::Min(0)])
         .split(inner);
 
+    let tab_hint = if data.show_active_issues {
+        "Tab pane"
+    } else {
+        "Tab view"
+    };
+    let nav_hint = if data.vim_mode {
+        format!(
+            "  {tab_hint}  ←/→/h/l views  ↑/↓/j/k select  Enter detail  p pause  r resume/retry"
+        )
+    } else {
+        format!("  {tab_hint}  ←/→ views  ↑/↓ select  Enter detail  p pause  r resume/retry")
+    };
     let controls = Paragraph::new(Line::from(vec![
         Span::styled("Views: ", label_style()),
         session_view_badge(SessionListView::Active, view, counts.active),
         Span::raw(" "),
         session_view_badge(SessionListView::Completed, view, counts.completed),
-        Span::styled(
-            if data.vim_mode {
-                "  Tab/←/→/h/l tabs  ↑/↓/j/k select  Enter detail  p pause  r resume/retry"
-            } else {
-                "  Tab/←/→ tabs  ↑/↓ select  Enter detail  p pause  r resume/retry"
-            },
-            Style::default().fg(Color::DarkGray),
-        ),
+        Span::styled(nav_hint, Style::default().fg(Color::DarkGray)),
     ]))
     .wrap(Wrap { trim: true });
     frame.render_widget(controls, sections[0]);
@@ -424,7 +515,8 @@ fn render_sessions(
         return;
     }
 
-    let layout = if state.detail_mode {
+    let show_session_detail = state.detail_mode && is_focused && data.show_preview;
+    let layout = if show_session_detail {
         if sections[1].width >= 150 {
             Layout::default()
                 .direction(Direction::Horizontal)
@@ -445,7 +537,7 @@ fn render_sessions(
 
     render_session_table(frame, data, layout[0], view, sessions, state);
 
-    if state.detail_mode && layout.len() > 1 {
+    if show_session_detail && layout.len() > 1 {
         if let Some(session) = state.selected_session(data) {
             render_session_detail(
                 frame,
@@ -463,6 +555,164 @@ fn render_sessions(
     }
 }
 
+fn render_active_issues(
+    frame: &mut Frame<'_>,
+    data: &ListenDashboardData,
+    area: Rect,
+    state: &SessionBrowserState,
+) {
+    let is_focused = matches!(state.focus, FocusPane::ActiveIssues);
+    let block = panel(panel_title("In Progress Issues - All Users", is_focused));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    if data.active_issues.is_empty() {
+        let empty = Paragraph::new(empty_state(
+            "No In Progress issues found.",
+            "Issues moved to In Progress will appear here.",
+        ))
+        .wrap(Wrap { trim: true });
+        frame.render_widget(empty, inner);
+        return;
+    }
+
+    let show_detail = state.detail_mode && is_focused && data.show_preview;
+    let layout = if show_detail {
+        if inner.width >= 150 {
+            Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+                .split(inner)
+        } else {
+            Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(4), Constraint::Min(0)])
+                .split(inner)
+        }
+    } else {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(0)])
+            .split(inner)
+    };
+
+    let selected_index = state.selected_active_issue;
+    let max_title_len = if layout[0].width > 60 { 50 } else { 30 };
+    let rows = data.active_issues.iter().enumerate().map(|(index, issue)| {
+        Row::new(vec![
+            Cell::from(if index == selected_index && is_focused {
+                ">"
+            } else {
+                " "
+            }),
+            Cell::from(issue.identifier.clone()),
+            Cell::from(issue.short_title(max_title_len)),
+            Cell::from(issue.assignee_label().to_string()),
+            Cell::from(issue.pr_label()),
+        ])
+    });
+    let header = Row::new(vec![
+        Cell::from(""),
+        Cell::from("ID"),
+        Cell::from("TITLE"),
+        Cell::from("ASSIGNEE"),
+        Cell::from("PR"),
+    ])
+    .style(
+        Style::default()
+            .fg(Color::Gray)
+            .add_modifier(Modifier::BOLD),
+    )
+    .bottom_margin(1);
+    let constraints = vec![
+        Constraint::Length(2),
+        Constraint::Length(9),
+        Constraint::Min(20),
+        Constraint::Length(16),
+        Constraint::Length(4),
+    ];
+    let table = Table::new(rows, constraints)
+        .header(header)
+        .column_spacing(1);
+    frame.render_widget(table, layout[0]);
+
+    if show_detail && layout.len() > 1 {
+        if let Some(issue) = state.selected_active_issue(data) {
+            render_active_issue_detail(frame, issue, layout[1], state.detail_scroll);
+        }
+    }
+}
+
+fn render_active_issue_detail(frame: &mut Frame<'_>, issue: &ActiveIssue, area: Rect, scroll: u16) {
+    let content = render_active_issue_detail_text(issue);
+    let detail = Paragraph::new(content)
+        .wrap(Wrap { trim: true })
+        .scroll((scroll, 0))
+        .block(content_panel(panel_title("Issue Detail", false)));
+    frame.render_widget(detail, area);
+}
+
+fn render_active_issue_detail_text(issue: &ActiveIssue) -> Text<'static> {
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(
+                format!("{} ", issue.identifier),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                issue.state_name.clone(),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(Span::styled(
+            issue.title.clone(),
+            Style::default().fg(Color::Gray),
+        )),
+        Line::from(""),
+        detail_line("Assignee", issue.assignee_label()),
+        detail_line(
+            "PR",
+            if issue.has_open_pr {
+                issue.pr_url.as_deref().unwrap_or("open")
+            } else {
+                "none"
+            },
+        ),
+        detail_line("URL", &issue.url),
+    ];
+
+    if let Some(project) = issue.project.as_deref() {
+        lines.push(detail_line("Project", project));
+    }
+
+    if let Some(description) = issue.description.as_deref() {
+        lines.push(Line::from(""));
+        lines.push(section_header("Description"));
+        for desc_line in description.lines() {
+            lines.push(Line::from(Span::styled(
+                desc_line.to_string(),
+                Style::default().fg(Color::White),
+            )));
+        }
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Esc/Backspace close detail. PgUp/PgDn scroll.",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    Text::from(lines)
+}
+
 fn render_session_table(
     frame: &mut Frame<'_>,
     data: &ListenDashboardData,
@@ -471,6 +721,7 @@ fn render_session_table(
     sessions: Vec<&super::AgentSession>,
     state: &SessionBrowserState,
 ) {
+    let is_focused = matches!(state.focus, FocusPane::Sessions);
     let selected_index = match view {
         SessionListView::Active => state.selected_active,
         SessionListView::Completed => state.selected_completed,
@@ -486,7 +737,11 @@ fn render_session_table(
             )));
         }
         Row::new(vec![
-            Cell::from(if index == selected_index { ">" } else { " " }),
+            Cell::from(if index == selected_index && is_focused {
+                ">"
+            } else {
+                " "
+            }),
             Cell::from(Text::from(issue_lines)),
             Cell::from(Span::styled(
                 session.stage_label(),
@@ -580,6 +835,9 @@ fn detail_scroll_metrics(
     height: u16,
 ) -> Option<(u16, usize)> {
     if !state.detail_mode {
+        return None;
+    }
+    if matches!(state.focus, FocusPane::ActiveIssues) {
         return None;
     }
     let session = state.selected_session(data)?;
@@ -928,7 +1186,8 @@ mod tests {
     use ratatui::text::Line;
 
     use super::{
-        SessionBrowserState, detail_scroll_metrics, render_dashboard, render_dashboard_with_state,
+        FocusPane, SessionBrowserAction, SessionBrowserState, detail_scroll_metrics,
+        render_active_issue_detail_text, render_dashboard, render_dashboard_with_state,
         render_dashboard_with_view, render_session_detail_text,
     };
     use crate::listen::{
@@ -957,6 +1216,8 @@ mod tests {
                 dashboard_refresh_seconds: 1,
                 linear_refresh_seconds: 15,
                 vim_mode: false,
+                show_active_issues: true,
+                show_preview: true,
             },
         );
 
@@ -996,6 +1257,8 @@ mod tests {
                 dashboard_refresh_seconds: 1,
                 linear_refresh_seconds: 15,
                 vim_mode: false,
+                show_active_issues: true,
+                show_preview: true,
             },
         );
 
@@ -1027,6 +1290,8 @@ mod tests {
                 dashboard_refresh_seconds: 1,
                 linear_refresh_seconds: 15,
                 vim_mode: false,
+                show_active_issues: true,
+                show_preview: true,
             },
         );
 
@@ -1050,6 +1315,8 @@ mod tests {
                 dashboard_refresh_seconds: 1,
                 linear_refresh_seconds: 15,
                 vim_mode: false,
+                show_active_issues: true,
+                show_preview: true,
             },
         );
 
@@ -1075,6 +1342,8 @@ mod tests {
                 dashboard_refresh_seconds: 1,
                 linear_refresh_seconds: 15,
                 vim_mode: false,
+                show_active_issues: true,
+                show_preview: true,
             },
         );
 
@@ -1100,6 +1369,8 @@ mod tests {
                 dashboard_refresh_seconds: 1,
                 linear_refresh_seconds: 15,
                 vim_mode: false,
+                show_active_issues: true,
+                show_preview: true,
             },
         );
 
@@ -1122,6 +1393,8 @@ mod tests {
                 dashboard_refresh_seconds: 1,
                 linear_refresh_seconds: 15,
                 vim_mode: true,
+                show_active_issues: true,
+                show_preview: true,
             },
         );
 
@@ -1143,13 +1416,15 @@ mod tests {
                 dashboard_refresh_seconds: 1,
                 linear_refresh_seconds: 15,
                 vim_mode: false,
+                show_active_issues: true,
+                show_preview: true,
             },
         );
 
         let snapshot = render_dashboard_with_state(
             &data,
             200,
-            44,
+            56,
             SessionBrowserState {
                 detail_mode: true,
                 ..SessionBrowserState::default()
@@ -1189,6 +1464,8 @@ mod tests {
                 dashboard_refresh_seconds: 1,
                 linear_refresh_seconds: 15,
                 vim_mode: false,
+                show_active_issues: true,
+                show_preview: true,
             },
         );
 
@@ -1231,16 +1508,18 @@ mod tests {
                 dashboard_refresh_seconds: 1,
                 linear_refresh_seconds: 15,
                 vim_mode: false,
+                show_active_issues: true,
+                show_preview: true,
             },
         );
 
         let snapshot = render_dashboard_with_state(
             &data,
             200,
-            44,
+            64,
             SessionBrowserState {
                 detail_mode: true,
-                detail_scroll: 8,
+                detail_scroll: 10,
                 ..SessionBrowserState::default()
             },
         )
@@ -1262,6 +1541,8 @@ mod tests {
                 dashboard_refresh_seconds: 1,
                 linear_refresh_seconds: 15,
                 vim_mode: false,
+                show_active_issues: true,
+                show_preview: true,
             },
         );
         let mut state = SessionBrowserState {
@@ -1271,10 +1552,10 @@ mod tests {
         };
 
         state.normalize(&data);
-        state.clamp_detail_scroll(&data, 200, 44);
+        state.clamp_detail_scroll(&data, 200, 56);
 
         let (viewport_height, content_rows) =
-            detail_scroll_metrics(&data, &state, 200, 44).expect("detail metrics should exist");
+            detail_scroll_metrics(&data, &state, 200, 56).expect("detail metrics should exist");
         assert_eq!(
             state.detail_scroll,
             clamp_offset(u16::MAX, viewport_height, content_rows)
@@ -1294,6 +1575,8 @@ mod tests {
                 dashboard_refresh_seconds: 1,
                 linear_refresh_seconds: 15,
                 vim_mode: false,
+                show_active_issues: true,
+                show_preview: true,
             },
         );
 
@@ -1344,6 +1627,8 @@ mod tests {
                 dashboard_refresh_seconds: 1,
                 linear_refresh_seconds: 15,
                 vim_mode: false,
+                show_active_issues: true,
+                show_preview: true,
             },
         );
 
@@ -1394,6 +1679,8 @@ mod tests {
                 dashboard_refresh_seconds: 1,
                 linear_refresh_seconds: 15,
                 vim_mode: false,
+                show_active_issues: true,
+                show_preview: true,
             },
         );
 
@@ -1417,5 +1704,270 @@ mod tests {
 
         assert!(rendered.contains("PR Ref: #321"));
         assert!(!rendered.contains("PR URL:"));
+    }
+
+    #[test]
+    fn snapshot_renders_active_issues_pane_with_demo_data() {
+        let cycle = demo_cycle();
+        let data = build_dashboard_data(
+            &cycle,
+            &DashboardRuntimeContext {
+                started_at_epoch_seconds: 1_773_568_249,
+                now_epoch_seconds: 1_773_575_600,
+                poll_interval_seconds: 7,
+                dashboard_label: "terminal dashboard (TUI)",
+                dashboard_refresh_seconds: 1,
+                linear_refresh_seconds: 15,
+                vim_mode: false,
+                show_active_issues: true,
+                show_preview: true,
+            },
+        );
+
+        let snapshot = render_dashboard(&data, 140, 48).expect("snapshot should render");
+
+        assert!(snapshot.contains("In Progress Issues - All Users"));
+        assert!(snapshot.contains("MET-22"));
+        assert!(snapshot.contains("MET-25"));
+        assert!(snapshot.contains("MET-30"));
+        assert!(snapshot.contains("Alice Chen"));
+        assert!(snapshot.contains("Bob Taylor"));
+        assert!(snapshot.contains("unassigned"));
+        assert!(snapshot.contains("PR"));
+    }
+
+    #[test]
+    fn active_issues_pane_hidden_when_config_disabled() {
+        let cycle = demo_cycle();
+        let data = build_dashboard_data(
+            &cycle,
+            &DashboardRuntimeContext {
+                started_at_epoch_seconds: 1_773_568_249,
+                now_epoch_seconds: 1_773_575_600,
+                poll_interval_seconds: 7,
+                dashboard_label: "terminal dashboard (TUI)",
+                dashboard_refresh_seconds: 1,
+                linear_refresh_seconds: 15,
+                vim_mode: false,
+                show_active_issues: false,
+                show_preview: true,
+            },
+        );
+
+        let snapshot = render_dashboard(&data, 140, 48).expect("snapshot should render");
+
+        assert!(!snapshot.contains("In Progress Issues - All Users"));
+        assert!(snapshot.contains("Agent Sessions"));
+    }
+
+    #[test]
+    fn tab_toggles_focus_between_sessions_and_active_issues() {
+        let cycle = demo_cycle();
+        let data = build_dashboard_data(
+            &cycle,
+            &DashboardRuntimeContext {
+                started_at_epoch_seconds: 1_773_568_249,
+                now_epoch_seconds: 1_773_575_600,
+                poll_interval_seconds: 7,
+                dashboard_label: "terminal dashboard (TUI)",
+                dashboard_refresh_seconds: 1,
+                linear_refresh_seconds: 15,
+                vim_mode: false,
+                show_active_issues: true,
+                show_preview: true,
+            },
+        );
+
+        let mut state = SessionBrowserState::default();
+        assert_eq!(state.focus, FocusPane::Sessions);
+
+        state.apply_action(&data, SessionBrowserAction::Tab);
+        assert_eq!(state.focus, FocusPane::ActiveIssues);
+
+        state.apply_action(&data, SessionBrowserAction::Tab);
+        assert_eq!(state.focus, FocusPane::Sessions);
+    }
+
+    #[test]
+    fn tab_toggles_session_view_when_active_issues_disabled() {
+        let cycle = demo_cycle();
+        let data = build_dashboard_data(
+            &cycle,
+            &DashboardRuntimeContext {
+                started_at_epoch_seconds: 1_773_568_249,
+                now_epoch_seconds: 1_773_575_600,
+                poll_interval_seconds: 7,
+                dashboard_label: "terminal dashboard (TUI)",
+                dashboard_refresh_seconds: 1,
+                linear_refresh_seconds: 15,
+                vim_mode: false,
+                show_active_issues: false,
+                show_preview: true,
+            },
+        );
+
+        let mut state = SessionBrowserState::default();
+        assert_eq!(state.view, SessionListView::Active);
+
+        state.apply_action(&data, SessionBrowserAction::Tab);
+        assert_eq!(state.view, SessionListView::Completed);
+        assert_eq!(state.focus, FocusPane::Sessions);
+    }
+
+    #[test]
+    fn active_issue_selection_navigates_with_up_down() {
+        let cycle = demo_cycle();
+        let data = build_dashboard_data(
+            &cycle,
+            &DashboardRuntimeContext {
+                started_at_epoch_seconds: 1_773_568_249,
+                now_epoch_seconds: 1_773_575_600,
+                poll_interval_seconds: 7,
+                dashboard_label: "terminal dashboard (TUI)",
+                dashboard_refresh_seconds: 1,
+                linear_refresh_seconds: 15,
+                vim_mode: false,
+                show_active_issues: true,
+                show_preview: true,
+            },
+        );
+
+        let mut state = SessionBrowserState {
+            focus: FocusPane::ActiveIssues,
+            ..SessionBrowserState::default()
+        };
+        assert_eq!(state.selected_active_issue, 0);
+
+        state.apply_action(&data, SessionBrowserAction::Down);
+        assert_eq!(state.selected_active_issue, 1);
+
+        state.apply_action(&data, SessionBrowserAction::Down);
+        assert_eq!(state.selected_active_issue, 2);
+
+        state.apply_action(&data, SessionBrowserAction::Up);
+        assert_eq!(state.selected_active_issue, 1);
+    }
+
+    #[test]
+    fn active_issue_enter_opens_detail_when_preview_enabled() {
+        let cycle = demo_cycle();
+        let data = build_dashboard_data(
+            &cycle,
+            &DashboardRuntimeContext {
+                started_at_epoch_seconds: 1_773_568_249,
+                now_epoch_seconds: 1_773_575_600,
+                poll_interval_seconds: 7,
+                dashboard_label: "terminal dashboard (TUI)",
+                dashboard_refresh_seconds: 1,
+                linear_refresh_seconds: 15,
+                vim_mode: false,
+                show_active_issues: true,
+                show_preview: true,
+            },
+        );
+
+        let mut state = SessionBrowserState {
+            focus: FocusPane::ActiveIssues,
+            ..SessionBrowserState::default()
+        };
+        state.apply_action(&data, SessionBrowserAction::Enter);
+        assert!(state.detail_mode);
+    }
+
+    #[test]
+    fn active_issue_detail_pane_renders_description() {
+        let cycle = demo_cycle();
+        let data = build_dashboard_data(
+            &cycle,
+            &DashboardRuntimeContext {
+                started_at_epoch_seconds: 1_773_568_249,
+                now_epoch_seconds: 1_773_575_600,
+                poll_interval_seconds: 7,
+                dashboard_label: "terminal dashboard (TUI)",
+                dashboard_refresh_seconds: 1,
+                linear_refresh_seconds: 15,
+                vim_mode: false,
+                show_active_issues: true,
+                show_preview: true,
+            },
+        );
+
+        let snapshot = render_dashboard_with_state(
+            &data,
+            200,
+            56,
+            SessionBrowserState {
+                focus: FocusPane::ActiveIssues,
+                detail_mode: true,
+                ..SessionBrowserState::default()
+            },
+        )
+        .expect("active issue detail snapshot should render");
+
+        assert!(snapshot.contains("Issue Detail"));
+        assert!(snapshot.contains("MET-22"));
+        assert!(snapshot.contains("Description"));
+    }
+
+    #[test]
+    fn active_issue_detail_text_includes_pr_url_and_assignee() {
+        use crate::listen::ActiveIssue;
+
+        let issue = ActiveIssue {
+            identifier: "MET-42".to_string(),
+            title: "Test issue".to_string(),
+            assignee: Some("Charlie".to_string()),
+            state_name: "In Progress".to_string(),
+            has_open_pr: true,
+            pr_url: Some("https://github.com/org/repo/pull/99".to_string()),
+            description: Some("A detailed description".to_string()),
+            url: "https://linear.app/issues/MET-42".to_string(),
+            team_key: "MET".to_string(),
+            project: Some("MyProject".to_string()),
+        };
+
+        let text = render_active_issue_detail_text(&issue);
+        let rendered = text
+            .lines
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("Assignee: Charlie"));
+        assert!(rendered.contains("PR: https://github.com/org/repo/pull/99"));
+        assert!(rendered.contains("Project: MyProject"));
+        assert!(rendered.contains("A detailed description"));
+    }
+
+    #[test]
+    fn active_issue_detail_text_handles_no_assignee_no_pr() {
+        use crate::listen::ActiveIssue;
+
+        let issue = ActiveIssue {
+            identifier: "MET-43".to_string(),
+            title: "Minimal issue".to_string(),
+            assignee: None,
+            state_name: "In Progress".to_string(),
+            has_open_pr: false,
+            pr_url: None,
+            description: None,
+            url: "https://linear.app/issues/MET-43".to_string(),
+            team_key: "MET".to_string(),
+            project: None,
+        };
+
+        let text = render_active_issue_detail_text(&issue);
+        let rendered = text
+            .lines
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("Assignee: unassigned"));
+        assert!(rendered.contains("PR: none"));
+        assert!(!rendered.contains("Description"));
+        assert!(!rendered.contains("Project:"));
     }
 }

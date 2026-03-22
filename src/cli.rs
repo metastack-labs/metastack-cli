@@ -94,11 +94,16 @@ Non-interactive mode:
 
 const LISTEN_HELP_EXAMPLES: &str = "\
 Interactive dashboard:
-  - Session rows stay compact and include PR visibility as `none`, `draft #N`, or `ready #N`
-  - Press Enter on the selected session to open the detail pane for milestones, references, prompt context, log excerpts, and any available PR URL or `#N` ref
-  - Use Up/Down (or j/k when vim mode is enabled) to change the selected session, Esc or Backspace to close detail mode, and PgUp/PgDn to scroll detail content
-  - Press P to pause the selected running session, and R to resume a paused session or retry a blocked one
-  - Missing or malformed session detail artifacts do not block the list view; the next refresh rewrites them and restores drill-down data
+  - The dashboard has two primary panes: Agent Sessions and In Progress Issues - All Users (from Linear)
+  - Tab switches focus between panes; Left/Right switches Active/Completed views within Agent Sessions
+  - In Progress Issues rows show short title, assignee, and open-PR indicator for each In Progress issue
+  - Press Enter on a selected item to open its detail pane; Esc or Backspace closes it
+  - Session detail includes milestones, references, prompt context, log excerpts, and PR info
+  - In Progress Issue detail shows the issue description, assignee, PR URL, and Linear link
+  - Use Up/Down (or j/k in vim mode) to navigate, PgUp/PgDn to scroll detail content
+  - Press P to pause a running session, R to resume a paused session or retry a blocked one
+  - Use --hide-active-issues or --hide-preview to simplify the dashboard layout
+  - Configure defaults in .metastack/meta.json under listen.dashboard_active_issues and listen.dashboard_preview
 
 Terminal-only examples:
   meta agents listen --check --root .
@@ -1395,6 +1400,12 @@ pub struct ListenRunArgs {
     /// Override the resolved built-in reasoning option for launched listen workers.
     #[arg(long)]
     pub reasoning: Option<String>,
+    /// Hide the In Progress Issues pane in the interactive dashboard.
+    #[arg(long)]
+    pub hide_active_issues: bool,
+    /// Hide the preview/detail pane in the interactive dashboard.
+    #[arg(long)]
+    pub hide_preview: bool,
 }
 
 #[derive(Debug, Clone, Args)]
