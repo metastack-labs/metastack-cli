@@ -99,6 +99,8 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
         backlog_issue: backlog_issue.as_ref(),
         max_turns: args.max_turns,
     };
+    let session_origin =
+        load_existing_session_origin(&source_root, project_selector, &args.issue)?;
     let mut session_context = WorkerSessionContext {
         source_root: &source_root,
         project_selector,
@@ -109,6 +111,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
         pid: Some(worker_pid),
         latest_resume_handle: None,
         pull_request: load_existing_pull_request(&source_root, project_selector, &args.issue)?,
+        origin: session_origin,
     };
     let mut session_tokens =
         load_existing_session_tokens(&source_root, project_selector, &args.issue)?;
@@ -534,6 +537,7 @@ struct WorkerSessionContext<'a> {
     pid: Option<u32>,
     latest_resume_handle: Option<LatestResumeHandle>,
     pull_request: PullRequestSummary,
+    origin: super::state::SessionOrigin,
 }
 
 #[derive(Debug, Default)]
@@ -1484,6 +1488,7 @@ fn build_worker_session(
             .display()
             .to_string(),
         ),
+        origin: context.origin,
     }
 }
 
@@ -1516,6 +1521,21 @@ fn load_existing_session_id(
         .and_then(|session| session.session_id))
 }
 
+fn load_existing_session_origin(
+    root: &Path,
+    project_selector: Option<&str>,
+    issue_identifier: &str,
+) -> Result<super::state::SessionOrigin> {
+    let store = super::store::ListenProjectStore::resolve(root, project_selector)?;
+    let state = store.load_state()?;
+    Ok(state
+        .sessions
+        .into_iter()
+        .find(|session| session.issue_matches(issue_identifier))
+        .map(|session| session.origin)
+        .unwrap_or_default())
+}
+
 fn load_existing_pull_request(
     root: &Path,
     project_selector: Option<&str>,
@@ -1539,7 +1559,7 @@ mod tests {
         query_codex_threads, read_codex_session_index,
     };
     use crate::linear::{IssueSummary, TeamRef};
-    use crate::listen::{PullRequestSummary, SessionPhase, TokenUsage};
+    use crate::listen::{PullRequestSummary, SessionOrigin, SessionPhase, TokenUsage};
     use std::fs;
     use std::sync::{Mutex, OnceLock};
     use tempfile::tempdir;
@@ -1629,6 +1649,7 @@ mod tests {
             pid: Some(1234),
             latest_resume_handle: None,
             pull_request: PullRequestSummary::default(),
+            origin: SessionOrigin::Listen,
         };
         let mut tokens = TokenUsage::default();
 

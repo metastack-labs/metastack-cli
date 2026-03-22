@@ -728,6 +728,12 @@ fn render_session_table(
     };
     let rows = sessions.into_iter().enumerate().map(|(index, session)| {
         let mut issue_lines = vec![Line::from(session.issue_identifier.clone())];
+        if session.origin.is_execute() {
+            issue_lines.push(Line::from(Span::styled(
+                "execute-origin",
+                Style::default().fg(Color::Yellow),
+            )));
+        }
         if let Some(backlog_issue_identifier) = session.backlog_issue_identifier.as_deref()
             && !backlog_issue_identifier.eq_ignore_ascii_case(&session.issue_identifier)
         {
@@ -939,6 +945,7 @@ fn render_session_detail_text(
             Style::default().fg(Color::Gray),
         )),
         Line::from(""),
+        detail_line("Origin", session.origin_label()),
         detail_line("Summary", &detail.summary),
         detail_line("Turns", &detail.turns.unwrap_or(0).to_string()),
         detail_line("Tokens", &detail.tokens.display_compact()),
@@ -1009,6 +1016,14 @@ fn render_session_detail_text(
                 excerpt.line_number, excerpt.text
             )));
         }
+    }
+
+    if session.origin.is_execute() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "This session was started by `meta agents execute`. Use R to resume/adopt or clear it to re-pick.",
+            Style::default().fg(Color::Yellow),
+        )));
     }
 
     lines.push(Line::from(""));

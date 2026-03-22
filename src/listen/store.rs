@@ -1114,7 +1114,7 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::config::data_root_from_config_path;
-    use crate::listen::{ListenSessionDetail, PullRequestSummary, TokenUsage};
+    use crate::listen::{ListenSessionDetail, PullRequestSummary, SessionOrigin, TokenUsage};
 
     use super::{
         ActiveListenerLock, AgentSession, COMPLETED_SESSION_TTL_SECONDS,
@@ -1250,6 +1250,7 @@ mod tests {
             turns: Some(1),
             tokens: TokenUsage::default(),
             log_path: Some(format!("logs/{issue_identifier}.log")),
+            origin: SessionOrigin::Listen,
         }
     }
 

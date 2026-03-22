@@ -33,7 +33,8 @@ Most planning tools split work across issue trackers, docs, scripts, and ad hoc 
 - `meta linear ...` and `meta backlog sync` keep Linear and local files aligned.
 - `meta agents review` audits GitHub PRs in a guided dashboard, queues `metastack`-labeled PRs for explicit human approval, and can open remediation PRs when required.
 - `meta agents retro` analyzes shipped PRs for follow-up backlog opportunities and opens a plan-style Linear ticket curation flow.
-- `meta agents listen` runs unattended ticket execution in dedicated workspace clones instead of your source checkout.
+- `meta agents execute <ISSUE_ID>` runs a one-off headless agent session for a single Linear issue, persisting session state for later adoption by `meta agents listen`.
+- `meta agents listen` runs unattended ticket execution in dedicated workspace clones instead of your source checkout. Execute-started sessions are visible in the listen dashboard but not auto-claimed.
 - `meta workspace` inventories and cleans those sibling listener workspace clones after the listener finishes.
 
 ## Install `meta` During Development
@@ -1189,6 +1190,24 @@ Prerequisites:
 - `gh` CLI installed and authenticated (`gh auth login`)
 - Repository with a configured `.metastack/meta.json`
 - For guided queue mode: open PRs must carry the `metastack` label
+
+### `agents execute`
+
+Run a one-off headless agent session for a single Linear issue. The execute command reuses the same bootstrap path as `meta agents listen` — workspace provisioning, backlog setup, workpad creation, and worker launch — but records the session origin as `execute` instead of `listen`. This means:
+
+- The listen dashboard surfaces execute-origin sessions with an `execute-origin` label.
+- The listen daemon does **not** auto-resume or auto-claim execute-origin sessions when their worker finishes. They remain blocked until an operator explicitly adopts them via `R` (resume) in the dashboard or `meta listen sessions resume`.
+- Workspace safety guarantees remain identical: the source checkout is never used as the turn cwd.
+
+Use `meta agents execute` when you want to kick off work on a specific ticket without leaving the continuous listen daemon running. The session will persist and be visible in the next `meta agents listen` dashboard.
+
+Examples:
+
+```bash
+meta agents execute MET-45 --team MET --project "MetaStack CLI"
+meta agents execute MET-45 --root . --max-turns 10
+meta agents execute MET-45 --root . --json
+```
 
 ### `agents listen`
 

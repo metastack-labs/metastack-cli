@@ -69,8 +69,8 @@ use crate::linear::edit::IssueEditAction;
 pub(crate) use crate::linear::{LinearCommandContext, load_linear_command_context};
 use crate::linear::{run_dashboard_command, run_issues_command, run_projects_command};
 use crate::listen::{
-    run_listen, run_listen_session_clear, run_listen_session_inspect, run_listen_session_list,
-    run_listen_session_resume, run_listen_worker,
+    run_execute, run_listen, run_listen_session_clear, run_listen_session_inspect,
+    run_listen_session_list, run_listen_session_resume, run_listen_worker,
 };
 use crate::merge::run_merge;
 use crate::merge_dashboard::MergeDashboardAction;
@@ -237,6 +237,9 @@ async fn dispatch(cli: Cli) -> Result<()> {
             },
         },
         Command::Agents(args) => match args.command {
+            AgentsCommands::Execute(args) => {
+                run_execute(&args).await?;
+            }
             AgentsCommands::Listen(args) => match args.command {
                 Some(crate::cli::ListenCommands::Sessions(session_args)) => {
                     match session_args.command {
