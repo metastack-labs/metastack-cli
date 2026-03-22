@@ -330,6 +330,15 @@ fn detail_text(data: &ReviewDashboardData, session: Option<&ReviewSession>) -> T
             "Remediation: {}",
             session.remediation_label()
         )));
+        if let Some(url) = &session.remediation_pr_url {
+            lines.push(Line::from(format!("Remediation PR: {url}")));
+        }
+        if session.needs_remediation_decision() {
+            lines.push(Line::from(String::new()));
+            lines.push(Line::from(
+                "Actions: [a] Create fix PR  [n] Skip remediation",
+            ));
+        }
     } else {
         lines.push(Line::from("No session selected."));
     }

@@ -1139,11 +1139,35 @@ meta agents review --root .
 meta agents review --root . --once
 meta agents review --root . --once --json
 meta agents review --root . --render-once
+
+# Non-interactive remediation dispatch
+meta agents review --root . --fix-pr 42
+meta agents review --root . --fix-pr 42 --json
+meta agents review --root . --skip-pr 42
+meta agents review --root . --skip-pr 42 --json
 ```
 
 The review instructions are stored as source-controlled artifacts at `src/artifacts/REVIEW.md` and `src/artifacts/VIEW_LINEAR.md`, and loaded at compile time via `include_str!`.
 
-When required fixes are found, the command creates a workspace-safe follow-up branch from the original PR context, applies agent-authored fixes, commits and pushes them, opens a remediation PR, and posts a Linear comment describing why the remediation PR was opened. When no remediation is required, the command exits cleanly without creating a branch, PR, or Linear comment.
+#### Review-to-fix-PR lifecycle
+
+Each reviewed PR transitions through a per-PR state model:
+
+1. **Selected** - User picked the PR for review in the dashboard.
+2. **Review In Progress** - Review agent is running.
+3. **Review Complete** - Review finished; user must decide: create fix PR or skip.
+4. **Fix Agent Pending** - User chose "Create fix PR"; agent is queued.
+5. **Fix Agent Running** - Fix agent is applying changes in an isolated workspace.
+6. **Fix Agent Complete** - Remediation PR created and pushed.
+7. **Skipped** - User explicitly declined remediation.
+
+When a review requires remediation, the interactive dashboard shows `[a] Create fix PR` and `[n] Skip` actions on the selected session. Dispatching a fix agent does not exit the TUI; the dashboard remains active and shows live progress for the remediation run. Multiple reviewed PRs maintain independent state in the same session.
+
+For scripted and CI usage, `--fix-pr N` and `--skip-pr N` act on a previously reviewed PR without requiring the interactive TUI. Both produce JSON output with `--json`.
+
+When the fix agent runs, it creates a workspace-safe follow-up branch from the original PR context, applies agent-authored fixes, commits and pushes them, opens a remediation PR that references the original reviewed PR, and posts a Linear comment. Failures surface back to the session state as `FixAgentFailed` with actionable error details.
+
+Re-entering the interactive dashboard restores existing review and remediation state for PRs processed in previous sessions.
 
 ### `agents retro`
 
