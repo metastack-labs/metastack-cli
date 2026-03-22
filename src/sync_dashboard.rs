@@ -27,7 +27,7 @@ use crate::linear::browser::{
 use crate::tui::fields::InputFieldState;
 use crate::tui::scroll::{ScrollState, plain_text, scrollable_content_paragraph, wrapped_rows};
 use crate::tui::spaced_list::{spaced_list, spaced_list_item};
-use crate::tui::theme::{Tone, badge, empty_state, key_hints, panel_title, paragraph};
+use crate::tui::theme::{Tone, badge, empty_state, panel_title, paragraph};
 
 /// Load state for a single backlog issue in the dashboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
