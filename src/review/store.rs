@@ -1,4 +1,4 @@
-use std::fs;
+use std::fs::{self, File};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -169,6 +169,34 @@ impl ReviewProjectStore {
         })
     }
 
+    /// Atomically read-modify-write the review state under an advisory file
+    /// lock so that concurrent threads/processes cannot corrupt
+    /// `session.json`.
+    pub(super) fn update_state(&self, mutate: impl FnOnce(&mut ReviewState)) -> Result<()> {
+        self.ensure_layout()?;
+        let lock_file = self.paths.state_path.with_extension("json.lock");
+        let lock = File::create(&lock_file).with_context(|| {
+            format!(
+                "failed to create state lock file `{}`",
+                lock_file.display()
+            )
+        })?;
+        flock_exclusive(&lock).with_context(|| {
+            format!(
+                "failed to acquire exclusive lock on `{}`",
+                lock_file.display()
+            )
+        })?;
+        let mut state = match self.load_state_from_disk() {
+            Ok((state, _)) => state,
+            Err(_) => ReviewState::default(),
+        };
+        mutate(&mut state);
+        let result = write_json(&self.paths.state_path, &state);
+        // Lock is released when `lock` is dropped.
+        result
+    }
+
     fn load_state_from_disk(&self) -> Result<(ReviewState, bool)> {
         match fs::read_to_string(&self.paths.state_path) {
             Ok(content) => {
@@ -233,10 +261,29 @@ fn now_epoch_seconds() -> u64 {
 }
 
 fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    use std::io::Write;
+
     let content =
         serde_json::to_string_pretty(value).context("failed to serialize JSON for review store")?;
-    fs::write(path, content)
-        .with_context(|| format!("failed to write review store file `{}`", path.display()))
+    let dir = path.parent().ok_or_else(|| {
+        anyhow::anyhow!(
+            "cannot determine parent directory for `{}`",
+            path.display()
+        )
+    })?;
+    let mut tmp = tempfile::NamedTempFile::new_in(dir).with_context(|| {
+        format!(
+            "failed to create temporary file in `{}`",
+            dir.display()
+        )
+    })?;
+    tmp.write_all(content.as_bytes()).with_context(|| {
+        format!("failed to write review store file `{}`", path.display())
+    })?;
+    tmp.persist(path).with_context(|| {
+        format!("failed to persist review store file `{}`", path.display())
+    })?;
+    Ok(())
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
@@ -262,6 +309,28 @@ pub(super) fn resolve_origin_remote(root: &Path) -> Result<String> {
         );
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Acquire an exclusive advisory lock on the given file descriptor.
+///
+/// Blocks until the lock is available. The lock is automatically released
+/// when the `File` is dropped.
+fn flock_exclusive(file: &File) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+        if ret != 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("flock(LOCK_EX) failed");
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = file;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
