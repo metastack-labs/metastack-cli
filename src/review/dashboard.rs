@@ -380,6 +380,7 @@ mod tests {
                 phase: ReviewPhase::Running,
                 summary: "Running agent review with codex".to_string(),
                 updated_at_epoch_seconds: 1,
+                review_output: None,
                 remediation_required: None,
                 remediation_pr_number: None,
                 remediation_pr_url: None,

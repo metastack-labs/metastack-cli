@@ -148,6 +148,8 @@ pub struct ReviewSession {
     pub summary: String,
     pub updated_at_epoch_seconds: u64,
     #[serde(default)]
+    pub review_output: Option<String>,
+    #[serde(default)]
     pub remediation_required: Option<bool>,
     #[serde(default)]
     pub remediation_pr_number: Option<u64>,
@@ -269,6 +271,12 @@ impl ReviewState {
         });
         sessions
     }
+
+    pub(super) fn remove_session(&mut self, pr_number: u64) -> bool {
+        let original_len = self.sessions.len();
+        self.sessions.retain(|session| !session.pr_matches(pr_number));
+        self.sessions.len() != original_len
+    }
 }
 
 #[cfg(test)]
@@ -287,6 +295,7 @@ mod tests {
             phase: ReviewPhase::Running,
             summary: "Running".to_string(),
             updated_at_epoch_seconds: 1,
+            review_output: None,
             remediation_required: None,
             remediation_pr_number: None,
             remediation_pr_url: None,

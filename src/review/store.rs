@@ -128,6 +128,20 @@ impl ReviewProjectStore {
         write_json(&self.paths.state_path, state)
     }
 
+    /// Delete a persisted review session by PR number.
+    ///
+    /// Returns `Ok(true)` when a session was removed, `Ok(false)` when no
+    /// matching session existed, and an error when the store cannot be loaded
+    /// or saved.
+    pub(super) fn delete_session(&self, pr_number: u64) -> Result<bool> {
+        let mut state = self.load_state()?;
+        let removed = state.remove_session(pr_number);
+        if removed {
+            self.save_state(&state)?;
+        }
+        Ok(removed)
+    }
+
     /// Acquire an exclusive listener lock for this project.
     ///
     /// Returns an error when a lock already exists for a running PID.
@@ -285,6 +299,7 @@ mod tests {
             phase: super::super::state::ReviewPhase::Claimed,
             summary: "Claimed".to_string(),
             updated_at_epoch_seconds: now_epoch_seconds(),
+            review_output: None,
             remediation_required: None,
             remediation_pr_number: None,
             remediation_pr_url: None,
