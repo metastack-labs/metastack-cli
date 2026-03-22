@@ -1242,8 +1242,10 @@ When `vim_mode` is enabled, the dashboard also accepts `h`/`l` as aliases for le
 `draft #N`, `ready #N`). Press `P` to pause a running session, `R` to resume paused or retry
 blocked.
 
-This feature is interactive-TUI only and does not expand non-interactive output (`--once`,
-`--json`).
+The resolved execution agent is shown in both the interactive dashboard header and the textual
+`--once` runtime summary so operators can confirm which configured worker route the listener will
+launch. `--once --json` continues to return the machine-readable poll-cycle payload without adding
+presentation-only fields to the JSON shape.
 
 Examples:
 
