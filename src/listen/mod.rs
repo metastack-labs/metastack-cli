@@ -54,7 +54,10 @@ pub use state::{
     AgentSession, LatestResumeHandle, PendingIssue, PullRequestStatus, PullRequestSummary,
     ResumeProvider, SessionPhase, TokenUsage,
 };
-use state::{COMPLETED_SESSION_TTL_SECONDS, ListenState};
+use state::{
+    COMPLETED_SESSION_TTL_SECONDS, ListenState, explicit_resume_id_label,
+    explicit_resume_provider_label,
+};
 use store::{
     ListenProjectStore, ListenSessionDetail, SessionSelector, StoredListenProjectSummary,
     pid_is_running, resolve_source_project_root,
@@ -2354,18 +2357,6 @@ fn append_session_inspect_detail_lines(lines: &mut Vec<String>, detail: &ListenS
             ));
         }
     }
-}
-
-fn explicit_resume_provider_label(handle: Option<&LatestResumeHandle>) -> String {
-    handle
-        .map(|handle| handle.provider.label().to_string())
-        .unwrap_or_else(|| "unavailable".to_string())
-}
-
-fn explicit_resume_id_label(handle: Option<&LatestResumeHandle>) -> String {
-    handle
-        .map(|handle| handle.id.clone())
-        .unwrap_or_else(|| "unavailable".to_string())
 }
 
 pub fn run_listen_session_clear(args: &ListenSessionClearArgs) -> Result<String> {

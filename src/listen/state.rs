@@ -42,6 +42,18 @@ impl LatestResumeHandle {
     }
 }
 
+pub(super) fn explicit_resume_provider_label(handle: Option<&LatestResumeHandle>) -> String {
+    handle
+        .map(|handle| handle.provider.label().to_string())
+        .unwrap_or_else(|| "unavailable".to_string())
+}
+
+pub(super) fn explicit_resume_id_label(handle: Option<&LatestResumeHandle>) -> String {
+    handle
+        .map(|handle| handle.id.clone())
+        .unwrap_or_else(|| "unavailable".to_string())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingIssue {
     pub identifier: String,
@@ -388,7 +400,7 @@ impl ListenState {
 mod tests {
     use super::{
         AgentSession, LatestResumeHandle, PullRequestStatus, PullRequestSummary, ResumeProvider,
-        SessionPhase, TokenUsage,
+        SessionPhase, TokenUsage, explicit_resume_id_label, explicit_resume_provider_label,
     };
 
     fn session() -> AgentSession {
@@ -437,6 +449,25 @@ mod tests {
                 .as_ref()
                 .map(|resume| resume.id.as_str()),
             Some("019cedb4-2293-7651-b0b4-dfac4af6a640")
+        );
+    }
+
+    #[test]
+    fn explicit_resume_labels_share_unavailable_and_full_id_formatting() {
+        assert_eq!(explicit_resume_provider_label(None), "unavailable");
+        assert_eq!(explicit_resume_id_label(None), "unavailable");
+
+        let handle = LatestResumeHandle {
+            provider: ResumeProvider::Claude,
+            id: "provider-resume-123".to_string(),
+        };
+        assert_eq!(
+            explicit_resume_provider_label(Some(&handle)),
+            "claude".to_string()
+        );
+        assert_eq!(
+            explicit_resume_id_label(Some(&handle)),
+            "provider-resume-123".to_string()
         );
     }
 

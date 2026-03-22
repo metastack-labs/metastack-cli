@@ -6,6 +6,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Cell, List, ListItem, Paragraph, Row, Table, Wrap};
 use ratatui::{Frame, Terminal};
 
+use super::state::{explicit_resume_id_label, explicit_resume_provider_label};
 use super::{ListenDashboardData, ListenSessionDetail, SessionListView, SessionPhase};
 use crate::tui::scroll::{clamp_offset, plain_text, wrapped_rows};
 use crate::tui::theme::{Tone, badge, content_panel, empty_state, key_hints, panel, panel_title};
@@ -768,18 +769,6 @@ fn render_session_detail_text(
     )));
 
     Text::from(lines)
-}
-
-fn explicit_resume_provider_label(handle: Option<&super::LatestResumeHandle>) -> String {
-    handle
-        .map(|handle| handle.provider.label().to_string())
-        .unwrap_or_else(|| "unavailable".to_string())
-}
-
-fn explicit_resume_id_label(handle: Option<&super::LatestResumeHandle>) -> String {
-    handle
-        .map(|handle| handle.id.clone())
-        .unwrap_or_else(|| "unavailable".to_string())
 }
 
 fn render_footer(frame: &mut Frame<'_>, data: &ListenDashboardData, area: Rect) {
