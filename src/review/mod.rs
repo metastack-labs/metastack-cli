@@ -1472,24 +1472,35 @@ impl InteractiveReviewApp {
             if persistent.phase.is_completed() && !persistent.needs_remediation_decision() {
                 continue;
             }
-            let candidate = ReviewLaunchCandidate {
-                pr_number: persistent.pr_number,
-                title: persistent.pr_title.clone(),
-                url: persistent.pr_url.clone().unwrap_or_default(),
-                author: persistent.pr_author.clone().unwrap_or_default(),
-                head_ref: persistent.head_branch.clone().unwrap_or_default(),
-                base_ref: persistent.base_branch.clone().unwrap_or_default(),
-                review_state: "UNKNOWN".to_string(),
-                changed_files: 0,
-                additions: 0,
-                deletions: 0,
-                linear_identifier: persistent.linear_identifier.clone(),
-                linear_error: None,
-                candidate_state: "open".to_string(),
-                candidate_labels: Vec::new(),
-                candidate_assignees: Vec::new(),
-            };
-            self.replace_candidate(candidate.clone());
+            let candidate = self
+                .candidates
+                .iter()
+                .find(|candidate| candidate.pr_number == persistent.pr_number)
+                .cloned()
+                .unwrap_or_else(|| ReviewLaunchCandidate {
+                    pr_number: persistent.pr_number,
+                    title: persistent.pr_title.clone(),
+                    url: persistent.pr_url.clone().unwrap_or_default(),
+                    author: persistent.pr_author.clone().unwrap_or_default(),
+                    head_ref: persistent.head_branch.clone().unwrap_or_default(),
+                    base_ref: persistent.base_branch.clone().unwrap_or_default(),
+                    review_state: "UNKNOWN".to_string(),
+                    changed_files: 0,
+                    additions: 0,
+                    deletions: 0,
+                    linear_identifier: persistent.linear_identifier.clone(),
+                    linear_error: None,
+                    candidate_state: "open".to_string(),
+                    candidate_labels: Vec::new(),
+                    candidate_assignees: Vec::new(),
+                });
+            if !self
+                .candidates
+                .iter()
+                .any(|existing| existing.pr_number == candidate.pr_number)
+            {
+                self.replace_candidate(candidate.clone());
+            }
             let session = self.upsert_session(InteractiveReviewSession {
                 kind: InteractiveSessionKind::Review,
                 candidate,
@@ -6812,6 +6823,60 @@ mod tests {
         assert_eq!(app.sessions.len(), 1);
         assert_eq!(app.sessions[0].phase, ReviewPhase::ReviewComplete);
         assert!(app.tab == InteractiveReviewTab::Sessions);
+    }
+
+    #[test]
+    fn restore_from_persistent_state_preserves_loaded_candidate_filter_metadata() {
+        let mut app =
+            InteractiveReviewApp::new(InteractiveReviewMode::Discovery, ReviewCommandKind::Review);
+        app.load_candidates(vec![make_filter_candidate(
+            42,
+            "closed",
+            "metasudo",
+            &["bug", "metastack"],
+            &["alice"],
+        )]);
+
+        let persistent = vec![ReviewSession {
+            pr_number: 42,
+            pr_title: "Restored title".to_string(),
+            pr_url: Some("https://example.test/pull/42".to_string()),
+            pr_author: Some("restored-user".to_string()),
+            head_branch: Some("restored-head".to_string()),
+            base_branch: Some("main".to_string()),
+            linear_identifier: Some("MET-42".to_string()),
+            phase: ReviewPhase::ReviewComplete,
+            summary: "Review complete".to_string(),
+            updated_at_epoch_seconds: 1000,
+            remediation_required: Some(true),
+            remediation_pr_number: None,
+            remediation_pr_url: None,
+        }];
+
+        app.restore_from_persistent_state(&persistent);
+
+        let candidate = app
+            .candidates
+            .iter()
+            .find(|candidate| candidate.pr_number == 42)
+            .expect("candidate should remain loaded");
+        assert_eq!(candidate.candidate_state, "closed");
+        assert_eq!(
+            candidate.candidate_labels,
+            vec!["bug".to_string(), "metastack".to_string()]
+        );
+        assert_eq!(candidate.candidate_assignees, vec!["alice".to_string()]);
+
+        assert_eq!(app.sessions.len(), 1);
+        assert_eq!(app.sessions[0].candidate.candidate_state, "closed");
+        assert_eq!(
+            app.sessions[0].candidate.candidate_labels,
+            vec!["bug".to_string(), "metastack".to_string()]
+        );
+        assert_eq!(
+            app.sessions[0].candidate.candidate_assignees,
+            vec!["alice".to_string()]
+        );
     }
 
     #[test]
