@@ -48,8 +48,9 @@ use crate::repo_target::RepoTarget;
 use crate::scaffold::ensure_planning_layout;
 use crate::tui::fields::InputFieldState;
 use crate::tui::scroll::{ScrollState, plain_text, scrollable_content_paragraph, wrapped_rows};
+use crate::tui::spaced_list::spaced_list;
 use crate::tui::theme::{
-    Tone, badge, emphasis_style, empty_state, key_hints, label_style, list, muted_style, panel,
+    Tone, badge, emphasis_style, empty_state, key_hints, label_style, muted_style, panel,
     panel_title, paragraph, tone_style,
 };
 use crate::{LinearCommandContext, load_linear_command_context};
@@ -927,7 +928,7 @@ fn render_improvement_issue_list(frame: &mut Frame<'_>, area: Rect, app: &Improv
 
     let mut state = ListState::default();
     state.select(Some(app.cursor.min(filtered.len().saturating_sub(1))));
-    let list_widget = list(items, title);
+    let list_widget = spaced_list(items, title);
     frame.render_stateful_widget(list_widget, area, &mut state);
 }
 

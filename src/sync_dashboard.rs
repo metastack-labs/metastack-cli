@@ -26,7 +26,8 @@ use crate::linear::browser::{
 };
 use crate::tui::fields::InputFieldState;
 use crate::tui::scroll::{ScrollState, plain_text, scrollable_content_paragraph, wrapped_rows};
-use crate::tui::theme::{Tone, badge, empty_state, list, panel_title, paragraph};
+use crate::tui::spaced_list::{spaced_list, spaced_list_item};
+use crate::tui::theme::{Tone, badge, empty_state, key_hints, panel_title, paragraph};
 
 /// Load state for a single backlog issue in the dashboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -391,7 +392,7 @@ fn render_issue_list(frame: &mut Frame<'_>, area: Rect, app: &SyncDashboardApp) 
                     let is_selected = app.selected.contains(&result.issue_index);
                     let prefix = checkbox_prefix(is_selected);
                     if issue.load_state == IssueLoadState::Loading {
-                        ListItem::new(Text::from(vec![
+                        spaced_list_item(vec![
                             Line::from(vec![
                                 Span::raw(prefix),
                                 Span::raw(issue.entry_slug.clone()),
@@ -399,7 +400,7 @@ fn render_issue_list(frame: &mut Frame<'_>, area: Rect, app: &SyncDashboardApp) 
                                 Span::styled("Loading...", loading_style()),
                             ]),
                             Line::from(""),
-                        ]))
+                        ])
                     } else {
                         render_sync_issue_row(
                             &issue.issue,
@@ -420,8 +421,8 @@ fn render_issue_list(frame: &mut Frame<'_>, area: Rect, app: &SyncDashboardApp) 
         state.select(Some(app.issue_index.min(results.len() - 1)));
     }
 
-    let list = list(items, title);
-    frame.render_stateful_widget(list, area, &mut state);
+    let list_widget = spaced_list(items, title);
+    frame.render_stateful_widget(list_widget, area, &mut state);
 }
 
 fn render_issue_preview(frame: &mut Frame<'_>, area: Rect, app: &SyncDashboardApp) {
@@ -441,17 +442,17 @@ fn render_action_list(frame: &mut Frame<'_>, area: Rect, app: &SyncDashboardApp)
         .iter()
         .map(|action| {
             let enabled = app.action_enabled(*action);
-            ListItem::new(Text::from(vec![
+            spaced_list_item(vec![
                 Line::from(app.action_badges(*action, enabled)),
                 Line::from(app.action_description(*action, enabled)),
-            ]))
+            ])
         })
         .collect::<Vec<_>>();
     let mut state = ListState::default();
     state.select(Some(app.action_index.min(ACTIONS.len() - 1)));
 
-    let list = list(items, title);
-    frame.render_stateful_widget(list, area, &mut state);
+    let list_widget = spaced_list(items, title);
+    frame.render_stateful_widget(list_widget, area, &mut state);
 }
 
 fn render_status(frame: &mut Frame<'_>, area: Rect, app: &SyncDashboardApp) {

@@ -3,4 +3,5 @@ pub(crate) mod keybindings;
 pub(crate) mod markdown;
 pub(crate) mod prompt_images;
 pub(crate) mod scroll;
+pub(crate) mod spaced_list;
 pub(crate) mod theme;
