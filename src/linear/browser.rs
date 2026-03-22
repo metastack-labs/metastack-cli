@@ -6,7 +6,7 @@ use ratatui::widgets::ListItem;
 
 use crate::linear::IssueSummary;
 use crate::tui::markdown::{MarkdownHighlight, render_markdown};
-use crate::tui::spaced_list::spaced_list_item;
+use crate::tui::spaced_list::render_linear_issue_row;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct IssueSearchResult {
@@ -118,74 +118,36 @@ pub(crate) fn empty_search_result(issue_index: usize) -> IssueSearchResult {
 }
 
 /// Render a shared issue row with consistent semantic styling.
+///
+/// Delegates to the canonical [`render_linear_issue_row`] entry point in the shared spaced-list
+/// layer so the two-line layout structure is defined in one place.
 pub(crate) fn render_issue_row(
     issue: &IssueSummary,
     result: Option<&IssueSearchResult>,
     sync_status: Option<&str>,
 ) -> ListItem<'static> {
-    let identifier = highlighted_spans(
-        &issue.identifier,
-        result.map_or(&[], |value| value.highlights.identifier.as_slice()),
-        identifier_style(),
-    );
-    let title = highlighted_spans(
-        &issue.title,
-        result.map_or(&[], |value| value.highlights.title.as_slice()),
-        title_style(),
-    );
-
-    let mut first_line = Vec::new();
-    first_line.extend(identifier);
-    first_line.push(Span::raw("  "));
-    first_line.extend(title);
-
-    let state = issue_state_label(issue);
-    let project = issue_project_label(issue);
-    let mut detail_line = Vec::new();
-    detail_line.extend(label_value_spans(
-        "state",
-        highlighted_spans(
-            &state,
-            result.map_or(&[], |value| value.highlights.state.as_slice()),
-            state_style(issue),
-        ),
-    ));
-    detail_line.push(Span::raw("  "));
-    detail_line.extend(label_value_spans(
-        "priority",
-        vec![Span::styled(priority_label(issue), priority_style(issue))],
-    ));
-    detail_line.push(Span::raw("  "));
-    detail_line.extend(label_value_spans(
-        "project",
-        highlighted_spans(
-            &project,
-            result.map_or(&[], |value| value.highlights.project.as_slice()),
-            project_style(),
-        ),
-    ));
-
-    if let Some(sync_status) = sync_status {
-        detail_line.push(Span::raw("  "));
-        detail_line.extend(label_value_spans(
-            "sync",
-            vec![Span::styled(
-                sync_status.to_string(),
-                sync_status_style(sync_status),
-            )],
-        ));
-    }
-
-    spaced_list_item(vec![Line::from(first_line), Line::from(detail_line)])
+    issue_row_inner(issue, result, sync_status, None)
 }
 
 /// Render a shared issue row with a leading prefix (e.g. checkbox) before the identifier.
+///
+/// Delegates to the canonical [`render_linear_issue_row`] entry point in the shared spaced-list
+/// layer so the two-line layout structure is defined in one place.
 pub(crate) fn render_issue_row_with_prefix(
     issue: &IssueSummary,
     result: Option<&IssueSearchResult>,
     sync_status: Option<&str>,
     prefix: &str,
 ) -> ListItem<'static> {
+    issue_row_inner(issue, result, sync_status, Some(prefix))
+}
+
+fn issue_row_inner(
+    issue: &IssueSummary,
+    result: Option<&IssueSearchResult>,
+    sync_status: Option<&str>,
+    prefix: Option<&str>,
+) -> ListItem<'static> {
     let identifier = highlighted_spans(
         &issue.identifier,
         result.map_or(&[], |value| value.highlights.identifier.as_slice()),
@@ -197,41 +159,33 @@ pub(crate) fn render_issue_row_with_prefix(
         title_style(),
     );
 
-    let mut first_line = Vec::new();
-    first_line.push(Span::raw(prefix.to_string()));
-    first_line.extend(identifier);
-    first_line.push(Span::raw("  "));
-    first_line.extend(title);
-
     let state = issue_state_label(issue);
     let project = issue_project_label(issue);
-    let mut detail_line = Vec::new();
-    detail_line.extend(label_value_spans(
-        "state",
-        highlighted_spans(
-            &state,
-            result.map_or(&[], |value| value.highlights.state.as_slice()),
-            state_style(issue),
+    let mut metadata: Vec<(&str, Vec<Span<'static>>)> = vec![
+        (
+            "state",
+            highlighted_spans(
+                &state,
+                result.map_or(&[], |value| value.highlights.state.as_slice()),
+                state_style(issue),
+            ),
         ),
-    ));
-    detail_line.push(Span::raw("  "));
-    detail_line.extend(label_value_spans(
-        "priority",
-        vec![Span::styled(priority_label(issue), priority_style(issue))],
-    ));
-    detail_line.push(Span::raw("  "));
-    detail_line.extend(label_value_spans(
-        "project",
-        highlighted_spans(
-            &project,
-            result.map_or(&[], |value| value.highlights.project.as_slice()),
-            project_style(),
+        (
+            "priority",
+            vec![Span::styled(priority_label(issue), priority_style(issue))],
         ),
-    ));
+        (
+            "project",
+            highlighted_spans(
+                &project,
+                result.map_or(&[], |value| value.highlights.project.as_slice()),
+                project_style(),
+            ),
+        ),
+    ];
 
     if let Some(sync_status) = sync_status {
-        detail_line.push(Span::raw("  "));
-        detail_line.extend(label_value_spans(
+        metadata.push((
             "sync",
             vec![Span::styled(
                 sync_status.to_string(),
@@ -240,7 +194,7 @@ pub(crate) fn render_issue_row_with_prefix(
         ));
     }
 
-    spaced_list_item(vec![Line::from(first_line), Line::from(detail_line)])
+    render_linear_issue_row(identifier, title, &metadata, prefix)
 }
 
 /// Render a shared issue preview with consistent semantic styling.
@@ -649,12 +603,6 @@ fn highlighted_spans(
     if cursor < value.len() {
         spans.push(Span::styled(value[cursor..].to_string(), base_style));
     }
-    spans
-}
-
-fn label_value_spans(label: &str, value: Vec<Span<'static>>) -> Vec<Span<'static>> {
-    let mut spans = vec![styled_label(label), Span::raw(" ")];
-    spans.extend(value);
     spans
 }
 

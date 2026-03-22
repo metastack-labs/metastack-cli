@@ -95,6 +95,41 @@ pub(crate) fn render_github_session_row(
     ])
 }
 
+/// Canonical rendering of a Linear issue row in stacked list views.
+///
+/// Returns a two-line `ListItem` (plus trailing blank spacer):
+/// 1. `[prefix?] IDENTIFIER  TITLE`
+/// 2. `key: VALUE  key: VALUE  …`
+///
+/// Callers supply pre-styled spans for identifier, title, and each metadata value
+/// so search-highlighting and domain-specific styling remain decoupled from the
+/// shared layout structure. Keys are formatted with the shared label style.
+pub(crate) fn render_linear_issue_row(
+    identifier: Vec<Span<'static>>,
+    title: Vec<Span<'static>>,
+    metadata: &[(&str, Vec<Span<'static>>)],
+    prefix: Option<&str>,
+) -> ListItem<'static> {
+    let mut first_line = Vec::new();
+    if let Some(prefix) = prefix {
+        first_line.push(Span::raw(prefix.to_string()));
+    }
+    first_line.extend(identifier);
+    first_line.push(Span::raw("  "));
+    first_line.extend(title);
+
+    let mut detail_spans: Vec<Span<'static>> = Vec::new();
+    for (index, (key, value)) in metadata.iter().enumerate() {
+        if index > 0 {
+            detail_spans.push(Span::raw("  "));
+        }
+        detail_spans.push(Span::styled(format!("{key}: "), label_style()));
+        detail_spans.extend(value.iter().cloned());
+    }
+
+    spaced_list_item(vec![Line::from(first_line), Line::from(detail_spans)])
+}
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
@@ -209,5 +244,68 @@ mod tests {
         assert!(rendered.contains("Session title"));
         assert!(rendered.contains("Summary"));
         assert!(rendered.contains("Work summary"));
+    }
+
+    #[test]
+    fn render_linear_issue_row_structure() {
+        let item = render_linear_issue_row(
+            vec![Span::raw("MET-42")],
+            vec![Span::raw("Searchable browser")],
+            &[
+                ("state", vec![Span::raw("In Progress")]),
+                ("priority", vec![Span::raw("High")]),
+                ("project", vec![Span::raw("CLI")]),
+            ],
+            None,
+        );
+        // 2 content lines + 1 spacer
+        assert_eq!(item.height(), 3);
+    }
+
+    #[test]
+    fn render_linear_issue_row_with_prefix() {
+        let item = render_linear_issue_row(
+            vec![Span::raw("MET-99")],
+            vec![Span::raw("Prefixed row")],
+            &[("state", vec![Span::raw("Todo")])],
+            Some("[x] "),
+        );
+        // 2 content lines + 1 spacer
+        assert_eq!(item.height(), 3);
+        let rendered = format!("{item:?}");
+        assert!(rendered.contains("[x] "));
+        assert!(rendered.contains("MET-99"));
+    }
+
+    #[test]
+    fn render_linear_issue_row_text_content() {
+        let item = render_linear_issue_row(
+            vec![Span::raw("MET-7")],
+            vec![Span::raw("Add tests")],
+            &[
+                ("state", vec![Span::raw("In Progress")]),
+                ("project", vec![Span::raw("MetaStack CLI")]),
+            ],
+            None,
+        );
+        let rendered = format!("{item:?}");
+        assert!(rendered.contains("MET-7"));
+        assert!(rendered.contains("Add tests"));
+        assert!(rendered.contains("state:"));
+        assert!(rendered.contains("In Progress"));
+        assert!(rendered.contains("project:"));
+        assert!(rendered.contains("MetaStack CLI"));
+    }
+
+    #[test]
+    fn render_linear_issue_row_no_metadata() {
+        let item = render_linear_issue_row(
+            vec![Span::raw("MET-1")],
+            vec![Span::raw("Title")],
+            &[],
+            None,
+        );
+        // 2 content lines + 1 spacer
+        assert_eq!(item.height(), 3);
     }
 }
