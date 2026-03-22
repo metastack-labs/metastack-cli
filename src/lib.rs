@@ -13,6 +13,7 @@ mod cron_dashboard;
 mod doctor;
 mod fs;
 mod github_pr;
+mod improve;
 mod linear;
 mod listen;
 mod merge;
@@ -58,6 +59,7 @@ use crate::config_command::{ConfigAction, ConfigCommandOutput, run_config};
 use crate::context::run_context_command;
 use crate::cron::run_cron;
 use crate::doctor::run_doctor;
+use crate::improve::run_improve;
 use crate::linear::create::IssueCreateAction;
 use crate::linear::dashboard::DashboardAction;
 use crate::linear::edit::IssueEditAction;
@@ -251,6 +253,9 @@ async fn dispatch(cli: Cli) -> Result<()> {
             }
             AgentsCommands::Retro(args) => {
                 run_retro(&args).await?;
+            }
+            AgentsCommands::Improve(args) => {
+                run_improve(&args).await?;
             }
             AgentsCommands::Workflows(args) => {
                 println!("{}", run_workflows(&args).await?);

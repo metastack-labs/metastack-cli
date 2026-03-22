@@ -1,21 +1,19 @@
 use std::io::{Read, Write as _};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
 
 use anyhow::{Context, Result, anyhow, bail};
 
-use crate::agent_provider::{BuiltinInvocationContext, builtin_provider_adapter};
+use crate::agent_provider::builtin_provider_adapter;
 use crate::cli::RunAgentArgs;
-use crate::config::{
-    AGENT_ROUTE_AGENTS_LISTEN, AGENT_ROUTE_BACKLOG_IMPROVE, AGENT_ROUTE_BACKLOG_PLAN,
-    AGENT_ROUTE_BACKLOG_SPEC, AGENT_ROUTE_BACKLOG_SPLIT, AGENT_ROUTE_CONTEXT_RELOAD,
-    AGENT_ROUTE_CONTEXT_SCAN, AGENT_ROUTE_LINEAR_ISSUES_REFINE, AgentConfigOverrides,
-    AgentConfigSource, AppConfig, PlanningMeta, PromptTransport, normalize_agent_name,
-    resolve_agent_config,
+use crate::config::{AppConfig, PlanningMeta, PromptTransport};
+
+use super::resolution::{
+    ResolvedAgentInvocation, command_args_for_invocation_with_options,
+    resolve_agent_invocation_for_planning, validate_invocation_command_surface,
 };
-use crate::tui::prompt_images::{PromptImageAttachment, encode_prompt_images_for_provider};
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct AgentExecutionOptions {
@@ -45,67 +43,14 @@ pub struct AgentCaptureReport {
     pub usage: Option<AgentTokenUsage>,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct ResolvedAgentInvocation {
-    pub(crate) agent: String,
-    pub(crate) command: String,
-    pub(crate) args: Vec<String>,
-    pub(crate) context: BuiltinInvocationContext,
-    pub(crate) model: Option<String>,
-    pub(crate) reasoning: Option<String>,
-    pub(crate) route_key: Option<String>,
-    pub(crate) family_key: Option<String>,
-    pub(crate) provider_source: AgentConfigSource,
-    pub(crate) model_source: Option<AgentConfigSource>,
-    pub(crate) reasoning_source: Option<AgentConfigSource>,
-    pub(crate) transport: PromptTransport,
-    pub(crate) payload: String,
-    pub(crate) attachments: Vec<PromptImageAttachment>,
-    pub(crate) builtin_provider: bool,
-}
+// ---------------------------------------------------------------------------
+// Environment injection
+// ---------------------------------------------------------------------------
 
-pub(crate) fn render_invocation_diagnostics(invocation: &ResolvedAgentInvocation) -> Vec<String> {
-    vec![
-        format!("Resolved provider: {}", invocation.agent),
-        format!(
-            "Resolved model: {}",
-            invocation.model.as_deref().unwrap_or("unset")
-        ),
-        format!(
-            "Resolved reasoning: {}",
-            invocation.reasoning.as_deref().unwrap_or("unset")
-        ),
-        format!(
-            "Resolved route key: {}",
-            invocation.route_key.as_deref().unwrap_or("unset")
-        ),
-        format!(
-            "Resolved family key: {}",
-            invocation.family_key.as_deref().unwrap_or("unset")
-        ),
-        format!(
-            "Provider source: {}",
-            format_agent_config_source(&invocation.provider_source)
-        ),
-        format!(
-            "Model source: {}",
-            invocation
-                .model_source
-                .as_ref()
-                .map(format_agent_config_source)
-                .unwrap_or_else(|| "unset".to_string())
-        ),
-        format!(
-            "Reasoning source: {}",
-            invocation
-                .reasoning_source
-                .as_ref()
-                .map(format_agent_config_source)
-                .unwrap_or_else(|| "unset".to_string())
-        ),
-    ]
-}
-
+/// Applies the full set of agent invocation environment variables to a command.
+///
+/// Sets non-interactive color guards plus `METASTACK_AGENT_*` variables exposing the resolved
+/// provider, model, reasoning, route key, family key, and their configuration sources.
 pub(crate) fn apply_invocation_environment(
     command: &mut Command,
     invocation: &ResolvedAgentInvocation,
@@ -141,14 +86,14 @@ pub(crate) fn apply_invocation_environment(
     );
     command.env(
         "METASTACK_AGENT_PROVIDER_SOURCE",
-        format_agent_config_source(&invocation.provider_source),
+        super::resolution::format_agent_config_source(&invocation.provider_source),
     );
     command.env(
         "METASTACK_AGENT_MODEL_SOURCE",
         invocation
             .model_source
             .as_ref()
-            .map(format_agent_config_source)
+            .map(super::resolution::format_agent_config_source)
             .unwrap_or_default(),
     );
     command.env(
@@ -156,7 +101,7 @@ pub(crate) fn apply_invocation_environment(
         invocation
             .reasoning_source
             .as_ref()
-            .map(format_agent_config_source)
+            .map(super::resolution::format_agent_config_source)
             .unwrap_or_default(),
     );
     command.env(
@@ -165,6 +110,7 @@ pub(crate) fn apply_invocation_environment(
     );
 }
 
+/// Applies minimal non-interactive environment variables (color suppression) to a command.
 pub(crate) fn apply_noninteractive_agent_environment(command: &mut Command) {
     command.env("TERM", "dumb");
     command.env("NO_COLOR", "1");
@@ -174,31 +120,9 @@ pub(crate) fn apply_noninteractive_agent_environment(command: &mut Command) {
     command.env_remove("COLORTERM");
 }
 
-pub(crate) fn attempted_command(command: &str, command_args: &[String]) -> String {
-    format!("{command} {}", command_args.join(" "))
-}
-
-pub(crate) fn validate_invocation_command_surface(
-    invocation: &ResolvedAgentInvocation,
-    command_args: &[String],
-) -> Result<String> {
-    let attempted = attempted_command(&invocation.command, command_args);
-    if invocation.builtin_provider {
-        builtin_provider_adapter(&invocation.agent)
-            .ok_or_else(|| anyhow!("builtin provider `{}` is not configured", invocation.agent))?
-            .validate_command_args(command_args)
-            .with_context(|| {
-                format!(
-                    "built-in provider `{}` launch validation failed before running `{attempted}` (model: {}, reasoning: {})",
-                    invocation.agent,
-                    invocation.model.as_deref().unwrap_or("unset"),
-                    invocation.reasoning.as_deref().unwrap_or("unset"),
-                )
-            })?;
-    }
-
-    Ok(attempted)
-}
+// ---------------------------------------------------------------------------
+// Subprocess execution with continuation/resume handling
+// ---------------------------------------------------------------------------
 
 /// Runs one non-interactive agent turn and returns the captured final assistant output.
 ///
@@ -210,6 +134,9 @@ pub fn run_agent_capture(args: &RunAgentArgs) -> Result<AgentCaptureReport> {
 }
 
 /// Runs one non-interactive agent turn, streaming stdout chunks to the provided callback.
+///
+/// If a continuation handle is provided and the provider reports an invalid-resume error, the
+/// continuation is cleared and the invocation is retried without it.
 ///
 /// Returns an error when config resolution fails, the configured command surface is invalid, the
 /// subprocess cannot be launched, or the agent exits unsuccessfully.
@@ -247,6 +174,14 @@ pub(crate) fn run_agent_streaming_text_with_continuation(
     }
 }
 
+/// Runs one non-interactive agent turn with continuation state management.
+///
+/// On success the continuation handle is updated to reflect the new session. If the provider
+/// reports an invalid-resume error for the supplied continuation, the continuation is cleared and
+/// the invocation is retried without it.
+///
+/// Returns an error when config resolution fails, the configured command surface is invalid, the
+/// subprocess cannot be launched, or the agent exits unsuccessfully.
 pub(crate) fn run_agent_capture_with_continuation(
     args: &RunAgentArgs,
     continuation: &mut Option<AgentContinuation>,
@@ -281,6 +216,10 @@ pub(crate) fn run_agent_capture_with_continuation(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Internal attempt implementations
+// ---------------------------------------------------------------------------
+
 #[derive(Debug, Clone, Copy)]
 enum OutputStream {
     Stdout,
@@ -291,257 +230,6 @@ enum OutputStream {
 struct OutputChunk {
     stream: OutputStream,
     text: String,
-}
-
-pub(crate) fn resolve_agent_invocation_for_planning(
-    config: &AppConfig,
-    planning_meta: &PlanningMeta,
-    args: &RunAgentArgs,
-) -> Result<ResolvedAgentInvocation> {
-    let resolved = resolve_agent_config(
-        config,
-        planning_meta,
-        args.route_key.as_deref(),
-        AgentConfigOverrides {
-            provider: args.agent.clone(),
-            model: args.model.clone(),
-            reasoning: args.reasoning.clone(),
-        },
-    )?;
-    let agent_name = normalize_agent_name(&resolved.provider);
-    let builtin_provider = builtin_provider_adapter(&agent_name).is_some();
-
-    let model = resolved.model;
-    let reasoning = resolved.reasoning;
-    if !builtin_provider && !args.attachments.is_empty() {
-        bail!(
-            "agent `{agent_name}` does not support prompt image attachments; use built-in `codex` or `claude`, or remove the attachments"
-        );
-    }
-    let payload = render_agent_payload(
-        &agent_name,
-        &args.prompt,
-        args.instructions.as_deref(),
-        model.as_deref(),
-        reasoning.as_deref(),
-        &args.attachments,
-    )?;
-    let context = builtin_invocation_context(args.route_key.as_deref());
-    let (command, rendered_args, transport) =
-        if let Some(provider) = builtin_provider_adapter(&agent_name) {
-            let transport = args
-                .transport
-                .map(Into::into)
-                .unwrap_or_else(|| provider.transport());
-            let mut launch_args = provider.launch_args(model.as_deref(), reasoning.as_deref());
-            if transport == PromptTransport::Arg {
-                launch_args.push(payload.clone());
-            }
-            (
-                provider.launch_command().to_string(),
-                launch_args,
-                transport,
-            )
-        } else {
-            let mut definition = config
-                .resolve_agent_definition(&agent_name)
-                .ok_or_else(|| anyhow!("agent `{agent_name}` is not configured"))?;
-
-            if let Some(transport) = args.transport {
-                definition.transport = transport.into();
-            }
-
-            let mut rendered_args = render_command_args(
-                &definition.args,
-                &args.prompt,
-                args.instructions.as_deref(),
-                model.as_deref(),
-                reasoning.as_deref(),
-                &payload,
-            );
-            if definition.transport == PromptTransport::Arg
-                && !definition
-                    .args
-                    .iter()
-                    .any(|arg| arg.contains("{{payload}}") || arg.contains("{{prompt}}"))
-            {
-                rendered_args.push(payload.clone());
-            }
-            (definition.command, rendered_args, definition.transport)
-        };
-
-    Ok(ResolvedAgentInvocation {
-        agent: agent_name,
-        command,
-        args: rendered_args,
-        context,
-        model,
-        reasoning,
-        route_key: resolved.route_key,
-        family_key: resolved.family_key,
-        provider_source: resolved.provider_source,
-        model_source: resolved.model_source,
-        reasoning_source: resolved.reasoning_source,
-        transport,
-        payload,
-        attachments: args.attachments.clone(),
-        builtin_provider,
-    })
-}
-
-pub(crate) fn command_args_for_invocation(
-    invocation: &ResolvedAgentInvocation,
-    working_dir: Option<&Path>,
-) -> Result<Vec<String>> {
-    command_args_for_invocation_with_options(
-        invocation,
-        AgentExecutionOptions {
-            working_dir: working_dir.map(Path::to_path_buf),
-            extra_env: Vec::new(),
-            capture_output: false,
-            continuation: None,
-        },
-    )
-}
-
-pub(crate) fn command_args_for_invocation_with_options(
-    invocation: &ResolvedAgentInvocation,
-    options: AgentExecutionOptions,
-) -> Result<Vec<String>> {
-    if !invocation.builtin_provider {
-        return Ok(invocation.args.clone());
-    }
-
-    builtin_provider_adapter(&invocation.agent)
-        .ok_or_else(|| anyhow!("builtin provider `{}` is not configured", invocation.agent))?
-        .prepare_command_args(
-            &invocation.args,
-            options.working_dir.as_deref(),
-            invocation.context,
-            invocation.transport,
-            options.capture_output,
-            options.continuation.as_deref(),
-        )
-}
-
-fn builtin_invocation_context(route_key: Option<&str>) -> BuiltinInvocationContext {
-    match route_key {
-        Some(AGENT_ROUTE_AGENTS_LISTEN) => BuiltinInvocationContext::Listen,
-        Some(AGENT_ROUTE_CONTEXT_SCAN | AGENT_ROUTE_CONTEXT_RELOAD) => {
-            BuiltinInvocationContext::Scan
-        }
-        Some(
-            AGENT_ROUTE_BACKLOG_SPEC
-            | AGENT_ROUTE_BACKLOG_PLAN
-            | AGENT_ROUTE_BACKLOG_IMPROVE
-            | AGENT_ROUTE_BACKLOG_SPLIT
-            | AGENT_ROUTE_LINEAR_ISSUES_REFINE,
-        ) => BuiltinInvocationContext::Planning,
-        _ => BuiltinInvocationContext::Other,
-    }
-}
-
-fn render_agent_payload(
-    provider: &str,
-    prompt: &str,
-    instructions: Option<&str>,
-    model: Option<&str>,
-    reasoning: Option<&str>,
-    attachments: &[PromptImageAttachment],
-) -> Result<String> {
-    let instructions = instructions
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let model = model.map(str::trim).filter(|value| !value.is_empty());
-    let reasoning = reasoning.map(str::trim).filter(|value| !value.is_empty());
-
-    if instructions.is_none() && model.is_none() && reasoning.is_none() && attachments.is_empty() {
-        return Ok(prompt.to_string());
-    }
-
-    let mut sections = vec![format!("Prompt:\n{prompt}")];
-
-    if let Some(instructions) = instructions {
-        sections.push(format!("Additional instructions:\n{instructions}"));
-    }
-
-    if let Some(model) = model {
-        sections.push(format!("Preferred model:\n{model}"));
-    }
-
-    if let Some(reasoning) = reasoning {
-        sections.push(format!("Preferred reasoning effort:\n{reasoning}"));
-    }
-
-    if !attachments.is_empty() {
-        sections.push(render_attachment_payload(provider, attachments)?);
-    }
-
-    Ok(sections.join("\n\n"))
-}
-
-fn render_attachment_payload(
-    provider: &str,
-    attachments: &[PromptImageAttachment],
-) -> Result<String> {
-    let encoded = encode_prompt_images_for_provider(attachments)?;
-    let mut lines = vec![format!(
-        "Prompt image attachments for built-in provider `{provider}`:"
-    )];
-    for (index, attachment) in encoded.iter().enumerate() {
-        lines.push(format!("[Image #{}]", index + 1));
-        lines.push(format!("name: {}", attachment.display_name));
-        lines.push("mime: image/png".to_string());
-        lines.push(format!(
-            "dimensions: {}x{}{}",
-            attachment.width,
-            attachment.height,
-            if attachment.resized {
-                " (resized to fit 2048x768)"
-            } else {
-                ""
-            }
-        ));
-        lines.push("base64:".to_string());
-        lines.push(attachment.base64_png.clone());
-    }
-    Ok(lines.join("\n"))
-}
-
-fn render_command_args(
-    template: &[String],
-    prompt: &str,
-    instructions: Option<&str>,
-    model: Option<&str>,
-    reasoning: Option<&str>,
-    payload: &str,
-) -> Vec<String> {
-    let model_arg = model
-        .map(|value| format!("--model={value}"))
-        .unwrap_or_default();
-    let reasoning_arg = reasoning
-        .map(|value| format!("--reasoning={value}"))
-        .unwrap_or_default();
-
-    template
-        .iter()
-        .filter_map(|value| {
-            let rendered = value
-                .replace("{{prompt}}", prompt)
-                .replace("{{instructions}}", instructions.unwrap_or(""))
-                .replace("{{model}}", model.unwrap_or(""))
-                .replace("{{reasoning}}", reasoning.unwrap_or(""))
-                .replace("{{model_arg}}", &model_arg)
-                .replace("{{reasoning_arg}}", &reasoning_arg)
-                .replace("{{payload}}", payload);
-
-            if rendered.is_empty() {
-                None
-            } else {
-                Some(rendered)
-            }
-        })
-        .collect()
 }
 
 fn run_agent_capture_attempt(
@@ -763,22 +451,11 @@ fn spawn_output_reader(
     });
 }
 
-pub(crate) fn format_agent_config_source(source: &AgentConfigSource) -> String {
-    match source {
-        AgentConfigSource::ExplicitOverride => "explicit_override".to_string(),
-        AgentConfigSource::CommandRoute(route) => format!("command_route:{route}"),
-        AgentConfigSource::FamilyRoute(route) => format!("family_route:{route}"),
-        AgentConfigSource::RepoDefault => "repo_default".to_string(),
-        AgentConfigSource::GlobalDefault => "global_default".to_string(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        ResolvedAgentInvocation, apply_invocation_environment, render_invocation_diagnostics,
-    };
-    use crate::agent_provider::BuiltinInvocationContext;
+    use super::super::resolution::ResolvedAgentInvocation;
+    use super::{AgentContinuation, apply_invocation_environment};
+    use crate::agent_provider::{BuiltinInvocationContext, builtin_provider_adapter};
     use crate::config::{AgentConfigSource, PromptTransport};
     use std::process::Command;
 
@@ -822,21 +499,132 @@ mod tests {
         assert_eq!(envs.get("METASTACK_AGENT_PROMPT"), Some(&"hello"));
     }
 
-    #[test]
-    fn render_invocation_diagnostics_reports_resolved_sources() {
-        let lines = render_invocation_diagnostics(&test_invocation());
+    // -----------------------------------------------------------------------
+    // Continuation/resume handling tests
+    // -----------------------------------------------------------------------
 
-        assert!(lines.iter().any(|line| line == "Resolved provider: codex"));
-        assert!(lines.iter().any(|line| line == "Resolved model: gpt-5.4"));
+    #[test]
+    fn continuation_is_skipped_when_provider_does_not_match() {
+        let invocation = test_invocation(); // agent = "codex"
+        let continuation = Some(AgentContinuation {
+            provider: "claude".to_string(),
+            session_id: "session-1".to_string(),
+        });
+
+        let attempted = continuation
+            .as_ref()
+            .filter(|state| state.provider == invocation.agent);
         assert!(
-            lines
-                .iter()
-                .any(|line| line == "Provider source: global_default")
+            attempted.is_none(),
+            "continuation should be skipped when provider does not match invocation agent"
         );
+    }
+
+    #[test]
+    fn continuation_is_used_when_provider_matches() {
+        let invocation = test_invocation(); // agent = "codex"
+        let continuation = Some(AgentContinuation {
+            provider: "codex".to_string(),
+            session_id: "thread-42".to_string(),
+        });
+
+        let attempted = continuation
+            .as_ref()
+            .filter(|state| state.provider == invocation.agent);
         assert!(
-            lines
-                .iter()
-                .any(|line| line == "Model source: repo_default")
+            attempted.is_some(),
+            "continuation should be used when provider matches invocation agent"
         );
+        assert_eq!(attempted.unwrap().session_id, "thread-42");
+    }
+
+    #[test]
+    fn codex_resume_error_detection_covers_expected_patterns() {
+        let provider = builtin_provider_adapter("codex").expect("codex adapter should exist");
+
+        // Positive cases: these messages should trigger a retry without continuation
+        assert!(provider.is_invalid_resume_error("could not find thread thread-42"));
+        assert!(provider.is_invalid_resume_error("No session found for the given ID"));
+        assert!(provider.is_invalid_resume_error("Unknown session: abc123"));
+
+        // Negative cases: unrelated errors should not trigger a retry
+        assert!(!provider.is_invalid_resume_error("permission denied"));
+        assert!(!provider.is_invalid_resume_error("network timeout"));
+        assert!(!provider.is_invalid_resume_error("rate limit exceeded"));
+    }
+
+    #[test]
+    fn claude_resume_error_detection_covers_expected_patterns() {
+        let provider = builtin_provider_adapter("claude").expect("claude adapter should exist");
+
+        // Positive cases: these messages should trigger a retry without continuation
+        assert!(provider.is_invalid_resume_error(
+            "No conversation found with session ID: 550e8400-e29b-41d4-a716-446655440000"
+        ));
+        assert!(
+            provider.is_invalid_resume_error("--resume requires a valid session ID to continue")
+        );
+
+        // Negative cases: unrelated errors should not trigger a retry
+        assert!(!provider.is_invalid_resume_error("permission denied"));
+        assert!(!provider.is_invalid_resume_error("API key invalid"));
+        assert!(!provider.is_invalid_resume_error("model not found"));
+    }
+
+    #[test]
+    fn codex_capture_output_returns_continuation_from_response() {
+        let provider = builtin_provider_adapter("codex").expect("codex adapter should exist");
+        let parsed = provider
+            .parse_capture_output(
+                r#"{"type":"thread.started","thread_id":"thread-abc"}
+{"type":"item.completed","item":{"type":"agent_message","text":"result"}}"#,
+            )
+            .expect("codex output should parse");
+
+        assert_eq!(parsed.continuation.as_deref(), Some("thread-abc"));
+        assert_eq!(parsed.response_text.as_deref(), Some("result"));
+    }
+
+    #[test]
+    fn claude_capture_output_returns_continuation_from_response() {
+        let provider = builtin_provider_adapter("claude").expect("claude adapter should exist");
+        let parsed = provider
+            .parse_capture_output(
+                r#"{"type":"result","subtype":"success","result":"ok","session_id":"sess-xyz"}"#,
+            )
+            .expect("claude output should parse");
+
+        assert_eq!(parsed.continuation.as_deref(), Some("sess-xyz"));
+        assert_eq!(parsed.response_text.as_deref(), Some("ok"));
+    }
+
+    #[test]
+    fn codex_capture_output_handles_missing_continuation() {
+        let provider = builtin_provider_adapter("codex").expect("codex adapter should exist");
+        let parsed = provider
+            .parse_capture_output(
+                r#"{"type":"item.completed","item":{"type":"agent_message","text":"done"}}"#,
+            )
+            .expect("codex output should parse");
+
+        assert!(
+            parsed.continuation.is_none(),
+            "continuation should be None when thread.started is missing"
+        );
+        assert_eq!(parsed.response_text.as_deref(), Some("done"));
+    }
+
+    #[test]
+    fn claude_capture_output_handles_missing_continuation() {
+        let provider = builtin_provider_adapter("claude").expect("claude adapter should exist");
+        let parsed = provider
+            .parse_capture_output(r#"{"type":"result","subtype":"success","result":"done"}"#)
+            .expect("claude output should parse");
+
+        assert!(
+            parsed.continuation.is_none(),
+            "continuation should be None when session_id is missing"
+        );
+        assert_eq!(parsed.response_text.as_deref(), Some("done"));
     }
 }

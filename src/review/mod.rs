@@ -69,6 +69,7 @@ const METASTACK_LABEL: &str = "metastack";
 const INPUT_POLL_INTERVAL_MILLIS: u64 = 100;
 const TERMINAL_REFRESH_INTERVAL_SECONDS: u64 = 1;
 const DEFAULT_POLL_INTERVAL_SECONDS: u64 = 60;
+const REMEDIATION_RETRY_DELAY_SECONDS: u64 = 2;
 
 /// Dashboard data for the review listener.
 #[derive(Debug, Clone, Serialize)]
@@ -159,6 +160,11 @@ struct GhPrLabel {
     name: String,
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+struct GhRepoView {
+    url: String,
+}
+
 /// Minimal PR listing entry from `gh pr list --json`.
 #[derive(Debug, Clone, serde::Deserialize)]
 struct GhPrListEntry {
@@ -209,6 +215,8 @@ enum InteractiveReviewDialog {
     LaunchReviews(Vec<ReviewLaunchCandidate>),
     LaunchFollowUpTickets(Vec<ReviewLaunchCandidate>),
     StartRemediation(u64),
+    SkipRemediation(u64),
+    DeleteSession(u64, InteractiveSessionKind),
     CancelSession(u64, InteractiveSessionKind),
 }
 
@@ -217,6 +225,8 @@ enum InteractiveReviewAction {
     LaunchReviews(Vec<ReviewLaunchCandidate>),
     LaunchFollowUpTickets(Vec<ReviewLaunchCandidate>),
     StartRemediation(u64),
+    SkipRemediation(u64),
+    DeleteSession(u64, InteractiveSessionKind),
     CancelSession(u64, InteractiveSessionKind),
 }
 
@@ -668,6 +678,9 @@ fn run_review_interactive(
     let planning_meta = crate::config::load_required_planning_meta(&root, command.command_name())?;
     let gh = GhCli;
     let store = ReviewProjectStore::resolve(&root).ok();
+    if let Some(ref store) = store {
+        reset_review_store(store)?;
+    }
     let mode = if pr_number.is_some() {
         InteractiveReviewMode::Direct
     } else {
@@ -875,6 +888,55 @@ fn run_review_interactive(
                                 worker_rxs.push(handle);
                                 app.status =
                                     format!("Starting remediation workflow for PR #{pr_number}.");
+                            }
+                        }
+                        InteractiveReviewAction::SkipRemediation(pr_number) => {
+                            if let Some(session) = app.sessions.iter_mut().find(|session| {
+                                session.candidate.pr_number == pr_number
+                                    && session.kind == InteractiveSessionKind::Review
+                            }) {
+                                session.remediation_declined = true;
+                                session.phase = ReviewPhase::Skipped;
+                                session.summary =
+                                    "Recommendation kept without remediation PR".to_string();
+                                session.push_note(
+                                    "User kept the review report without opening a remediation PR."
+                                        .to_string(),
+                                );
+                                app.status = format!(
+                                    "Kept report for PR #{} without creating remediation.",
+                                    pr_number
+                                );
+                                if let Some(ref store) = store {
+                                    let persisted = ReviewSession {
+                                        pr_number: session.candidate.pr_number,
+                                        pr_title: session.candidate.title.clone(),
+                                        pr_url: Some(session.candidate.url.clone()),
+                                        pr_author: Some(session.candidate.author.clone()),
+                                        head_branch: Some(session.candidate.head_ref.clone()),
+                                        base_branch: Some(session.candidate.base_ref.clone()),
+                                        linear_identifier: session
+                                            .candidate
+                                            .linear_identifier
+                                            .clone(),
+                                        phase: session.phase,
+                                        summary: session.summary.clone(),
+                                        updated_at_epoch_seconds: session.updated_at_epoch_seconds,
+                                        review_output: session.review_output.clone(),
+                                        remediation_required: session.remediation_required,
+                                        remediation_pr_number: session.remediation_pr_number,
+                                        remediation_pr_url: session.remediation_pr_url.clone(),
+                                    };
+                                    persist_review_session(Some(store), &persisted)?;
+                                }
+                            }
+                        }
+                        InteractiveReviewAction::DeleteSession(pr_number, kind) => {
+                            app.delete_session(pr_number, kind);
+                            if kind == InteractiveSessionKind::Review
+                                && let Some(ref store) = store
+                            {
+                                let _ = store.delete_session(pr_number)?;
                             }
                         }
                         InteractiveReviewAction::CancelSession(pr_number, kind) => {
@@ -1509,7 +1571,7 @@ impl InteractiveReviewApp {
                 phase: persistent.phase,
                 summary: persistent.summary.clone(),
                 notes: Vec::new(),
-                review_output: None,
+                review_output: persistent.review_output.clone(),
                 follow_up_ticket_set: None,
                 created_follow_up_issues: Vec::new(),
                 remediation_required: persistent.remediation_required,
@@ -2011,9 +2073,39 @@ impl InteractiveReviewApp {
                                 .selected_session()
                                 .is_some_and(Self::session_needs_remediation_decision) =>
                     {
-                        self.decline_selected_session_remediation();
+                        if let Some(pr_number) = self
+                            .selected_session()
+                            .map(|session| session.candidate.pr_number)
+                        {
+                            self.stage = InteractiveReviewStage::Confirm;
+                            self.dialog = Some(InteractiveReviewDialog::SkipRemediation(pr_number));
+                            self.status = format!(
+                                "Confirm keeping the report without remediation for PR #{pr_number}."
+                            );
+                        }
                     }
-                    KeyCode::Char('c') | KeyCode::Char('C')
+                    KeyCode::Char('d') | KeyCode::Char('D')
+                        if self.tab == InteractiveReviewTab::Sessions
+                            && self.selected_session().is_some() =>
+                    {
+                        if let Some((pr_number, kind)) = self
+                            .selected_session()
+                            .map(|session| (session.candidate.pr_number, session.kind))
+                        {
+                            self.stage = InteractiveReviewStage::Confirm;
+                            self.dialog =
+                                Some(InteractiveReviewDialog::DeleteSession(pr_number, kind));
+                            self.status = format!(
+                                "Confirm deleting the stored {} session for PR #{}.",
+                                kind.label(),
+                                pr_number
+                            );
+                        }
+                    }
+                    KeyCode::Char('c')
+                    | KeyCode::Char('C')
+                    | KeyCode::Char('x')
+                    | KeyCode::Char('X')
                         if self.tab == InteractiveReviewTab::Sessions
                             && self
                                 .selected_session()
@@ -2038,8 +2130,7 @@ impl InteractiveReviewApp {
                         }
                     }
                     KeyCode::Char('f') | KeyCode::Char('F')
-                        if self.command == ReviewCommandKind::Retro
-                            && self.tab == InteractiveReviewTab::Candidates =>
+                        if self.tab == InteractiveReviewTab::Candidates =>
                     {
                         self.open_filter_panel();
                     }
@@ -2060,6 +2151,12 @@ impl InteractiveReviewApp {
                         }
                         Some(InteractiveReviewDialog::StartRemediation(pr_number)) => {
                             Some(InteractiveReviewAction::StartRemediation(pr_number))
+                        }
+                        Some(InteractiveReviewDialog::SkipRemediation(pr_number)) => {
+                            Some(InteractiveReviewAction::SkipRemediation(pr_number))
+                        }
+                        Some(InteractiveReviewDialog::DeleteSession(pr_number, kind)) => {
+                            Some(InteractiveReviewAction::DeleteSession(pr_number, kind))
                         }
                         Some(InteractiveReviewDialog::CancelSession(pr_number, kind)) => {
                             Some(InteractiveReviewAction::CancelSession(pr_number, kind))
@@ -2112,10 +2209,6 @@ impl InteractiveReviewApp {
 
     fn selected_session(&self) -> Option<&InteractiveReviewSession> {
         self.sessions.get(self.session_index)
-    }
-
-    fn selected_session_mut(&mut self) -> Option<&mut InteractiveReviewSession> {
-        self.sessions.get_mut(self.session_index)
     }
 
     fn open_selected_follow_up_ticket_review(&mut self) {
@@ -2439,7 +2532,9 @@ impl InteractiveReviewApp {
         {
             return false;
         }
-        let selected_pr = self.selected_candidate().map(|candidate| candidate.pr_number);
+        let selected_pr = self
+            .selected_candidate()
+            .map(|candidate| candidate.pr_number);
         if self.query.handle_key(key) {
             self.restore_selected_candidate(selected_pr);
             self.preview_scroll.reset();
@@ -2635,21 +2730,6 @@ impl InteractiveReviewApp {
             .is_some_and(|session| session.cancel_requested)
     }
 
-    fn decline_selected_session_remediation(&mut self) {
-        let Some(session) = self.selected_session_mut() else {
-            return;
-        };
-        session.remediation_declined = true;
-        session.phase = ReviewPhase::Skipped;
-        session.summary = "Recommendation kept without remediation PR".to_string();
-        session
-            .push_note("User kept the review report without opening a remediation PR.".to_string());
-        self.status = format!(
-            "Kept report for PR #{} without creating remediation.",
-            session.candidate.pr_number
-        );
-    }
-
     fn session_needs_remediation_decision(session: &InteractiveReviewSession) -> bool {
         (session.phase == ReviewPhase::ReviewComplete
             || (session.phase == ReviewPhase::Completed
@@ -2658,6 +2738,30 @@ impl InteractiveReviewApp {
             && !session.remediation_declined
             && !session.cancel_requested
             && session.review_output.is_some()
+    }
+
+    fn delete_session(&mut self, pr_number: u64, kind: InteractiveSessionKind) {
+        if let Some(index) = self
+            .sessions
+            .iter()
+            .position(|session| Self::session_matches(session, pr_number, kind))
+        {
+            self.sessions.remove(index);
+            if self.sessions.is_empty() {
+                self.session_index = 0;
+                self.focus = InteractiveReviewFocus::CandidateList;
+                self.tab = InteractiveReviewTab::Candidates;
+            } else {
+                self.session_index = self
+                    .session_index
+                    .min(self.sessions.len().saturating_sub(1));
+            }
+            self.status = format!(
+                "Deleted stored {} session for PR #{}.",
+                kind.label(),
+                pr_number
+            );
+        }
     }
 
     fn session_can_cancel(session: &InteractiveReviewSession) -> bool {
@@ -3612,6 +3716,7 @@ fn execute_review_with_progress(
     );
     session.remediation_required = Some(remediation_required);
     session.linear_identifier = Some(linear_identifier);
+    session.review_output = Some(outcome.review_output.clone());
     persist_review_session(context.store, &session)?;
     emit(ReviewExecutionEvent::Completed(outcome));
 
@@ -3647,6 +3752,7 @@ fn execute_remediation_with_progress(
         ReviewPhase::FixAgentPending,
         format!("Fix agent pending for PR #{}", request.candidate.pr_number),
     );
+    session.review_output = Some(request.review_output.clone());
     session.remediation_required = Some(true);
     session.linear_identifier = Some(request.linear_identifier.clone());
     persist_review_session(context.store, &session)?;
@@ -3662,6 +3768,7 @@ fn execute_remediation_with_progress(
     session.phase = ReviewPhase::FixAgentInProgress;
     session.summary = format!("Fix agent running for PR #{}", request.candidate.pr_number);
     session.updated_at_epoch_seconds = now_epoch_seconds();
+    session.review_output = Some(request.review_output.clone());
     persist_review_session(context.store, &session)?;
     emit(ReviewExecutionEvent::Progress {
         kind: InteractiveSessionKind::Review,
@@ -3674,14 +3781,31 @@ fn execute_remediation_with_progress(
         remediation_required: Some(true),
     });
 
-    match run_remediation(
-        context.root,
-        &pr,
-        &request.linear_identifier,
-        &request.review_output,
-        context.config,
-        context.planning_meta,
-        context.args,
+    let remediation_context = RemediationContext {
+        root: context.root,
+        pr: &pr,
+        linear_identifier: &request.linear_identifier,
+        review_output: &request.review_output,
+        config: context.config,
+        planning_meta: context.planning_meta,
+        args: context.args,
+    };
+
+    match run_remediation_with_retry(
+        &remediation_context,
+        Some(context.cancel),
+        |attempt, error| {
+            emit(ReviewExecutionEvent::Progress {
+                kind: InteractiveSessionKind::Review,
+                candidate: request.candidate.clone(),
+                phase: ReviewPhase::FixAgentInProgress,
+                summary: format!("Fix agent retrying for PR #{}", request.candidate.pr_number),
+                note: Some(format!(
+                    "Remediation attempt #{attempt} failed: {error}. Retrying until the PR is created or you cancel the session."
+                )),
+                remediation_required: Some(true),
+            });
+        },
     ) {
         Ok(remediation) => {
             let outcome = InteractiveReviewOutcome {
@@ -3704,6 +3828,7 @@ fn execute_remediation_with_progress(
             session.remediation_pr_number = outcome.remediation_pr_number;
             session.remediation_pr_url = outcome.remediation_pr_url.clone();
             session.linear_identifier = Some(request.linear_identifier.clone());
+            session.review_output = Some(request.review_output.clone());
             persist_review_session(context.store, &session)?;
             emit(ReviewExecutionEvent::Completed(outcome));
         }
@@ -3715,6 +3840,7 @@ fn execute_remediation_with_progress(
             );
             session.remediation_required = Some(true);
             session.linear_identifier = Some(request.linear_identifier.clone());
+            session.review_output = Some(request.review_output.clone());
             persist_review_session(context.store, &session)?;
             emit(ReviewExecutionEvent::Failed {
                 kind: InteractiveSessionKind::Review,
@@ -4193,9 +4319,10 @@ fn persist_review_session(
     session: &ReviewSession,
 ) -> Result<()> {
     if let Some(store) = store {
-        let mut state = store.load_state()?;
-        state.upsert(session.clone());
-        store.save_state(&state)?;
+        let session = session.clone();
+        store.update_state(|state| {
+            state.upsert(session);
+        })?;
     }
     Ok(())
 }
@@ -4216,6 +4343,7 @@ fn review_session_from_candidate(
         phase,
         summary: summary.into(),
         updated_at_epoch_seconds: now_epoch_seconds(),
+        review_output: None,
         remediation_required: None,
         remediation_pr_number: None,
         remediation_pr_url: None,
@@ -4561,7 +4689,7 @@ fn render_interactive_secondary_panel(
                 ]),
                 Line::from(""),
                 Line::from(
-                    "Press Esc to return to candidates and queue more reviews or follow-up ticket ideas while current sessions keep running.",
+                    "Press `A` to start a remediation agent PR from a review report, `D` to delete stored sessions, or Esc to return to candidates.",
                 ),
             ]);
             let widget = ratatui::widgets::Paragraph::new(text)
@@ -4845,6 +4973,10 @@ fn interactive_footer_text(app: &InteractiveReviewApp) -> Text<'static> {
                 Line::from(
                     "Search candidates, mark PRs with Space, then press Enter to queue reviews.",
                 ),
+                Line::from(
+                    "After a review finishes, switch to Sessions and press `A` to launch the remediation agent PR.",
+                ),
+                interactive_action_line(app),
                 Line::from("Use the Navigation strip to track the active view and focused pane."),
                 Line::from(""),
                 key_hints(&interactive_key_hints(app)),
@@ -4853,6 +4985,7 @@ fn interactive_footer_text(app: &InteractiveReviewApp) -> Text<'static> {
                 Line::from(
                     "Search candidates, mark PRs with Space, then press Enter to queue retro ticket analysis.",
                 ),
+                interactive_action_line(app),
                 Line::from("Use the Navigation strip to track the active view and focused pane."),
                 Line::from(""),
                 key_hints(&interactive_key_hints(app)),
@@ -4868,6 +5001,12 @@ fn interactive_footer_text(app: &InteractiveReviewApp) -> Text<'static> {
                 }
                 Some(InteractiveReviewDialog::StartRemediation(_)) => {
                     "Press Enter to create the remediation PR from the review report."
+                }
+                Some(InteractiveReviewDialog::SkipRemediation(_)) => {
+                    "Press Enter to keep the review report without opening a remediation PR."
+                }
+                Some(InteractiveReviewDialog::DeleteSession(_, _)) => {
+                    "Press Enter to delete the selected stored session."
                 }
                 Some(InteractiveReviewDialog::CancelSession(_, _)) => {
                     "Press Enter to cancel the selected session at the next checkpoint."
@@ -4910,6 +5049,7 @@ fn interactive_key_hints(app: &InteractiveReviewApp) -> Vec<(&'static str, &'sta
             InteractiveReviewTab::Candidates => match app.command {
                 ReviewCommandKind::Review => vec![
                     ("Type", "search"),
+                    ("F", "filter"),
                     ("Up/Down", "move"),
                     ("Space", "select"),
                     ("Tab", "focus"),
@@ -4956,6 +5096,7 @@ fn session_key_hints(app: &InteractiveReviewApp) -> Vec<(&'static str, &'static 
             hints.push(("A", "create PR"));
             hints.push(("N", "keep report"));
         }
+        hints.push(("D", "delete"));
         if InteractiveReviewApp::session_can_cancel(session) {
             hints.push(("C", "cancel"));
         }
@@ -4964,6 +5105,39 @@ fn session_key_hints(app: &InteractiveReviewApp) -> Vec<(&'static str, &'static 
     hints.push(("Esc", "candidates"));
     hints.push(("q", "exit"));
     hints
+}
+
+fn interactive_action_line(app: &InteractiveReviewApp) -> Line<'static> {
+    if app.tab != InteractiveReviewTab::Sessions {
+        return Line::from(vec![
+            badge("Enter", Tone::Accent),
+            Span::raw(" queue selected work  "),
+            badge("F", Tone::Info),
+            Span::raw(" filter candidates  "),
+            badge("R", Tone::Info),
+            Span::raw(" refresh"),
+        ]);
+    }
+
+    let mut spans = vec![badge("D", Tone::Muted), Span::raw(" delete stored session")];
+    if let Some(session) = app.selected_session() {
+        if InteractiveReviewApp::session_needs_remediation_decision(session) {
+            spans = vec![
+                badge("A", Tone::Success),
+                Span::raw(" launch remediation PR  "),
+                badge("N", Tone::Muted),
+                Span::raw(" keep report  "),
+                badge("D", Tone::Muted),
+                Span::raw(" delete"),
+            ];
+        }
+        if InteractiveReviewApp::session_can_cancel(session) {
+            spans.push(Span::raw("  "));
+            spans.push(badge("C", Tone::Danger));
+            spans.push(Span::raw(" cancel active work"));
+        }
+    }
+    Line::from(spans)
 }
 
 fn tab_label(label: &str, active: bool, count: usize) -> Span<'static> {
@@ -5594,6 +5768,16 @@ struct RemediationOutcome {
     pr_url: String,
 }
 
+struct RemediationContext<'a> {
+    root: &'a Path,
+    pr: &'a GhPrMetadata,
+    linear_identifier: &'a str,
+    review_output: &'a str,
+    config: &'a AppConfig,
+    planning_meta: &'a PlanningMeta,
+    args: &'a ReviewRunArgs,
+}
+
 fn run_remediation(
     root: &Path,
     pr: &GhPrMetadata,
@@ -5603,29 +5787,71 @@ fn run_remediation(
     planning_meta: &PlanningMeta,
     args: &ReviewRunArgs,
 ) -> Result<RemediationOutcome> {
+    let context = RemediationContext {
+        root,
+        pr,
+        linear_identifier,
+        review_output,
+        config,
+        planning_meta,
+        args,
+    };
+    run_remediation_with_retry(&context, None, |_attempt, _error| {})
+}
+
+fn run_remediation_with_retry(
+    context: &RemediationContext<'_>,
+    cancel: Option<&AtomicBool>,
+    mut on_retry: impl FnMut(usize, &str),
+) -> Result<RemediationOutcome> {
+    let mut attempt = 1usize;
+    let mut previous_error: Option<String> = None;
+    loop {
+        if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+            bail!("remediation cancelled before PR creation completed");
+        }
+
+        match run_remediation_attempt(context, attempt, previous_error.as_deref()) {
+            Ok(outcome) => return Ok(outcome),
+            Err(error) => {
+                let message = error.to_string();
+                on_retry(attempt, &message);
+                previous_error = Some(message);
+                attempt += 1;
+                thread::sleep(Duration::from_secs(REMEDIATION_RETRY_DELAY_SECONDS));
+            }
+        }
+    }
+}
+
+fn run_remediation_attempt(
+    context: &RemediationContext<'_>,
+    attempt: usize,
+    previous_error: Option<&str>,
+) -> Result<RemediationOutcome> {
     let gh = GhCli;
-    let remediation_branch = format!("review/remediation-pr-{}", pr.number);
-    let workspace_path = prepare_remediation_workspace(root, pr.number)?;
-    materialize_pull_request_head(&workspace_path, pr.number, &remediation_branch)?;
+    let remediation_branch = format!("review/remediation-pr-{}", context.pr.number);
+    let remediation_base_branch = remediation_target_branch(context.pr);
+    let workspace_path = prepare_remediation_workspace(context.root, context.pr.number)?;
+    let remediation_branch_exists =
+        materialize_pull_request_head(&workspace_path, context.pr.number, &remediation_branch)?;
     let starting_head = git_stdout(&workspace_path, &["rev-parse", "HEAD"])?;
 
-    let fix_prompt = format!(
-        "You are applying required fixes from a code review to this branch.\n\n\
-         ## Review Output\n{review_output}\n\n\
-         ## Instructions\n\
-         Apply ONLY the required fixes identified in the review above. Do not apply optional recommendations.\n\
-         Make minimal, targeted changes. Commit each logical fix separately with clear commit messages.\n\
-         After applying all fixes, verify the changes compile and pass basic checks.\n"
+    let fix_prompt = remediation_fix_prompt(
+        context.review_output,
+        attempt,
+        previous_error,
+        remediation_branch_exists,
     );
 
     let fix_args = RunAgentArgs {
         root: Some(workspace_path.clone()),
         route_key: Some(AGENT_ROUTE_AGENTS_REVIEW.to_string()),
-        agent: args.agent.clone(),
+        agent: context.args.agent.clone(),
         prompt: fix_prompt,
         instructions: None,
-        model: args.model.clone(),
-        reasoning: args.reasoning.clone(),
+        model: context.args.model.clone(),
+        reasoning: context.args.reasoning.clone(),
         transport: None,
         attachments: Vec::new(),
     };
@@ -5633,11 +5859,17 @@ fn run_remediation(
     let report = run_agent_capture(&fix_args)?;
     eprintln!("{}", report.stdout.trim());
 
-    ensure_remediation_commits_created(&workspace_path, &starting_head)?;
+    ensure_remediation_commits_created(&workspace_path, &starting_head, remediation_branch_exists)?;
 
     run_git(
         &workspace_path,
-        &["push", "-u", "origin", &remediation_branch],
+        &[
+            "push",
+            "--force-with-lease",
+            "-u",
+            "origin",
+            &remediation_branch,
+        ],
     )
     .map_err(|e| {
         anyhow!(
@@ -5646,15 +5878,12 @@ fn run_remediation(
         )
     })?;
 
-    let pr_title = format!("review: remediation for PR #{}", pr.number);
-    let pr_body = format!(
-        "## Summary\n\n\
-         Automated remediation PR for #{pr_number} based on `meta agents review` audit.\n\n\
-         ## Review Findings\n\n\
-         {review_output}\n\n\
-        ## Linear Ticket\n\n\
-         {linear_identifier}\n",
-        pr_number = pr.number,
+    let pr_title = format!("review: remediation for PR #{}", context.pr.number);
+    let pr_body = remediation_pull_request_body(
+        context.pr.number,
+        remediation_base_branch,
+        context.review_output,
+        context.linear_identifier,
     );
     let body_path = workspace_path.join(".metastack").join("review-pr-body.md");
     ensure_dir(&workspace_path.join(".metastack"))?;
@@ -5664,7 +5893,7 @@ fn run_remediation(
         &workspace_path,
         crate::github_pr::PullRequestPublishRequest {
             head_branch: &remediation_branch,
-            base_branch: &pr.base_ref_name,
+            base_branch: remediation_base_branch,
             title: &pr_title,
             body_path: &body_path,
             mode: crate::github_pr::PullRequestPublishMode::Ready,
@@ -5682,21 +5911,21 @@ fn run_remediation(
     eprintln!("Remediation PR #{} created: {}", result.number, result.url);
 
     post_linear_remediation_comment(
-        root,
-        config,
-        planning_meta,
-        linear_identifier,
+        context.root,
+        context.config,
+        context.planning_meta,
+        context.linear_identifier,
         &result.url,
-        pr.number,
+        context.pr.number,
     )?;
 
     let _ = std::fs::remove_file(&body_path);
 
-    println!("{review_output}");
+    println!("{}", context.review_output);
     println!(
         "\nRemediation PR #{} opened against `{}` from `{}`: {}",
         result.number,
-        pr.base_ref_name,
+        remediation_base_branch,
         workspace_path.display(),
         result.url
     );
@@ -5707,10 +5936,77 @@ fn run_remediation(
     })
 }
 
+fn remediation_fix_prompt(
+    review_output: &str,
+    attempt: usize,
+    previous_error: Option<&str>,
+    remediation_branch_exists: bool,
+) -> String {
+    let retry_context = previous_error
+        .map(|error| {
+            format!(
+                "\n## Retry Context\n\
+                 This is remediation attempt #{attempt}.\n\
+                 The previous attempt failed with:\n\
+                 {error}\n"
+            )
+        })
+        .unwrap_or_default();
+    let existing_branch_context = if remediation_branch_exists {
+        "\n## Existing Remediation Branch\n\
+         A remediation branch already exists remotely. Reuse and update it instead of starting over from scratch.\n"
+    } else {
+        ""
+    };
+
+    format!(
+        "You are applying required fixes from a code review to this branch.\n\n\
+         ## Review Output\n{review_output}\n\
+         {retry_context}\
+         {existing_branch_context}\
+         ## Instructions\n\
+         Apply ONLY the required fixes identified in the review above. Do not apply optional recommendations.\n\
+         Make minimal, targeted changes. Commit each logical fix separately with clear commit messages.\n\
+         If the branch already contains prior remediation work, continue from it instead of undoing it.\n\
+         After applying all fixes, verify the changes compile and pass basic checks.\n"
+    )
+}
+
+fn remediation_target_branch(pr: &GhPrMetadata) -> &str {
+    &pr.head_ref_name
+}
+
+fn remediation_pull_request_body(
+    original_pr_number: u64,
+    target_branch: &str,
+    review_output: &str,
+    linear_identifier: &str,
+) -> String {
+    format!(
+        "## Summary\n\n\
+         Automated remediation PR for #{original_pr_number} based on `meta agents review` audit.\n\
+         This follow-up PR targets the reviewed branch `{target_branch}` so it can merge into the original PR.\n\n\
+         ## Review Findings\n\n\
+         {review_output}\n\n\
+         ## Linear Ticket\n\n\
+         {linear_identifier}\n"
+    )
+}
+
+fn resolve_remediation_clone_source(root: &Path) -> Result<String> {
+    let gh = GhCli;
+    match gh.run_json::<GhRepoView>(root, &["repo", "view", "--json", "url"]) {
+        Ok(repo) => Ok(repo.url),
+        Err(_) => store::resolve_origin_remote(root),
+    }
+}
+
 fn prepare_remediation_workspace(root: &Path, pr_number: u64) -> Result<std::path::PathBuf> {
     let workspace_root = sibling_workspace_root(root)?.join("review-runs");
     ensure_dir(&workspace_root)?;
     let workspace_path = workspace_root.join(format!("pr-{pr_number}"));
+    let clone_source = resolve_remediation_clone_source(root)
+        .context("failed to resolve a GitHub clone source for the remediation workspace")?;
 
     if workspace_path.exists() {
         ensure_workspace_path_is_safe(root, &workspace_root, &workspace_path)?;
@@ -5726,8 +6022,7 @@ fn prepare_remediation_workspace(root: &Path, pr_number: u64) -> Result<std::pat
         root,
         &[
             "clone",
-            root.to_str()
-                .ok_or_else(|| anyhow!("repository path is not valid utf-8"))?,
+            &clone_source,
             workspace_path
                 .to_str()
                 .ok_or_else(|| anyhow!("workspace path is not valid utf-8"))?,
@@ -5742,7 +6037,7 @@ fn materialize_pull_request_head(
     workspace_path: &Path,
     pr_number: u64,
     remediation_branch: &str,
-) -> Result<()> {
+) -> Result<bool> {
     let output = Command::new("gh")
         .args(["pr", "checkout", &pr_number.to_string(), "--detach"])
         .current_dir(workspace_path)
@@ -5755,19 +6050,52 @@ fn materialize_pull_request_head(
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
-    run_git(
-        workspace_path,
-        &["checkout", "-B", remediation_branch, "HEAD"],
-    )?;
-    Ok(())
+    let branch_exists = remote_branch_exists(workspace_path, remediation_branch)?;
+    if branch_exists {
+        run_git(workspace_path, &["fetch", "origin", remediation_branch])?;
+        run_git(
+            workspace_path,
+            &[
+                "checkout",
+                "-B",
+                remediation_branch,
+                &format!("origin/{remediation_branch}"),
+            ],
+        )?;
+    } else {
+        run_git(
+            workspace_path,
+            &["checkout", "-B", remediation_branch, "HEAD"],
+        )?;
+    }
+    Ok(branch_exists)
 }
 
-fn ensure_remediation_commits_created(workspace_path: &Path, starting_head: &str) -> Result<()> {
+fn remote_branch_exists(workspace_path: &Path, branch: &str) -> Result<bool> {
+    let output = Command::new("git")
+        .args(["ls-remote", "--heads", "origin", branch])
+        .current_dir(workspace_path)
+        .output()
+        .context("failed to inspect existing remediation branch")?;
+    if !output.status.success() {
+        bail!(
+            "failed to inspect remediation branch `{branch}`: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
+}
+
+fn ensure_remediation_commits_created(
+    workspace_path: &Path,
+    starting_head: &str,
+    remediation_branch_exists: bool,
+) -> Result<()> {
     let commit_count = git_stdout(
         workspace_path,
         &["rev-list", "--count", &format!("{starting_head}..HEAD")],
     )?;
-    if commit_count.trim() == "0" {
+    if commit_count.trim() == "0" && !remediation_branch_exists {
         bail!(
             "remediation agent did not create any commits in `{}`",
             workspace_path.display()
@@ -5873,6 +6201,7 @@ async fn run_review_listener(args: &ReviewRunArgs) -> Result<()> {
 
     verify_gh_auth(&root)?;
     let store = ReviewProjectStore::resolve(&root)?;
+    reset_review_store(&store)?;
 
     if args.once || args.json {
         return run_review_once(&root, &store, args);
@@ -5924,6 +6253,10 @@ fn run_review_check(root: &Path, args: &ReviewRunArgs) -> Result<()> {
 
     println!("\nAll review prerequisites satisfied.");
     Ok(())
+}
+
+fn reset_review_store(store: &ReviewProjectStore) -> Result<()> {
+    store.save_state(&state::ReviewState::default())
 }
 
 fn run_review_once(root: &Path, store: &ReviewProjectStore, args: &ReviewRunArgs) -> Result<()> {
@@ -6060,6 +6393,7 @@ fn run_single_review_cycle(
             phase: ReviewPhase::Claimed,
             summary: "Claimed for review".to_string(),
             updated_at_epoch_seconds: now,
+            review_output: None,
             remediation_required: None,
             remediation_pr_number: None,
             remediation_pr_url: None,
@@ -6083,6 +6417,7 @@ fn run_single_review_cycle(
             Ok(result) => {
                 session.phase = ReviewPhase::Completed;
                 session.summary = result.summary;
+                session.review_output = result.review_output;
                 session.remediation_required = Some(result.remediation_required);
                 session.remediation_pr_number = result.remediation_pr_number;
                 session.remediation_pr_url = result.remediation_pr_url;
@@ -6118,6 +6453,7 @@ fn run_single_review_cycle(
 
 struct ReviewResult {
     summary: String,
+    review_output: Option<String>,
     remediation_required: bool,
     remediation_pr_number: Option<u64>,
     remediation_pr_url: Option<String>,
@@ -6181,6 +6517,7 @@ fn run_review_for_session(
         } else {
             "No remediation required".to_string()
         },
+        review_output: Some(review_output.clone()),
         remediation_required,
         remediation_pr_number: None,
         remediation_pr_url: None,
@@ -6502,6 +6839,47 @@ mod tests {
         let output =
             "### Required Fixes\nNo required fixes identified.\n\n### Remediation Required\nNO";
         assert!(!review_output_requires_remediation(output));
+    }
+
+    #[test]
+    fn remediation_targets_reviewed_pr_branch() {
+        let pr = GhPrMetadata {
+            number: 42,
+            title: "Review flow".to_string(),
+            url: "https://example.test/pull/42".to_string(),
+            body: Some("Implements MET-42".to_string()),
+            author: GhPrAuthor {
+                login: "metasudo".to_string(),
+            },
+            head_ref_name: "met-42-review".to_string(),
+            base_ref_name: "main".to_string(),
+            changed_files: 1,
+            additions: 10,
+            deletions: 2,
+            state: "OPEN".to_string(),
+            assignees: vec![],
+            labels: vec![GhPrLabel {
+                name: "id-MET-42".to_string(),
+            }],
+            review_decision: None,
+        };
+
+        assert_eq!(remediation_target_branch(&pr), "met-42-review");
+    }
+
+    #[test]
+    fn remediation_pull_request_body_mentions_original_target_branch() {
+        let body = remediation_pull_request_body(
+            42,
+            "met-42-review",
+            "### Remediation Required\nYES",
+            "MET-42",
+        );
+
+        assert!(body.contains("Automated remediation PR for #42"));
+        assert!(body.contains("targets the reviewed branch `met-42-review`"));
+        assert!(body.contains("### Remediation Required"));
+        assert!(body.contains("MET-42"));
     }
 
     #[test]
@@ -6832,7 +7210,8 @@ mod tests {
         type_query(&mut app, "beta");
 
         assert_eq!(
-            app.selected_candidate().map(|candidate| candidate.pr_number),
+            app.selected_candidate()
+                .map(|candidate| candidate.pr_number),
             Some(123),
             "filtering in place should keep the cursor on the previously selected PR"
         );
@@ -6846,7 +7225,8 @@ mod tests {
         }
 
         assert_eq!(
-            app.selected_candidate().map(|candidate| candidate.pr_number),
+            app.selected_candidate()
+                .map(|candidate| candidate.pr_number),
             Some(123),
             "clearing the filter should restore the same selected PR when it is still visible"
         );
@@ -6870,6 +7250,7 @@ mod tests {
             phase: ReviewPhase::ReviewComplete,
             summary: "Review complete".to_string(),
             updated_at_epoch_seconds: 1000,
+            review_output: Some("### Remediation Required\nYES".to_string()),
             remediation_required: Some(true),
             remediation_pr_number: None,
             remediation_pr_url: None,
@@ -6904,6 +7285,7 @@ mod tests {
             phase: ReviewPhase::ReviewComplete,
             summary: "Review complete".to_string(),
             updated_at_epoch_seconds: 1000,
+            review_output: Some("### Remediation Required\nYES".to_string()),
             remediation_required: Some(true),
             remediation_pr_number: None,
             remediation_pr_url: None,
@@ -6952,6 +7334,7 @@ mod tests {
             phase: ReviewPhase::Completed,
             summary: "No remediation required".to_string(),
             updated_at_epoch_seconds: 1000,
+            review_output: Some("### Remediation Required\nNO".to_string()),
             remediation_required: Some(false),
             remediation_pr_number: None,
             remediation_pr_url: None,
@@ -6966,7 +7349,7 @@ mod tests {
     }
 
     #[test]
-    fn decline_sets_skipped_phase() {
+    fn delete_session_removes_selected_entry() {
         let mut app =
             InteractiveReviewApp::new(InteractiveReviewMode::Discovery, ReviewCommandKind::Review);
         app.load_candidates(vec![make_test_candidate(42)]);
@@ -6980,10 +7363,10 @@ mod tests {
         app.tab = InteractiveReviewTab::Sessions;
         app.focus = InteractiveReviewFocus::SessionList;
 
-        app.decline_selected_session_remediation();
+        app.delete_session(42, InteractiveSessionKind::Review);
 
-        assert_eq!(app.sessions[0].phase, ReviewPhase::Skipped);
-        assert!(app.sessions[0].remediation_declined);
+        assert!(app.sessions.is_empty());
+        assert_eq!(app.tab, InteractiveReviewTab::Candidates);
     }
 
     #[test]
@@ -7004,6 +7387,7 @@ mod tests {
                     phase: ReviewPhase::FixAgentInProgress,
                     summary: "Fix agent running".to_string(),
                     updated_at_epoch_seconds: 1,
+                    review_output: Some("### Remediation Required\nYES".to_string()),
                     remediation_required: Some(true),
                     remediation_pr_number: None,
                     remediation_pr_url: None,
@@ -7019,6 +7403,7 @@ mod tests {
                     phase: ReviewPhase::Skipped,
                     summary: "Remediation skipped".to_string(),
                     updated_at_epoch_seconds: 1,
+                    review_output: Some("### Remediation Required\nYES".to_string()),
                     remediation_required: Some(true),
                     remediation_pr_number: None,
                     remediation_pr_url: None,
@@ -7404,15 +7789,15 @@ mod tests {
     }
 
     #[test]
-    fn f_key_does_not_open_filter_panel_in_review_mode() {
+    fn f_key_opens_filter_panel_in_review_mode() {
         let mut app =
             InteractiveReviewApp::new(InteractiveReviewMode::Discovery, ReviewCommandKind::Review);
         app.load_candidates(vec![make_test_candidate(1)]);
         let f_key = crossterm::event::KeyEvent::new(KeyCode::Char('F'), KeyModifiers::NONE);
         let _ = app.handle_key(f_key, Rect::default());
         assert!(
-            !app.filter_panel_open,
-            "filter panel should not open in review mode"
+            app.filter_panel_open,
+            "filter panel should open in review mode"
         );
     }
 

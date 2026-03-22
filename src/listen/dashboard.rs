@@ -268,7 +268,7 @@ pub(crate) fn render(
     } else {
         0
     };
-    let header_height = if area.width >= 120 { 10 } else { 12 };
+    let header_height = if area.width >= 120 { 11 } else { 12 };
     let show_active_issues = data.show_active_issues && !data.active_issues.is_empty();
     let active_issue_detail =
         state.detail_mode && matches!(state.focus, FocusPane::ActiveIssues) && data.show_preview;
@@ -329,6 +329,11 @@ fn render_header(frame: &mut Frame<'_>, data: &ListenDashboardData, area: Rect) 
                 data.cycle_summary.clone(),
                 Style::default().fg(Color::Gray),
             )),
+            runtime_line(
+                "Execution agent",
+                data.resolved_agent.as_deref().unwrap_or("unresolved"),
+                Color::LightCyan,
+            ),
             runtime_line("Agents", &data.runtime.agents, Color::Green),
             runtime_line("Throughput", &data.runtime.throughput, Color::Cyan),
             runtime_line("Runtime", &data.runtime.runtime, Color::Yellow),
@@ -430,6 +435,11 @@ fn render_header(frame: &mut Frame<'_>, data: &ListenDashboardData, area: Rect) 
     frame.render_widget(hero, chunks[0]);
 
     let runtime_lines = vec![
+        runtime_line(
+            "Execution agent",
+            data.resolved_agent.as_deref().unwrap_or("unresolved"),
+            Color::LightCyan,
+        ),
         runtime_line("Agents", &data.runtime.agents, Color::Green),
         runtime_line("Throughput", &data.runtime.throughput, Color::Cyan),
         runtime_line("Runtime", &data.runtime.runtime, Color::Yellow),
@@ -1219,12 +1229,15 @@ mod tests {
                 vim_mode: false,
                 show_active_issues: true,
                 show_preview: true,
+                resolved_agent: Some("codex".to_string()),
             },
         );
 
         let snapshot = render_dashboard(&data, 140, 36).expect("snapshot should render");
 
         assert!(snapshot.contains("Runtime"));
+        assert!(snapshot.contains("Execution agent"));
+        assert!(snapshot.contains("codex"));
         assert!(snapshot.contains("Agent Sessions"));
         assert!(snapshot.contains("Active (2)"));
         assert!(snapshot.contains("Completed (0)"));
@@ -1232,6 +1245,31 @@ mod tests {
         assert!(snapshot.contains("SESSION"));
         assert!(snapshot.contains("PROGRESS"));
         assert!(snapshot.contains("MET-13"));
+    }
+
+    #[test]
+    fn compact_header_includes_resolved_execution_agent() {
+        let cycle = demo_cycle();
+        let data = build_dashboard_data(
+            &cycle,
+            &DashboardRuntimeContext {
+                started_at_epoch_seconds: 1_773_568_249,
+                now_epoch_seconds: 1_773_575_600,
+                poll_interval_seconds: 7,
+                dashboard_label: "terminal dashboard (TUI)",
+                dashboard_refresh_seconds: 1,
+                linear_refresh_seconds: 15,
+                vim_mode: false,
+                show_active_issues: true,
+                show_preview: true,
+                resolved_agent: Some("claude".to_string()),
+            },
+        );
+
+        let snapshot = render_dashboard(&data, 100, 36).expect("snapshot should render");
+
+        assert!(snapshot.contains("Execution agent"));
+        assert!(snapshot.contains("claude"));
     }
 
     #[test]
@@ -1260,6 +1298,7 @@ mod tests {
                 vim_mode: false,
                 show_active_issues: true,
                 show_preview: true,
+                resolved_agent: Some("codex".to_string()),
             },
         );
 
@@ -1293,6 +1332,7 @@ mod tests {
                 vim_mode: false,
                 show_active_issues: true,
                 show_preview: true,
+                resolved_agent: Some("codex".to_string()),
             },
         );
 
@@ -1318,6 +1358,7 @@ mod tests {
                 vim_mode: false,
                 show_active_issues: true,
                 show_preview: true,
+                resolved_agent: Some("codex".to_string()),
             },
         );
 
@@ -1345,6 +1386,7 @@ mod tests {
                 vim_mode: false,
                 show_active_issues: true,
                 show_preview: true,
+                resolved_agent: Some("codex".to_string()),
             },
         );
 
@@ -1372,6 +1414,7 @@ mod tests {
                 vim_mode: false,
                 show_active_issues: true,
                 show_preview: true,
+                resolved_agent: Some("codex".to_string()),
             },
         );
 
@@ -1396,6 +1439,7 @@ mod tests {
                 vim_mode: true,
                 show_active_issues: true,
                 show_preview: true,
+                resolved_agent: Some("codex".to_string()),
             },
         );
 
@@ -1419,6 +1463,7 @@ mod tests {
                 vim_mode: false,
                 show_active_issues: true,
                 show_preview: true,
+                resolved_agent: Some("codex".to_string()),
             },
         );
 
@@ -1467,6 +1512,7 @@ mod tests {
                 vim_mode: false,
                 show_active_issues: true,
                 show_preview: true,
+                resolved_agent: Some("codex".to_string()),
             },
         );
 
@@ -1511,6 +1557,7 @@ mod tests {
                 vim_mode: false,
                 show_active_issues: true,
                 show_preview: true,
+                resolved_agent: Some("codex".to_string()),
             },
         );
 
@@ -1544,6 +1591,7 @@ mod tests {
                 vim_mode: false,
                 show_active_issues: true,
                 show_preview: true,
+                resolved_agent: Some("codex".to_string()),
             },
         );
         let mut state = SessionBrowserState {
@@ -1578,6 +1626,7 @@ mod tests {
                 vim_mode: false,
                 show_active_issues: true,
                 show_preview: true,
+                resolved_agent: Some("codex".to_string()),
             },
         );
 
@@ -1630,6 +1679,7 @@ mod tests {
                 vim_mode: false,
                 show_active_issues: true,
                 show_preview: true,
+                resolved_agent: Some("codex".to_string()),
             },
         );
 
@@ -1682,6 +1732,7 @@ mod tests {
                 vim_mode: false,
                 show_active_issues: true,
                 show_preview: true,
+                resolved_agent: Some("codex".to_string()),
             },
         );
 
@@ -1722,6 +1773,7 @@ mod tests {
                 vim_mode: false,
                 show_active_issues: true,
                 show_preview: true,
+                resolved_agent: Some("codex".to_string()),
             },
         );
 
@@ -1752,6 +1804,7 @@ mod tests {
                 vim_mode: false,
                 show_active_issues: false,
                 show_preview: true,
+                resolved_agent: Some("codex".to_string()),
             },
         );
 
@@ -1776,6 +1829,7 @@ mod tests {
                 vim_mode: false,
                 show_active_issues: true,
                 show_preview: true,
+                resolved_agent: Some("codex".to_string()),
             },
         );
 
@@ -1804,6 +1858,7 @@ mod tests {
                 vim_mode: false,
                 show_active_issues: false,
                 show_preview: true,
+                resolved_agent: Some("codex".to_string()),
             },
         );
 
@@ -1830,6 +1885,7 @@ mod tests {
                 vim_mode: false,
                 show_active_issues: true,
                 show_preview: true,
+                resolved_agent: Some("codex".to_string()),
             },
         );
 
@@ -1864,6 +1920,7 @@ mod tests {
                 vim_mode: false,
                 show_active_issues: true,
                 show_preview: true,
+                resolved_agent: Some("codex".to_string()),
             },
         );
 
@@ -1890,6 +1947,7 @@ mod tests {
                 vim_mode: false,
                 show_active_issues: true,
                 show_preview: true,
+                resolved_agent: Some("codex".to_string()),
             },
         );
 

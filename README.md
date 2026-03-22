@@ -33,6 +33,7 @@ Most planning tools split work across issue trackers, docs, scripts, and ad hoc 
 - `meta linear ...` and `meta backlog sync` keep Linear and local files aligned.
 - `meta agents review` audits GitHub PRs in a guided dashboard, queues `metastack`-labeled PRs for explicit human approval, and can open remediation PRs when required.
 - `meta agents retro` analyzes shipped PRs for follow-up backlog opportunities and opens a plan-style Linear ticket curation flow.
+- `meta agents improve` inspects open PRs, accepts improvement instructions, and publishes stacked PRs targeting the source PR branch from an isolated workspace.
 - `meta agents listen` runs unattended ticket execution in dedicated workspace clones instead of your source checkout.
 - `meta workspace` inventories and cleans those sibling listener workspace clones after the listener finishes.
 
@@ -1060,7 +1061,7 @@ Review open GitHub PRs with a holistic audit pipeline that gathers PR metadata, 
 - **Direct review**: `meta agents review <PR_NUMBER>` loads one PR into the dashboard, shows a review preview, and waits for explicit approval before the audit starts.
 - **Guided queue review**: `meta agents review` (no PR number) discovers open PRs with the `metastack` label via `gh`, shows a searchable candidate queue, and waits for a human to approve starting each review session.
 
-The interactive dashboard keeps candidates and live sessions in separate views so you can search, multi-select, and queue more PRs while earlier reviews are still running. `Enter` queues a normal review, `Tab` rotates focus between the candidate list, candidate preview, session list, and session detail panes, and `R` refreshes the candidate discovery set without leaving the dashboard.
+The interactive dashboard keeps candidates and live sessions in separate views so you can search, multi-select, and queue more PRs while earlier reviews are still running. `Enter` queues a normal review, `Tab` rotates focus between the candidate list, candidate preview, session list, and session detail panes, and `R` refreshes the candidate discovery set without leaving the dashboard. Once a review reaches `Review Complete`, switch to the Sessions view and press `A` to start the remediation agent PR workflow from the saved report.
 
 ```bash
 # One-shot review
@@ -1098,7 +1099,7 @@ Each reviewed PR transitions through a per-PR state model:
 6. **Fix Agent Complete** - Remediation PR created and pushed.
 7. **Skipped** - User explicitly declined remediation.
 
-When a review requires remediation, the interactive dashboard shows `[a] Create fix PR` and `[n] Skip` actions on the selected session. Dispatching a fix agent does not exit the TUI; the dashboard remains active and shows live progress for the remediation run. Multiple reviewed PRs maintain independent state in the same session.
+When a review requires remediation, the interactive dashboard shows `[a] Create fix PR` and `[n] Skip` actions on the selected session. Press `d` to delete a stored session after confirmation when you no longer want it in the session view. Dispatching a fix agent does not exit the TUI; the dashboard remains active and shows live progress for the remediation run. Multiple reviewed PRs maintain independent state in the same session, and each new `meta agents review` run starts from a fresh session set instead of restoring prior runs into the dashboard.
 
 For scripted and CI usage, `--fix-pr N` and `--skip-pr N` act on a previously reviewed PR without requiring the interactive TUI. Both produce JSON output with `--json`.
 
@@ -1142,6 +1143,35 @@ Prerequisites:
 - Repository with a configured `.metastack/meta.json`
 - For guided queue mode: PRs must carry the `metastack` label
 
+### `agents improve`
+
+Inspect open PRs for the current repository, describe an improvement request, and publish the result as a stacked PR targeting the source PR branch. Interactive TTY runs stay inside one TUI dashboard:
+
+- The left panel lists open PRs discovered via `gh pr list`.
+- The right panel lists persisted improve sessions loaded from `.metastack/agents/improve/sessions/state.json`.
+- `Enter` on a PR opens a detail view with branch info and body preview.
+- `Tab` toggles focus between the PR list and session list.
+- `Enter` on a session opens a detail view with phase, instructions, and stacked PR link.
+- `Backspace` returns from a detail view to the parent list.
+
+Sessions persist across restarts. Each session records the source PR metadata, user instructions, execution phase, workspace path, improve branch, and stacked PR URL.
+
+When an improve session executes, it:
+1. Clones the repository into an isolated sibling workspace under `<repo>-workspace/improve-<session-id>/`.
+2. Checks out the source PR branch and creates an `improve/<source-branch>` branch.
+3. Publishes a stacked PR targeting the source PR branch with a title and body linking back to the original PR.
+
+```bash
+meta agents improve --root .
+meta agents improve --root . --render-once
+meta agents improve --root . --render-once --events enter
+meta agents improve --root . --render-once --events tab,enter
+```
+
+Prerequisites:
+- `gh` CLI installed and authenticated (`gh auth login`)
+- Repository with a GitHub remote
+
 ### `agents listen`
 
 Run the unattended agent daemon. The listener watches Todo issues, applies repo-scoped label and assignee filters, moves newly claimed work to `In Progress`, prepares a per-ticket standalone clone under a sibling `-workspace` directory, bootstraps a `## Codex Workpad` comment on the Linear issue, downloads issue attachments into a local attachment-context manifest under `.metastack/agents/issue-context/<TICKET>/`, and launches a supervised listen worker inside that workspace. The worker re-runs the configured local agent with Symphony-inspired first-turn and continuation prompts while the ticket stays active, but it now stops once a turn leaves meaningful local workspace progress and attempts to move the issue into a review-style state instead of burning all 20 turns on the same in-progress work. When the ticket branch is pushed, shared automation creates or updates that branch PR as a draft, keeps the `metastack` label attached, and promotes the same PR to ready for review during the existing review handoff without demoting an already-ready PR on continuation. If no matching open branch PR exists during handoff, the worker leaves the PR state as `none` and continues safely without creating a new review PR at completion time.
@@ -1179,8 +1209,10 @@ When `vim_mode` is enabled, the dashboard also accepts `h`/`l` as aliases for le
 `draft #N`, `ready #N`). Press `P` to pause a running session, `R` to resume paused or retry
 blocked.
 
-This feature is interactive-TUI only and does not expand non-interactive output (`--once`,
-`--json`).
+The resolved execution agent is shown in both the interactive dashboard header and the textual
+`--once` runtime summary so operators can confirm which configured worker route the listener will
+launch. `--once --json` continues to return the machine-readable poll-cycle payload without adding
+presentation-only fields to the JSON shape.
 
 Examples:
 
