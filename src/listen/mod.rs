@@ -88,6 +88,8 @@ pub struct ListenDashboardData {
     pub state_file: String,
     pub show_active_issues: bool,
     pub show_preview: bool,
+    #[serde(skip_serializing)]
+    pub resolved_agent: Option<String>,
 }
 
 impl ListenDashboardData {
@@ -543,6 +545,7 @@ struct DashboardRuntimeContext {
     vim_mode: bool,
     show_active_issues: bool,
     show_preview: bool,
+    resolved_agent: Option<String>,
 }
 
 struct ListenLoopConfig {
@@ -552,6 +555,7 @@ struct ListenLoopConfig {
     vim_mode: bool,
     show_active_issues: bool,
     show_preview: bool,
+    resolved_agent: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -2506,6 +2510,7 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
                     vim_mode: app_config.vim_mode_enabled(),
                     show_active_issues,
                     show_preview,
+                    resolved_agent: None,
                 },
             );
             println!(
@@ -2528,6 +2533,7 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
                     vim_mode: app_config.vim_mode_enabled(),
                     show_active_issues,
                     show_preview,
+                    resolved_agent: None,
                 },
             );
             if args.json {
@@ -2548,6 +2554,7 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
                 vim_mode: app_config.vim_mode_enabled(),
                 show_active_issues,
                 show_preview,
+                resolved_agent: None,
             },
             initial_cycle,
             move || {
@@ -2583,6 +2590,9 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
             return Err(error);
         }
     };
+    let resolved_agent = startup_provider_preflight
+        .as_ref()
+        .map(|report| report.provider().to_string());
 
     let config = LinearConfig::new_with_root(
         Some(&root),
@@ -2688,6 +2698,7 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
                 vim_mode: daemon.app_config.vim_mode_enabled(),
                 show_active_issues,
                 show_preview,
+                resolved_agent: resolved_agent.clone(),
             },
         );
         println!(
@@ -2712,6 +2723,7 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
                 vim_mode: daemon.app_config.vim_mode_enabled(),
                 show_active_issues,
                 show_preview,
+                resolved_agent: resolved_agent.clone(),
             },
         );
         if args.json {
@@ -2742,6 +2754,7 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
             vim_mode: daemon.app_config.vim_mode_enabled(),
             show_active_issues,
             show_preview,
+            resolved_agent,
         },
         initial_cycle,
         || daemon.run_cycle(),
@@ -2923,6 +2936,7 @@ where
             vim_mode: loop_config.vim_mode,
             show_active_issues: loop_config.show_active_issues,
             show_preview: loop_config.show_preview,
+            resolved_agent: loop_config.resolved_agent.clone(),
         },
     );
     let linear_refresh_interval = Duration::from_secs(loop_config.poll_interval_seconds);
@@ -2962,6 +2976,7 @@ where
                 vim_mode: loop_config.vim_mode,
                 show_active_issues: loop_config.show_active_issues,
                 show_preview: loop_config.show_preview,
+                resolved_agent: loop_config.resolved_agent.clone(),
             },
         );
         browser_state.normalize(&data);
@@ -3117,6 +3132,7 @@ fn build_dashboard_data(
         state_file: cycle.state_file.clone(),
         show_active_issues: runtime.show_active_issues,
         show_preview: runtime.show_preview,
+        resolved_agent: runtime.resolved_agent.clone(),
     }
 }
 
@@ -3789,6 +3805,7 @@ mod tests {
             vim_mode: false,
             show_active_issues: true,
             show_preview: true,
+            resolved_agent: Some("codex".to_string()),
         };
 
         let dashboard = super::build_dashboard_data(&cycle, &runtime);

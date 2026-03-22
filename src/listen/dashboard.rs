@@ -329,6 +329,11 @@ fn render_header(frame: &mut Frame<'_>, data: &ListenDashboardData, area: Rect) 
                 data.cycle_summary.clone(),
                 Style::default().fg(Color::Gray),
             )),
+            runtime_line(
+                "Execution agent",
+                data.resolved_agent.as_deref().unwrap_or("unresolved"),
+                Color::LightCyan,
+            ),
             runtime_line("Agents", &data.runtime.agents, Color::Green),
             runtime_line("Throughput", &data.runtime.throughput, Color::Cyan),
             runtime_line("Runtime", &data.runtime.runtime, Color::Yellow),
@@ -430,6 +435,11 @@ fn render_header(frame: &mut Frame<'_>, data: &ListenDashboardData, area: Rect) 
     frame.render_widget(hero, chunks[0]);
 
     let runtime_lines = vec![
+        runtime_line(
+            "Execution agent",
+            data.resolved_agent.as_deref().unwrap_or("unresolved"),
+            Color::LightCyan,
+        ),
         runtime_line("Agents", &data.runtime.agents, Color::Green),
         runtime_line("Throughput", &data.runtime.throughput, Color::Cyan),
         runtime_line("Runtime", &data.runtime.runtime, Color::Yellow),
@@ -1219,12 +1229,15 @@ mod tests {
                 vim_mode: false,
                 show_active_issues: true,
                 show_preview: true,
+                resolved_agent: Some("codex".to_string()),
             },
         );
 
         let snapshot = render_dashboard(&data, 140, 36).expect("snapshot should render");
 
         assert!(snapshot.contains("Runtime"));
+        assert!(snapshot.contains("Execution agent"));
+        assert!(snapshot.contains("codex"));
         assert!(snapshot.contains("Agent Sessions"));
         assert!(snapshot.contains("Active (2)"));
         assert!(snapshot.contains("Completed (0)"));
@@ -1260,6 +1273,7 @@ mod tests {
                 vim_mode: false,
                 show_active_issues: true,
                 show_preview: true,
+                resolved_agent: Some("codex".to_string()),
             },
         );
 
@@ -1293,6 +1307,7 @@ mod tests {
                 vim_mode: false,
                 show_active_issues: true,
                 show_preview: true,
+                resolved_agent: Some("codex".to_string()),
             },
         );
 
@@ -1318,6 +1333,7 @@ mod tests {
                 vim_mode: false,
                 show_active_issues: true,
                 show_preview: true,
+                resolved_agent: Some("codex".to_string()),
             },
         );
 
@@ -1345,6 +1361,7 @@ mod tests {
                 vim_mode: false,
                 show_active_issues: true,
                 show_preview: true,
+                resolved_agent: Some("codex".to_string()),
             },
         );
 
@@ -1372,6 +1389,7 @@ mod tests {
                 vim_mode: false,
                 show_active_issues: true,
                 show_preview: true,
+                resolved_agent: Some("codex".to_string()),
             },
         );
 
@@ -1396,6 +1414,7 @@ mod tests {
                 vim_mode: true,
                 show_active_issues: true,
                 show_preview: true,
+                resolved_agent: Some("codex".to_string()),
             },
         );
 
@@ -1419,6 +1438,7 @@ mod tests {
                 vim_mode: false,
                 show_active_issues: true,
                 show_preview: true,
+                resolved_agent: Some("codex".to_string()),
             },
         );
 
@@ -1467,6 +1487,7 @@ mod tests {
                 vim_mode: false,
                 show_active_issues: true,
                 show_preview: true,
+                resolved_agent: Some("codex".to_string()),
             },
         );
 
@@ -1511,6 +1532,7 @@ mod tests {
                 vim_mode: false,
                 show_active_issues: true,
                 show_preview: true,
+                resolved_agent: Some("codex".to_string()),
             },
         );
 
@@ -1544,6 +1566,7 @@ mod tests {
                 vim_mode: false,
                 show_active_issues: true,
                 show_preview: true,
+                resolved_agent: Some("codex".to_string()),
             },
         );
         let mut state = SessionBrowserState {
@@ -1578,6 +1601,7 @@ mod tests {
                 vim_mode: false,
                 show_active_issues: true,
                 show_preview: true,
+                resolved_agent: Some("codex".to_string()),
             },
         );
 
@@ -1630,6 +1654,7 @@ mod tests {
                 vim_mode: false,
                 show_active_issues: true,
                 show_preview: true,
+                resolved_agent: Some("codex".to_string()),
             },
         );
 
@@ -1682,6 +1707,7 @@ mod tests {
                 vim_mode: false,
                 show_active_issues: true,
                 show_preview: true,
+                resolved_agent: Some("codex".to_string()),
             },
         );
 
@@ -1722,6 +1748,7 @@ mod tests {
                 vim_mode: false,
                 show_active_issues: true,
                 show_preview: true,
+                resolved_agent: Some("codex".to_string()),
             },
         );
 
@@ -1752,6 +1779,7 @@ mod tests {
                 vim_mode: false,
                 show_active_issues: false,
                 show_preview: true,
+                resolved_agent: Some("codex".to_string()),
             },
         );
 
@@ -1776,6 +1804,7 @@ mod tests {
                 vim_mode: false,
                 show_active_issues: true,
                 show_preview: true,
+                resolved_agent: Some("codex".to_string()),
             },
         );
 
@@ -1804,6 +1833,7 @@ mod tests {
                 vim_mode: false,
                 show_active_issues: false,
                 show_preview: true,
+                resolved_agent: Some("codex".to_string()),
             },
         );
 
@@ -1830,6 +1860,7 @@ mod tests {
                 vim_mode: false,
                 show_active_issues: true,
                 show_preview: true,
+                resolved_agent: Some("codex".to_string()),
             },
         );
 
@@ -1864,6 +1895,7 @@ mod tests {
                 vim_mode: false,
                 show_active_issues: true,
                 show_preview: true,
+                resolved_agent: Some("codex".to_string()),
             },
         );
 
@@ -1890,6 +1922,7 @@ mod tests {
                 vim_mode: false,
                 show_active_issues: true,
                 show_preview: true,
+                resolved_agent: Some("codex".to_string()),
             },
         );
 
