@@ -5321,6 +5321,138 @@ printf '%s' "$METASTACK_AGENT_INSTRUCTIONS" > "$TEST_OUTPUT_DIR/instructions-$co
 
 #[cfg(unix)]
 #[test]
+fn listen_worker_reuses_stored_provider_native_resume_handle() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let stub_dir = temp.path().join("stub-output");
+    let server = DynamicLinearServer::start_with_completion_after_refreshes(1_000_000)?;
+    let api_url = server.url.clone();
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&stub_dir)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+    write_onboarded_config(
+        &config_path,
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+"#,
+        ),
+    )?;
+
+    let claude_path = bin_dir.join("claude");
+    fs::write(
+        &claude_path,
+        r#"#!/bin/sh
+if [ "$1" = "-p" ] && [ "$2" = "--help" ]; then
+  cat <<'EOF'
+-p, --print
+--model <model>
+--effort <level>
+--verbose
+--output-format <format>
+--permission-mode <mode>
+EOF
+  exit 0
+fi
+printf '%s\n' "$@" > "$TEST_OUTPUT_DIR/claude-args.txt"
+printf '%s' '{"type":"result","subtype":"success","result":"claude listen ok","session_id":"provider-session-new"}'
+"#,
+    )?;
+    let mut permissions = fs::metadata(&claude_path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&claude_path, permissions)?;
+
+    init_repo_with_origin(&repo_root)?;
+    let workspace = create_workspace_clone_checkout(&repo_root, "repo-workspace/MET-32")?;
+
+    let state_path = write_listen_store_session(
+        &config_path,
+        &repo_root,
+        vec![json!({
+            "issue_id": "issue-32",
+            "issue_identifier": "MET-32",
+            "issue_title": "Resume worker from stored provider handle",
+            "project_name": "MetaStack CLI",
+            "team_key": "MET",
+            "issue_url": "https://linear.app/issues/MET-32",
+            "phase": "blocked",
+            "summary": "Waiting for worker retry",
+            "brief_path": null,
+            "workspace_path": workspace.display().to_string(),
+            "workpad_comment_id": "comment-32",
+            "updated_at_epoch_seconds": 1_773_575_100u64,
+            "pid": null,
+            "session_id": "legacy-session-should-not-be-used",
+            "latest_resume_handle": {
+                "provider": "claude",
+                "id": "provider-resume-32"
+            },
+            "turns": 2,
+            "tokens": {},
+            "log_path": "logs/MET-32.log"
+        })],
+    )?;
+
+    let current_path = std::env::var("PATH")?;
+    meta()
+        .current_dir(&workspace)
+        .env_remove("ANTHROPIC_API_KEY")
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &stub_dir)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "listen-worker",
+            "--source-root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+            "--workspace",
+            workspace.to_str().expect("workspace path should be utf-8"),
+            "--issue",
+            "MET-32",
+            "--workpad-comment-id",
+            "comment-32",
+            "--api-key",
+            "token",
+            "--api-url",
+            &api_url,
+            "--agent",
+            "claude",
+            "--max-turns",
+            "1",
+        ])
+        .assert()
+        .success();
+
+    let args = fs::read_to_string(stub_dir.join("claude-args.txt"))?;
+    assert!(args.contains("--resume"));
+    assert!(args.contains("provider-resume-32"));
+    assert!(!args.contains("legacy-session-should-not-be-used"));
+
+    let state = fs::read_to_string(state_path)?;
+    assert!(state.contains("\"latest_resume_handle\""));
+    assert!(state.contains("\"provider\": \"claude\""));
+    assert!(state.contains("\"id\": \"provider-session-new\""));
+    assert!(state.contains("\"session_id\": \"provider-session-new\""));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn listen_worker_publishes_the_initial_branch_pull_request_as_a_draft() -> Result<(), Box<dyn Error>>
 {
     let _guard = listen_test_lock();
