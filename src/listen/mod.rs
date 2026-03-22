@@ -2169,10 +2169,10 @@ pub fn run_listen_session_list(_: &ListenSessionListArgs) -> Result<String> {
             .map(|session| session.issue_identifier.clone())
             .unwrap_or_else(|| "-".to_string());
         let provider = latest
-            .map(AgentSession::latest_resume_provider_label)
+            .map(|session| explicit_resume_provider_label(session.latest_resume_handle.as_ref()))
             .unwrap_or_else(|| "-".to_string());
         let resume_id = latest
-            .map(AgentSession::latest_resume_id_label)
+            .map(|session| explicit_resume_id_label(session.latest_resume_handle.as_ref()))
             .unwrap_or_else(|| "-".to_string());
         lines.push(format!(
             "{}  {}  {}  {}  {}  {}  {}  {}",

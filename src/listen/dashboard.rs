@@ -1301,7 +1301,7 @@ mod tests {
             44,
             SessionBrowserState {
                 detail_mode: true,
-                detail_scroll: 8,
+                detail_scroll: u16::MAX,
                 ..SessionBrowserState::default()
             },
         )

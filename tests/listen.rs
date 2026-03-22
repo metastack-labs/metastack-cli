@@ -750,6 +750,79 @@ fn listen_sessions_list_and_inspect_surface_resume_and_token_metadata() -> Resul
 
 #[cfg(unix)]
 #[test]
+fn listen_sessions_list_and_inspect_show_explicit_unavailable_resume_metadata()
+-> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    write_onboarded_config(&config_path, "")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+    init_repo_with_origin(&repo_root)?;
+
+    write_listen_store_session(
+        &config_path,
+        &repo_root,
+        vec![json!({
+            "issue_id": "issue-10183",
+            "issue_identifier": "ENG-10183",
+            "issue_title": "Resume metadata missing",
+            "project_name": "MetaStack CLI",
+            "team_key": "MET",
+            "issue_url": "https://linear.app/issues/ENG-10183",
+            "phase": "blocked",
+            "summary": "Waiting on a retry",
+            "brief_path": null,
+            "workspace_path": "/tmp/ENG-10183",
+            "workpad_comment_id": "comment-10183",
+            "updated_at_epoch_seconds": 1_773_575_100u64,
+            "pid": null,
+            "session_id": "legacy-session-should-not-surface",
+            "turns": 2,
+            "tokens": {},
+            "log_path": "logs/ENG-10183.log"
+        })],
+    )?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args(["listen", "sessions", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("unavailable"))
+        .stdout(predicate::str::contains("legacy-session-should-not-surface").not());
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "inspect",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Resume provider: unavailable"))
+        .stdout(predicate::str::contains("Resume ID: unavailable"))
+        .stdout(predicate::str::contains("legacy-session-should-not-surface").not());
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn listen_sessions_inspect_surfaces_structured_detail_fields() -> Result<(), Box<dyn Error>> {
     let _guard = listen_test_lock();
     let temp = tempdir()?;

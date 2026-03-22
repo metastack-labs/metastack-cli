@@ -229,13 +229,6 @@ impl AgentSession {
             .unwrap_or_else(|| "-".to_string())
     }
 
-    pub(super) fn latest_resume_id_label(&self) -> String {
-        self.latest_resume_handle
-            .as_ref()
-            .map(|resume| resume.id.clone())
-            .unwrap_or_else(|| "-".to_string())
-    }
-
     pub(super) fn pull_request_label(&self) -> String {
         self.pull_request.compact_label()
     }
@@ -439,8 +432,11 @@ mod tests {
         assert_eq!(session.session_label(), "019c...f6a640");
         assert_eq!(session.latest_resume_provider_label(), "codex");
         assert_eq!(
-            session.latest_resume_id_label(),
-            "019cedb4-2293-7651-b0b4-dfac4af6a640"
+            session
+                .latest_resume_handle
+                .as_ref()
+                .map(|resume| resume.id.as_str()),
+            Some("019cedb4-2293-7651-b0b4-dfac4af6a640")
         );
     }
 
