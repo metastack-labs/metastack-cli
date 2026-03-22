@@ -26,7 +26,7 @@ use crate::linear::browser::{
 };
 use crate::tui::fields::InputFieldState;
 use crate::tui::scroll::{ScrollState, plain_text, scrollable_content_paragraph, wrapped_rows};
-use crate::tui::theme::{Tone, badge, empty_state, key_hints, list, panel_title, paragraph};
+use crate::tui::theme::{Tone, badge, empty_state, list, panel_title, paragraph};
 
 /// Load state for a single backlog issue in the dashboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -296,7 +296,7 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &SyncDashboardApp) {
             Constraint::Length(if narrow { 6 } else { 5 }),
             Constraint::Length(3),
             Constraint::Min(0),
-            Constraint::Length(4),
+            Constraint::Length(3),
         ])
         .split(frame.area());
     let body = Layout::default()
@@ -315,7 +315,7 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &SyncDashboardApp) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Percentage(if narrow { 50 } else { 58 }),
-            Constraint::Length(8),
+            Constraint::Length(6),
             Constraint::Min(6),
         ])
         .split(body[1]);
@@ -495,11 +495,20 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &SyncDashboardApp) {
             ("q", "exit"),
         ],
     };
+    let mut spans = vec![Span::raw(format!("Focus: {focus_label}  |  "))];
+    for (i, (key, desc)) in hints.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw("  "));
+        }
+        spans.push(Span::styled(
+            (*key).to_string(),
+            ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::BOLD),
+        ));
+        spans.push(Span::raw(format!(" {desc}")));
+    }
+    spans.push(Span::raw("  |  Ctrl+C quit"));
     let footer = paragraph(
-        Text::from(vec![
-            key_hints(&hints),
-            Line::from(format!("Focus: {focus_label}  |  Ctrl+C quit")),
-        ]),
+        Text::from(vec![Line::from(spans)]),
         panel_title("Keys", false),
     );
     frame.render_widget(footer, area);
