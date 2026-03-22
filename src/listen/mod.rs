@@ -2516,12 +2516,8 @@ pub async fn run_execute(args: &crate::cli::ExecuteArgs) -> Result<()> {
             profile: args.profile.clone(),
         },
     )?;
-    let store = resolve_project_store_for_run(
-        &root,
-        args.project.as_deref(),
-        &planning_meta,
-        &app_config,
-    )?;
+    let store =
+        resolve_project_store_for_run(&root, args.project.as_deref(), &planning_meta, &app_config)?;
     let client = ReqwestLinearClient::new(config.clone())?;
     let service = LinearService::new(client, config.default_team.clone());
 
@@ -2677,10 +2673,7 @@ pub async fn run_execute(args: &crate::cli::ExecuteArgs) -> Result<()> {
         issue_id: Some(detailed_issue.id.clone()),
         issue_identifier: detailed_issue.identifier.clone(),
         issue_title: detailed_issue.title.clone(),
-        project_name: detailed_issue
-            .project
-            .as_ref()
-            .map(|p| p.name.clone()),
+        project_name: detailed_issue.project.as_ref().map(|p| p.name.clone()),
         team_key: detailed_issue.team.key.clone(),
         issue_url: detailed_issue.url.clone(),
         phase: SessionPhase::Running,
@@ -3829,8 +3822,8 @@ mod tests {
         AgentDaemon, AgentSession, DashboardRuntimeContext, ListenCycleData, ListenState,
         PullRequestSummary, SessionOrigin, SessionPhase, TODO_STATE, TokenUsage,
         capture_workspace_snapshot, compact_identifier, format_duration, format_number,
-        listen_browser_action, listen_scope_label, mark_running_session_stale,
-        render_agent_prompt, required_label_skip_reason,
+        listen_browser_action, listen_scope_label, mark_running_session_stale, render_agent_prompt,
+        required_label_skip_reason,
     };
     use crate::config::{
         AppConfig, LinearConfig, ListenAssignmentScope, ListenRefreshPolicy,

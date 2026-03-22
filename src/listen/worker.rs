@@ -99,8 +99,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
         backlog_issue: backlog_issue.as_ref(),
         max_turns: args.max_turns,
     };
-    let session_origin =
-        load_existing_session_origin(&source_root, project_selector, &args.issue)?;
+    let session_origin = load_existing_session_origin(&source_root, project_selector, &args.issue)?;
     let mut session_context = WorkerSessionContext {
         source_root: &source_root,
         project_selector,

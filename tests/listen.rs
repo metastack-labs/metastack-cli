@@ -1124,7 +1124,12 @@ fn listen_sessions_inspect_shows_listen_origin_by_default() -> Result<(), Box<dy
     write_listen_store_session(
         &config_path,
         &repo_root,
-        vec![listen_session_json("MET-50", "running", 1_773_575_100, Some(99999))],
+        vec![listen_session_json(
+            "MET-50",
+            "running",
+            1_773_575_100,
+            Some(99999),
+        )],
     )?;
 
     meta()
