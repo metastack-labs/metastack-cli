@@ -2,9 +2,7 @@ mod agent_provider;
 mod agents;
 mod backlog;
 mod backlog_defaults;
-mod backlog_dependencies;
 mod backlog_improve;
-mod backlog_release;
 mod backlog_spec;
 mod cli;
 mod config;
@@ -20,7 +18,6 @@ mod listen;
 mod merge;
 mod merge_dashboard;
 mod onboarding;
-mod orchestrate;
 mod output;
 mod plan;
 mod progress;
@@ -48,9 +45,7 @@ use anyhow::{Result, bail};
 use clap::Parser;
 use clap::error::ErrorKind;
 
-use crate::backlog_dependencies::run_backlog_dependencies;
 use crate::backlog_improve::run_backlog_improve;
-use crate::backlog_release::run_backlog_release;
 use crate::backlog_spec::{BacklogSpecOutput, run_backlog_spec};
 use crate::cli::{
     AgentsCommands, BacklogCommands, Cli, Command, ConfigEventArg, DashboardCommands,
@@ -77,7 +72,6 @@ use crate::merge_dashboard::MergeDashboardAction;
 use crate::onboarding::{
     OnboardingLaunchMode, OnboardingOptions, OnboardingResult, run_onboarding,
 };
-use crate::orchestrate::run_orchestrate;
 use crate::output::{render_json_clap_error, render_json_error};
 use crate::plan::run_plan;
 use crate::review::{run_retro, run_review};
@@ -174,12 +168,6 @@ async fn dispatch(cli: Cli) -> Result<()> {
             BacklogCommands::Improve(args) => {
                 run_backlog_improve(&args).await?;
             }
-            BacklogCommands::Dependencies(args) => {
-                run_backlog_dependencies(&args).await?;
-            }
-            BacklogCommands::Release(args) => {
-                run_backlog_release(&args).await?;
-            }
             BacklogCommands::Tech(args) => {
                 let report = run_technical(&args).await?;
                 if args.no_interactive {
@@ -258,9 +246,6 @@ async fn dispatch(cli: Cli) -> Result<()> {
                     run_listen(&args.run).await?;
                 }
             },
-            AgentsCommands::Orchestrate(args) => {
-                println!("{}", run_orchestrate(&args).await?);
-            }
             AgentsCommands::Review(args) => {
                 run_review(&args).await?;
             }

@@ -28,7 +28,7 @@ Most planning tools split work across issue trackers, docs, scripts, and ad hoc 
 - `meta runtime config` saves install-scoped Linear and agent defaults.
 - `meta runtime setup` bootstraps the repo and saves repo-scoped defaults under `.metastack/`.
 - `meta context scan` turns the codebase into reusable planning context.
-- `meta backlog spec`, `meta backlog plan`, `meta backlog improve`, `meta backlog dependencies`, `meta backlog release`, `meta backlog tech`, `meta linear issues refine`, and `meta agents workflows` generate structured backlog work.
+- `meta backlog spec`, `meta backlog plan`, `meta backlog improve`, `meta backlog tech`, `meta linear issues refine`, and `meta agents workflows` generate structured backlog work.
 - `meta merge` batches open GitHub PRs into one isolated aggregate merge run and publish step.
 - `meta linear ...` and `meta backlog sync` keep Linear and local files aligned.
 - `meta agents review` audits GitHub PRs in a guided dashboard, queues `metastack`-labeled PRs for explicit human approval, and can open remediation PRs when required.
@@ -119,7 +119,6 @@ meta backlog spec --root .
 meta context scan
 meta context show
 meta backlog plan --request "Break the next release into Linear-ready tickets"
-meta backlog release --name sprint-1 --batch-size 5
 ```
 
 If you are ready to supervise issue execution:
@@ -223,7 +222,7 @@ A typical end-to-end loop looks like this:
 2. Run `meta runtime setup` once per repository to scaffold `.metastack/` and save repo defaults.
 3. Run `meta backlog spec` to create or refine the repo-local `.metastack/SPEC.md`.
 4. Run `meta context scan` to refresh the repo context under `.metastack/codebase/`.
-5. Use `meta backlog plan`, `meta backlog release`, or `meta backlog tech` to create structured backlog work.
+5. Use `meta backlog plan` or `meta backlog tech` to create structured backlog work.
 6. Use `meta linear ...`, `meta dashboard ...`, or `meta backlog sync` to coordinate with Linear.
 7. Use `meta merge` when you want to batch open GitHub PRs in one isolated aggregate merge run.
 8. Use `meta agents listen` when you want unattended ticket execution inside a dedicated workspace clone.
@@ -238,7 +237,6 @@ meta runtime setup --team MET --project "MetaStack CLI"
 meta backlog spec --root .
 meta context scan
 meta backlog plan --request "Break the next release into Linear-ready tickets"
-meta backlog release --name sprint-1 --batch-size 5
 meta backlog tech MET-35
 ```
 
@@ -649,7 +647,6 @@ Use these flags when an outer agent or shell wrapper needs deterministic non-int
 | Command | Promptless mode | JSON selector | Machine output behavior |
 | --- | --- | --- | --- |
 | `meta backlog plan` | `--no-interactive` | implicit in `--no-interactive` | success and failure emit JSON |
-| `meta backlog dependencies` | n/a | `--json` | success and failure emit JSON |
 | `meta backlog tech` | `--no-interactive` | implicit in `--no-interactive` | success and failure emit JSON |
 | `meta backlog sync <subcommand>` | `--no-interactive` | `--json` or implicit in `--no-interactive` | direct subcommands emit JSON |
 | `meta linear issues create` | `--no-interactive` | implicit in `--no-interactive` | success and failure emit JSON |
@@ -673,7 +670,6 @@ This matrix is the contract for agent callers deciding whether to drive a comman
 | Command | `--no-interactive` | `--json` | `--render-once` |
 | --- | --- | --- | --- |
 | `meta backlog plan` | required for promptless runs; implies JSON | n/a | not supported |
-| `meta backlog dependencies` | n/a | supported | not supported |
 | `meta backlog tech` | required for promptless runs; implies JSON | n/a | not supported |
 | `meta backlog sync status` | optional | supported | supported on dashboard form (`meta backlog sync --render-once`) |
 | `meta backlog sync link` | optional for scripting; requires explicit selectors | supported and implied by `--no-interactive` | not supported |
@@ -922,65 +918,6 @@ Side effects:
 - keeps the default flow proposal-only, without mutating `.metastack/backlog/<ISSUE>/index.md` or the Linear issue
 - with `--apply`, writes the local artifact trail first, then updates `.metastack/backlog/<ISSUE>/index.md` when the proposal includes a description rewrite, and finally pushes the proposed metadata/content updates back to Linear
 
-### `backlog dependencies`
-
-Map deterministic dependency proposals across the current repository backlog without rewriting issue descriptions:
-
-```bash
-meta backlog dependencies --root .
-meta backlog dependencies --root . --json
-meta backlog dependencies --root . --fetch --json
-meta backlog dependencies --root . --fetch --apply --yes
-```
-
-`meta backlog dependencies` reads the local `.metastack/backlog/` packets first, extracts explicit issue references from the backlog markdown, and proposes parent, `blockedBy`, and `related` relationships plus a rollout order for the repository backlog. The default analysis is local-only so the command works from checked-in backlog packets without talking to Linear.
-
-Pass `--fetch` when you want the proposal enriched with current Linear parent and issue-relation metadata. In that mode the command also computes an apply preview that distinguishes no-op rows from relationship changes that would be created or updated remotely.
-
-Machine mode:
-
-- `meta backlog dependencies --json` emits the analyzed backlog items, proposed relationships, warnings, rollout waves, and parallel workstreams in one stable JSON envelope
-- `meta backlog dependencies --fetch --apply --yes --json` emits the same analysis plus the applied change list after the Linear mutations complete
-
-Side effects:
-
-- scans every local backlog packet under `.metastack/backlog/`, ignoring `_TEMPLATE`
-- distinguishes hard blockers from soft sequencing fallbacks and reports parallelizable waves
-- detects circular and conflicting dependency chains and surfaces them as warnings instead of applying an invalid ordering
-- with `--apply`, prints a dry-run preview first and requires confirmation unless `--yes` is present
-- with `--apply`, mutates only the proposed parent and issue-relation edges in Linear; unrelated issue descriptions and attachments remain untouched
-
-### `backlog release`
-
-Slice existing repo-scoped backlog items into milestone-ready execution batches and write the release plan locally before any optional Linear edits:
-
-```bash
-meta backlog release --root .
-meta backlog release --root . --name v0.4
-meta backlog release --root . --fetch --json
-meta backlog release --root . --fetch --apply --yes
-```
-
-`meta backlog release` reads local backlog packets from `.metastack/backlog/<ISSUE>/`, optionally enriches them with live Linear issue data via `--fetch`, uses priority and dependency signals to classify items into Must-Have / Should-Have / Deferred batches, and writes an execution packet under `.metastack/releases/<NAME>/`.
-
-The generated packet includes:
-
-- priority-based batches (Must-Have, Should-Have, Deferred) with rationale
-- dependency-aware ordering within each batch
-- a concrete recommended cut line with included vs deferred counts
-- risk analysis (unestimated items, unprioritized items, external blockers)
-- both Markdown (`plan.md`) and machine-readable JSON (`plan.json`) output
-
-Pass `--apply` only when you want to push the release grouping into Linear-compatible metadata. The command writes the local release plan first so the planning run stays auditable.
-
-Side effects:
-
-- reads all local backlog packets under `.metastack/backlog/`, ignoring `_TEMPLATE`
-- writes `.metastack/releases/<NAME>/plan.md`
-- writes `.metastack/releases/<NAME>/plan.json`
-- empty backlogs or insufficient items produce a clear message instead of an empty plan
-- with `--fetch`, enriches local analysis with current Linear state, priority, and estimate data
-- with `--apply`, writes the local plan first, then pushes the selected metadata to Linear
 
 ### `issues refine`
 

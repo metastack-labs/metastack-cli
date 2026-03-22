@@ -1,4 +1,4 @@
-.PHONY: all fmt-check clippy test release-verify quality release-artifacts
+.PHONY: all fmt-check clippy test quality release-artifacts
 
 all: quality
 
@@ -11,10 +11,7 @@ clippy:
 test:
 	cargo test -- --test-threads=1
 
-release-verify:
-	cargo test --test release_artifacts
-
-quality: fmt-check clippy test release-verify
+quality: fmt-check clippy test
 
 release-artifacts:
 	./scripts/release-artifacts.sh
