@@ -527,6 +527,7 @@ Behavior summary:
 
 - `--json` emits the resolved GitHub repository metadata plus the open PR list used by the dashboard and planner.
 - Plain `meta merge` opens a one-shot dashboard that lets you select multiple PRs, review the selected batch summary, scroll the focused preview pane with `Up`/`Down`, `PgUp`/`PgDn`, `Home`/`End`, or the mouse wheel when it overflows, launch immediately, then stay in a live progress screen until the merge run succeeds or fails.
+- The focused `meta merge` preview keeps the PR metadata header and now renders the selected PR body with the shared TUI markdown renderer, preserving headings, lists, blockquotes, fenced code blocks, and blank lines.
 - `--render-once` prints a deterministic dashboard snapshot for tests and proofs.
 - `--no-interactive` skips the dashboard and runs the selected `--pull-request` values directly while printing textual phase updates to stdout.
 - `--resume-run <RUN_ID>` reuses an existing aggregate branch and run artifact directory under `.metastack/merge-runs/<RUN_ID>/`, revalidates the preserved workspace, repushes the branch, and updates the aggregate PR instead of starting from scratch.
@@ -1066,6 +1067,7 @@ Notes:
 - `meta linear issues list` opens an interactive issue browser unless you pass `--json`
 - `meta linear issues list`, `meta dashboard linear`, and `meta dashboard team` share the same free-text search behavior when the issue list is focused: type to search by identifier, title, state, project, or description, with exact identifiers ranked ahead of broader matches
 - the shared Linear dashboards keep their existing filters, and the search query narrows the visible issue set after those filters are applied
+- Shared Linear issue previews now preserve markdown block structure for headings, bullet lists, blockquotes, fenced code blocks, and blank lines through one reusable renderer under `src/tui/`.
 - `meta linear issues create` and `meta linear issues edit` open ratatui workflows when stdin/stdout are attached to a TTY
 - `meta linear issues create --no-interactive ...` and `meta linear issues edit --no-interactive ...` emit structured JSON instead of text
 - In the interactive create/edit forms, multiline descriptions advance on `Enter`, insert a newline on `Shift+Enter`, and support `Up`/`Down`, `PgUp`/`PgDn`, `Home`/`End`, plus mouse-wheel scrolling while the description pane is focused; the summary/review sidebar also scrolls with the mouse wheel when long descriptions overflow

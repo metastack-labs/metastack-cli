@@ -5,6 +5,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::ListItem;
 
 use crate::linear::IssueSummary;
+use crate::tui::markdown::{MarkdownHighlight, render_markdown};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct IssueSearchResult {
@@ -246,11 +247,27 @@ pub(crate) fn render_issue_preview(
         Line::from(vec![styled_label("description")]),
     ]);
 
-    lines.push(Line::from(highlighted_spans(
-        description,
-        result.map_or(&[], |value| value.highlights.description.as_slice()),
-        description_style(),
-    )));
+    let description_highlights = result
+        .map(|value| {
+            value
+                .highlights
+                .description
+                .iter()
+                .map(|range| MarkdownHighlight {
+                    start: range.start,
+                    end: range.end,
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    lines.extend(
+        render_markdown(
+            description,
+            description_style(),
+            description_highlights.as_slice(),
+        )
+        .lines,
+    );
 
     Text::from(lines)
 }
@@ -701,6 +718,7 @@ mod tests {
         IssueSearchResult, compare_scores, render_issue_preview, render_issue_row, search_issues,
     };
     use crate::linear::{IssueSummary, ProjectRef, TeamRef, WorkflowState};
+    use crate::tui::scroll::plain_text;
     use std::cmp::Ordering;
 
     fn issue(
@@ -846,6 +864,26 @@ mod tests {
         assert!(format!("{row:?}").contains("MET-42"));
         assert!(format!("{preview:?}").contains("description"));
         assert!(format!("{preview:?}").contains("diverged"));
+    }
+
+    #[test]
+    fn render_issue_preview_preserves_markdown_block_structure() {
+        let issue = issue(
+            "MET-88",
+            "Markdown preview",
+            "# Heading\n\n- bullet\n> quote\n\n```rust\nlet value = 1;\n```",
+            "In Progress",
+            "MetaStack CLI",
+        );
+
+        let preview = render_issue_preview(&issue, None, None, "No description");
+        let preview_text = plain_text(&preview);
+
+        assert!(preview_text.contains("description:"));
+        assert!(preview_text.contains("# Heading"));
+        assert!(preview_text.contains("- bullet"));
+        assert!(preview_text.contains("> quote"));
+        assert!(preview_text.contains("```rust"));
     }
 
     #[test]
