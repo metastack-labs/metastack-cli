@@ -1248,6 +1248,31 @@ mod tests {
     }
 
     #[test]
+    fn compact_header_includes_resolved_execution_agent() {
+        let cycle = demo_cycle();
+        let data = build_dashboard_data(
+            &cycle,
+            &DashboardRuntimeContext {
+                started_at_epoch_seconds: 1_773_568_249,
+                now_epoch_seconds: 1_773_575_600,
+                poll_interval_seconds: 7,
+                dashboard_label: "terminal dashboard (TUI)",
+                dashboard_refresh_seconds: 1,
+                linear_refresh_seconds: 15,
+                vim_mode: false,
+                show_active_issues: true,
+                show_preview: true,
+                resolved_agent: Some("claude".to_string()),
+            },
+        );
+
+        let snapshot = render_dashboard(&data, 100, 36).expect("snapshot should render");
+
+        assert!(snapshot.contains("Execution agent"));
+        assert!(snapshot.contains("claude"));
+    }
+
+    #[test]
     fn completed_view_renders_only_completed_sessions() {
         let mut cycle = demo_cycle();
         let mut completed = cycle
