@@ -39,7 +39,11 @@ Examples:
   meta backlog sync status
   meta backlog sync link MET-35 --entry manual-notes --pull
   meta backlog sync pull --all
-  meta backlog sync push MET-35 --update-description";
+  meta backlog sync push MET-35 --update-description
+  meta backlog release --root .
+  meta backlog release --root . --name v0.4
+  meta backlog release --root . --fetch --json
+  meta backlog release --root . --fetch --apply --yes";
 
 const BACKLOG_IMPROVE_HELP: &str = "\
 Use `meta backlog improve` for a repo-scoped backlog sweep across existing issues in one state.
@@ -305,6 +309,8 @@ pub enum BacklogCommands {
     Improve(BacklogImproveArgs),
     /// Propose dependency relationships, rollout order, and optional Linear updates for repo backlog packets.
     Dependencies(BacklogDependenciesArgs),
+    /// Slice repo-scoped backlog issues into milestone-ready execution batches.
+    Release(BacklogReleaseArgs),
     /// Create a backlog sub-issue and local planning files from a parent issue.
     #[command(name = "tech", visible_alias = "split", visible_alias = "derive")]
     Tech(TechnicalArgs),
@@ -360,6 +366,27 @@ pub struct BacklogDependenciesArgs {
     #[arg(long)]
     pub json: bool,
     /// Apply the proposed parent and issue-relation changes after showing a dry-run preview.
+    #[arg(long)]
+    pub apply: bool,
+    /// Skip the interactive confirmation prompt for `--apply`.
+    #[arg(long)]
+    pub yes: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct BacklogReleaseArgs {
+    #[command(flatten)]
+    pub client: LinearClientArgs,
+    /// Name for the release plan. Defaults to a timestamp-based slug when omitted.
+    #[arg(long)]
+    pub name: Option<String>,
+    /// Enrich the release analysis with current Linear issue metadata such as state and priority.
+    #[arg(long)]
+    pub fetch: bool,
+    /// Emit the result as machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+    /// Push the selected release grouping into Linear-compatible metadata.
     #[arg(long)]
     pub apply: bool,
     /// Skip the interactive confirmation prompt for `--apply`.
@@ -1984,6 +2011,7 @@ impl Cli {
             Command::Backlog(args) => match &args.command {
                 BacklogCommands::Plan(args) if args.no_interactive => Some("backlog.plan"),
                 BacklogCommands::Dependencies(args) if args.json => Some("backlog.dependencies"),
+                BacklogCommands::Release(args) if args.json => Some("backlog.release"),
                 BacklogCommands::Tech(args) if args.no_interactive => Some("backlog.tech"),
                 BacklogCommands::Sync(args) if args.no_interactive || args.json => {
                     Some("backlog.sync")
@@ -2096,6 +2124,7 @@ fn infer_backlog_machine_output(tokens: &[String]) -> Option<&'static str> {
     match command.as_str() {
         "plan" if has_flag(rest, "--no-interactive") => Some("backlog.plan"),
         "dependencies" if has_flag(rest, "--json") => Some("backlog.dependencies"),
+        "release" if has_flag(rest, "--json") => Some("backlog.release"),
         "tech" | "split" | "derive" if has_flag(rest, "--no-interactive") => Some("backlog.tech"),
         "sync" if has_flag(rest, "--json") || has_flag(rest, "--no-interactive") => {
             Some("backlog.sync")
