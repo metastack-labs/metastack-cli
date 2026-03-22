@@ -98,6 +98,10 @@ impl ListenDashboardData {
             self.title.clone(),
             self.cycle_summary.clone(),
             format!("Agents: {}", self.runtime.agents),
+            format!(
+                "Execution agent: {}",
+                self.resolved_agent.as_deref().unwrap_or("unresolved")
+            ),
             format!("Throughput: {}", self.runtime.throughput),
             format!("Runtime: {}", self.runtime.runtime),
             format!("Tokens: {}", self.runtime.tokens),
@@ -3810,6 +3814,30 @@ mod tests {
 
         let dashboard = super::build_dashboard_data(&cycle, &runtime);
         assert_eq!(dashboard.runtime.tokens, "in 100 | out n/a | total 100");
+    }
+
+    #[test]
+    fn render_summary_includes_resolved_execution_agent() {
+        let cycle = ListenCycleData::demo(
+            Path::new("."),
+            ".metastack/agents/sessions/listen-state.json".to_string(),
+        );
+        let runtime = DashboardRuntimeContext {
+            started_at_epoch_seconds: 1_773_568_249,
+            now_epoch_seconds: 1_773_575_600,
+            poll_interval_seconds: 7,
+            dashboard_label: "terminal summary",
+            dashboard_refresh_seconds: 1,
+            linear_refresh_seconds: 15,
+            vim_mode: false,
+            show_active_issues: true,
+            show_preview: true,
+            resolved_agent: Some("claude".to_string()),
+        };
+
+        let summary = super::build_dashboard_data(&cycle, &runtime).render_summary();
+
+        assert!(summary.contains("Execution agent: claude"));
     }
 
     #[test]
