@@ -186,7 +186,9 @@ fn agents_listen_help_describes_session_browser_navigation() {
         .args(["agents", "listen", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Agent Sessions and In Progress Issues"))
+        .stdout(predicate::str::contains(
+            "Agent Sessions and In Progress Issues",
+        ))
         .stdout(predicate::str::contains("Tab switches focus between panes"))
         .stdout(predicate::str::contains(
             "Press Enter on a selected item to open its detail pane",

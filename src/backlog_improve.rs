@@ -348,6 +348,21 @@ struct ImprovementIssueSelection {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InstructionPromptFocus {
+    Editor,
+    Preview,
+}
+
+#[derive(Debug, Clone)]
+struct InstructionPromptApp {
+    input: InputFieldState,
+    issues: Vec<IssueSummary>,
+    issue_cursor: usize,
+    focus: InstructionPromptFocus,
+    preview_scroll: ScrollState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ImprovementPickerFocus {
     List,
     Preview,
@@ -478,7 +493,7 @@ async fn run_interactive_improvement_session(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let instructions = run_instruction_prompt(&mut terminal)?;
+    let instructions = run_instruction_prompt(&mut terminal, &issues)?;
 
     let mut reports = Vec::with_capacity(issues.len());
 
@@ -1752,78 +1767,258 @@ impl Drop for ImprovementReviewCleanup {
 
 /// Collects optional free-form instructions before the improvement analysis begins.
 ///
+/// Renders a side-by-side layout with a multiline editor on the left and a ticket preview
+/// on the right so the user can draft improvement instructions while reading issue context.
 /// Returns `None` when the user presses Enter with an empty field or Esc to skip.
 fn run_instruction_prompt(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    issues: &[IssueSummary],
 ) -> Result<Option<String>> {
-    let mut input = InputFieldState::new(String::new());
+    let mut app = InstructionPromptApp::new(issues.to_vec());
+    let mut preview_viewport = Rect::default();
+
     loop {
-        terminal.draw(|frame| render_instruction_prompt(frame, &input))?;
+        terminal.draw(|frame| {
+            preview_viewport = render_instruction_prompt(frame, &app);
+        })?;
 
         if !event::poll(Duration::from_millis(250))? {
             continue;
         }
-        if let Event::Key(key) = event::read()?
-            && key.kind == KeyEventKind::Press
-        {
-            match key.code {
-                KeyCode::Enter => {
-                    let text = input.display_value().trim().to_string();
+
+        match event::read()? {
+            Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
+                KeyCode::Enter
+                    if !key.modifiers.contains(KeyModifiers::SHIFT)
+                        && app.focus == InstructionPromptFocus::Editor =>
+                {
+                    let text = app.input.display_value().trim().to_string();
+                    return Ok(if text.is_empty() { None } else { Some(text) });
+                }
+                KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    let text = app.input.display_value().trim().to_string();
                     return Ok(if text.is_empty() { None } else { Some(text) });
                 }
                 KeyCode::Esc => return Ok(None),
-                _ => {
-                    input.handle_key(key);
+                KeyCode::Tab => {
+                    app.focus = match app.focus {
+                        InstructionPromptFocus::Editor => InstructionPromptFocus::Preview,
+                        InstructionPromptFocus::Preview => InstructionPromptFocus::Editor,
+                    };
                 }
+                KeyCode::Left
+                    if app.focus == InstructionPromptFocus::Preview && app.issues.len() > 1 =>
+                {
+                    app.prev_issue();
+                }
+                KeyCode::Right
+                    if app.focus == InstructionPromptFocus::Preview && app.issues.len() > 1 =>
+                {
+                    app.next_issue();
+                }
+                KeyCode::Up if app.focus == InstructionPromptFocus::Preview => {
+                    let _ = app.preview_scroll.apply_key_code_in_viewport(
+                        KeyCode::Up,
+                        preview_viewport,
+                        app.preview_content_rows(preview_viewport.width.max(1)),
+                    );
+                }
+                KeyCode::Down if app.focus == InstructionPromptFocus::Preview => {
+                    let _ = app.preview_scroll.apply_key_code_in_viewport(
+                        KeyCode::Down,
+                        preview_viewport,
+                        app.preview_content_rows(preview_viewport.width.max(1)),
+                    );
+                }
+                KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End
+                    if app.focus == InstructionPromptFocus::Preview =>
+                {
+                    let _ = app.preview_scroll.apply_key_in_viewport(
+                        key,
+                        preview_viewport,
+                        app.preview_content_rows(preview_viewport.width.max(1)),
+                    );
+                }
+                _ if app.focus == InstructionPromptFocus::Editor => {
+                    app.input.handle_key(key);
+                }
+                _ => {}
+            },
+            Event::Paste(text) if app.focus == InstructionPromptFocus::Editor => {
+                app.input.paste(&text);
             }
+            Event::Mouse(mouse) => {
+                let _ = app.preview_scroll.apply_mouse_in_viewport(
+                    mouse,
+                    preview_viewport,
+                    app.preview_content_rows(preview_viewport.width.max(1)),
+                );
+            }
+            _ => {}
         }
     }
 }
 
-fn render_instruction_prompt(frame: &mut Frame<'_>, input: &InputFieldState) {
-    let layout = Layout::default()
+/// Renders the instruction prompt as a side-by-side layout and returns the preview pane viewport.
+fn render_instruction_prompt(frame: &mut Frame<'_>, app: &InstructionPromptApp) -> Rect {
+    let outer = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(4),
-            Constraint::Length(3),
-            Constraint::Min(0),
-        ])
+        .constraints([Constraint::Length(4), Constraint::Min(0)])
         .split(frame.area());
+
+    let issue_count_label = if app.issues.len() == 1 {
+        format!("1 issue selected ({})", app.issues[0].identifier)
+    } else {
+        format!("{} issues selected", app.issues.len())
+    };
+
+    let mut hints = vec![
+        ("Tab", "focus"),
+        ("Enter", "continue"),
+        ("Shift+Enter", "newline"),
+        ("Ctrl+S", "submit"),
+        ("Esc", "skip"),
+    ];
+    if app.issues.len() > 1 && app.focus == InstructionPromptFocus::Preview {
+        hints.insert(1, ("\u{2190}/\u{2192}", "prev/next issue"));
+    }
 
     let header = paragraph(
         Text::from(vec![
-            Line::from(Span::styled(
-                "Improvement Instructions (optional)",
-                emphasis_style(),
+            Line::from(vec![
+                badge("improve", Tone::Accent),
+                Span::raw(" "),
+                Span::styled("Improvement Instructions (optional)", emphasis_style()),
+            ]),
+            Line::from(format!(
+                "{issue_count_label}. Add free-form guidance for the analysis or leave empty for default behavior.",
             )),
-            Line::from(
-                "Add free-form guidance for the improvement analysis. Leave empty for default behavior.",
-            ),
-            key_hints(&[("Enter", "continue"), ("Esc", "skip")]),
+            key_hints(&hints),
         ]),
         panel_title("meta backlog improve", false),
     );
-    frame.render_widget(header, layout[0]);
+    frame.render_widget(header, outer[0]);
 
-    let input_block = panel(panel_title("Instructions", true));
-    let input_inner = input_block.inner(layout[1]);
-    let rendered = input.render_with_width(
-        "Type optional instructions for the agent...",
-        true,
+    let body = if outer[1].width >= 60 {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(outer[1])
+    } else {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(outer[1])
+    };
+
+    let editor_focused = app.focus == InstructionPromptFocus::Editor;
+    let input_block = panel(panel_title("Instructions", editor_focused));
+    let input_inner = input_block.inner(body[0]);
+    let rendered = app.input.render_with_viewport(
+        "Type optional improvement instructions for the agent...",
+        editor_focused,
         input_inner.width,
+        input_inner.height,
     );
     let widget = rendered.paragraph(input_block);
-    frame.render_widget(widget, layout[1]);
-    rendered.set_cursor(frame, input_inner);
+    frame.render_widget(widget, body[0]);
+    if editor_focused {
+        rendered.set_cursor(frame, input_inner);
+    }
+
+    let preview_area = body[1];
+    render_instruction_issue_preview(frame, preview_area, app);
+    preview_area
 }
 
 #[cfg(test)]
-fn render_instruction_prompt_snapshot(width: u16, height: u16) -> Result<String> {
+fn render_instruction_prompt_snapshot(
+    issues: Vec<IssueSummary>,
+    width: u16,
+    height: u16,
+) -> Result<String> {
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend)?;
-    let input = InputFieldState::new(String::new());
-    terminal.draw(|frame| render_instruction_prompt(frame, &input))?;
+    let app = InstructionPromptApp::new(issues);
+    terminal.draw(|frame| {
+        render_instruction_prompt(frame, &app);
+    })?;
     Ok(improvement_dashboard_snapshot(terminal.backend()))
+}
+
+impl InstructionPromptApp {
+    fn new(issues: Vec<IssueSummary>) -> Self {
+        Self {
+            input: InputFieldState::multiline(String::new()),
+            issues,
+            issue_cursor: 0,
+            focus: InstructionPromptFocus::Editor,
+            preview_scroll: ScrollState::default(),
+        }
+    }
+
+    fn next_issue(&mut self) {
+        if !self.issues.is_empty() {
+            self.issue_cursor = (self.issue_cursor + 1) % self.issues.len();
+            self.preview_scroll.reset();
+        }
+    }
+
+    fn prev_issue(&mut self) {
+        if !self.issues.is_empty() {
+            self.issue_cursor = if self.issue_cursor == 0 {
+                self.issues.len() - 1
+            } else {
+                self.issue_cursor - 1
+            };
+            self.preview_scroll.reset();
+        }
+    }
+
+    fn preview_content_rows(&self, width: u16) -> usize {
+        let preview = self
+            .issues
+            .get(self.issue_cursor)
+            .map(|issue| render_issue_preview(issue, None, None, "_No description provided._"))
+            .unwrap_or_else(|| {
+                empty_state(
+                    "No issues selected.",
+                    "Select issues from the dashboard first.",
+                )
+            });
+        wrapped_rows(&plain_text(&preview), width.max(1))
+    }
+}
+
+/// Renders the issue preview pane for the instruction prompt.
+fn render_instruction_issue_preview(frame: &mut Frame<'_>, area: Rect, app: &InstructionPromptApp) {
+    let preview_focused = app.focus == InstructionPromptFocus::Preview;
+    let title = if app.issues.len() > 1 {
+        format!(
+            "Ticket Preview ({}/{})",
+            app.issue_cursor + 1,
+            app.issues.len()
+        )
+    } else {
+        "Ticket Preview".to_string()
+    };
+    let preview = app
+        .issues
+        .get(app.issue_cursor)
+        .map(|issue| render_issue_preview(issue, None, None, "_No description provided._"))
+        .unwrap_or_else(|| {
+            empty_state(
+                "No issues selected.",
+                "Select issues from the dashboard first.",
+            )
+        });
+    let widget = scrollable_content_paragraph(
+        preview,
+        panel_title(title, preview_focused),
+        &app.preview_scroll,
+    )
+    .wrap(Wrap { trim: false });
+    frame.render_widget(widget, area);
 }
 
 impl ImprovementDashboardApp {
@@ -3331,14 +3526,63 @@ mod tests {
     }
 
     #[test]
-    fn instruction_prompt_renders_without_panic() {
-        let snapshot =
-            render_instruction_prompt_snapshot(120, 20).expect("instruction prompt snapshot");
-        assert!(snapshot.contains("Instructions"));
+    fn instruction_prompt_renders_side_by_side_with_ticket_preview() {
+        let issues = vec![demo_issue("ENG-10170", "First issue title")];
+        let snapshot = render_instruction_prompt_snapshot(issues, 120, 24)
+            .expect("instruction prompt snapshot");
+        assert!(
+            snapshot.contains("Instructions"),
+            "snapshot should show editor pane"
+        );
+        assert!(
+            snapshot.contains("Ticket Preview"),
+            "snapshot should show ticket preview pane"
+        );
+        assert!(
+            snapshot.contains("ENG-10170"),
+            "snapshot should show issue identifier in preview"
+        );
         assert!(
             snapshot.contains("optional"),
             "snapshot should mention optional instructions"
         );
+    }
+
+    #[test]
+    fn instruction_prompt_uses_multiline_editor() {
+        let app = InstructionPromptApp::new(vec![demo_issue("ENG-10170", "First")]);
+        let mut input = app.input.clone();
+        assert!(
+            input.insert_newline(),
+            "multiline editor should accept newlines"
+        );
+    }
+
+    #[test]
+    fn instruction_prompt_cycles_through_multiple_issues() {
+        let issues = vec![
+            demo_issue("ENG-10170", "First"),
+            demo_issue("ENG-10171", "Second"),
+            demo_issue("ENG-10172", "Third"),
+        ];
+        let mut app = InstructionPromptApp::new(issues);
+        assert_eq!(app.issue_cursor, 0);
+        app.next_issue();
+        assert_eq!(app.issue_cursor, 1);
+        app.next_issue();
+        assert_eq!(app.issue_cursor, 2);
+        app.next_issue();
+        assert_eq!(app.issue_cursor, 0);
+        app.prev_issue();
+        assert_eq!(app.issue_cursor, 2);
+    }
+
+    #[test]
+    fn instruction_prompt_degrades_to_vertical_layout_when_narrow() {
+        let issues = vec![demo_issue("ENG-10170", "First")];
+        let snapshot = render_instruction_prompt_snapshot(issues, 50, 24).expect("narrow snapshot");
+        assert!(snapshot.contains("Instructions"));
+        assert!(snapshot.contains("Ticket Preview"));
     }
 
     #[test]
