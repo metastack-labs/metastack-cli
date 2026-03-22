@@ -119,7 +119,9 @@ capture the latest provider-native resume target for the current turn. Codex use
 `codex exec --json`, Claude uses `claude -p --verbose --output-format=stream-json`, and both
 capture paths are silent best effort with no backfill of older stored session records. Built-in
 worker restarts and `meta listen sessions resume` reuse the stored provider-native handle when it
-matches the active built-in provider.
+matches the active built-in provider. Codex live token hydration follows the same rule by
+resolving token files from the stored provider-native handle or the captured `thread.started`
+event in the listen log, not from legacy continuation bookkeeping.
 Structured session detail artifacts are best-effort companion state: malformed or missing
 `session-details/<TICKET>.json` files do not break the list view or reload path, and the next
 successful session refresh rewrites them. The detail artifact also stores the same

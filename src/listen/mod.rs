@@ -557,12 +557,6 @@ impl CodexLiveTokenHydrator {
             return Ok(Some(candidate.to_string()));
         }
 
-        if let Some(candidate) = session.session_id.as_deref()
-            && self.session_file_path(candidate)?.is_some()
-        {
-            return Ok(Some(candidate.to_string()));
-        }
-
         let Some(log_path) = session.log_path.as_deref() else {
             return Ok(None);
         };
@@ -3753,6 +3747,102 @@ mod tests {
         assert_eq!(
             super::parse_codex_thread_id_from_log(&log_path)?,
             Some("thread-2".to_string())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn codex_live_token_hydrator_ignores_legacy_session_id_without_resume_handle() -> Result<()> {
+        let temp = tempdir()?;
+        let sessions_root = temp.path().join(".codex").join("sessions");
+        fs::create_dir_all(&sessions_root)?;
+        fs::write(
+            sessions_root.join("legacy-session-1.jsonl"),
+            "{\"type\":\"event_msg\"}\n",
+        )?;
+
+        let mut hydrator = super::CodexLiveTokenHydrator {
+            sessions_root: Some(sessions_root),
+            snapshots: HashMap::new(),
+        };
+        let session = AgentSession {
+            issue_id: Some("issue-1".to_string()),
+            issue_identifier: "ENG-9".to_string(),
+            issue_title: "Legacy continuation bookkeeping".to_string(),
+            project_name: None,
+            team_key: "ENG".to_string(),
+            issue_url: "https://linear.app/issues/ENG-9".to_string(),
+            phase: SessionPhase::Running,
+            summary: "running".to_string(),
+            brief_path: None,
+            backlog_issue_identifier: None,
+            backlog_issue_title: None,
+            backlog_path: None,
+            workspace_path: None,
+            branch: None,
+            pull_request: PullRequestSummary::default(),
+            workpad_comment_id: None,
+            updated_at_epoch_seconds: 1,
+            pid: None,
+            session_id: Some("legacy-session-1".to_string()),
+            latest_resume_handle: None,
+            turns: None,
+            tokens: TokenUsage::default(),
+            log_path: None,
+        };
+
+        assert_eq!(hydrator.resolve_thread_id(&session)?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn codex_live_token_hydrator_uses_log_thread_when_resume_handle_missing() -> Result<()> {
+        let temp = tempdir()?;
+        let sessions_root = temp.path().join(".codex").join("sessions");
+        fs::create_dir_all(&sessions_root)?;
+        fs::write(
+            sessions_root.join("thread-log-derived.jsonl"),
+            "{\"type\":\"event_msg\"}\n",
+        )?;
+        let log_path = temp.path().join("ENG-10.log");
+        fs::write(
+            &log_path,
+            "{\"type\":\"thread.started\",\"thread_id\":\"thread-log-derived\"}\n",
+        )?;
+
+        let mut hydrator = super::CodexLiveTokenHydrator {
+            sessions_root: Some(sessions_root),
+            snapshots: HashMap::new(),
+        };
+        let session = AgentSession {
+            issue_id: Some("issue-1".to_string()),
+            issue_identifier: "ENG-10".to_string(),
+            issue_title: "Codex thread from log".to_string(),
+            project_name: None,
+            team_key: "ENG".to_string(),
+            issue_url: "https://linear.app/issues/ENG-10".to_string(),
+            phase: SessionPhase::Running,
+            summary: "running".to_string(),
+            brief_path: None,
+            backlog_issue_identifier: None,
+            backlog_issue_title: None,
+            backlog_path: None,
+            workspace_path: None,
+            branch: None,
+            pull_request: PullRequestSummary::default(),
+            workpad_comment_id: None,
+            updated_at_epoch_seconds: 1,
+            pid: None,
+            session_id: Some("legacy-session-1".to_string()),
+            latest_resume_handle: None,
+            turns: None,
+            tokens: TokenUsage::default(),
+            log_path: Some(log_path.display().to_string()),
+        };
+
+        assert_eq!(
+            hydrator.resolve_thread_id(&session)?,
+            Some("thread-log-derived".to_string())
         );
         Ok(())
     }

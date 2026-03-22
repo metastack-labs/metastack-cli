@@ -1207,8 +1207,10 @@ Capture is latest-only and silent best effort: new listen turns overwrite the st
 when capture succeeds, and leave those fields explicitly unavailable when it does not. The same
 `{ provider, id }` record is mirrored into the per-session detail artifact so dashboard detail and
 `inspect` render the same full handle, and built-in worker restarts reuse that stored
-provider-native handle instead of falling back to a legacy `session_id`. Older stored records are
-not backfilled.
+provider-native handle instead of falling back to a legacy `session_id`. Codex live token
+hydration follows that same contract by resolving token files from the stored provider-native
+handle or the session log's `thread.started` record rather than from legacy continuation
+bookkeeping. Older stored records are not backfilled.
 
 Reference:
 
