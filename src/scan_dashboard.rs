@@ -12,7 +12,8 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::ListItem;
 use ratatui::{Frame, Terminal};
 
-use crate::tui::theme::{Tone, badge, empty_state, key_hints, list, panel_title, paragraph};
+use crate::tui::spaced_list::{spaced_list, spaced_list_item};
+use crate::tui::theme::{Tone, badge, empty_state, key_hints, panel_title, paragraph};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ScanItemState {
@@ -141,7 +142,7 @@ fn render_dashboard(frame: &mut Frame<'_>, data: &ScanDashboardData) {
             .map(render_row)
             .collect::<Vec<ListItem<'static>>>()
     };
-    let step_list = list(step_items, panel_title("Steps", false));
+    let step_list = spaced_list(step_items, panel_title("Steps", false));
     frame.render_widget(step_list, body[0]);
 
     let file_items = if data.files.is_empty() {
@@ -155,7 +156,7 @@ fn render_dashboard(frame: &mut Frame<'_>, data: &ScanDashboardData) {
             .map(render_row)
             .collect::<Vec<ListItem<'static>>>()
     };
-    let file_list = list(file_items, panel_title("Generated Files", false));
+    let file_list = spaced_list(file_items, panel_title("Generated Files", false));
     frame.render_widget(file_list, body[1]);
 
     let footer = paragraph(
@@ -169,14 +170,14 @@ fn render_dashboard(frame: &mut Frame<'_>, data: &ScanDashboardData) {
 }
 
 fn render_row(row: &ScanDashboardRow) -> ListItem<'static> {
-    ListItem::new(Text::from(vec![
+    spaced_list_item(vec![
         Line::from(vec![
             badge(row.state.label(), scan_row_tone(row.state)),
             Span::raw(" "),
             Span::raw(row.label.clone()),
         ]),
         Line::from(row.detail.clone()),
-    ]))
+    ])
 }
 
 fn scan_row_tone(state: ScanItemState) -> Tone {

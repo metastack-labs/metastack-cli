@@ -22,6 +22,7 @@ use super::browser::{
 use super::{DashboardData, IssueSummary};
 use crate::tui::fields::InputFieldState;
 use crate::tui::scroll::{ScrollState, plain_text, scrollable_content_paragraph, wrapped_rows};
+use crate::tui::spaced_list::spaced_list;
 use crate::tui::theme::{Tone, badge, empty_state, key_hints, list, panel_title, paragraph};
 
 #[derive(Debug, Clone)]
@@ -303,7 +304,7 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &DashboardApp) {
     } else {
         issue_state.select(Some(app.issue_index.min(filtered_issue_results.len() - 1)));
     }
-    let issue_list = list(issue_items, issue_title);
+    let issue_list = spaced_list(issue_items, issue_title);
     frame.render_stateful_widget(issue_list, body[1], &mut issue_state);
 
     let preview = scrollable_content_paragraph(

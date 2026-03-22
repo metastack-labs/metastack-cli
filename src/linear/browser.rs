@@ -6,6 +6,7 @@ use ratatui::widgets::ListItem;
 
 use crate::linear::IssueSummary;
 use crate::tui::markdown::{MarkdownHighlight, render_markdown};
+use crate::tui::spaced_list::spaced_list_item;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct IssueSearchResult {
@@ -175,10 +176,7 @@ pub(crate) fn render_issue_row(
         ));
     }
 
-    ListItem::new(Text::from(vec![
-        Line::from(first_line),
-        Line::from(detail_line),
-    ]))
+    spaced_list_item(vec![Line::from(first_line), Line::from(detail_line)])
 }
 
 /// Render a shared issue row with a leading prefix (e.g. checkbox) before the identifier.
@@ -242,10 +240,7 @@ pub(crate) fn render_issue_row_with_prefix(
         ));
     }
 
-    ListItem::new(Text::from(vec![
-        Line::from(first_line),
-        Line::from(detail_line),
-    ]))
+    spaced_list_item(vec![Line::from(first_line), Line::from(detail_line)])
 }
 
 /// Render a shared issue preview with consistent semantic styling.
@@ -782,7 +777,8 @@ impl PreparedQuery {
 #[cfg(test)]
 mod tests {
     use super::{
-        IssueSearchResult, compare_scores, render_issue_preview, render_issue_row, search_issues,
+        IssueSearchResult, compare_scores, render_issue_preview, render_issue_row,
+        render_issue_row_with_prefix, search_issues,
     };
     use crate::linear::{IssueSummary, ProjectRef, TeamRef, WorkflowState};
     use crate::tui::scroll::plain_text;
@@ -951,6 +947,34 @@ mod tests {
         assert!(preview_text.contains("- bullet"));
         assert!(preview_text.contains("> quote"));
         assert!(preview_text.contains("```rust"));
+    }
+
+    #[test]
+    fn render_issue_row_includes_trailing_spacer_line() {
+        let issue = issue(
+            "MET-105",
+            "Spaced list rendering",
+            "Shared TUI helper for stacked lists.",
+            "In Progress",
+            "MetaStack CLI",
+        );
+        let row = render_issue_row(&issue, None, None);
+        // 2 content lines (identifier+title, metadata) + 1 blank spacer
+        assert_eq!(row.height(), 3);
+    }
+
+    #[test]
+    fn render_issue_row_with_prefix_includes_trailing_spacer_line() {
+        let issue = issue(
+            "MET-106",
+            "Prefixed row",
+            "Row with checkbox prefix.",
+            "Todo",
+            "MetaStack CLI",
+        );
+        let row = render_issue_row_with_prefix(&issue, None, None, "[x] ");
+        // 2 content lines + 1 blank spacer
+        assert_eq!(row.height(), 3);
     }
 
     #[test]
