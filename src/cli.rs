@@ -504,7 +504,7 @@ pub enum AgentsCommands {
     Listen(ListenArgs),
     /// Orchestrate backlog promotion, PR review coordination, and staging-branch integration.
     Orchestrate(OrchestrateArgs),
-    /// Review open GitHub PRs through a guided dashboard with explicit human approval.
+    /// Review open GitHub PRs through a guided one-shot dashboard with explicit human approval.
     Review(ReviewArgs),
     /// Analyze merged work for follow-up Linear tickets through a guided retro dashboard.
     Retro(RetroArgs),
@@ -859,7 +859,7 @@ pub struct CronInitArgs {
     #[arg(long, conflicts_with = "render_once")]
     pub no_interactive: bool,
     /// Emit the cron-init result as JSON.
-    #[arg(long, conflicts_with = "render_once", requires = "once")]
+    #[arg(long, conflicts_with = "render_once")]
     pub json: bool,
     /// Render the cron init dashboard once to an in-memory buffer and print the snapshot.
     #[arg(long, hide = true)]

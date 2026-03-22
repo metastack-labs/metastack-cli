@@ -726,7 +726,11 @@ fn ensure_listener_pull_request_label(
         LINEAR_IDENTIFIER_PR_LABEL_COLOR,
         &format!("Linear issue {}", issue.identifier),
     )?;
-    gh.add_label_to_pull_request(workspace_path, pull_request.number, &linear_identifier_label)
+    gh.add_label_to_pull_request(
+        workspace_path,
+        pull_request.number,
+        &linear_identifier_label,
+    )
 }
 
 async fn ensure_listener_pull_request_attachment<C>(
