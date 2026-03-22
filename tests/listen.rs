@@ -1962,6 +1962,10 @@ fn listen_once_json_outputs_machine_readable_poll_result() -> Result<(), Box<dyn
     assert!(payload["result"]["notes"].is_array());
     assert!(payload["result"]["state_file"].as_str().is_some());
     assert!(
+        payload["result"].get("resolved_agent").is_none(),
+        "presentation-only resolved agent state must stay out of --json output"
+    );
+    assert!(
         payload["result"]["runtime"]["current_epoch_seconds"]
             .as_u64()
             .is_some()
