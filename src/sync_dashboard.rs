@@ -26,7 +26,7 @@ use crate::linear::browser::{
 };
 use crate::tui::fields::InputFieldState;
 use crate::tui::scroll::{ScrollState, plain_text, scrollable_content_paragraph, wrapped_rows};
-use crate::tui::theme::{Tone, badge, empty_state, key_hints, list, panel_title, paragraph};
+use crate::tui::theme::{Tone, badge, empty_state, list, panel_title, paragraph};
 
 /// Load state for a single backlog issue in the dashboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,6 +73,7 @@ pub enum SyncDashboardAction {
     Back,
     ToggleSelect,
     SelectAll,
+    FocusSearch,
     CycleStatusFilter,
     CycleLabelFilter,
     ClearFilters,
@@ -105,7 +106,8 @@ pub enum SyncDashboardExit {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Focus {
-    Issues,
+    Search,
+    List,
     Preview,
     Actions,
 }
@@ -172,67 +174,87 @@ pub fn run_sync_dashboard(
                         return Ok(SyncDashboardExit::Cancelled);
                     }
 
-                    // When the Issues pane has focus the search bar is active.
-                    // Route character keys (without Ctrl) to the query field
-                    // first so typing does not trigger action shortcuts.
-                    let query_active = app.focus == Focus::Issues && !app.query.value().is_empty();
+                    // When the search field has focus, route all character
+                    // keys (including Space) to the query field.  Only
+                    // navigation/focus keys escape the search pane.
+                    if app.focus == Focus::Search {
+                        let action = match key.code {
+                            KeyCode::Esc => Some(SyncDashboardAction::Back),
+                            KeyCode::Enter => Some(SyncDashboardAction::Enter),
+                            KeyCode::Tab => Some(SyncDashboardAction::Tab),
+                            KeyCode::Up => Some(SyncDashboardAction::Up),
+                            KeyCode::Down => Some(SyncDashboardAction::Down),
+                            _ => None,
+                        };
 
-                    let action = match key.code {
-                        // 'q' exits only when no query text is present.
-                        KeyCode::Char('q') if !query_active => {
-                            return Ok(SyncDashboardExit::Cancelled);
-                        }
-                        KeyCode::Char(' ') if app.focus == Focus::Issues && !query_active => {
-                            Some(SyncDashboardAction::ToggleSelect)
-                        }
-                        KeyCode::Char('a')
-                            if key.modifiers.contains(KeyModifiers::CONTROL)
-                                && app.focus == Focus::Issues =>
-                        {
-                            Some(SyncDashboardAction::SelectAll)
-                        }
-                        KeyCode::Char('s')
-                            if key.modifiers.contains(KeyModifiers::CONTROL)
-                                && app.focus == Focus::Issues =>
-                        {
-                            Some(SyncDashboardAction::CycleStatusFilter)
-                        }
-                        KeyCode::Char('l')
-                            if key.modifiers.contains(KeyModifiers::CONTROL)
-                                && app.focus == Focus::Issues =>
-                        {
-                            Some(SyncDashboardAction::CycleLabelFilter)
-                        }
-                        KeyCode::Char('r')
-                            if key.modifiers.contains(KeyModifiers::CONTROL)
-                                && app.focus == Focus::Issues =>
-                        {
-                            Some(SyncDashboardAction::ClearFilters)
-                        }
-                        KeyCode::Up => Some(SyncDashboardAction::Up),
-                        KeyCode::Down => Some(SyncDashboardAction::Down),
-                        KeyCode::PageUp => Some(SyncDashboardAction::PageUp),
-                        KeyCode::PageDown => Some(SyncDashboardAction::PageDown),
-                        KeyCode::Home => Some(SyncDashboardAction::Home),
-                        KeyCode::End => Some(SyncDashboardAction::End),
-                        KeyCode::Tab => Some(SyncDashboardAction::Tab),
-                        // Enter only advances focus when the search query is
-                        // empty.  With an active query it is a no-op so that
-                        // typing then pressing Enter never causes an invalid
-                        // focus transition.
-                        KeyCode::Enter if !query_active => Some(SyncDashboardAction::Enter),
-                        KeyCode::Esc => Some(SyncDashboardAction::Back),
-                        _ => None,
-                    };
-
-                    if let Some(action) = action {
-                        let result = app
-                            .apply_in_viewport(action, preview_viewport(terminal.size()?.into()));
-                        if !result.is_empty() {
-                            return Ok(SyncDashboardExit::Selected(result));
+                        if let Some(action) = action {
+                            let result = app.apply_in_viewport(
+                                action,
+                                preview_viewport(terminal.size()?.into()),
+                            );
+                            if !result.is_empty() {
+                                return Ok(SyncDashboardExit::Selected(result));
+                            }
+                        } else {
+                            let _ = app.handle_query_key(key);
                         }
                     } else {
-                        let _ = app.handle_query_key(key);
+                        // Non-search focus: List, Preview, Actions.
+                        let action = match key.code {
+                            KeyCode::Char('q') => {
+                                return Ok(SyncDashboardExit::Cancelled);
+                            }
+                            KeyCode::Char('/') if app.focus == Focus::List => {
+                                Some(SyncDashboardAction::FocusSearch)
+                            }
+                            KeyCode::Char(' ') if app.focus == Focus::List => {
+                                Some(SyncDashboardAction::ToggleSelect)
+                            }
+                            KeyCode::Char('a')
+                                if key.modifiers.contains(KeyModifiers::CONTROL)
+                                    && app.focus == Focus::List =>
+                            {
+                                Some(SyncDashboardAction::SelectAll)
+                            }
+                            KeyCode::Char('s')
+                                if key.modifiers.contains(KeyModifiers::CONTROL)
+                                    && app.focus == Focus::List =>
+                            {
+                                Some(SyncDashboardAction::CycleStatusFilter)
+                            }
+                            KeyCode::Char('l')
+                                if key.modifiers.contains(KeyModifiers::CONTROL)
+                                    && app.focus == Focus::List =>
+                            {
+                                Some(SyncDashboardAction::CycleLabelFilter)
+                            }
+                            KeyCode::Char('r')
+                                if key.modifiers.contains(KeyModifiers::CONTROL)
+                                    && app.focus == Focus::List =>
+                            {
+                                Some(SyncDashboardAction::ClearFilters)
+                            }
+                            KeyCode::Up => Some(SyncDashboardAction::Up),
+                            KeyCode::Down => Some(SyncDashboardAction::Down),
+                            KeyCode::PageUp => Some(SyncDashboardAction::PageUp),
+                            KeyCode::PageDown => Some(SyncDashboardAction::PageDown),
+                            KeyCode::Home => Some(SyncDashboardAction::Home),
+                            KeyCode::End => Some(SyncDashboardAction::End),
+                            KeyCode::Tab => Some(SyncDashboardAction::Tab),
+                            KeyCode::Enter => Some(SyncDashboardAction::Enter),
+                            KeyCode::Esc => Some(SyncDashboardAction::Back),
+                            _ => None,
+                        };
+
+                        if let Some(action) = action {
+                            let result = app.apply_in_viewport(
+                                action,
+                                preview_viewport(terminal.size()?.into()),
+                            );
+                            if !result.is_empty() {
+                                return Ok(SyncDashboardExit::Selected(result));
+                            }
+                        }
                     }
                 }
                 Event::Mouse(mouse)
@@ -271,9 +293,10 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &SyncDashboardApp) {
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(if narrow { 7 } else { 6 }),
+            Constraint::Length(if narrow { 6 } else { 5 }),
             Constraint::Length(3),
             Constraint::Min(0),
+            Constraint::Length(3),
         ])
         .split(frame.area());
     let body = Layout::default()
@@ -292,7 +315,7 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &SyncDashboardApp) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Percentage(if narrow { 50 } else { 58 }),
-            Constraint::Length(8),
+            Constraint::Length(6),
             Constraint::Min(6),
         ])
         .split(body[1]);
@@ -301,16 +324,6 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &SyncDashboardApp) {
         Text::from(vec![
             Line::from(app.data.title.clone()),
             Line::from(app.summary_line()),
-            key_hints(&[
-                ("Type", "search"),
-                ("Space", "select"),
-                ("Ctrl+A", "select visible"),
-                ("Tab", "focus"),
-                ("Up/Down", "move"),
-                ("Enter", "advance"),
-                ("Esc", "back/clear"),
-                ("q", "exit"),
-            ]),
             Line::from(app.filter_hint_line()),
         ]),
         panel_title("meta sync", false),
@@ -319,12 +332,12 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &SyncDashboardApp) {
 
     let rendered_query = app.query.render(
         "Search by backlog slug, linked identifier, title, state, project, or description...",
-        app.focus == Focus::Issues,
+        app.focus == Focus::Search,
     );
     let query_block = Block::default()
         .borders(Borders::ALL)
-        .title(if app.focus == Focus::Issues {
-            "Backlog Search [active]"
+        .title(if app.focus == Focus::Search {
+            "Backlog Search [focus]"
         } else {
             "Backlog Search"
         });
@@ -337,6 +350,8 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &SyncDashboardApp) {
     render_issue_preview(frame, details[0], app);
     render_action_list(frame, details[1], app);
     render_status(frame, details[2], app);
+
+    render_footer(frame, outer[3], app);
 }
 
 fn render_issue_list(frame: &mut Frame<'_>, area: Rect, app: &SyncDashboardApp) {
@@ -357,7 +372,7 @@ fn render_issue_list(frame: &mut Frame<'_>, area: Rect, app: &SyncDashboardApp) 
         }
         parts
     };
-    let title = panel_title(title_text, app.focus == Focus::Issues);
+    let title = panel_title(title_text, app.focus == Focus::List);
     let items = if app.data.issues.is_empty() {
         vec![ListItem::new(empty_state(
             "No backlog entries were found under `.metastack/backlog/`.",
@@ -444,11 +459,66 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, app: &SyncDashboardApp) {
     frame.render_widget(status, area);
 }
 
+fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &SyncDashboardApp) {
+    let focus_label = match app.focus {
+        Focus::Search => "Search",
+        Focus::List => "List",
+        Focus::Preview => "Preview",
+        Focus::Actions => "Actions",
+    };
+    let hints: Vec<(&str, &str)> = match app.focus {
+        Focus::Search => vec![
+            ("Esc", "clear/back"),
+            ("Enter", "go to list"),
+            ("Tab", "next pane"),
+            ("Up/Down", "move"),
+        ],
+        Focus::List => vec![
+            ("/", "search"),
+            ("Space", "select"),
+            ("Ctrl+A", "select visible"),
+            ("Enter", "advance"),
+            ("Tab", "next pane"),
+            ("q", "exit"),
+        ],
+        Focus::Preview => vec![
+            ("PgUp/PgDn", "scroll"),
+            ("Enter", "advance"),
+            ("Esc", "back"),
+            ("Tab", "next pane"),
+            ("q", "exit"),
+        ],
+        Focus::Actions => vec![
+            ("Enter", "confirm"),
+            ("Esc", "back"),
+            ("Tab", "next pane"),
+            ("q", "exit"),
+        ],
+    };
+    let mut spans = vec![Span::raw(format!("Focus: {focus_label}  |  "))];
+    for (i, (key, desc)) in hints.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw("  "));
+        }
+        spans.push(Span::styled(
+            (*key).to_string(),
+            ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::BOLD),
+        ));
+        spans.push(Span::raw(format!(" {desc}")));
+    }
+    spans.push(Span::raw("  |  Ctrl+C quit"));
+    let footer = paragraph(
+        Text::from(vec![Line::from(spans)]),
+        panel_title("Keys", false),
+    );
+    frame.render_widget(footer, area);
+}
+
 impl SyncDashboardApp {
     fn new(data: SyncDashboardData) -> Self {
         Self {
             data,
-            focus: Focus::Issues,
+            focus: Focus::List,
             query: InputFieldState::default(),
             issue_index: 0,
             action_index: 0,
@@ -482,7 +552,7 @@ impl SyncDashboardApp {
 
         match action {
             SyncDashboardAction::Up => match self.focus {
-                Focus::Issues => {
+                Focus::Search | Focus::List => {
                     let len = self.visible_issue_results().len();
                     shift_index(&mut self.issue_index, len, -1);
                     self.preview_scroll.reset();
@@ -491,7 +561,7 @@ impl SyncDashboardApp {
                 Focus::Actions => shift_index(&mut self.action_index, ACTIONS.len(), -1),
             },
             SyncDashboardAction::Down => match self.focus {
-                Focus::Issues => {
+                Focus::Search | Focus::List => {
                     let len = self.visible_issue_results().len();
                     shift_index(&mut self.issue_index, len, 1);
                     self.preview_scroll.reset();
@@ -521,26 +591,35 @@ impl SyncDashboardApp {
             }
             SyncDashboardAction::Tab => {
                 self.focus = match self.focus {
-                    Focus::Issues => Focus::Preview,
+                    Focus::Search => Focus::List,
+                    Focus::List => Focus::Preview,
                     Focus::Preview => Focus::Actions,
-                    Focus::Actions => Focus::Issues,
+                    Focus::Actions => Focus::Search,
                 };
             }
+            SyncDashboardAction::FocusSearch => {
+                self.focus = Focus::Search;
+            }
             SyncDashboardAction::Back => {
-                if self.focus == Focus::Issues && !self.query.value().is_empty() {
-                    // Esc clears the search query before navigating back.
-                    self.query.clear();
-                    self.issue_index = 0;
-                    self.preview_scroll.reset();
+                if self.focus == Focus::Search {
+                    if !self.query.value().is_empty() {
+                        // Esc clears the search query first.
+                        self.query.clear();
+                        self.issue_index = 0;
+                        self.preview_scroll.reset();
+                    } else {
+                        // With empty query, Esc returns to the results list.
+                        self.focus = Focus::List;
+                    }
                 } else if self.focus == Focus::Actions {
                     self.focus = Focus::Preview;
                 } else if self.focus == Focus::Preview {
-                    self.focus = Focus::Issues;
+                    self.focus = Focus::List;
                 }
                 self.action_index = 0;
             }
             SyncDashboardAction::ToggleSelect => {
-                if self.focus == Focus::Issues {
+                if self.focus == Focus::List {
                     let results = self.visible_issue_results();
                     if let Some(result) = results.get(self.issue_index) {
                         let issue_index = result.issue_index;
@@ -551,7 +630,7 @@ impl SyncDashboardApp {
                 }
             }
             SyncDashboardAction::SelectAll => {
-                if self.focus == Focus::Issues {
+                if self.focus == Focus::List {
                     let visible_indices: BTreeSet<usize> = self
                         .visible_issue_results()
                         .iter()
@@ -569,7 +648,7 @@ impl SyncDashboardApp {
                 }
             }
             SyncDashboardAction::CycleStatusFilter => {
-                if self.focus == Focus::Issues {
+                if self.focus == Focus::List {
                     let statuses = self.available_statuses();
                     self.status_filter = cycle_filter(&self.status_filter, &statuses);
                     self.issue_index = 0;
@@ -577,7 +656,7 @@ impl SyncDashboardApp {
                 }
             }
             SyncDashboardAction::CycleLabelFilter => {
-                if self.focus == Focus::Issues {
+                if self.focus == Focus::List {
                     let labels = self.available_labels();
                     self.label_filter = cycle_filter(&self.label_filter, &labels);
                     self.issue_index = 0;
@@ -585,7 +664,7 @@ impl SyncDashboardApp {
                 }
             }
             SyncDashboardAction::ClearFilters => {
-                if self.focus == Focus::Issues {
+                if self.focus == Focus::List {
                     self.status_filter = None;
                     self.label_filter = None;
                     self.issue_index = 0;
@@ -593,7 +672,12 @@ impl SyncDashboardApp {
                 }
             }
             SyncDashboardAction::Enter => match self.focus {
-                Focus::Issues => {
+                Focus::Search => {
+                    // Enter from search moves to the results list so the
+                    // user can interact with the filtered results.
+                    self.focus = Focus::List;
+                }
+                Focus::List => {
                     if !self.selected.is_empty() || self.selected_issue().is_some() {
                         self.focus = Focus::Preview;
                     }
@@ -642,7 +726,7 @@ impl SyncDashboardApp {
     }
 
     fn handle_query_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
-        if self.focus != Focus::Issues {
+        if self.focus != Focus::Search {
             return false;
         }
         if self.query.handle_key(key) {
@@ -754,25 +838,36 @@ impl SyncDashboardApp {
             .count();
 
         match self.focus {
-            Focus::Issues => {
+            Focus::Search => {
+                let visible = self.visible_issue_results().len();
+                let total = self.data.issues.len();
+                if self.query.value().is_empty() {
+                    format!(
+                        "Type to filter {total} backlog entries. Press Esc or Enter to return to the list."
+                    )
+                } else {
+                    format!(
+                        "{visible}/{total} entries match. Press Enter to interact with results, Esc to clear.",
+                    )
+                }
+            }
+            Focus::List => {
                 if self.data.issues.is_empty() {
                     "No backlog entries were discovered under `.metastack/backlog/`.".to_string()
                 } else if loading > 0 {
                     let visible = self.visible_issue_results().len();
                     format!(
-                        "{visible} backlog entries ({loading} loading). Space selects, Ctrl+A selects all {visible} visible.",
+                        "{visible} backlog entries ({loading} loading). Space selects, / searches.",
                     )
                 } else {
                     let visible = self.visible_issue_results().len();
                     let total = self.data.issues.len();
                     if visible < total {
                         format!(
-                            "{visible}/{total} entries shown (filtered). Space selects, Ctrl+A selects all {visible} visible.",
+                            "{visible}/{total} entries shown (filtered). Space selects, / searches.",
                         )
                     } else {
-                        format!(
-                            "{visible} backlog entries loaded. Space selects, Ctrl+A selects all visible.",
-                        )
+                        format!("{visible} backlog entries loaded. Space selects, / searches.",)
                     }
                 }
             }
@@ -885,12 +980,16 @@ impl SyncDashboardApp {
         }
 
         match self.focus {
-            Focus::Issues => {
+            Focus::Search => {
+                "Type to filter entries. Press Enter to return to the list, or Esc to clear the query."
+                    .to_string()
+            }
+            Focus::List => {
                 if self.data.issues.is_empty() {
                     "Create or link backlog entries under `.metastack/backlog/`, then rerun `meta backlog sync`."
                         .to_string()
                 } else {
-                    "Step 1 of 3: search or choose backlog entries sourced from local `.metastack/backlog/`. Space to select, Ctrl+A to select all visible."
+                    "Step 1 of 3: choose backlog entries from `.metastack/backlog/`. Space selects, / searches, Ctrl+A selects all visible."
                         .to_string()
                 }
             }
@@ -1281,7 +1380,7 @@ mod tests {
     fn back_returns_focus_to_issue_list() {
         let mut app = SyncDashboardApp::new(demo_data());
 
-        assert_eq!(app.focus, Focus::Issues);
+        assert_eq!(app.focus, Focus::List);
         app.apply(SyncDashboardAction::Enter);
         assert_eq!(app.focus, Focus::Preview);
         app.apply(SyncDashboardAction::Enter);
@@ -1289,7 +1388,7 @@ mod tests {
         app.apply(SyncDashboardAction::Back);
         assert_eq!(app.focus, Focus::Preview);
         app.apply(SyncDashboardAction::Back);
-        assert_eq!(app.focus, Focus::Issues);
+        assert_eq!(app.focus, Focus::List);
     }
 
     #[test]
@@ -1556,37 +1655,39 @@ mod tests {
     // --- Search input stability tests ---
 
     #[test]
-    fn enter_with_active_query_does_not_advance_focus() {
+    fn enter_from_search_moves_to_list() {
         let mut app = SyncDashboardApp::new(demo_data());
+        app.focus = Focus::Search;
         app.query = InputFieldState::new("MET");
 
-        assert_eq!(app.focus, Focus::Issues);
-        // Enter should be a no-op because the query is active.
-        // In the interactive loop Enter is suppressed; simulate the
-        // same guard via apply and verify focus stays put.
         app.apply(SyncDashboardAction::Enter);
-        // Focus should NOT advance when a query is active.
-        // The interactive event loop guards this; verify the app
-        // state is safe if Enter is still dispatched.
-        assert!(
-            app.focus == Focus::Issues || app.focus == Focus::Preview,
-            "focus should stay on Issues or at most Preview, not crash"
+        assert_eq!(
+            app.focus,
+            Focus::List,
+            "Enter from search should move focus to the results list"
         );
+        // Query text is preserved so the user can continue interacting
+        // with the filtered results.
+        assert_eq!(app.query.value(), "MET");
     }
 
     #[test]
-    fn back_clears_query_when_focus_is_issues() {
+    fn back_clears_query_when_focus_is_search() {
         let mut app = SyncDashboardApp::new(demo_data());
+        app.focus = Focus::Search;
         app.query = InputFieldState::new("search term");
 
-        assert_eq!(app.focus, Focus::Issues);
         assert!(!app.query.value().is_empty());
 
         app.apply(SyncDashboardAction::Back);
 
-        // Esc should clear the query, not navigate away.
-        assert_eq!(app.focus, Focus::Issues);
+        // Esc should clear the query first, staying in Search.
+        assert_eq!(app.focus, Focus::Search);
         assert!(app.query.value().is_empty());
+
+        // A second Esc with empty query returns to List.
+        app.apply(SyncDashboardAction::Back);
+        assert_eq!(app.focus, Focus::List);
     }
 
     #[test]
@@ -1597,7 +1698,7 @@ mod tests {
 
         // With empty query, Back should navigate back.
         app.apply(SyncDashboardAction::Back);
-        assert_eq!(app.focus, Focus::Issues);
+        assert_eq!(app.focus, Focus::List);
     }
 
     // --- Clear filters tests ---
@@ -1714,5 +1815,178 @@ mod tests {
         // Should not panic on out-of-range index.
         app.drain_updates(&rx);
         assert_eq!(app.data.issues.len(), issue_count);
+    }
+
+    // --- Focus semantics regression tests (MET-108) ---
+
+    #[test]
+    fn space_in_search_focus_does_not_toggle_selection() {
+        let mut app = SyncDashboardApp::new(demo_data());
+        app.focus = Focus::Search;
+
+        // Space in search focus should NOT toggle any item.
+        assert!(app.selected.is_empty());
+        app.apply(SyncDashboardAction::ToggleSelect);
+        // ToggleSelect is a no-op when focus is Search.
+        assert!(
+            app.selected.is_empty(),
+            "ToggleSelect must not select items when search is focused"
+        );
+    }
+
+    #[test]
+    fn space_in_list_focus_toggles_selection() {
+        let mut app = SyncDashboardApp::new(demo_data());
+        assert_eq!(app.focus, Focus::List);
+
+        // Space in list focus should toggle the highlighted item.
+        assert!(app.selected.is_empty());
+        app.apply(SyncDashboardAction::ToggleSelect);
+        assert_eq!(
+            app.selected.len(),
+            1,
+            "ToggleSelect must select item when list is focused"
+        );
+    }
+
+    #[test]
+    fn space_in_list_with_active_query_still_toggles() {
+        let mut app = SyncDashboardApp::new(demo_data());
+        app.focus = Focus::List;
+        app.query = InputFieldState::new("MET");
+
+        // Even with an active search query, Space in list focus toggles.
+        app.apply(SyncDashboardAction::ToggleSelect);
+        assert_eq!(
+            app.selected.len(),
+            1,
+            "ToggleSelect in list focus should work even with a non-empty query"
+        );
+        // Query should not be mutated.
+        assert_eq!(app.query.value(), "MET");
+    }
+
+    #[test]
+    fn focus_search_action_switches_to_search() {
+        let mut app = SyncDashboardApp::new(demo_data());
+        assert_eq!(app.focus, Focus::List);
+
+        app.apply(SyncDashboardAction::FocusSearch);
+        assert_eq!(
+            app.focus,
+            Focus::Search,
+            "FocusSearch action should switch to Search focus"
+        );
+    }
+
+    #[test]
+    fn tab_cycles_through_all_focus_states() {
+        let mut app = SyncDashboardApp::new(demo_data());
+        assert_eq!(app.focus, Focus::List);
+
+        app.apply(SyncDashboardAction::Tab);
+        assert_eq!(app.focus, Focus::Preview);
+        app.apply(SyncDashboardAction::Tab);
+        assert_eq!(app.focus, Focus::Actions);
+        app.apply(SyncDashboardAction::Tab);
+        assert_eq!(app.focus, Focus::Search);
+        app.apply(SyncDashboardAction::Tab);
+        assert_eq!(app.focus, Focus::List);
+    }
+
+    #[test]
+    fn initial_focus_is_list() {
+        let app = SyncDashboardApp::new(demo_data());
+        assert_eq!(
+            app.focus,
+            Focus::List,
+            "dashboard should start with list focus so Space toggles immediately"
+        );
+    }
+
+    #[test]
+    fn render_once_footer_shows_focus_and_keys() {
+        let exit = run_sync_dashboard(
+            demo_data(),
+            SyncDashboardOptions {
+                render_once: true,
+                width: 120,
+                height: 36,
+                actions: vec![],
+                vim_mode: false,
+            },
+            None,
+        )
+        .expect("render once should succeed");
+
+        let SyncDashboardExit::Snapshot(snapshot) = exit else {
+            panic!("render_once should return a snapshot");
+        };
+        // Footer should be present with focus label and key hints.
+        assert!(
+            snapshot.contains("Focus: List"),
+            "footer should show the current focus state"
+        );
+        assert!(
+            snapshot.contains("Space"),
+            "footer should show Space key hint in list focus"
+        );
+    }
+
+    #[test]
+    fn render_once_footer_reflects_search_focus() {
+        let exit = run_sync_dashboard(
+            demo_data(),
+            SyncDashboardOptions {
+                render_once: true,
+                width: 120,
+                height: 36,
+                actions: vec![SyncDashboardAction::FocusSearch],
+                vim_mode: false,
+            },
+            None,
+        )
+        .expect("render once should succeed");
+
+        let SyncDashboardExit::Snapshot(snapshot) = exit else {
+            panic!("render_once should return a snapshot");
+        };
+        assert!(
+            snapshot.contains("Focus: Search"),
+            "footer should reflect Search focus after FocusSearch action"
+        );
+        assert!(
+            snapshot.contains("Backlog Search [focus]"),
+            "search bar should show [focus] indicator when search is focused"
+        );
+    }
+
+    #[test]
+    fn search_then_list_then_space_selects_item() {
+        let mut app = SyncDashboardApp::new(demo_data());
+
+        // Enter search, type a query, then return to list and toggle.
+        app.apply(SyncDashboardAction::FocusSearch);
+        assert_eq!(app.focus, Focus::Search);
+
+        // Simulate typing by setting query (handle_query_key is the
+        // interactive path; the action-based tests verify focus routing).
+        app.query = InputFieldState::new("MET-11");
+
+        // Enter returns to list focus.
+        app.apply(SyncDashboardAction::Enter);
+        assert_eq!(app.focus, Focus::List);
+
+        // Space now toggles in the filtered list.
+        let visible = app.visible_issue_results();
+        assert!(!visible.is_empty(), "query should match at least one entry");
+
+        app.apply(SyncDashboardAction::ToggleSelect);
+        assert!(
+            !app.selected.is_empty(),
+            "Space in list focus should toggle even after searching"
+        );
+        // Query unchanged.
+        assert_eq!(app.query.value(), "MET-11");
     }
 }
