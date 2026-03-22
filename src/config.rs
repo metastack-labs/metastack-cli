@@ -39,6 +39,7 @@ pub const AGENT_ROUTE_LINEAR_ISSUES_REFINE: &str = "linear.issues.refine";
 pub const AGENT_ROUTE_AGENTS_LISTEN: &str = "agents.listen";
 pub const AGENT_ROUTE_AGENTS_WORKFLOWS_RUN: &str = "agents.workflows.run";
 pub const AGENT_ROUTE_RUNTIME_CRON_PROMPT: &str = "runtime.cron.prompt";
+pub const AGENT_ROUTE_AGENTS_REVIEW: &str = "agents.review";
 pub const AGENT_ROUTE_MERGE: &str = "merge.run";
 #[allow(dead_code)]
 pub const AGENT_ROUTE_AGENTS_ORCHESTRATE: &str = "agents.orchestrate";
@@ -1406,6 +1407,11 @@ pub fn supported_agent_route_definitions() -> &'static [AgentRouteDefinition] {
             key: AGENT_ROUTE_RUNTIME_CRON_PROMPT,
             family: "runtime.cron",
             label: "meta runtime cron prompt jobs",
+        },
+        AgentRouteDefinition {
+            key: AGENT_ROUTE_AGENTS_REVIEW,
+            family: "agents",
+            label: "meta agents review",
         },
         AgentRouteDefinition {
             key: AGENT_ROUTE_MERGE,
