@@ -64,6 +64,8 @@ Examples:
   meta agents review --root .
   meta agents review --root . --check
   meta agents review --root . --once
+  meta agents retro 42 --root .
+  meta agents retro --root .
   meta agents workflows list --root .
   meta agents workflows run ticket-implementation --root .
   meta agents workflows run ticket-implementation --root . --no-interactive --param issue=MET-93
@@ -470,6 +472,8 @@ pub enum AgentsCommands {
     Listen(ListenArgs),
     /// Review open GitHub PRs through a guided dashboard with explicit human approval.
     Review(ReviewArgs),
+    /// Analyze merged work for follow-up Linear tickets through a guided retro dashboard.
+    Retro(RetroArgs),
     /// List, explain, and run reusable workflow playbooks.
     #[command(alias = "workflow")]
     Workflows(WorkflowsArgs),
@@ -1541,7 +1545,16 @@ pub struct ListenWorkerArgs {
 
 #[derive(Debug, Clone, Args)]
 pub struct ReviewArgs {
-    /// GitHub PR number for one-shot review. Omit to discover candidate PRs in the dashboard first.
+    /// GitHub PR number for guided review. Omit to search and multi-select candidate PRs in the dashboard first.
+    #[arg(value_name = "PR_NUMBER")]
+    pub pr_number: Option<u64>,
+    #[command(flatten)]
+    pub run: ReviewRunArgs,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct RetroArgs {
+    /// GitHub PR number for retro analysis. Omit to search and multi-select candidate PRs in the dashboard first.
     #[arg(value_name = "PR_NUMBER")]
     pub pr_number: Option<u64>,
     #[command(flatten)]
@@ -2061,6 +2074,7 @@ impl Cli {
             Command::Agents(args) => match &args.command {
                 AgentsCommands::Listen(args) if args.run.json => Some("agents.listen"),
                 AgentsCommands::Review(args) if args.run.json => Some("agents.review"),
+                AgentsCommands::Retro(args) if args.run.json => Some("agents.retro"),
                 _ => None,
             },
             Command::Linear(args) => match &args.command {

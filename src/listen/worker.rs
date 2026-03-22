@@ -51,6 +51,7 @@ const REQUIRED_LISTEN_PR_LABEL: &str = "metastack";
 const LEGACY_LISTEN_PR_LABEL: &str = "symphony";
 const REQUIRED_LISTEN_PR_LABEL_COLOR: &str = "0e8a16";
 const REQUIRED_LISTEN_PR_LABEL_DESCRIPTION: &str = "MetaStack automation";
+const LINEAR_IDENTIFIER_PR_LABEL_COLOR: &str = "1d76db";
 const LISTEN_PULL_REQUEST_BASE_BRANCH: &str = "main";
 
 pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
@@ -634,6 +635,10 @@ fn listener_pull_request_title(issue: &IssueSummary) -> String {
     format!("{}: {}", issue.identifier, issue.title)
 }
 
+fn listener_linear_identifier_pr_label(issue: &IssueSummary) -> String {
+    format!("id-{}", issue.identifier)
+}
+
 fn listener_pull_request_body(issue: &IssueSummary) -> String {
     let mut lines = vec![
         format!("# {}", listener_pull_request_title(issue)),
@@ -697,6 +702,7 @@ fn workspace_branch_is_published(workspace_path: &Path, branch: &str) -> Result<
 fn ensure_listener_pull_request_label(
     gh: &GhCli,
     workspace_path: &Path,
+    issue: &IssueSummary,
     pull_request: &PullRequestLifecycleResult,
 ) -> Result<()> {
     gh.ensure_label_exists(
@@ -709,7 +715,16 @@ fn ensure_listener_pull_request_label(
         workspace_path,
         pull_request.number,
         REQUIRED_LISTEN_PR_LABEL,
-    )
+    )?;
+
+    let linear_identifier_label = listener_linear_identifier_pr_label(issue);
+    gh.ensure_label_exists(
+        workspace_path,
+        &linear_identifier_label,
+        LINEAR_IDENTIFIER_PR_LABEL_COLOR,
+        &format!("Linear issue {}", issue.identifier),
+    )?;
+    gh.add_label_to_pull_request(workspace_path, pull_request.number, &linear_identifier_label)
 }
 
 async fn ensure_listener_pull_request_attachment<C>(
@@ -772,7 +787,7 @@ where
             mode,
         },
     )?;
-    ensure_listener_pull_request_label(&gh, workspace_path, &pull_request)?;
+    ensure_listener_pull_request_label(&gh, workspace_path, issue, &pull_request)?;
     ensure_listener_pull_request_attachment(service, issue, &pull_request).await?;
     Ok(Some(pull_request))
 }
@@ -805,7 +820,7 @@ where
         branch,
         LISTEN_PULL_REQUEST_BASE_BRANCH,
     )?;
-    ensure_listener_pull_request_label(&gh, workspace_path, &ready)?;
+    ensure_listener_pull_request_label(&gh, workspace_path, issue, &ready)?;
     ensure_listener_pull_request_attachment(service, issue, &ready).await?;
     Ok(match ready.action {
         PullRequestLifecycleAction::PromotedToReady | PullRequestLifecycleAction::AlreadyReady => {

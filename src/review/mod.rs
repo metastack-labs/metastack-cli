@@ -7,6 +7,8 @@ use std::io;
 use std::io::IsTerminal;
 use std::path::Path;
 use std::process::Command;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -22,13 +24,17 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{ListItem, ListState, Wrap};
+use ratatui::widgets::{Block, Borders, ListItem, ListState, Padding, Wrap};
 use serde::Serialize;
 
+use crate::backlog_defaults::{
+    PlanTicketResolutionInput, TicketOptionOverrides, load_remembered_backlog_selection,
+    resolve_plan_ticket_defaults, save_remembered_backlog_selection,
+};
 use crate::agents::{
     render_invocation_diagnostics, resolve_agent_invocation_for_planning, run_agent_capture,
 };
-use crate::cli::{ReviewArgs, ReviewDashboardEventArg, ReviewRunArgs, RunAgentArgs};
+use crate::cli::{RetroArgs, ReviewArgs, ReviewDashboardEventArg, ReviewRunArgs, RunAgentArgs};
 use crate::config::{
     AGENT_ROUTE_AGENTS_REVIEW, AppConfig, LinearConfig, LinearConfigOverrides, PlanningMeta,
 };
@@ -37,7 +43,9 @@ use crate::fs::{
     canonicalize_existing_dir, ensure_dir, ensure_workspace_path_is_safe, sibling_workspace_root,
 };
 use crate::github_pr::GhCli;
-use crate::linear::{IssueComment, IssueSummary, LinearService, ReqwestLinearClient};
+use crate::linear::{IssueComment, IssueCreateSpec, IssueSummary, LinearService, ReqwestLinearClient};
+use crate::progress::render_loading_panel;
+use crate::tui::fields::InputFieldState;
 use crate::tui::scroll::{ScrollState, scrollable_content_paragraph, wrapped_rows};
 use crate::tui::theme::{
     Tone, badge, emphasis_style, empty_state, key_hints, label_style, list, muted_style,
@@ -52,6 +60,7 @@ use state::{ReviewPhase, ReviewSession};
 use store::ReviewProjectStore;
 
 const REVIEW_INSTRUCTIONS: &str = include_str!("../artifacts/REVIEW.md");
+const VIEW_LINEAR_INSTRUCTIONS: &str = include_str!("../artifacts/VIEW_LINEAR.md");
 const METASTACK_LABEL: &str = "metastack";
 const INPUT_POLL_INTERVAL_MILLIS: u64 = 100;
 const TERMINAL_REFRESH_INTERVAL_SECONDS: u64 = 1;
@@ -172,12 +181,67 @@ struct ReviewLaunchCandidate {
 
 #[derive(Debug, Clone)]
 struct InteractiveReviewOutcome {
+    kind: InteractiveSessionKind,
     candidate: ReviewLaunchCandidate,
     summary: String,
     review_output: String,
+    follow_up_ticket_set: Option<FollowUpTicketSet>,
     remediation_required: bool,
+    linear_identifier: Option<String>,
     remediation_pr_number: Option<u64>,
     remediation_pr_url: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+enum InteractiveReviewDialog {
+    LaunchReviews(Vec<ReviewLaunchCandidate>),
+    LaunchFollowUpTickets(Vec<ReviewLaunchCandidate>),
+    StartRemediation(u64),
+    CancelSession(u64, InteractiveSessionKind),
+}
+
+#[derive(Debug, Clone)]
+enum InteractiveReviewAction {
+    LaunchReviews(Vec<ReviewLaunchCandidate>),
+    LaunchFollowUpTickets(Vec<ReviewLaunchCandidate>),
+    StartRemediation(u64),
+    CancelSession(u64, InteractiveSessionKind),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InteractiveSessionKind {
+    Review,
+    FollowUpTickets,
+}
+
+impl InteractiveSessionKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Review => "review",
+            Self::FollowUpTickets => "linear ideas",
+        }
+    }
+
+    fn tone(self) -> Tone {
+        match self {
+            Self::Review => Tone::Accent,
+            Self::FollowUpTickets => Tone::Info,
+        }
+    }
+
+    fn noun(self) -> &'static str {
+        match self {
+            Self::Review => "review",
+            Self::FollowUpTickets => "ticket analysis",
+        }
+    }
+
+    fn title_label(self) -> &'static str {
+        match self {
+            Self::Review => "Review",
+            Self::FollowUpTickets => "Ticket analysis",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -185,8 +249,8 @@ enum InteractiveReviewStage {
     Loading,
     Select,
     Confirm,
-    Running,
-    Completed,
+    TicketReview,
+    TicketLoading,
     Empty,
 }
 
@@ -197,28 +261,174 @@ enum InteractiveReviewMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum InteractiveReviewFocus {
+enum InteractiveReviewTab {
     Candidates,
-    Preview,
+    Sessions,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InteractiveReviewFocus {
+    CandidateList,
+    CandidatePreview,
+    SessionList,
+    SessionPreview,
+}
+
+#[derive(Debug, Clone)]
+struct InteractiveReviewSession {
+    kind: InteractiveSessionKind,
+    candidate: ReviewLaunchCandidate,
+    phase: ReviewPhase,
+    summary: String,
+    notes: Vec<String>,
+    review_output: Option<String>,
+    follow_up_ticket_set: Option<FollowUpTicketSet>,
+    created_follow_up_issues: Vec<IssueSummary>,
+    remediation_required: Option<bool>,
+    remediation_pr_number: Option<u64>,
+    remediation_pr_url: Option<String>,
+    remediation_declined: bool,
+    cancel_requested: bool,
+    error: Option<String>,
+    updated_at_epoch_seconds: u64,
 }
 
 #[derive(Debug, Clone)]
 struct InteractiveReviewApp {
+    command: ReviewCommandKind,
     mode: InteractiveReviewMode,
     stage: InteractiveReviewStage,
+    tab: InteractiveReviewTab,
     focus: InteractiveReviewFocus,
+    query: InputFieldState,
     candidates: Vec<ReviewLaunchCandidate>,
     selected_index: usize,
+    session_index: usize,
+    selected_prs: BTreeSet<u64>,
+    sessions: Vec<InteractiveReviewSession>,
     preview_scroll: ScrollState,
+    session_preview_scroll: ScrollState,
     status: String,
     notes: Vec<String>,
-    outcome: Option<InteractiveReviewOutcome>,
     error: Option<String>,
+    refresh_requested: bool,
+    dialog: Option<InteractiveReviewDialog>,
+    ticket_review: Option<FollowUpTicketReviewApp>,
+}
+
+#[derive(Debug)]
+struct InteractiveWorkerHandle {
+    kind: InteractiveSessionKind,
+    pr_number: u64,
+    receiver: Receiver<ReviewExecutionEvent>,
+    cancel: Arc<AtomicBool>,
+}
+
+struct ReviewExecutionContext<'a> {
+    root: &'a Path,
+    config: &'a AppConfig,
+    planning_meta: &'a PlanningMeta,
+    args: &'a ReviewRunArgs,
+    store: Option<&'a ReviewProjectStore>,
+    cancel: &'a AtomicBool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReviewCommandKind {
+    Review,
+    Retro,
+}
+
+impl ReviewCommandKind {
+    fn command_name(self) -> &'static str {
+        match self {
+            Self::Review => "meta agents review",
+            Self::Retro => "meta agents retro",
+        }
+    }
+
+    fn dashboard_title(self) -> &'static str {
+        match self {
+            Self::Review => "meta agents review",
+            Self::Retro => "meta agents retro",
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+struct FollowUpTicketDraft {
+    title: String,
+    #[serde(default)]
+    why_now: String,
+    #[serde(default)]
+    outcome: String,
+    #[serde(default)]
+    scope: String,
+    #[serde(default)]
+    acceptance_criteria: Vec<String>,
+    #[serde(default)]
+    priority: Option<u8>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+struct FollowUpTicketSet {
+    summary: String,
+    #[serde(default)]
+    tickets: Vec<FollowUpTicketDraft>,
+    #[serde(default)]
+    notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FollowUpTicketReviewFocus {
+    Tickets,
+    SelectedTicket,
+    Overview,
+    CombinationPlan,
+}
+
+#[derive(Debug, Clone)]
+struct FollowUpTicketReviewApp {
+    pr_number: u64,
+    candidate: ReviewLaunchCandidate,
+    plan: FollowUpTicketSet,
+    selected: usize,
+    decisions: Vec<usize>,
+    revision: usize,
+    focus: FollowUpTicketReviewFocus,
+    overview_scroll: ScrollState,
+    selected_ticket_scroll: ScrollState,
+    combination_scroll: ScrollState,
+    error: Option<String>,
+}
+
+struct PendingFollowUpTicketJob {
+    receiver: Receiver<FollowUpTicketJobEvent>,
+}
+
+enum FollowUpTicketJobEvent {
+    RevisionReady(Box<FollowUpTicketReviewApp>),
+    Created {
+        pr_number: u64,
+        issues: Vec<IssueSummary>,
+    },
+    Failed {
+        pr_number: u64,
+        error: String,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct RemediationLaunchRequest {
+    candidate: ReviewLaunchCandidate,
+    linear_identifier: String,
+    review_output: String,
 }
 
 #[derive(Debug, Clone)]
 enum ReviewExecutionEvent {
     Progress {
+        kind: InteractiveSessionKind,
         candidate: ReviewLaunchCandidate,
         phase: ReviewPhase,
         summary: String,
@@ -226,7 +436,16 @@ enum ReviewExecutionEvent {
         remediation_required: Option<bool>,
     },
     Completed(InteractiveReviewOutcome),
+    Cancelled {
+        kind: InteractiveSessionKind,
+        candidate: ReviewLaunchCandidate,
+        summary: String,
+        note: String,
+        review_output: Option<String>,
+        remediation_required: Option<bool>,
+    },
     Failed {
+        kind: InteractiveSessionKind,
         candidate: ReviewLaunchCandidate,
         error: String,
     },
@@ -240,16 +459,40 @@ enum ReviewExecutionEvent {
 /// Returns an error when prerequisite checks fail, agent execution fails,
 /// or required external tools are unavailable.
 pub(crate) async fn run_review(args: &ReviewArgs) -> Result<()> {
-    if let Some(pr_number) = args.pr_number {
-        if should_launch_interactive_review_dashboard(&args.run) {
-            run_review_interactive(&args.run, Some(pr_number))
+    run_review_command(ReviewCommandKind::Review, args.pr_number, &args.run).await
+}
+
+/// Run the unified `meta agents retro` command.
+///
+/// Dispatches between one-shot PR retro analysis and the interactive retro dashboard.
+pub(crate) async fn run_retro(args: &RetroArgs) -> Result<()> {
+    run_review_command(ReviewCommandKind::Retro, args.pr_number, &args.run).await
+}
+
+async fn run_review_command(
+    command: ReviewCommandKind,
+    pr_number: Option<u64>,
+    args: &ReviewRunArgs,
+) -> Result<()> {
+    if let Some(pr_number) = pr_number {
+        if should_launch_interactive_review_dashboard(args) {
+            run_review_interactive(args, Some(pr_number), command)
         } else {
-            run_review_one_shot(&args.run, pr_number)
+            match command {
+                ReviewCommandKind::Review => run_review_one_shot(args, pr_number),
+                ReviewCommandKind::Retro => run_retro_one_shot(args, pr_number),
+            }
         }
-    } else if should_launch_interactive_review_dashboard(&args.run) {
-        run_review_interactive(&args.run, None)
+    } else if should_launch_interactive_review_dashboard(args) {
+        run_review_interactive(args, None, command)
     } else {
-        run_review_listener(&args.run).await
+        match command {
+            ReviewCommandKind::Review => run_review_listener(args).await,
+            ReviewCommandKind::Retro => bail!(
+                "the interactive retro dashboard requires a TTY; rerun `{}` in a terminal with an optional PR number",
+                command.command_name()
+            ),
+        }
     }
 }
 
@@ -257,10 +500,15 @@ pub(crate) async fn run_review(args: &ReviewArgs) -> Result<()> {
 // One-shot PR review
 // ---------------------------------------------------------------------------
 
-fn run_review_interactive(args: &ReviewRunArgs, pr_number: Option<u64>) -> Result<()> {
+fn run_review_interactive(
+    args: &ReviewRunArgs,
+    pr_number: Option<u64>,
+    command: ReviewCommandKind,
+) -> Result<()> {
     let root = canonicalize_existing_dir(&args.root)?;
     let config = AppConfig::load()?;
-    let planning_meta = crate::config::load_required_planning_meta(&root, "meta agents review")?;
+    let planning_meta =
+        crate::config::load_required_planning_meta(&root, command.command_name())?;
     let gh = GhCli;
     let store = ReviewProjectStore::resolve(&root).ok();
     let mode = if pr_number.is_some() {
@@ -270,10 +518,20 @@ fn run_review_interactive(args: &ReviewRunArgs, pr_number: Option<u64>) -> Resul
     };
 
     let mut terminal = ReviewTerminalDashboard::open()?;
-    let mut app = InteractiveReviewApp::new(mode);
+    let mut app = InteractiveReviewApp::new(mode, command);
     app.set_loading(
-        "Preparing review dashboard".to_string(),
-        "Opening the review workflow and resolving prerequisites.".to_string(),
+        match command {
+            ReviewCommandKind::Review => "Preparing review dashboard".to_string(),
+            ReviewCommandKind::Retro => "Preparing retro dashboard".to_string(),
+        },
+        match command {
+            ReviewCommandKind::Review => {
+                "Opening the review workflow and resolving prerequisites.".to_string()
+            }
+            ReviewCommandKind::Retro => {
+                "Opening the retro workflow and resolving prerequisites.".to_string()
+            }
+        },
     );
     terminal.draw_interactive(&app)?;
 
@@ -290,9 +548,20 @@ fn run_review_interactive(args: &ReviewRunArgs, pr_number: Option<u64>) -> Resul
     app.set_loading(
         "Discovering review candidates".to_string(),
         match pr_number {
-            Some(number) => format!("Loading PR #{number} and linked review context."),
-            None => "Finding open `metastack` pull requests that are ready for explicit review approval."
-                .to_string(),
+            Some(number) => match command {
+                ReviewCommandKind::Review => {
+                    format!("Loading PR #{number} and linked review context.")
+                }
+                ReviewCommandKind::Retro => {
+                    format!("Loading PR #{number} and linked retro context.")
+                }
+            },
+            None => match command {
+                ReviewCommandKind::Review => "Finding open `metastack` pull requests that are ready for explicit review approval."
+                    .to_string(),
+                ReviewCommandKind::Retro => "Finding open `metastack` pull requests that are ready for retro ticket analysis."
+                    .to_string(),
+            },
         },
     );
     terminal.draw_interactive(&app)?;
@@ -301,29 +570,66 @@ fn run_review_interactive(args: &ReviewRunArgs, pr_number: Option<u64>) -> Resul
     app.load_candidates(candidates);
     terminal.draw_interactive(&app)?;
 
-    let mut worker_rx: Option<Receiver<ReviewExecutionEvent>> = None;
+    let mut worker_rxs: Vec<InteractiveWorkerHandle> = Vec::new();
+    let mut pending_ticket_job: Option<PendingFollowUpTicketJob> = None;
     let mut next_pulse_at = Instant::now() + Duration::from_millis(150);
 
     loop {
+        if app.refresh_requested {
+            let candidates =
+                discover_review_candidates(&root, &gh, pr_number, &mut app, &mut terminal)?;
+            app.refresh_candidates(candidates);
+            terminal.draw_interactive(&app)?;
+        }
+
         if next_pulse_at <= Instant::now() {
             app.tick();
             terminal.draw_interactive(&app)?;
             next_pulse_at = Instant::now() + Duration::from_millis(150);
         }
 
-        if let Some(ref receiver) = worker_rx {
-            match receiver.try_recv() {
+        let mut remove_indices = Vec::new();
+        for (index, handle) in worker_rxs.iter().enumerate() {
+            match handle.receiver.try_recv() {
                 Ok(event) => {
+                    let finished = matches!(
+                        event,
+                        ReviewExecutionEvent::Completed(_)
+                            | ReviewExecutionEvent::Failed { .. }
+                            | ReviewExecutionEvent::Cancelled { .. }
+                    );
                     app.apply_worker_event(event);
                     terminal.draw_interactive(&app)?;
-                    if app.stage != InteractiveReviewStage::Running {
-                        worker_rx = None;
+                    if finished {
+                        remove_indices.push(index);
                     }
                 }
                 Err(TryRecvError::Empty) => {}
                 Err(TryRecvError::Disconnected) => {
-                    app.fail("review worker disconnected unexpectedly".to_string());
-                    worker_rx = None;
+                    app.fail(format!(
+                        "review worker for PR #{} disconnected unexpectedly",
+                        handle.pr_number
+                    ));
+                    remove_indices.push(index);
+                    terminal.draw_interactive(&app)?;
+                }
+            }
+        }
+        for index in remove_indices.into_iter().rev() {
+            worker_rxs.remove(index);
+        }
+
+        if let Some(job) = &pending_ticket_job {
+            match job.receiver.try_recv() {
+                Ok(event) => {
+                    app.apply_follow_up_ticket_job_event(event);
+                    pending_ticket_job = None;
+                    terminal.draw_interactive(&app)?;
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => {
+                    app.fail("follow-up ticket workflow disconnected unexpectedly".to_string());
+                    pending_ticket_job = None;
                     terminal.draw_interactive(&app)?;
                 }
             }
@@ -336,17 +642,158 @@ fn run_review_interactive(args: &ReviewRunArgs, pr_number: Option<u64>) -> Resul
         match event::read()? {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
                 let preview = interactive_preview_viewport(terminal.size()?);
-                if let Some(selection) = app.handle_key(key.code, preview)? {
-                    let receiver = spawn_review_execution(
-                        root.clone(),
-                        config.clone(),
-                        planning_meta.clone(),
-                        args.clone(),
-                        selection.clone(),
-                        store.clone(),
-                    );
-                    worker_rx = Some(receiver);
-                    app.begin_running(selection);
+                let stage_before_key = app.stage;
+                if let Some(action) = app.handle_key(key, preview)? {
+                    match action {
+                        InteractiveReviewAction::LaunchReviews(selection) => {
+                            for candidate in &selection {
+                                let handle = spawn_review_execution(
+                                    root.clone(),
+                                    config.clone(),
+                                    planning_meta.clone(),
+                                    args.clone(),
+                                    candidate.clone(),
+                                    store.clone(),
+                                );
+                                worker_rxs.push(handle);
+                            }
+                            app.begin_running(&selection);
+                        }
+                        InteractiveReviewAction::LaunchFollowUpTickets(selection) => {
+                            for candidate in &selection {
+                                let handle = spawn_follow_up_ticket_execution(
+                                    root.clone(),
+                                    config.clone(),
+                                    planning_meta.clone(),
+                                    args.clone(),
+                                    candidate.clone(),
+                                    store.clone(),
+                                );
+                                worker_rxs.push(handle);
+                            }
+                            app.begin_running_with_kind(
+                                &selection,
+                                InteractiveSessionKind::FollowUpTickets,
+                            );
+                        }
+                        InteractiveReviewAction::StartRemediation(pr_number) => {
+                            if let Some(session) = app
+                                .sessions
+                                .iter()
+                                .find(|session| {
+                                    session.candidate.pr_number == pr_number
+                                        && session.kind == InteractiveSessionKind::Review
+                                })
+                                .cloned()
+                                && let Some(review_output) = session.review_output.clone()
+                                && let Some(linear_identifier) =
+                                    session.candidate.linear_identifier.clone()
+                            {
+                                let handle = spawn_remediation_execution(
+                                    root.clone(),
+                                    config.clone(),
+                                    planning_meta.clone(),
+                                    args.clone(),
+                                    RemediationLaunchRequest {
+                                        candidate: session.candidate,
+                                        linear_identifier,
+                                        review_output,
+                                    },
+                                    store.clone(),
+                                );
+                                worker_rxs.push(handle);
+                                app.status =
+                                    format!("Starting remediation workflow for PR #{pr_number}.");
+                            }
+                        }
+                        InteractiveReviewAction::CancelSession(pr_number, kind) => {
+                            if let Some(handle) = worker_rxs
+                                .iter()
+                                .find(|handle| {
+                                    handle.pr_number == pr_number && handle.kind == kind
+                                })
+                            {
+                                handle.cancel.store(true, Ordering::Relaxed);
+                            }
+                            if let Some(session) = app
+                                .sessions
+                                .iter_mut()
+                                .find(|session| {
+                                    session.candidate.pr_number == pr_number
+                                        && session.kind == kind
+                                })
+                            {
+                                session.cancel_requested = true;
+                                session.phase = ReviewPhase::Blocked;
+                                session.summary =
+                                    format!("{} cancellation requested", kind.noun());
+                                session.push_note(
+                                    format!(
+                                        "User requested cancellation for this {} session.",
+                                        kind.noun()
+                                    ),
+                                );
+                                app.status = format!(
+                                    "Cancellation requested for PR #{} {}. The session will stop at the next checkpoint.",
+                                    pr_number,
+                                    kind.label()
+                                );
+                            }
+                        }
+                    }
+                    terminal.draw_interactive(&app)?;
+                } else if stage_before_key != InteractiveReviewStage::TicketReview
+                    && app.stage == InteractiveReviewStage::TicketReview
+                {
+                    terminal.draw_interactive(&app)?;
+                } else if app.stage == InteractiveReviewStage::TicketReview {
+                    if let Some(review) = app.ticket_review.as_mut() {
+                        match handle_follow_up_ticket_review_key(review, key, terminal.size()?) {
+                            FollowUpTicketReviewAction::None => {}
+                            FollowUpTicketReviewAction::Close => {
+                                app.stage = InteractiveReviewStage::Select;
+                                app.ticket_review = None;
+                                app.status = format!(
+                                    "Returned to sessions. {} active review session(s) still running.",
+                                    app.active_session_count()
+                                );
+                            }
+                            FollowUpTicketReviewAction::OpenCreate => {
+                                if let Some(review) = app.ticket_review.clone() {
+                                    app.stage = InteractiveReviewStage::TicketLoading;
+                                    app.status = format!(
+                                        "Creating {} follow-up Linear ticket(s) for PR #{}.",
+                                        follow_up_ticket_kept_indices(&review).len(),
+                                        review.pr_number
+                                    );
+                                    pending_ticket_job = Some(PendingFollowUpTicketJob {
+                                        receiver: spawn_follow_up_ticket_create_job(
+                                            root.clone(),
+                                            config.clone(),
+                                            planning_meta.clone(),
+                                            review,
+                                        ),
+                                    });
+                                }
+                            }
+                            FollowUpTicketReviewAction::OpenRevision => {
+                                if let Some(review) = app.ticket_review.clone() {
+                                    app.stage = InteractiveReviewStage::TicketLoading;
+                                    app.status = format!(
+                                        "Rebuilding follow-up ticket preview for PR #{}.",
+                                        review.pr_number
+                                    );
+                                    pending_ticket_job = Some(PendingFollowUpTicketJob {
+                                        receiver: spawn_follow_up_ticket_revision_job(
+                                            root.clone(),
+                                            args.clone(),
+                                            review,
+                                        ),
+                                    });
+                                }
+                            }
+                        }
+                    }
                     terminal.draw_interactive(&app)?;
                 } else if app.should_exit(key.code) {
                     break;
@@ -358,22 +805,39 @@ fn run_review_interactive(args: &ReviewRunArgs, pr_number: Option<u64>) -> Resul
                     MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
                 ) =>
             {
-                let viewport = interactive_preview_viewport(terminal.size()?);
-                let _ = app.handle_preview_mouse(mouse, viewport);
+                if app.stage == InteractiveReviewStage::TicketReview {
+                    if let Some(review) = app.ticket_review.as_mut() {
+                        let _ = handle_follow_up_ticket_review_mouse(review, mouse, terminal.size()?);
+                    }
+                } else {
+                    let viewport = interactive_preview_viewport(terminal.size()?);
+                    let _ = app.handle_preview_mouse(mouse, viewport);
+                }
             }
             _ => {}
         }
     }
 
     terminal.close()?;
-    if let Some(outcome) = app.outcome {
-        println!("{}", outcome.review_output);
-        if let Some(pr_url) = outcome.remediation_pr_url {
-            println!(
-                "\nRemediation PR #{} opened: {}",
-                outcome.remediation_pr_number.unwrap_or_default(),
-                pr_url
-            );
+    if let Some(pr_number) = pr_number {
+        let review_session = app.sessions.iter().find(|session| {
+            session.candidate.pr_number == pr_number && session.kind == InteractiveSessionKind::Review
+        });
+        let fallback_session =
+            app.sessions
+                .iter()
+                .find(|session| session.candidate.pr_number == pr_number);
+        if let Some(session) = review_session.or(fallback_session)
+            && let Some(output) = session.review_output.as_deref()
+        {
+            println!("{output}");
+            if let Some(pr_url) = session.remediation_pr_url.as_deref() {
+                println!(
+                    "\nRemediation PR #{} opened: {}",
+                    session.remediation_pr_number.unwrap_or_default(),
+                    pr_url
+                );
+            }
         }
     }
 
@@ -466,19 +930,72 @@ fn run_review_one_shot(args: &ReviewRunArgs, pr_number: u64) -> Result<()> {
     Ok(())
 }
 
+fn run_retro_one_shot(args: &ReviewRunArgs, pr_number: u64) -> Result<()> {
+    let root = canonicalize_existing_dir(&args.root)?;
+    let config = AppConfig::load()?;
+    let planning_meta = crate::config::load_required_planning_meta(&root, "meta agents retro")?;
+    let gh = GhCli;
+
+    verify_gh_auth(&root)?;
+
+    let pr = fetch_pr_metadata(&gh, &root, pr_number)?;
+    let linear_identifier = resolve_linear_identifier(&pr)?;
+
+    let diff = fetch_pr_diff(&root, pr_number)?;
+    let context_bundle = load_codebase_context_bundle(&root).unwrap_or_default();
+    let workflow_contract = load_workflow_contract(&root).unwrap_or_default();
+    let repo_map = render_repo_map(&root).unwrap_or_default();
+    let ticket_context =
+        gather_linear_ticket_context(&root, &config, &planning_meta, &linear_identifier)?;
+
+    let prompt = assemble_follow_up_linear_prompt(
+        &pr,
+        &linear_identifier,
+        &diff,
+        &context_bundle,
+        &workflow_contract,
+        &repo_map,
+        &ticket_context,
+    );
+
+    let report = run_agent_capture(&RunAgentArgs {
+        root: Some(root),
+        route_key: Some(AGENT_ROUTE_AGENTS_REVIEW.to_string()),
+        agent: args.agent.clone(),
+        prompt,
+        instructions: Some(VIEW_LINEAR_INSTRUCTIONS.to_string()),
+        model: args.model.clone(),
+        reasoning: args.reasoning.clone(),
+        transport: None,
+        attachments: Vec::new(),
+    })?;
+    let ticket_set = normalize_follow_up_ticket_set(parse_follow_up_ticket_set(&report.stdout)?)?;
+    println!("{}", render_follow_up_ticket_set_markdown(&ticket_set));
+    Ok(())
+}
+
 impl InteractiveReviewApp {
-    fn new(mode: InteractiveReviewMode) -> Self {
+    fn new(mode: InteractiveReviewMode, command: ReviewCommandKind) -> Self {
         Self {
+            command,
             mode,
             stage: InteractiveReviewStage::Loading,
-            focus: InteractiveReviewFocus::Candidates,
+            tab: InteractiveReviewTab::Candidates,
+            focus: InteractiveReviewFocus::CandidateList,
+            query: InputFieldState::default(),
             candidates: Vec::new(),
             selected_index: 0,
+            session_index: 0,
+            selected_prs: BTreeSet::new(),
+            sessions: Vec::new(),
             preview_scroll: ScrollState::default(),
+            session_preview_scroll: ScrollState::default(),
             status: "Preparing review dashboard".to_string(),
             notes: Vec::new(),
-            outcome: None,
             error: None,
+            refresh_requested: false,
+            dialog: None,
+            ticket_review: None,
         }
     }
 
@@ -487,6 +1004,9 @@ impl InteractiveReviewApp {
         self.status = status;
         self.push_note(note);
         self.error = None;
+        self.refresh_requested = false;
+        self.dialog = None;
+        self.ticket_review = None;
     }
 
     fn load_candidates(&mut self, candidates: Vec<ReviewLaunchCandidate>) {
@@ -494,120 +1014,296 @@ impl InteractiveReviewApp {
         self.selected_index = 0;
         self.preview_scroll.reset();
         self.error = None;
-        self.outcome = None;
+        self.refresh_requested = false;
+        self.dialog = None;
         if self.candidates.is_empty() {
             self.stage = InteractiveReviewStage::Empty;
             self.status = "No review candidates found".to_string();
         } else {
             self.stage = InteractiveReviewStage::Select;
-            self.status = match self.mode {
-                InteractiveReviewMode::Direct => {
-                    "Review candidate loaded. Confirm when you want to start the audit.".to_string()
+            self.status = match (self.command, self.mode) {
+                (ReviewCommandKind::Review, InteractiveReviewMode::Direct) => {
+                    "Review candidate loaded. Confirm when you want to start the audit."
+                        .to_string()
                 }
-                InteractiveReviewMode::Discovery => {
+                (ReviewCommandKind::Review, InteractiveReviewMode::Discovery) => {
                     "Select a PR to review, inspect the preview, then explicitly start the audit."
+                        .to_string()
+                }
+                (ReviewCommandKind::Retro, InteractiveReviewMode::Direct) => {
+                    "Retro candidate loaded. Confirm when you want to start follow-up ticket analysis."
+                        .to_string()
+                }
+                (ReviewCommandKind::Retro, InteractiveReviewMode::Discovery) => {
+                    "Select a PR to inspect, then explicitly start the retro ticket analysis."
                         .to_string()
                 }
             };
         }
     }
 
-    fn begin_running(&mut self, candidate: ReviewLaunchCandidate) {
-        self.stage = InteractiveReviewStage::Running;
-        self.status = format!(
-            "Reviewing PR #{} — {}",
-            candidate.pr_number, candidate.title
-        );
-        self.outcome = None;
-        self.error = None;
-        self.replace_candidate(candidate);
+    fn refresh_candidates(&mut self, candidates: Vec<ReviewLaunchCandidate>) {
+        let selected = self.selected_prs.clone();
+        self.candidates = candidates;
+        self.selected_index = self
+            .selected_index
+            .min(self.visible_candidate_indices().len().saturating_sub(1));
+        self.selected_prs = selected
+            .into_iter()
+            .filter(|pr_number| self.candidates.iter().any(|candidate| candidate.pr_number == *pr_number))
+            .collect();
         self.preview_scroll.reset();
+        self.refresh_requested = false;
+        self.dialog = None;
+        self.ticket_review = None;
+        self.stage = if self.candidates.is_empty() {
+            InteractiveReviewStage::Empty
+        } else {
+            InteractiveReviewStage::Select
+        };
+        self.status = format!(
+            "{} candidate PR(s) available. Select one or more {}, or switch to sessions to watch progress.",
+            self.visible_candidate_indices().len()
+            ,
+            match self.command {
+                ReviewCommandKind::Review => "reviews",
+                ReviewCommandKind::Retro => "retro analyses",
+            }
+        );
+    }
+
+    fn begin_running(&mut self, candidates: &[ReviewLaunchCandidate]) {
+        self.begin_running_with_kind(candidates, InteractiveSessionKind::Review);
+    }
+
+    fn begin_running_with_kind(
+        &mut self,
+        candidates: &[ReviewLaunchCandidate],
+        kind: InteractiveSessionKind,
+    ) {
+        self.stage = InteractiveReviewStage::Select;
+        self.tab = InteractiveReviewTab::Sessions;
+        self.focus = InteractiveReviewFocus::SessionList;
+        self.error = None;
+        for candidate in candidates {
+            self.replace_candidate(candidate.clone());
+            self.upsert_session(InteractiveReviewSession {
+                kind,
+                candidate: candidate.clone(),
+                phase: ReviewPhase::Claimed,
+                summary: match kind {
+                    InteractiveSessionKind::Review => "Queued for review".to_string(),
+                    InteractiveSessionKind::FollowUpTickets => {
+                        "Queued for follow-up ticket analysis".to_string()
+                    }
+                },
+                notes: vec![match kind {
+                    InteractiveSessionKind::Review => {
+                        "Waiting for the review worker to start.".to_string()
+                    }
+                    InteractiveSessionKind::FollowUpTickets => {
+                        "Waiting for the follow-up ticket analysis to start.".to_string()
+                    }
+                }],
+                review_output: None,
+                follow_up_ticket_set: None,
+                created_follow_up_issues: Vec::new(),
+                remediation_required: None,
+                remediation_pr_number: None,
+                remediation_pr_url: None,
+                remediation_declined: false,
+                cancel_requested: false,
+                error: None,
+                updated_at_epoch_seconds: now_epoch_seconds(),
+            });
+        }
+        self.selected_prs.clear();
+        self.session_index = self.sessions.len().saturating_sub(1);
+        self.session_preview_scroll.reset();
+        self.status = format!(
+            "{} session(s) running. You can switch back to candidates to queue more work or press `R` to refresh the queue.",
+            self.active_session_count()
+        );
     }
 
     fn apply_worker_event(&mut self, event: ReviewExecutionEvent) {
         match event {
             ReviewExecutionEvent::Progress {
+                kind,
                 candidate,
                 phase,
                 summary,
                 note,
                 remediation_required,
             } => {
-                self.stage = InteractiveReviewStage::Running;
+                if self.is_cancel_requested(candidate.pr_number, kind) {
+                    return;
+                }
                 self.status = summary.clone();
                 self.error = None;
                 self.replace_candidate(candidate.clone());
-                if let Some(candidate) = self.candidates.get_mut(self.selected_index) {
-                    candidate.linear_identifier = candidate.linear_identifier.clone();
-                }
-                if let Some(session) = self
-                    .candidates
-                    .iter_mut()
-                    .find(|entry| entry.pr_number == candidate.pr_number)
-                {
-                    session.linear_identifier = candidate.linear_identifier.clone();
-                    if remediation_required.is_some() {
-                        session.linear_error = None;
-                    }
-                }
+                let session = self.upsert_session(InteractiveReviewSession {
+                    kind,
+                    candidate: candidate.clone(),
+                    phase,
+                    summary,
+                    notes: note.clone().into_iter().collect(),
+                    review_output: None,
+                    follow_up_ticket_set: None,
+                    created_follow_up_issues: Vec::new(),
+                    remediation_required,
+                    remediation_pr_number: None,
+                    remediation_pr_url: None,
+                    remediation_declined: false,
+                    cancel_requested: false,
+                    error: None,
+                    updated_at_epoch_seconds: now_epoch_seconds(),
+                });
                 if let Some(note) = note {
-                    self.push_note(note);
+                    session.push_note(note);
                 }
-                self.push_note(format!(
-                    "PR #{} is now in `{}`.",
-                    candidate.pr_number,
-                    phase.display_label()
-                ));
+                session.push_note(format!("PR #{} entered `{}`.", candidate.pr_number, phase.display_label()));
             }
             ReviewExecutionEvent::Completed(outcome) => {
-                self.stage = InteractiveReviewStage::Completed;
+                if self.is_cancel_requested(outcome.candidate.pr_number, outcome.kind) {
+                    return;
+                }
                 self.status = outcome.summary.clone();
                 self.error = None;
-                self.replace_candidate(outcome.candidate.clone());
-                self.outcome = Some(outcome.clone());
-                self.push_note(match outcome.remediation_pr_url.as_deref() {
-                    Some(url) => format!(
+                let mut candidate = outcome.candidate.clone();
+                candidate.linear_identifier = outcome.linear_identifier.clone();
+                candidate.linear_error = None;
+                self.replace_candidate(candidate.clone());
+                let session = self.upsert_session(InteractiveReviewSession {
+                    kind: outcome.kind,
+                    candidate,
+                    phase: ReviewPhase::Completed,
+                    summary: outcome.summary.clone(),
+                    notes: Vec::new(),
+                    review_output: Some(outcome.review_output.clone()),
+                    follow_up_ticket_set: outcome.follow_up_ticket_set.clone(),
+                    created_follow_up_issues: Vec::new(),
+                    remediation_required: Some(outcome.remediation_required),
+                    remediation_pr_number: outcome.remediation_pr_number,
+                    remediation_pr_url: outcome.remediation_pr_url.clone(),
+                    remediation_declined: false,
+                    cancel_requested: false,
+                    error: None,
+                    updated_at_epoch_seconds: now_epoch_seconds(),
+                });
+                session.push_note(match (outcome.remediation_required, outcome.remediation_pr_url.as_deref()) {
+                    (_, _) if outcome.kind == InteractiveSessionKind::FollowUpTickets => format!(
+                        "Follow-up Linear ticket recommendations are ready for PR #{}. Press `Enter` to review, merge, and create them in Linear.",
+                        outcome.candidate.pr_number
+                    ),
+                    (true, Some(url)) => format!(
                         "Remediation PR #{} opened at {}.",
                         outcome.remediation_pr_number.unwrap_or_default(),
                         url
                     ),
-                    None => format!(
+                    (true, None) => format!(
+                        "Review report is ready for PR #{}. Press `a` to create remediation or `n` to keep the report only.",
+                        outcome.candidate.pr_number
+                    ),
+                    (false, _) => format!(
                         "Review finished for PR #{} without remediation.",
                         outcome.candidate.pr_number
                     ),
                 });
-                self.preview_scroll.reset();
+                self.session_preview_scroll.reset();
             }
-            ReviewExecutionEvent::Failed { candidate, error } => {
-                self.stage = InteractiveReviewStage::Completed;
-                self.status = format!("Review failed for PR #{}", candidate.pr_number);
-                self.error = Some(error.clone());
-                self.outcome = None;
-                self.replace_candidate(candidate);
-                self.push_note(error);
-                self.preview_scroll.reset();
+            ReviewExecutionEvent::Cancelled {
+                kind,
+                candidate,
+                summary,
+                note,
+                review_output,
+                remediation_required,
+            } => {
+                self.status = summary.clone();
+                self.error = None;
+                self.replace_candidate(candidate.clone());
+                let session = self.upsert_session(InteractiveReviewSession {
+                    kind,
+                    candidate,
+                    phase: ReviewPhase::Blocked,
+                    summary,
+                    notes: Vec::new(),
+                    review_output,
+                    follow_up_ticket_set: None,
+                    created_follow_up_issues: Vec::new(),
+                    remediation_required,
+                    remediation_pr_number: None,
+                    remediation_pr_url: None,
+                    remediation_declined: false,
+                    cancel_requested: true,
+                    error: None,
+                    updated_at_epoch_seconds: now_epoch_seconds(),
+                });
+                session.push_note(note);
+                self.session_preview_scroll.reset();
+            }
+            ReviewExecutionEvent::Failed {
+                kind,
+                candidate,
+                error,
+            } => {
+                if self.is_cancel_requested(candidate.pr_number, kind) {
+                    return;
+                }
+                self.status = format!("{} failed for PR #{}", kind.title_label(), candidate.pr_number);
+                self.error = None;
+                self.replace_candidate(candidate.clone());
+                let session = self.upsert_session(InteractiveReviewSession {
+                    kind,
+                    candidate: candidate.clone(),
+                    phase: ReviewPhase::Blocked,
+                    summary: format!("{} failed for PR #{}", kind.title_label(), candidate.pr_number),
+                    notes: Vec::new(),
+                    review_output: None,
+                    follow_up_ticket_set: None,
+                    created_follow_up_issues: Vec::new(),
+                    remediation_required: None,
+                    remediation_pr_number: None,
+                    remediation_pr_url: None,
+                    remediation_declined: false,
+                    cancel_requested: false,
+                    error: Some(error.clone()),
+                    updated_at_epoch_seconds: now_epoch_seconds(),
+                });
+                session.push_note(error);
+                self.tab = InteractiveReviewTab::Sessions;
+                self.focus = InteractiveReviewFocus::SessionList;
+                self.session_preview_scroll.reset();
             }
         }
     }
 
     fn fail(&mut self, error: String) {
-        self.stage = InteractiveReviewStage::Completed;
+        self.stage = if self.candidates.is_empty() {
+            InteractiveReviewStage::Empty
+        } else {
+            InteractiveReviewStage::Select
+        };
         self.status = "Review dashboard failed".to_string();
         self.error = Some(error.clone());
         self.push_note(error);
+        self.refresh_requested = false;
+        self.dialog = None;
+        self.ticket_review = None;
     }
 
     fn tick(&mut self) {}
 
     fn handle_key(
         &mut self,
-        code: KeyCode,
+        key: crossterm::event::KeyEvent,
         preview: Rect,
-    ) -> Result<Option<ReviewLaunchCandidate>> {
+    ) -> Result<Option<InteractiveReviewAction>> {
         match self.stage {
-            InteractiveReviewStage::Loading => Ok(None),
+            InteractiveReviewStage::Loading | InteractiveReviewStage::TicketLoading => Ok(None),
             InteractiveReviewStage::Empty => {
-                if matches!(code, KeyCode::Char('r') | KeyCode::Char('R')) {
+                if matches!(key.code, KeyCode::Char('r') | KeyCode::Char('R')) {
                     self.stage = InteractiveReviewStage::Loading;
                     self.status = "Refreshing review candidates".to_string();
                     self.notes.clear();
@@ -616,96 +1312,247 @@ impl InteractiveReviewApp {
                 Ok(None)
             }
             InteractiveReviewStage::Select => {
-                match code {
+                match key.code {
+                    KeyCode::Tab => {
+                        self.focus = match self.focus {
+                            InteractiveReviewFocus::CandidateList => InteractiveReviewFocus::CandidatePreview,
+                            InteractiveReviewFocus::CandidatePreview => InteractiveReviewFocus::SessionList,
+                            InteractiveReviewFocus::SessionList => InteractiveReviewFocus::SessionPreview,
+                            InteractiveReviewFocus::SessionPreview => InteractiveReviewFocus::CandidateList,
+                        };
+                        self.tab = match self.focus {
+                            InteractiveReviewFocus::CandidateList | InteractiveReviewFocus::CandidatePreview => InteractiveReviewTab::Candidates,
+                            InteractiveReviewFocus::SessionList | InteractiveReviewFocus::SessionPreview => InteractiveReviewTab::Sessions,
+                        };
+                    }
+                    KeyCode::Esc => {
+                        if self.tab == InteractiveReviewTab::Sessions
+                            || self.focus != InteractiveReviewFocus::CandidateList
+                        {
+                            self.tab = InteractiveReviewTab::Candidates;
+                            self.focus = InteractiveReviewFocus::CandidateList;
+                            self.status = format!(
+                                "Returned to candidates. {} active review session(s) remain visible and candidate rows with running work stay highlighted.",
+                                self.active_session_count()
+                            );
+                        }
+                    }
+                    KeyCode::Char('r') | KeyCode::Char('R') => {
+                        self.stage = InteractiveReviewStage::Loading;
+                        self.status = "Refreshing review candidates".to_string();
+                        self.push_note("Refreshing candidate discovery from GitHub.".to_string());
+                        self.refresh_requested = true;
+                    }
+                    KeyCode::Char(' ') if self.tab == InteractiveReviewTab::Candidates => {
+                        if let Some(pr_number) = self.selected_candidate().map(|candidate| candidate.pr_number) {
+                            if !self.selected_prs.insert(pr_number) {
+                                self.selected_prs.remove(&pr_number);
+                            }
+                        }
+                    }
                     KeyCode::Up => {
-                        if self.focus == InteractiveReviewFocus::Candidates {
+                        if self.focus == InteractiveReviewFocus::CandidateList {
                             self.selected_index = self.selected_index.saturating_sub(1);
                             self.preview_scroll.reset();
-                        } else {
+                        } else if self.focus == InteractiveReviewFocus::CandidatePreview {
                             let _ = self.preview_scroll.apply_key_code_in_viewport(
                                 KeyCode::Up,
                                 preview,
                                 self.preview_rows(preview.width),
                             );
+                        } else if self.focus == InteractiveReviewFocus::SessionList {
+                            self.session_index = self.session_index.saturating_sub(1);
+                            self.session_preview_scroll.reset();
+                        } else {
+                            let _ = self.session_preview_scroll.apply_key_code_in_viewport(
+                                KeyCode::Up,
+                                preview,
+                                self.session_preview_rows(preview.width),
+                            );
                         }
                     }
                     KeyCode::Down => {
-                        if self.focus == InteractiveReviewFocus::Candidates {
-                            if self.selected_index + 1 < self.candidates.len() {
+                        if self.focus == InteractiveReviewFocus::CandidateList {
+                            if self.selected_index + 1 < self.visible_candidate_indices().len() {
                                 self.selected_index += 1;
                                 self.preview_scroll.reset();
                             }
-                        } else {
+                        } else if self.focus == InteractiveReviewFocus::CandidatePreview {
                             let _ = self.preview_scroll.apply_key_code_in_viewport(
                                 KeyCode::Down,
                                 preview,
                                 self.preview_rows(preview.width),
                             );
+                        } else if self.focus == InteractiveReviewFocus::SessionList {
+                            if self.session_index + 1 < self.sessions.len() {
+                                self.session_index += 1;
+                                self.session_preview_scroll.reset();
+                            }
+                        } else {
+                            let _ = self.session_preview_scroll.apply_key_code_in_viewport(
+                                KeyCode::Down,
+                                preview,
+                                self.session_preview_rows(preview.width),
+                            );
                         }
                     }
-                    KeyCode::Tab => {
-                        self.focus = match self.focus {
-                            InteractiveReviewFocus::Candidates => InteractiveReviewFocus::Preview,
-                            InteractiveReviewFocus::Preview => InteractiveReviewFocus::Candidates,
-                        };
-                    }
                     KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End
-                        if self.focus == InteractiveReviewFocus::Preview =>
+                        if self.focus == InteractiveReviewFocus::CandidatePreview =>
                     {
                         let _ = self.preview_scroll.apply_key_code_in_viewport(
-                            code,
+                            key.code,
                             preview,
                             self.preview_rows(preview.width),
                         );
                     }
-                    KeyCode::Enter if self.selected_candidate().is_some() => {
-                        self.stage = InteractiveReviewStage::Confirm;
-                        self.status = format!(
-                            "Confirm review start for PR #{}.",
-                            self.selected_candidate()
-                                .map(|candidate| candidate.pr_number)
-                                .unwrap_or_default()
+                    KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End
+                        if self.focus == InteractiveReviewFocus::SessionPreview =>
+                    {
+                        let _ = self.session_preview_scroll.apply_key_code_in_viewport(
+                            key.code,
+                            preview,
+                            self.session_preview_rows(preview.width),
                         );
                     }
+                    KeyCode::Enter
+                        if self.tab == InteractiveReviewTab::Candidates
+                            && match self.command {
+                                ReviewCommandKind::Review => self
+                                    .launch_candidates_for(InteractiveSessionKind::Review)
+                                    .is_some(),
+                                ReviewCommandKind::Retro => self
+                                    .launch_candidates_for(InteractiveSessionKind::FollowUpTickets)
+                                    .is_some(),
+                            } =>
+                    {
+                        self.stage = InteractiveReviewStage::Confirm;
+                        match self.command {
+                            ReviewCommandKind::Review => {
+                                self.dialog = self
+                                    .launch_candidates_for(InteractiveSessionKind::Review)
+                                    .map(InteractiveReviewDialog::LaunchReviews);
+                                self.status = format!(
+                                    "Confirm review start for {} candidate PR(s).",
+                                    self.launch_candidates_for(InteractiveSessionKind::Review)
+                                        .map(|entries| entries.len())
+                                        .unwrap_or_default()
+                                );
+                            }
+                            ReviewCommandKind::Retro => {
+                                self.dialog = self
+                                    .launch_candidates_for(InteractiveSessionKind::FollowUpTickets)
+                                    .map(InteractiveReviewDialog::LaunchFollowUpTickets);
+                                self.status = format!(
+                                    "Confirm retro analysis start for {} candidate PR(s).",
+                                    self.launch_candidates_for(
+                                        InteractiveSessionKind::FollowUpTickets
+                                    )
+                                    .map(|entries| entries.len())
+                                    .unwrap_or_default()
+                                );
+                            }
+                        }
+                    }
+                    KeyCode::Enter
+                        if self.tab == InteractiveReviewTab::Sessions
+                            && self.selected_session().is_some_and(Self::session_has_ticket_review) =>
+                    {
+                        self.open_selected_follow_up_ticket_review();
+                    }
+                    KeyCode::Char('l') | KeyCode::Char('L')
+                        if self.command == ReviewCommandKind::Review
+                            && self.tab == InteractiveReviewTab::Candidates
+                            && self.launch_candidates_for(InteractiveSessionKind::FollowUpTickets).is_some() =>
+                    {
+                        self.stage = InteractiveReviewStage::Confirm;
+                        self.dialog = self
+                            .launch_candidates_for(InteractiveSessionKind::FollowUpTickets)
+                            .map(InteractiveReviewDialog::LaunchFollowUpTickets);
+                        self.status = format!(
+                            "Recommend follow-up Linear tickets for {} candidate PR(s).",
+                            self.launch_candidates_for(InteractiveSessionKind::FollowUpTickets).map(|entries| entries.len()).unwrap_or_default()
+                        );
+                    }
+                    KeyCode::Char('a') | KeyCode::Char('A')
+                        if self.tab == InteractiveReviewTab::Sessions
+                            && self.selected_session().is_some_and(Self::session_needs_remediation_decision) =>
+                    {
+                        if let Some(pr_number) =
+                            self.selected_session().map(|session| session.candidate.pr_number)
+                        {
+                            self.stage = InteractiveReviewStage::Confirm;
+                            self.dialog =
+                                Some(InteractiveReviewDialog::StartRemediation(pr_number));
+                            self.status =
+                                format!("Confirm remediation PR creation for PR #{pr_number}.");
+                        }
+                    }
+                    KeyCode::Char('n') | KeyCode::Char('N')
+                        if self.tab == InteractiveReviewTab::Sessions
+                            && self.selected_session().is_some_and(Self::session_needs_remediation_decision) =>
+                    {
+                        self.decline_selected_session_remediation();
+                    }
+                    KeyCode::Char('c') | KeyCode::Char('C')
+                        if self.tab == InteractiveReviewTab::Sessions
+                            && self.selected_session().is_some_and(Self::session_can_cancel) =>
+                    {
+                        if let Some(pr_number) =
+                            self.selected_session().map(|session| session.candidate.pr_number)
+                        {
+                            self.stage = InteractiveReviewStage::Confirm;
+                            let kind = self
+                                .selected_session()
+                                .map(|session| session.kind)
+                                .unwrap_or(InteractiveSessionKind::Review);
+                            self.dialog =
+                                Some(InteractiveReviewDialog::CancelSession(pr_number, kind));
+                            self.status = format!(
+                                "Confirm cancellation for PR #{} {}.",
+                                pr_number,
+                                kind.label()
+                            );
+                        }
+                    }
+                    _ if self.tab == InteractiveReviewTab::Candidates && self.handle_query_key(key) => {}
                     _ => {}
                 }
                 Ok(None)
             }
-            InteractiveReviewStage::Confirm => match code {
-                KeyCode::Enter => Ok(self.selected_candidate().cloned()),
+            InteractiveReviewStage::Confirm => match key.code {
+                KeyCode::Enter => {
+                    let action = match self.dialog.clone() {
+                        Some(InteractiveReviewDialog::LaunchReviews(selection)) => {
+                            Some(InteractiveReviewAction::LaunchReviews(selection))
+                        }
+                        Some(InteractiveReviewDialog::LaunchFollowUpTickets(selection)) => {
+                            Some(InteractiveReviewAction::LaunchFollowUpTickets(selection))
+                        }
+                        Some(InteractiveReviewDialog::StartRemediation(pr_number)) => {
+                            Some(InteractiveReviewAction::StartRemediation(pr_number))
+                        }
+                        Some(InteractiveReviewDialog::CancelSession(pr_number, kind)) => {
+                            Some(InteractiveReviewAction::CancelSession(pr_number, kind))
+                        }
+                        None => None,
+                    };
+                    self.stage = InteractiveReviewStage::Select;
+                    self.dialog = None;
+                    Ok(action)
+                }
                 KeyCode::Esc | KeyCode::Backspace => {
                     self.stage = InteractiveReviewStage::Select;
+                    self.dialog = None;
                     Ok(None)
                 }
                 _ => Ok(None),
             },
-            InteractiveReviewStage::Running => Ok(None),
-            InteractiveReviewStage::Completed => {
-                if matches!(code, KeyCode::Esc | KeyCode::Backspace)
-                    && self.mode == InteractiveReviewMode::Discovery
-                    && !self.candidates.is_empty()
-                {
-                    self.stage = InteractiveReviewStage::Select;
-                    self.status =
-                        "Select another PR to review, or exit when you are done.".to_string();
-                    self.error = None;
-                    self.outcome = None;
-                    self.preview_scroll.reset();
-                }
-                Ok(None)
-            }
+            InteractiveReviewStage::TicketReview => Ok(None),
         }
     }
 
     fn should_exit(&self, code: KeyCode) -> bool {
-        match self.stage {
-            InteractiveReviewStage::Running => false,
-            InteractiveReviewStage::Completed if self.mode == InteractiveReviewMode::Direct => {
-                matches!(code, KeyCode::Char('q') | KeyCode::Esc | KeyCode::Enter)
-            }
-            InteractiveReviewStage::Completed => matches!(code, KeyCode::Char('q')),
-            _ => matches!(code, KeyCode::Char('q') | KeyCode::Esc),
-        }
+        matches!(code, KeyCode::Char('q') | KeyCode::Esc)
     }
 
     fn handle_preview_mouse(
@@ -713,22 +1560,115 @@ impl InteractiveReviewApp {
         mouse: crossterm::event::MouseEvent,
         viewport: Rect,
     ) -> bool {
-        self.preview_scroll.apply_mouse_in_viewport(
-            mouse,
-            viewport,
-            self.preview_rows(viewport.width),
-        )
+        let row_count = if self.tab == InteractiveReviewTab::Candidates {
+            self.preview_rows(viewport.width)
+        } else {
+            self.session_preview_rows(viewport.width)
+        };
+        if self.tab == InteractiveReviewTab::Candidates {
+            self.preview_scroll
+                .apply_mouse_in_viewport(mouse, viewport, row_count)
+        } else {
+            self.session_preview_scroll
+                .apply_mouse_in_viewport(mouse, viewport, row_count)
+        }
     }
 
     fn selected_candidate(&self) -> Option<&ReviewLaunchCandidate> {
-        self.candidates.get(self.selected_index)
+        self.visible_candidate_indices()
+            .get(self.selected_index)
+            .and_then(|index| self.candidates.get(*index))
+    }
+
+    fn selected_session(&self) -> Option<&InteractiveReviewSession> {
+        self.sessions.get(self.session_index)
+    }
+
+    fn selected_session_mut(&mut self) -> Option<&mut InteractiveReviewSession> {
+        self.sessions.get_mut(self.session_index)
+    }
+
+    fn open_selected_follow_up_ticket_review(&mut self) {
+        let Some((candidate, plan)) = self
+            .selected_session()
+            .and_then(|session| {
+                session
+                    .follow_up_ticket_set
+                    .clone()
+                    .map(|plan| (session.candidate.clone(), plan))
+            })
+        else {
+            return;
+        };
+        let pr_number = candidate.pr_number;
+        self.ticket_review = Some(FollowUpTicketReviewApp::new(candidate, plan));
+        self.stage = InteractiveReviewStage::TicketReview;
+        self.error = None;
+        self.status = format!(
+            "Review follow-up Linear ticket suggestions for PR #{} before creating them.",
+            pr_number
+        );
+    }
+
+    fn launch_candidates_for(
+        &self,
+        kind: InteractiveSessionKind,
+    ) -> Option<Vec<ReviewLaunchCandidate>> {
+        let selected = if !self.selected_prs.is_empty() {
+            self
+                .candidates
+                .iter()
+                .filter(|candidate| self.selected_prs.contains(&candidate.pr_number))
+                .cloned()
+                .collect::<Vec<_>>()
+        } else {
+            self.selected_candidate()
+                .cloned()
+                .map(|candidate| vec![candidate])
+                .unwrap_or_default()
+        };
+
+        let launchable = selected
+            .into_iter()
+            .filter(|candidate| !self.has_active_session(candidate.pr_number, kind))
+            .collect::<Vec<_>>();
+        (!launchable.is_empty()).then_some(launchable)
+    }
+
+    fn session_matches(
+        session: &InteractiveReviewSession,
+        pr_number: u64,
+        kind: InteractiveSessionKind,
+    ) -> bool {
+        session.candidate.pr_number == pr_number && session.kind == kind
+    }
+
+    fn visible_candidate_indices(&self) -> Vec<usize> {
+        let query = self.query.value().trim().to_ascii_lowercase();
+        self.candidates
+            .iter()
+            .enumerate()
+            .filter(|(_, candidate)| {
+                if query.is_empty() {
+                    return true;
+                }
+                let haystack = format!(
+                    "{} {} {} {} {} {}",
+                    candidate.pr_number,
+                    candidate.title,
+                    candidate.author,
+                    candidate.head_ref,
+                    candidate.base_ref,
+                    candidate.linear_identifier.as_deref().unwrap_or("")
+                )
+                .to_ascii_lowercase();
+                haystack.contains(&query)
+            })
+            .map(|(index, _)| index)
+            .collect()
     }
 
     fn selected_candidate_text(&self) -> Text<'static> {
-        if let Some(outcome) = &self.outcome {
-            return Text::from(outcome.review_output.clone());
-        }
-
         if let Some(candidate) = self.selected_candidate() {
             let mut lines = vec![
                 Line::from(vec![Span::styled(
@@ -761,6 +1701,24 @@ impl InteractiveReviewApp {
                 ]),
             ];
 
+            let review_active =
+                self.has_active_session(candidate.pr_number, InteractiveSessionKind::Review);
+            let ideas_active = self.has_active_session(
+                candidate.pr_number,
+                InteractiveSessionKind::FollowUpTickets,
+            );
+            if review_active || ideas_active {
+                lines.push(Line::from(vec![
+                    Span::styled("Active ", label_style()),
+                    Span::raw(match (review_active, ideas_active) {
+                        (true, true) => "review and linear ideas".to_string(),
+                        (true, false) => "review".to_string(),
+                        (false, true) => "linear ideas".to_string(),
+                        (false, false) => String::new(),
+                    }),
+                ]));
+            }
+
             if let Some(error) = candidate.linear_error.as_deref() {
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
@@ -770,6 +1728,16 @@ impl InteractiveReviewApp {
                 lines.push(Line::from(error.to_string()));
             }
 
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled("Available actions", label_style())));
+            match self.command {
+                ReviewCommandKind::Review => {
+                    lines.push(Line::from("- Enter queues a review session."));
+                }
+                ReviewCommandKind::Retro => {
+                    lines.push(Line::from("- Enter queues a retro ticket-analysis session."));
+                }
+            }
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled("Recent status", label_style())));
             if self.notes.is_empty() {
@@ -789,8 +1757,108 @@ impl InteractiveReviewApp {
         )
     }
 
+    fn selected_session_text(&self) -> Text<'static> {
+        let Some(session) = self.selected_session() else {
+            return Text::from("No agent session selected yet.");
+        };
+
+        let mut lines = vec![
+            Line::from(vec![
+                badge(format!("#{}", session.candidate.pr_number), Tone::Accent),
+                Span::raw(" "),
+                badge(session.kind.label(), session.kind.tone()),
+                Span::raw(" "),
+                Span::styled(session.candidate.title.clone(), emphasis_style()),
+            ]),
+            Line::from(vec![
+                Span::styled("Kind ", label_style()),
+                Span::raw(session.kind.label()),
+                Span::styled("  ", muted_style()),
+                Span::styled("Stage ", label_style()),
+                Span::raw(session.phase.display_label()),
+                Span::styled("  Summary ", label_style()),
+                Span::raw(session.summary.clone()),
+            ]),
+        ];
+
+        if let Some(error) = session.error.as_deref() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                error.to_string(),
+                Style::default().fg(ratatui::style::Color::Red),
+            )));
+        }
+
+        lines.push(Line::from(vec![
+            Span::styled("Updated ", label_style()),
+            Span::raw(format_duration(now_epoch_seconds().saturating_sub(
+                session.updated_at_epoch_seconds,
+            ))),
+            Span::styled(" ago", muted_style()),
+        ]));
+        if session.kind == InteractiveSessionKind::Review
+            && let Some(remediation_required) = session.remediation_required
+        {
+            lines.push(Line::from(vec![
+                Span::styled("Remediation ", label_style()),
+                Span::raw(if session.remediation_declined {
+                    "skipped"
+                } else if remediation_required {
+                    "recommended"
+                } else {
+                    "not required"
+                }),
+            ]));
+        }
+        if session.kind == InteractiveSessionKind::Review
+            && let Some(remediation_pr_number) = session.remediation_pr_number
+        {
+            lines.push(Line::from(vec![
+                Span::styled("Remediation PR ", label_style()),
+                Span::raw(format!("#{remediation_pr_number}")),
+            ]));
+        }
+        if session.cancel_requested {
+            lines.push(Line::from(vec![
+                Span::styled("Session ", label_style()),
+                Span::raw("cancelled"),
+            ]));
+        }
+        if !session.created_follow_up_issues.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled("Created Linear Tickets", label_style())));
+            for issue in &session.created_follow_up_issues {
+                lines.push(Line::from(format!("- {}: {}", issue.identifier, issue.url)));
+            }
+        }
+
+        if let Some(output) = session.review_output.as_deref() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                match session.kind {
+                    InteractiveSessionKind::Review => "Review Report",
+                    InteractiveSessionKind::FollowUpTickets => "Follow-Up Ticket Recommendations",
+                },
+                label_style(),
+            )));
+            lines.extend(render_markdown_preview(output).lines);
+        } else {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled("Progress Notes", label_style())));
+            for note in &session.notes {
+                lines.push(Line::from(format!("- {note}")));
+            }
+        }
+
+        Text::from(lines)
+    }
+
     fn preview_rows(&self, width: u16) -> usize {
         wrapped_rows(&self.selected_candidate_text().to_string(), width.max(1))
+    }
+
+    fn session_preview_rows(&self, width: u16) -> usize {
+        wrapped_rows(&self.selected_session_text().to_string(), width.max(1))
     }
 
     fn push_note(&mut self, note: String) {
@@ -799,6 +1867,18 @@ impl InteractiveReviewApp {
         }
         self.notes.insert(0, note);
         self.notes.truncate(10);
+    }
+
+    fn handle_query_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        if self.tab != InteractiveReviewTab::Candidates || self.focus != InteractiveReviewFocus::CandidateList {
+            return false;
+        }
+        if self.query.handle_key(key) {
+            self.selected_index = 0;
+            self.preview_scroll.reset();
+            return true;
+        }
+        false
     }
 
     fn replace_candidate(&mut self, candidate: ReviewLaunchCandidate) {
@@ -812,6 +1892,603 @@ impl InteractiveReviewApp {
             self.candidates.push(candidate);
             self.selected_index = self.candidates.len().saturating_sub(1);
         }
+    }
+
+    fn has_active_session(&self, pr_number: u64, kind: InteractiveSessionKind) -> bool {
+        self.sessions.iter().any(|session| {
+            Self::session_matches(session, pr_number, kind)
+                && !matches!(session.phase, ReviewPhase::Completed | ReviewPhase::Blocked)
+        })
+    }
+
+    fn is_cancel_requested(&self, pr_number: u64, kind: InteractiveSessionKind) -> bool {
+        self.sessions
+            .iter()
+            .find(|session| Self::session_matches(session, pr_number, kind))
+            .is_some_and(|session| session.cancel_requested)
+    }
+
+    fn decline_selected_session_remediation(&mut self) {
+        let Some(session) = self.selected_session_mut() else {
+            return;
+        };
+        session.remediation_declined = true;
+        session.summary = "Recommendation kept without remediation PR".to_string();
+        session.push_note(
+            "User kept the review report without opening a remediation PR.".to_string(),
+        );
+        self.status = format!(
+            "Kept report for PR #{} without creating remediation.",
+            session.candidate.pr_number
+        );
+    }
+
+    fn session_needs_remediation_decision(session: &InteractiveReviewSession) -> bool {
+        session.remediation_required == Some(true)
+            && session.remediation_pr_url.is_none()
+            && !session.remediation_declined
+            && !session.cancel_requested
+            && session.review_output.is_some()
+    }
+
+    fn session_can_cancel(session: &InteractiveReviewSession) -> bool {
+        !matches!(session.phase, ReviewPhase::Completed | ReviewPhase::Blocked)
+            || Self::session_needs_remediation_decision(session)
+    }
+
+    fn session_has_ticket_review(session: &InteractiveReviewSession) -> bool {
+        session.kind == InteractiveSessionKind::FollowUpTickets
+            && session.phase == ReviewPhase::Completed
+            && session.follow_up_ticket_set.is_some()
+            && session.created_follow_up_issues.is_empty()
+    }
+
+    fn upsert_session(&mut self, session: InteractiveReviewSession) -> &mut InteractiveReviewSession {
+        if let Some(index) = self
+            .sessions
+            .iter()
+            .position(|existing| {
+                Self::session_matches(existing, session.candidate.pr_number, session.kind)
+            })
+        {
+            self.sessions[index] = session;
+            return &mut self.sessions[index];
+        }
+
+        self.sessions.push(session);
+        let index = self.sessions.len() - 1;
+        &mut self.sessions[index]
+    }
+
+    fn active_session_count(&self) -> usize {
+        self.sessions
+            .iter()
+            .filter(|session| !matches!(session.phase, ReviewPhase::Completed | ReviewPhase::Blocked))
+            .count()
+    }
+
+    fn apply_follow_up_ticket_job_event(&mut self, event: FollowUpTicketJobEvent) {
+        match event {
+            FollowUpTicketJobEvent::RevisionReady(review) => {
+                self.status = format!(
+                    "Updated follow-up ticket preview for PR #{}.",
+                    review.pr_number
+                );
+                self.stage = InteractiveReviewStage::TicketReview;
+                self.ticket_review = Some(*review);
+                self.error = None;
+            }
+            FollowUpTicketJobEvent::Created { pr_number, issues } => {
+                self.stage = InteractiveReviewStage::Select;
+                self.status = format!(
+                    "Created {} follow-up Linear ticket(s) for PR #{}.",
+                    issues.len(),
+                    pr_number
+                );
+                self.error = None;
+                if let Some(session) = self.sessions.iter_mut().find(|session| {
+                    session.candidate.pr_number == pr_number
+                        && session.kind == InteractiveSessionKind::FollowUpTickets
+                }) {
+                    session.created_follow_up_issues = issues.clone();
+                    session.summary = if issues.is_empty() {
+                        "No follow-up tickets created".to_string()
+                    } else {
+                        format!("Created {} follow-up Linear ticket(s)", issues.len())
+                    };
+                    for issue in &issues {
+                        session.push_note(format!("Created {}: {}", issue.identifier, issue.url));
+                    }
+                }
+                self.ticket_review = None;
+                self.tab = InteractiveReviewTab::Sessions;
+                self.focus = InteractiveReviewFocus::SessionList;
+            }
+            FollowUpTicketJobEvent::Failed { pr_number, error } => {
+                self.stage = if self.ticket_review.is_some() {
+                    InteractiveReviewStage::TicketReview
+                } else {
+                    InteractiveReviewStage::Select
+                };
+                self.status = format!("Follow-up ticket workflow failed for PR #{}.", pr_number);
+                self.error = Some(error.clone());
+                if let Some(review) = self.ticket_review.as_mut() {
+                    review.error = Some(error);
+                }
+            }
+        }
+    }
+}
+
+impl InteractiveReviewSession {
+    fn push_note(&mut self, note: String) {
+        if self.notes.first().is_some_and(|existing| existing == &note) {
+            return;
+        }
+        self.notes.insert(0, note);
+        self.notes.truncate(12);
+        self.updated_at_epoch_seconds = now_epoch_seconds();
+    }
+}
+
+#[derive(Clone, Copy)]
+struct FollowUpTicketReviewLayout {
+    issue_list: Rect,
+    selected_ticket: Rect,
+    overview: Rect,
+    combination_plan: Rect,
+    footer: Rect,
+}
+
+enum FollowUpTicketReviewAction {
+    None,
+    OpenCreate,
+    OpenRevision,
+    Close,
+}
+
+impl FollowUpTicketReviewApp {
+    fn new(candidate: ReviewLaunchCandidate, plan: FollowUpTicketSet) -> Self {
+        let decisions = vec![1; plan.tickets.len()];
+        Self {
+            pr_number: candidate.pr_number,
+            candidate,
+            plan,
+            selected: 0,
+            decisions,
+            revision: 1,
+            focus: FollowUpTicketReviewFocus::Tickets,
+            overview_scroll: ScrollState::default(),
+            selected_ticket_scroll: ScrollState::default(),
+            combination_scroll: ScrollState::default(),
+            error: None,
+        }
+    }
+
+    fn overview_text(&self) -> Text<'static> {
+        let decisions = follow_up_ticket_decision_counts(self);
+        Text::from(vec![
+            Line::from(format!("PR #{} follow-up suggestions", self.pr_number)),
+            Line::from(format!("Draft batch: {}", self.revision)),
+            Line::from(format!(
+                "Selected: {}/{}",
+                decisions.selected_count,
+                self.plan.tickets.len()
+            )),
+            Line::from(format!("Skipped: {}", decisions.skipped_count)),
+            Line::from(format!("Keeping as-is: {}", decisions.keep_count)),
+            Line::from(format!("Merge groups: {}", decisions.group_count)),
+            Line::from(""),
+            Line::from("Summary"),
+            Line::from(""),
+            Line::from(self.plan.summary.clone()),
+            Line::from(""),
+            if self.plan.notes.is_empty() {
+                Line::from("")
+            } else {
+                Line::from("Notes")
+            },
+        ]
+        .into_iter()
+        .chain(
+            self.plan
+                .notes
+                .iter()
+                .flat_map(|note| [Line::from(""), Line::from(format!("- {note}"))]),
+        )
+        .collect::<Vec<_>>())
+    }
+
+    fn selected_ticket(&self) -> Option<&FollowUpTicketDraft> {
+        self.plan.tickets.get(self.selected)
+    }
+
+    fn selected_ticket_text(&self) -> Text<'static> {
+        let Some(ticket) = self.selected_ticket() else {
+            return Text::from("No suggested ticket selected.");
+        };
+        let mut lines = vec![
+            Line::from(format!("Title: {}", ticket.title)),
+            Line::from(format!(
+                "Priority: {}",
+                ticket
+                    .priority
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "unset".to_string())
+            )),
+            Line::from(""),
+            Line::from("Why Now"),
+            Line::from(""),
+            Line::from(ticket.why_now.clone()),
+            Line::from(""),
+            Line::from("Outcome"),
+            Line::from(""),
+            Line::from(ticket.outcome.clone()),
+            Line::from(""),
+            Line::from("Scope"),
+            Line::from(""),
+            Line::from(ticket.scope.clone()),
+        ];
+        if !ticket.acceptance_criteria.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from("Suggested Acceptance Criteria"));
+            lines.push(Line::from(""));
+            lines.extend(
+                ticket
+                    .acceptance_criteria
+                    .iter()
+                    .map(|criterion| Line::from(format!("- {criterion}"))),
+            );
+        }
+        Text::from(lines)
+    }
+
+    fn combination_plan_text(&self) -> Text<'static> {
+        let decisions = follow_up_ticket_decision_counts(self);
+        let mut lines = vec![
+            Line::from("Space cycles the active ticket through review states."),
+            Line::from(""),
+            Line::from("[ ] Skip the ticket"),
+            Line::from("[x] Keep the ticket as-is"),
+            Line::from("[1], [2], ... Merge every ticket sharing that number"),
+            Line::from(""),
+            Line::from(format!(
+                "Active ticket state: {}",
+                follow_up_ticket_review_marker(
+                    self.decisions
+                        .get(self.selected)
+                        .copied()
+                        .unwrap_or_default()
+                )
+            )),
+            Line::from(""),
+        ];
+        if decisions.selected_count == 0 {
+            lines.push(Line::from(
+                "Select at least one suggested ticket before continuing. Leave [ ] on tickets you want to skip.",
+            ));
+        } else if decisions.group_count == 0 {
+            lines.push(Line::from(
+                "Press Enter to create the checked [x] tickets in Linear. Unchecked [ ] tickets will be skipped.",
+            ));
+        } else {
+            lines.push(Line::from(
+                "Press Enter to rebuild the next preview from the checked [x] tickets and these merge groups. Unchecked [ ] tickets will be skipped:",
+            ));
+            lines.push(Line::from(""));
+            lines.extend(render_follow_up_ticket_merge_group_lines(self));
+        }
+        Text::from(lines)
+    }
+
+    fn overview_rows(&self, width: u16) -> usize {
+        wrapped_rows(&self.overview_text().to_string(), width.max(1))
+    }
+
+    fn selected_ticket_rows(&self, width: u16) -> usize {
+        wrapped_rows(&self.selected_ticket_text().to_string(), width.max(1))
+    }
+
+    fn combination_plan_rows(&self, width: u16) -> usize {
+        wrapped_rows(&self.combination_plan_text().to_string(), width.max(1))
+    }
+
+    fn move_selection(&mut self, delta: isize) {
+        let next = if delta.is_negative() {
+            self.selected.saturating_sub(delta.unsigned_abs())
+        } else {
+            self.selected
+                .saturating_add(delta as usize)
+                .min(self.plan.tickets.len().saturating_sub(1))
+        };
+        if next != self.selected {
+            self.selected = next;
+            self.selected_ticket_scroll.reset();
+        }
+    }
+}
+
+fn handle_follow_up_ticket_review_key(
+    app: &mut FollowUpTicketReviewApp,
+    key: crossterm::event::KeyEvent,
+    area: Rect,
+) -> FollowUpTicketReviewAction {
+    match key.code {
+        KeyCode::Esc => FollowUpTicketReviewAction::Close,
+        KeyCode::BackTab => {
+            app.focus = match app.focus {
+                FollowUpTicketReviewFocus::Tickets => FollowUpTicketReviewFocus::CombinationPlan,
+                FollowUpTicketReviewFocus::SelectedTicket => FollowUpTicketReviewFocus::Tickets,
+                FollowUpTicketReviewFocus::Overview => FollowUpTicketReviewFocus::SelectedTicket,
+                FollowUpTicketReviewFocus::CombinationPlan => FollowUpTicketReviewFocus::Overview,
+            };
+            app.error = None;
+            FollowUpTicketReviewAction::None
+        }
+        KeyCode::Tab => {
+            app.focus = match app.focus {
+                FollowUpTicketReviewFocus::Tickets => FollowUpTicketReviewFocus::SelectedTicket,
+                FollowUpTicketReviewFocus::SelectedTicket => FollowUpTicketReviewFocus::Overview,
+                FollowUpTicketReviewFocus::Overview => FollowUpTicketReviewFocus::CombinationPlan,
+                FollowUpTicketReviewFocus::CombinationPlan => FollowUpTicketReviewFocus::Tickets,
+            };
+            app.error = None;
+            FollowUpTicketReviewAction::None
+        }
+        KeyCode::Up => {
+            if app.focus == FollowUpTicketReviewFocus::Tickets {
+                app.move_selection(-1);
+            } else {
+                let _ = handle_follow_up_ticket_scroll_key(app, key, area);
+            }
+            app.error = None;
+            FollowUpTicketReviewAction::None
+        }
+        KeyCode::Down => {
+            if app.focus == FollowUpTicketReviewFocus::Tickets {
+                app.move_selection(1);
+            } else {
+                let _ = handle_follow_up_ticket_scroll_key(app, key, area);
+            }
+            app.error = None;
+            FollowUpTicketReviewAction::None
+        }
+        KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End => {
+            let _ = handle_follow_up_ticket_scroll_key(app, key, area);
+            app.error = None;
+            FollowUpTicketReviewAction::None
+        }
+        KeyCode::Char(' ') => {
+            cycle_follow_up_ticket_decision(app);
+            app.error = None;
+            FollowUpTicketReviewAction::None
+        }
+        KeyCode::Char('x') | KeyCode::Char('X') => {
+            if let Some(decision) = app.decisions.get_mut(app.selected) {
+                *decision = 1;
+            }
+            app.error = None;
+            FollowUpTicketReviewAction::None
+        }
+        KeyCode::Char('s') | KeyCode::Char('S') => {
+            if let Some(decision) = app.decisions.get_mut(app.selected) {
+                *decision = 0;
+            }
+            app.error = None;
+            FollowUpTicketReviewAction::None
+        }
+        KeyCode::Char('u') | KeyCode::Char('U') => {
+            for decision in &mut app.decisions {
+                *decision = 0;
+            }
+            app.error = None;
+            FollowUpTicketReviewAction::None
+        }
+        KeyCode::Enter => match follow_up_ticket_review_submission_action(app) {
+            Ok(FollowUpTicketReviewSubmissionAction::ConfirmAsIs) => {
+                FollowUpTicketReviewAction::OpenCreate
+            }
+            Ok(FollowUpTicketReviewSubmissionAction::RegeneratePreview) => {
+                FollowUpTicketReviewAction::OpenRevision
+            }
+            Err(error) => {
+                app.error = Some(error);
+                FollowUpTicketReviewAction::None
+            }
+        },
+        _ => FollowUpTicketReviewAction::None,
+    }
+}
+
+fn handle_follow_up_ticket_scroll_key(
+    app: &mut FollowUpTicketReviewApp,
+    key: crossterm::event::KeyEvent,
+    area: Rect,
+) -> bool {
+    let layout = follow_up_ticket_review_layout(area);
+    match app.focus {
+        FollowUpTicketReviewFocus::Tickets => false,
+        FollowUpTicketReviewFocus::SelectedTicket => app.selected_ticket_scroll.apply_key_in_viewport(
+            key,
+            layout.selected_ticket,
+            app.selected_ticket_rows(layout.selected_ticket.width.saturating_sub(2)),
+        ),
+        FollowUpTicketReviewFocus::Overview => app.overview_scroll.apply_key_in_viewport(
+            key,
+            layout.overview,
+            app.overview_rows(layout.overview.width.saturating_sub(2)),
+        ),
+        FollowUpTicketReviewFocus::CombinationPlan => app.combination_scroll.apply_key_in_viewport(
+            key,
+            layout.combination_plan,
+            app.combination_plan_rows(layout.combination_plan.width.saturating_sub(2)),
+        ),
+    }
+}
+
+fn handle_follow_up_ticket_review_mouse(
+    app: &mut FollowUpTicketReviewApp,
+    mouse: crossterm::event::MouseEvent,
+    area: Rect,
+) -> bool {
+    if !matches!(
+        mouse.kind,
+        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+    ) {
+        return false;
+    }
+    let layout = follow_up_ticket_review_layout(area);
+    match app.focus {
+        FollowUpTicketReviewFocus::Tickets => false,
+        FollowUpTicketReviewFocus::SelectedTicket => app.selected_ticket_scroll.apply_mouse_in_viewport(
+            mouse,
+            layout.selected_ticket,
+            app.selected_ticket_rows(layout.selected_ticket.width.saturating_sub(2)),
+        ),
+        FollowUpTicketReviewFocus::Overview => app.overview_scroll.apply_mouse_in_viewport(
+            mouse,
+            layout.overview,
+            app.overview_rows(layout.overview.width.saturating_sub(2)),
+        ),
+        FollowUpTicketReviewFocus::CombinationPlan => app.combination_scroll.apply_mouse_in_viewport(
+            mouse,
+            layout.combination_plan,
+            app.combination_plan_rows(layout.combination_plan.width.saturating_sub(2)),
+        ),
+    }
+}
+
+enum FollowUpTicketReviewSubmissionAction {
+    ConfirmAsIs,
+    RegeneratePreview,
+}
+
+fn follow_up_ticket_review_submission_action(
+    app: &FollowUpTicketReviewApp,
+) -> Result<FollowUpTicketReviewSubmissionAction, String> {
+    if app.decisions.iter().all(|decision| *decision == 0) {
+        return Err(
+            "Select at least one suggested ticket before continuing. Leave [ ] on any ticket you want to skip, use [x] to keep it, or assign a number to merge it."
+                .to_string(),
+        );
+    }
+
+    let merge_groups = follow_up_ticket_merge_groups(app);
+    for (group, indices) in &merge_groups {
+        if indices.len() < 2 {
+            return Err(format!(
+                "Merge group {group} only has one ticket. Mark it as [x] or assign another ticket to [{group}]."
+            ));
+        }
+    }
+
+    if merge_groups.is_empty() {
+        Ok(FollowUpTicketReviewSubmissionAction::ConfirmAsIs)
+    } else {
+        Ok(FollowUpTicketReviewSubmissionAction::RegeneratePreview)
+    }
+}
+
+fn follow_up_ticket_review_marker(decision: usize) -> String {
+    match decision {
+        0 => "[ ]".to_string(),
+        1 => "[x]".to_string(),
+        value => format!("[{}]", value - 1),
+    }
+}
+
+struct FollowUpTicketDecisionCounts {
+    selected_count: usize,
+    skipped_count: usize,
+    keep_count: usize,
+    group_count: usize,
+}
+
+fn follow_up_ticket_decision_counts(app: &FollowUpTicketReviewApp) -> FollowUpTicketDecisionCounts {
+    let groups = follow_up_ticket_merge_groups(app);
+    FollowUpTicketDecisionCounts {
+        selected_count: app.decisions.iter().filter(|decision| **decision > 0).count(),
+        skipped_count: app.decisions.iter().filter(|decision| **decision == 0).count(),
+        keep_count: app.decisions.iter().filter(|decision| **decision == 1).count(),
+        group_count: groups.len(),
+    }
+}
+
+fn cycle_follow_up_ticket_decision(app: &mut FollowUpTicketReviewApp) {
+    if app.plan.tickets.is_empty() {
+        return;
+    }
+    let max_state = app.plan.tickets.len() + 1;
+    if let Some(decision) = app.decisions.get_mut(app.selected) {
+        *decision = (*decision + 1) % (max_state + 1);
+    }
+}
+
+fn follow_up_ticket_merge_groups(app: &FollowUpTicketReviewApp) -> std::collections::BTreeMap<usize, Vec<usize>> {
+    let mut groups = std::collections::BTreeMap::new();
+    for (index, decision) in app.decisions.iter().copied().enumerate() {
+        if decision >= 2 {
+            groups.entry(decision - 1).or_insert_with(Vec::new).push(index);
+        }
+    }
+    groups
+}
+
+fn follow_up_ticket_kept_indices(app: &FollowUpTicketReviewApp) -> Vec<usize> {
+    app.decisions
+        .iter()
+        .enumerate()
+        .filter_map(|(index, decision)| (*decision == 1).then_some(index))
+        .collect()
+}
+
+fn selected_follow_up_ticket_plan(app: &FollowUpTicketReviewApp) -> FollowUpTicketSet {
+    FollowUpTicketSet {
+        summary: app.plan.summary.clone(),
+        tickets: follow_up_ticket_kept_indices(app)
+            .into_iter()
+            .filter_map(|index| app.plan.tickets.get(index).cloned())
+            .collect(),
+        notes: app.plan.notes.clone(),
+    }
+}
+
+fn render_follow_up_ticket_merge_group_lines(app: &FollowUpTicketReviewApp) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for (group, indices) in follow_up_ticket_merge_groups(app) {
+        let titles = indices
+            .into_iter()
+            .filter_map(|index| app.plan.tickets.get(index).map(|ticket| ticket.title.clone()))
+            .collect::<Vec<_>>()
+            .join(" + ");
+        lines.push(Line::from(format!("[{group}] {titles}")));
+    }
+    lines
+}
+
+fn follow_up_ticket_review_layout(frame_area: Rect) -> FollowUpTicketReviewLayout {
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(4)])
+        .split(frame_area);
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(56), Constraint::Percentage(44)])
+        .split(layout[0]);
+    let top_row = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(34), Constraint::Percentage(66)])
+        .split(rows[0]);
+    let bottom_row = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(34), Constraint::Percentage(66)])
+        .split(rows[1]);
+    FollowUpTicketReviewLayout {
+        issue_list: top_row[0],
+        selected_ticket: top_row[1],
+        overview: bottom_row[0],
+        combination_plan: bottom_row[1],
+        footer: layout[1],
     }
 }
 
@@ -895,63 +2572,163 @@ fn spawn_review_execution(
     args: ReviewRunArgs,
     candidate: ReviewLaunchCandidate,
     store: Option<ReviewProjectStore>,
-) -> Receiver<ReviewExecutionEvent> {
+) -> InteractiveWorkerHandle {
     let (tx, rx) = mpsc::channel();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel_for_thread = Arc::clone(&cancel);
+    let pr_number = candidate.pr_number;
     thread::spawn(move || {
-        let result = execute_review_with_progress(
-            &root,
-            &config,
-            &planning_meta,
-            &args,
-            &candidate,
-            store.as_ref(),
-            |event| {
-                let _ = tx.send(event);
-            },
-        );
+        let context = ReviewExecutionContext {
+            root: &root,
+            config: &config,
+            planning_meta: &planning_meta,
+            args: &args,
+            store: store.as_ref(),
+            cancel: &cancel_for_thread,
+        };
+        let result = execute_review_with_progress(&context, &candidate, |event| {
+            let _ = tx.send(event);
+        });
 
         if let Err(error) = result {
             let _ = tx.send(ReviewExecutionEvent::Failed {
+                kind: InteractiveSessionKind::Review,
                 candidate,
                 error: error.to_string(),
             });
         }
     });
-    rx
+    InteractiveWorkerHandle {
+        kind: InteractiveSessionKind::Review,
+        pr_number,
+        receiver: rx,
+        cancel,
+    }
+}
+
+fn spawn_follow_up_ticket_execution(
+    root: std::path::PathBuf,
+    config: AppConfig,
+    planning_meta: PlanningMeta,
+    args: ReviewRunArgs,
+    candidate: ReviewLaunchCandidate,
+    store: Option<ReviewProjectStore>,
+) -> InteractiveWorkerHandle {
+    let (tx, rx) = mpsc::channel();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel_for_thread = Arc::clone(&cancel);
+    let pr_number = candidate.pr_number;
+    thread::spawn(move || {
+        let context = ReviewExecutionContext {
+            root: &root,
+            config: &config,
+            planning_meta: &planning_meta,
+            args: &args,
+            store: store.as_ref(),
+            cancel: &cancel_for_thread,
+        };
+        let result = execute_follow_up_ticket_with_progress(&context, &candidate, |event| {
+            let _ = tx.send(event);
+        });
+
+        if let Err(error) = result {
+            let _ = tx.send(ReviewExecutionEvent::Failed {
+                kind: InteractiveSessionKind::FollowUpTickets,
+                candidate,
+                error: error.to_string(),
+            });
+        }
+    });
+    InteractiveWorkerHandle {
+        kind: InteractiveSessionKind::FollowUpTickets,
+        pr_number,
+        receiver: rx,
+        cancel,
+    }
+}
+
+fn spawn_remediation_execution(
+    root: std::path::PathBuf,
+    config: AppConfig,
+    planning_meta: PlanningMeta,
+    args: ReviewRunArgs,
+    request: RemediationLaunchRequest,
+    store: Option<ReviewProjectStore>,
+) -> InteractiveWorkerHandle {
+    let (tx, rx) = mpsc::channel();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel_for_thread = Arc::clone(&cancel);
+    let pr_number = request.candidate.pr_number;
+    thread::spawn(move || {
+        let context = ReviewExecutionContext {
+            root: &root,
+            config: &config,
+            planning_meta: &planning_meta,
+            args: &args,
+            store: store.as_ref(),
+            cancel: &cancel_for_thread,
+        };
+        let result = execute_remediation_with_progress(&context, &request, |event| {
+            let _ = tx.send(event);
+        });
+
+        if let Err(error) = result {
+            let _ = tx.send(ReviewExecutionEvent::Failed {
+                kind: InteractiveSessionKind::Review,
+                candidate: request.candidate,
+                error: error.to_string(),
+            });
+        }
+    });
+    InteractiveWorkerHandle {
+        kind: InteractiveSessionKind::Review,
+        pr_number,
+        receiver: rx,
+        cancel,
+    }
 }
 
 fn execute_review_with_progress(
-    root: &Path,
-    config: &AppConfig,
-    planning_meta: &PlanningMeta,
-    args: &ReviewRunArgs,
+    context: &ReviewExecutionContext<'_>,
     initial_candidate: &ReviewLaunchCandidate,
-    store: Option<&ReviewProjectStore>,
     mut emit: impl FnMut(ReviewExecutionEvent),
 ) -> Result<()> {
     let gh = GhCli;
     let mut candidate = initial_candidate.clone();
     let mut session =
         review_session_from_candidate(&candidate, ReviewPhase::Claimed, "Queued for review");
-    persist_review_session(store, &session)?;
+    persist_review_session(context.store, &session)?;
 
     emit(ReviewExecutionEvent::Progress {
+        kind: InteractiveSessionKind::Review,
         candidate: candidate.clone(),
         phase: ReviewPhase::Claimed,
         summary: format!("Queued review for PR #{}", candidate.pr_number),
         note: Some("Human approval received. Starting review workflow.".to_string()),
         remediation_required: None,
     });
+    if context.cancel.load(Ordering::Relaxed) {
+        emit(ReviewExecutionEvent::Cancelled {
+            kind: InteractiveSessionKind::Review,
+            candidate: candidate.clone(),
+            summary: format!("Cancelled review for PR #{}", candidate.pr_number),
+            note: "Review cancelled before loading PR context.".to_string(),
+            review_output: None,
+            remediation_required: None,
+        });
+        return Ok(());
+    }
 
-    let pr = fetch_pr_metadata(&gh, root, candidate.pr_number)?;
+    let pr = fetch_pr_metadata(&gh, context.root, candidate.pr_number)?;
     candidate = candidate_from_metadata(&pr);
     session = review_session_from_candidate(
         &candidate,
         ReviewPhase::ReviewStarted,
         "Loading pull request and Linear context",
     );
-    persist_review_session(store, &session)?;
+    persist_review_session(context.store, &session)?;
     emit(ReviewExecutionEvent::Progress {
+        kind: InteractiveSessionKind::Review,
         candidate: candidate.clone(),
         phase: ReviewPhase::ReviewStarted,
         summary: format!("Loading review context for PR #{}", candidate.pr_number),
@@ -960,12 +2737,17 @@ fn execute_review_with_progress(
     });
 
     let linear_identifier = resolve_linear_identifier(&pr)?;
-    let diff = fetch_pr_diff(root, candidate.pr_number)?;
-    let context_bundle = load_codebase_context_bundle(root).unwrap_or_default();
-    let workflow_contract = load_workflow_contract(root).unwrap_or_default();
-    let repo_map = render_repo_map(root).unwrap_or_default();
+    let diff = fetch_pr_diff(context.root, candidate.pr_number)?;
+    let context_bundle = load_codebase_context_bundle(context.root).unwrap_or_default();
+    let workflow_contract = load_workflow_contract(context.root).unwrap_or_default();
+    let repo_map = render_repo_map(context.root).unwrap_or_default();
     let ticket_context =
-        gather_linear_ticket_context(root, config, planning_meta, &linear_identifier)?;
+        gather_linear_ticket_context(
+            context.root,
+            context.config,
+            context.planning_meta,
+            &linear_identifier,
+        )?;
 
     let review_prompt = assemble_review_prompt(
         &pr,
@@ -977,17 +2759,21 @@ fn execute_review_with_progress(
         &ticket_context,
     );
     let agent_args = RunAgentArgs {
-        root: Some(root.to_path_buf()),
+        root: Some(context.root.to_path_buf()),
         route_key: Some(AGENT_ROUTE_AGENTS_REVIEW.to_string()),
-        agent: args.agent.clone(),
+        agent: context.args.agent.clone(),
         prompt: review_prompt,
         instructions: Some(REVIEW_INSTRUCTIONS.to_string()),
-        model: args.model.clone(),
-        reasoning: args.reasoning.clone(),
+        model: context.args.model.clone(),
+        reasoning: context.args.reasoning.clone(),
         transport: None,
         attachments: Vec::new(),
     };
-    let invocation = resolve_agent_invocation_for_planning(config, planning_meta, &agent_args)?;
+    let invocation = resolve_agent_invocation_for_planning(
+        context.config,
+        context.planning_meta,
+        &agent_args,
+    )?;
 
     candidate.linear_identifier = Some(linear_identifier.clone());
     candidate.linear_error = None;
@@ -996,8 +2782,9 @@ fn execute_review_with_progress(
         ReviewPhase::Running,
         format!("Running agent review with {}", invocation.agent),
     );
-    persist_review_session(store, &session)?;
+    persist_review_session(context.store, &session)?;
     emit(ReviewExecutionEvent::Progress {
+        kind: InteractiveSessionKind::Review,
         candidate: candidate.clone(),
         phase: ReviewPhase::Running,
         summary: format!("Running agent review with {}", invocation.agent),
@@ -1011,67 +2798,576 @@ fn execute_review_with_progress(
     let report = run_agent_capture(&agent_args)?;
     let review_output = report.stdout.trim().to_string();
     let remediation_required = review_output_requires_remediation(&review_output);
-
-    if remediation_required {
-        emit(ReviewExecutionEvent::Progress {
+    if context.cancel.load(Ordering::Relaxed) {
+        emit(ReviewExecutionEvent::Cancelled {
+            kind: InteractiveSessionKind::Review,
             candidate: candidate.clone(),
-            phase: ReviewPhase::Running,
-            summary: format!("Creating remediation PR for #{}", candidate.pr_number),
-            note: Some(
-                "Required fixes were found. Preparing the remediation branch and follow-up PR."
-                    .to_string(),
-            ),
-            remediation_required: Some(true),
+            summary: format!("Cancelled review for PR #{}", candidate.pr_number),
+            note: "Review cancelled after the agent finished. Keeping the report without further action."
+                .to_string(),
+            review_output: Some(review_output),
+            remediation_required: Some(remediation_required),
         });
-        let remediation = run_remediation(
-            root,
-            &pr,
-            &linear_identifier,
-            &review_output,
-            config,
-            planning_meta,
-            args,
-        )?;
-        let outcome = InteractiveReviewOutcome {
-            candidate: candidate.clone(),
-            summary: "Remediation PR created".to_string(),
-            review_output,
-            remediation_required: true,
-            remediation_pr_number: Some(remediation.pr_number),
-            remediation_pr_url: Some(remediation.pr_url),
-        };
-        session = review_session_from_candidate(
-            &candidate,
-            ReviewPhase::Completed,
-            "Remediation PR created",
-        );
-        session.remediation_required = Some(true);
-        session.remediation_pr_number = outcome.remediation_pr_number;
-        session.remediation_pr_url = outcome.remediation_pr_url.clone();
-        session.linear_identifier = Some(linear_identifier);
-        persist_review_session(store, &session)?;
-        emit(ReviewExecutionEvent::Completed(outcome));
-    } else {
-        let outcome = InteractiveReviewOutcome {
-            candidate: candidate.clone(),
-            summary: "No remediation required".to_string(),
-            review_output,
-            remediation_required: false,
-            remediation_pr_number: None,
-            remediation_pr_url: None,
-        };
-        session = review_session_from_candidate(
-            &candidate,
-            ReviewPhase::Completed,
-            "No remediation required",
-        );
-        session.remediation_required = Some(false);
-        session.linear_identifier = Some(linear_identifier);
-        persist_review_session(store, &session)?;
-        emit(ReviewExecutionEvent::Completed(outcome));
+        return Ok(());
     }
 
+    let outcome = InteractiveReviewOutcome {
+        kind: InteractiveSessionKind::Review,
+        candidate: candidate.clone(),
+        summary: if remediation_required {
+            "Review report ready".to_string()
+        } else {
+            "No remediation required".to_string()
+        },
+        review_output,
+        follow_up_ticket_set: None,
+        remediation_required,
+        linear_identifier: Some(linear_identifier.clone()),
+        remediation_pr_number: None,
+        remediation_pr_url: None,
+    };
+    session = review_session_from_candidate(
+        &candidate,
+        ReviewPhase::Completed,
+        if remediation_required {
+            "Review report ready"
+        } else {
+            "No remediation required"
+        },
+    );
+    session.remediation_required = Some(remediation_required);
+    session.linear_identifier = Some(linear_identifier);
+    persist_review_session(context.store, &session)?;
+    emit(ReviewExecutionEvent::Completed(outcome));
+
     Ok(())
+}
+
+fn execute_remediation_with_progress(
+    context: &ReviewExecutionContext<'_>,
+    request: &RemediationLaunchRequest,
+    mut emit: impl FnMut(ReviewExecutionEvent),
+) -> Result<()> {
+    if context.cancel.load(Ordering::Relaxed) {
+        emit(ReviewExecutionEvent::Cancelled {
+            kind: InteractiveSessionKind::Review,
+            candidate: request.candidate.clone(),
+            summary: format!("Cancelled remediation for PR #{}", request.candidate.pr_number),
+            note: "Remediation was cancelled before the PR was created.".to_string(),
+            review_output: Some(request.review_output.clone()),
+            remediation_required: Some(true),
+        });
+        return Ok(());
+    }
+
+    let gh = GhCli;
+    let pr = fetch_pr_metadata(&gh, context.root, request.candidate.pr_number)?;
+    let mut session = review_session_from_candidate(
+        &request.candidate,
+        ReviewPhase::Running,
+        format!("Creating remediation PR for #{}", request.candidate.pr_number),
+    );
+    session.remediation_required = Some(true);
+    session.linear_identifier = Some(request.linear_identifier.clone());
+    persist_review_session(context.store, &session)?;
+    emit(ReviewExecutionEvent::Progress {
+        kind: InteractiveSessionKind::Review,
+        candidate: request.candidate.clone(),
+        phase: ReviewPhase::Running,
+        summary: format!("Creating remediation PR for #{}", request.candidate.pr_number),
+        note: Some(
+            "Opening a remediation branch and follow-up pull request from the approved review report."
+                .to_string(),
+        ),
+        remediation_required: Some(true),
+    });
+
+    let remediation = run_remediation(
+        context.root,
+        &pr,
+        &request.linear_identifier,
+        &request.review_output,
+        context.config,
+        context.planning_meta,
+        context.args,
+    )?;
+    let outcome = InteractiveReviewOutcome {
+        kind: InteractiveSessionKind::Review,
+        candidate: request.candidate.clone(),
+        summary: "Remediation PR created".to_string(),
+        review_output: request.review_output.clone(),
+        follow_up_ticket_set: None,
+        remediation_required: true,
+        linear_identifier: Some(request.linear_identifier.clone()),
+        remediation_pr_number: Some(remediation.pr_number),
+        remediation_pr_url: Some(remediation.pr_url),
+    };
+    session = review_session_from_candidate(
+        &request.candidate,
+        ReviewPhase::Completed,
+        "Remediation PR created",
+    );
+    session.remediation_required = Some(true);
+    session.remediation_pr_number = outcome.remediation_pr_number;
+    session.remediation_pr_url = outcome.remediation_pr_url.clone();
+    session.linear_identifier = Some(request.linear_identifier.clone());
+    persist_review_session(context.store, &session)?;
+    emit(ReviewExecutionEvent::Completed(outcome));
+
+    Ok(())
+}
+
+fn execute_follow_up_ticket_with_progress(
+    context: &ReviewExecutionContext<'_>,
+    initial_candidate: &ReviewLaunchCandidate,
+    mut emit: impl FnMut(ReviewExecutionEvent),
+) -> Result<()> {
+    let gh = GhCli;
+    let mut candidate = initial_candidate.clone();
+    let mut session = review_session_from_candidate(
+        &candidate,
+        ReviewPhase::Claimed,
+        "Queued for follow-up ticket analysis",
+    );
+    persist_review_session(context.store, &session)?;
+
+    emit(ReviewExecutionEvent::Progress {
+        kind: InteractiveSessionKind::FollowUpTickets,
+        candidate: candidate.clone(),
+        phase: ReviewPhase::Claimed,
+        summary: format!(
+            "Queued follow-up ticket analysis for PR #{}",
+            candidate.pr_number
+        ),
+        note: Some("Human approval received. Starting follow-up ticket analysis.".to_string()),
+        remediation_required: None,
+    });
+    if context.cancel.load(Ordering::Relaxed) {
+        emit(ReviewExecutionEvent::Cancelled {
+            kind: InteractiveSessionKind::FollowUpTickets,
+            candidate: candidate.clone(),
+            summary: format!("Cancelled ticket analysis for PR #{}", candidate.pr_number),
+            note: "Ticket analysis cancelled before loading PR context.".to_string(),
+            review_output: None,
+            remediation_required: None,
+        });
+        return Ok(());
+    }
+
+    let pr = fetch_pr_metadata(&gh, context.root, candidate.pr_number)?;
+    candidate = candidate_from_metadata(&pr);
+    session = review_session_from_candidate(
+        &candidate,
+        ReviewPhase::ReviewStarted,
+        "Loading PR context for follow-up ticket analysis",
+    );
+    persist_review_session(context.store, &session)?;
+    emit(ReviewExecutionEvent::Progress {
+        kind: InteractiveSessionKind::FollowUpTickets,
+        candidate: candidate.clone(),
+        phase: ReviewPhase::ReviewStarted,
+        summary: format!("Loading ticket recommendation context for PR #{}", candidate.pr_number),
+        note: Some(
+            "Resolving PR metadata, diff scope, and linked ticket context for future work suggestions."
+                .to_string(),
+        ),
+        remediation_required: None,
+    });
+
+    let linear_identifier = resolve_linear_identifier(&pr)?;
+    let diff = fetch_pr_diff(context.root, candidate.pr_number)?;
+    let context_bundle = load_codebase_context_bundle(context.root).unwrap_or_default();
+    let workflow_contract = load_workflow_contract(context.root).unwrap_or_default();
+    let repo_map = render_repo_map(context.root).unwrap_or_default();
+    let ticket_context = gather_linear_ticket_context(
+        context.root,
+        context.config,
+        context.planning_meta,
+        &linear_identifier,
+    )?;
+
+    let prompt = assemble_follow_up_linear_prompt(
+        &pr,
+        &linear_identifier,
+        &diff,
+        &context_bundle,
+        &workflow_contract,
+        &repo_map,
+        &ticket_context,
+    );
+    let agent_args = RunAgentArgs {
+        root: Some(context.root.to_path_buf()),
+        route_key: Some(AGENT_ROUTE_AGENTS_REVIEW.to_string()),
+        agent: context.args.agent.clone(),
+        prompt,
+        instructions: Some(VIEW_LINEAR_INSTRUCTIONS.to_string()),
+        model: context.args.model.clone(),
+        reasoning: context.args.reasoning.clone(),
+        transport: None,
+        attachments: Vec::new(),
+    };
+    let invocation = resolve_agent_invocation_for_planning(
+        context.config,
+        context.planning_meta,
+        &agent_args,
+    )?;
+
+    candidate.linear_identifier = Some(linear_identifier.clone());
+    candidate.linear_error = None;
+    session = review_session_from_candidate(
+        &candidate,
+        ReviewPhase::Running,
+        format!("Running follow-up ticket analysis with {}", invocation.agent),
+    );
+    persist_review_session(context.store, &session)?;
+    emit(ReviewExecutionEvent::Progress {
+        kind: InteractiveSessionKind::FollowUpTickets,
+        candidate: candidate.clone(),
+        phase: ReviewPhase::Running,
+        summary: format!("Running follow-up ticket analysis with {}", invocation.agent),
+        note: Some(
+            "Analyzing the PR for non-blocking future Linear ticket recommendations."
+                .to_string(),
+        ),
+        remediation_required: None,
+    });
+
+    let report = run_agent_capture(&agent_args)?;
+    let ticket_set = normalize_follow_up_ticket_set(parse_follow_up_ticket_set(&report.stdout)?)?;
+    let review_output = render_follow_up_ticket_set_markdown(&ticket_set);
+    if context.cancel.load(Ordering::Relaxed) {
+        emit(ReviewExecutionEvent::Cancelled {
+            kind: InteractiveSessionKind::FollowUpTickets,
+            candidate: candidate.clone(),
+            summary: format!("Cancelled ticket analysis for PR #{}", candidate.pr_number),
+            note: "Ticket analysis cancelled after the agent finished. Keeping the report."
+                .to_string(),
+            review_output: Some(review_output),
+            remediation_required: None,
+        });
+        return Ok(());
+    }
+
+    let outcome = InteractiveReviewOutcome {
+        kind: InteractiveSessionKind::FollowUpTickets,
+        candidate: candidate.clone(),
+        summary: "Follow-up ticket recommendations ready".to_string(),
+        review_output,
+        follow_up_ticket_set: Some(ticket_set),
+        remediation_required: false,
+        linear_identifier: Some(linear_identifier.clone()),
+        remediation_pr_number: None,
+        remediation_pr_url: None,
+    };
+    session = review_session_from_candidate(
+        &candidate,
+        ReviewPhase::Completed,
+        "Follow-up ticket recommendations ready",
+    );
+    session.linear_identifier = Some(linear_identifier);
+    persist_review_session(context.store, &session)?;
+    emit(ReviewExecutionEvent::Completed(outcome));
+
+    Ok(())
+}
+
+fn spawn_follow_up_ticket_revision_job(
+    root: std::path::PathBuf,
+    args: ReviewRunArgs,
+    review: FollowUpTicketReviewApp,
+) -> Receiver<FollowUpTicketJobEvent> {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let result = revise_follow_up_ticket_plan(&root, &args, &review).map(|plan| {
+            let mut next = FollowUpTicketReviewApp::new(review.candidate.clone(), plan);
+            next.revision = review.revision + 1;
+            FollowUpTicketJobEvent::RevisionReady(Box::new(next))
+        });
+
+        let event = match result {
+            Ok(event) => event,
+            Err(error) => FollowUpTicketJobEvent::Failed {
+                pr_number: review.pr_number,
+                error: error.to_string(),
+            },
+        };
+        let _ = sender.send(event);
+    });
+    receiver
+}
+
+fn spawn_follow_up_ticket_create_job(
+    root: std::path::PathBuf,
+    config: AppConfig,
+    planning_meta: PlanningMeta,
+    review: FollowUpTicketReviewApp,
+) -> Receiver<FollowUpTicketJobEvent> {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let result =
+            create_follow_up_linear_issues(&root, &config, &planning_meta, &review).map(|issues| {
+                FollowUpTicketJobEvent::Created {
+                    pr_number: review.pr_number,
+                    issues,
+                }
+            });
+        let event = match result {
+            Ok(event) => event,
+            Err(error) => FollowUpTicketJobEvent::Failed {
+                pr_number: review.pr_number,
+                error: error.to_string(),
+            },
+        };
+        let _ = sender.send(event);
+    });
+    receiver
+}
+
+fn revise_follow_up_ticket_plan(
+    root: &Path,
+    args: &ReviewRunArgs,
+    review: &FollowUpTicketReviewApp,
+) -> Result<FollowUpTicketSet> {
+    let prompt = assemble_follow_up_ticket_revision_prompt(root, review)?;
+    let output = run_agent_capture(&RunAgentArgs {
+        root: Some(root.to_path_buf()),
+        route_key: Some(AGENT_ROUTE_AGENTS_REVIEW.to_string()),
+        agent: args.agent.clone(),
+        prompt,
+        instructions: Some(VIEW_LINEAR_INSTRUCTIONS.to_string()),
+        model: args.model.clone(),
+        reasoning: args.reasoning.clone(),
+        transport: None,
+        attachments: Vec::new(),
+    })?;
+    normalize_follow_up_ticket_set(parse_follow_up_ticket_set(&output.stdout)?)
+}
+
+fn create_follow_up_linear_issues(
+    root: &Path,
+    app_config: &AppConfig,
+    planning_meta: &PlanningMeta,
+    review: &FollowUpTicketReviewApp,
+) -> Result<Vec<IssueSummary>> {
+    let remembered_selection = load_remembered_backlog_selection(root)?;
+    let plan = selected_follow_up_ticket_plan(review);
+    let label = planning_meta.effective_plan_label(app_config);
+    let linear_config = LinearConfig::from_sources(
+        app_config,
+        planning_meta,
+        Some(root),
+        LinearConfigOverrides::default(),
+    )?;
+    let default_team = linear_config.default_team.clone();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to initialize Linear runtime for follow-up ticket creation")?;
+
+    runtime.block_on(async move {
+        let service = LinearService::new(ReqwestLinearClient::new(linear_config)?, default_team);
+        let mut created = Vec::with_capacity(plan.tickets.len());
+        for ticket in &plan.tickets {
+            let resolved_defaults = resolve_plan_ticket_defaults(
+                app_config,
+                planning_meta,
+                &remembered_selection,
+                &PlanTicketResolutionInput {
+                    zero_prompt: false,
+                    explicit_team: None,
+                    explicit_project: None,
+                    overrides: TicketOptionOverrides::default(),
+                    built_in_label: label.clone(),
+                    generated_priority: ticket.priority,
+                },
+            );
+            let assignee_id = service
+                .resolve_assignee_id(resolved_defaults.assignee.as_deref())
+                .await?;
+            let issue = service
+                .create_issue(IssueCreateSpec {
+                    team: resolved_defaults.team.clone(),
+                    title: ticket.title.clone(),
+                    description: Some(render_follow_up_ticket_issue_description(
+                        &review.candidate,
+                        ticket,
+                    )),
+                    project: resolved_defaults.project.clone(),
+                    project_id: resolved_defaults.project_id.clone(),
+                    parent_id: None,
+                    state: resolved_defaults.state.clone(),
+                    priority: resolved_defaults.priority,
+                    assignee_id,
+                    labels: resolved_defaults.labels.clone(),
+                })
+                .await?;
+            if let Err(error) = save_remembered_backlog_selection(root, &issue) {
+                eprintln!("warning: failed to persist remembered backlog defaults: {error}");
+            }
+            created.push(issue);
+        }
+        Ok::<Vec<IssueSummary>, anyhow::Error>(created)
+    })
+}
+
+fn render_follow_up_ticket_issue_description(
+    candidate: &ReviewLaunchCandidate,
+    ticket: &FollowUpTicketDraft,
+) -> String {
+    let mut lines = vec![
+        format!("Follow-up work identified from PR #{}: {}", candidate.pr_number, candidate.title),
+        String::new(),
+        "## Why Now".to_string(),
+        ticket.why_now.clone(),
+        String::new(),
+        "## Outcome".to_string(),
+        ticket.outcome.clone(),
+        String::new(),
+        "## Scope".to_string(),
+        ticket.scope.clone(),
+    ];
+    if !ticket.acceptance_criteria.is_empty() {
+        lines.push(String::new());
+        lines.push("## Suggested Acceptance Criteria".to_string());
+        lines.extend(
+            ticket
+                .acceptance_criteria
+                .iter()
+                .map(|criterion| format!("- {criterion}")),
+        );
+    }
+    lines.join("\n")
+}
+
+fn parse_follow_up_ticket_set(output: &str) -> Result<FollowUpTicketSet> {
+    serde_json::from_str(output.trim())
+        .context("follow-up ticket analysis returned invalid JSON")
+}
+
+fn normalize_follow_up_ticket_set(parsed: FollowUpTicketSet) -> Result<FollowUpTicketSet> {
+    let normalized = FollowUpTicketSet {
+        summary: parsed.summary.trim().to_string(),
+        tickets: parsed
+            .tickets
+            .into_iter()
+            .map(|ticket| FollowUpTicketDraft {
+                title: ticket.title.trim().to_string(),
+                why_now: ticket.why_now.trim().to_string(),
+                outcome: ticket.outcome.trim().to_string(),
+                scope: ticket.scope.trim().to_string(),
+                acceptance_criteria: ticket
+                    .acceptance_criteria
+                    .into_iter()
+                    .map(|criterion| criterion.trim().to_string())
+                    .filter(|criterion| !criterion.is_empty())
+                    .collect(),
+                priority: ticket.priority,
+            })
+            .filter(|ticket| !ticket.title.is_empty())
+            .collect(),
+        notes: parsed
+            .notes
+            .into_iter()
+            .map(|note| note.trim().to_string())
+            .filter(|note| !note.is_empty())
+            .collect(),
+    };
+
+    Ok(normalized)
+}
+
+fn render_follow_up_ticket_set_markdown(plan: &FollowUpTicketSet) -> String {
+    let mut lines = vec![
+        "## Follow-Up Linear Recommendations".to_string(),
+        String::new(),
+        "### Summary".to_string(),
+        plan.summary.clone(),
+        String::new(),
+        "### Recommended Tickets".to_string(),
+    ];
+    if plan.tickets.is_empty() {
+        lines.push("No strong follow-up tickets recommended.".to_string());
+    } else {
+        for (index, ticket) in plan.tickets.iter().enumerate() {
+            lines.push(format!("{}. **Title**: {}", index + 1, ticket.title));
+            lines.push(format!("   - **Why now**: {}", ticket.why_now));
+            lines.push(format!("   - **Outcome**: {}", ticket.outcome));
+            lines.push(format!("   - **Scope**: {}", ticket.scope));
+            lines.push("   - **Suggested acceptance criteria**:".to_string());
+            if ticket.acceptance_criteria.is_empty() {
+                lines.push("     - None provided".to_string());
+            } else {
+                lines.extend(
+                    ticket
+                        .acceptance_criteria
+                        .iter()
+                        .map(|criterion| format!("     - {criterion}")),
+                );
+            }
+        }
+    }
+    lines.push(String::new());
+    lines.push("### Nice-To-Have Notes".to_string());
+    if plan.notes.is_empty() {
+        lines.push("None.".to_string());
+    } else {
+        lines.extend(plan.notes.iter().map(|note| format!("- {note}")));
+    }
+    lines.join("\n")
+}
+
+fn assemble_follow_up_ticket_revision_prompt(
+    root: &Path,
+    review: &FollowUpTicketReviewApp,
+) -> Result<String> {
+    let workflow_contract = load_workflow_contract(root).unwrap_or_default();
+    let context_bundle = load_codebase_context_bundle(root).unwrap_or_default();
+    let current_plan = serde_json::to_string_pretty(&review.plan)
+        .context("failed to serialize follow-up ticket draft for revision")?;
+    let kept_tickets = follow_up_ticket_kept_indices(review)
+        .into_iter()
+        .filter_map(|index| review.plan.tickets.get(index))
+        .cloned()
+        .collect::<Vec<_>>();
+    let kept_tickets_json = serde_json::to_string_pretty(&kept_tickets)
+        .context("failed to serialize standalone follow-up tickets for revision")?;
+    let merge_plan = follow_up_ticket_merge_groups(review)
+        .iter()
+        .map(|(group, indices)| {
+            let tickets = indices
+                .iter()
+                .filter_map(|index| review.plan.tickets.get(*index))
+                .cloned()
+                .collect::<Vec<_>>();
+            serde_json::json!({
+                "group": group,
+                "tickets": tickets,
+            })
+        })
+        .collect::<Vec<_>>();
+    let merge_plan_json = serde_json::to_string_pretty(&merge_plan)
+        .context("failed to serialize follow-up merge groups for revision")?;
+
+    Ok(format!(
+        "You are revising follow-up Linear ticket recommendations for the active repository.\n\n\
+PR context:\n- Number: #{pr_number}\n- Title: {title}\n- URL: {url}\n- Linked Linear ticket: {linear}\n\n\
+Workflow contract:\n{workflow_contract}\n\n\
+Repository context:\n{context_bundle}\n\n\
+Current draft recommendation JSON:\n{current_plan}\n\n\
+Selected standalone tickets to preserve:\n{kept_tickets_json}\n\n\
+Merge groups:\n{merge_plan_json}\n\n\
+Rebuild the next recommendation set from only the selected standalone tickets plus the numbered merge groups. Tickets omitted from both lists were intentionally skipped and must not appear in the rebuilt output. For each merge group, combine all tickets in that group into exactly one replacement ticket unless a tiny wording edit is needed for coherence.\n\n\
+Return JSON only using this exact shape:\n\
+{{\n  \"summary\":\"One paragraph summary of the overall recommendation set\",\n  \"tickets\":[\n    {{\n      \"title\":\"Issue title\",\n      \"why_now\":\"Why this PR makes the follow-up timely\",\n      \"outcome\":\"What shipping the ticket improves\",\n      \"scope\":\"Concrete scope boundaries\",\n      \"acceptance_criteria\":[\"criterion one\",\"criterion two\"],\n      \"priority\": 2\n    }}\n  ],\n  \"notes\":[\"Optional extra note\"]\n}}",
+        pr_number = review.pr_number,
+        title = review.candidate.title,
+        url = review.candidate.url,
+        linear = review
+            .candidate
+            .linear_identifier
+            .clone()
+            .unwrap_or_else(|| "unresolved".to_string()),
+    ))
 }
 
 fn persist_review_session(
@@ -1113,43 +3409,78 @@ fn interactive_preview_viewport(area: Rect) -> Rect {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(6),
+            Constraint::Length(4),
             Constraint::Min(0),
-            Constraint::Length(7),
+            Constraint::Length(5),
         ])
         .split(area);
     let body = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
-        .split(outer[1]);
+        .constraints([Constraint::Percentage(44), Constraint::Percentage(56)])
+        .split(outer[2]);
     body[1]
 }
 
 fn render_interactive_review(frame: &mut ratatui::Frame<'_>, app: &InteractiveReviewApp) {
+    if app.stage == InteractiveReviewStage::TicketReview {
+        if let Some(review) = app.ticket_review.as_ref() {
+            render_follow_up_ticket_review(frame, review);
+        }
+        return;
+    }
+    if app.stage == InteractiveReviewStage::TicketLoading {
+        render_loading_panel(
+            frame,
+            frame.area(),
+            &crate::progress::LoadingPanelData {
+                title: "Follow-Up Ticket Flow [loading]".to_string(),
+                message: app.status.clone(),
+                detail: "MetaStack is rebuilding the curated ticket preview or creating the selected issues in Linear."
+                    .to_string(),
+                spinner_index: 0,
+                status_line:
+                    "State: loading. The dashboard advances automatically when the job completes."
+                        .to_string(),
+            },
+        );
+        return;
+    }
+    let narrow = frame.area().width < 110;
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(6),
+            Constraint::Length(4),
             Constraint::Min(0),
-            Constraint::Length(7),
+            Constraint::Length(5),
         ])
         .split(frame.area());
     let body = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
-        .split(outer[1]);
+        .direction(if narrow {
+            Direction::Vertical
+        } else {
+            Direction::Horizontal
+        })
+        .constraints(if narrow {
+            vec![Constraint::Percentage(46), Constraint::Percentage(54)]
+        } else {
+            vec![Constraint::Percentage(44), Constraint::Percentage(56)]
+        })
+        .split(outer[2]);
+    let left = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(5), Constraint::Min(0)])
+        .split(body[0]);
 
     let status_badge = match app.stage {
         InteractiveReviewStage::Loading => badge("loading", Tone::Info),
-        InteractiveReviewStage::Select => badge("select", Tone::Accent),
         InteractiveReviewStage::Confirm => badge("confirm", Tone::Accent),
-        InteractiveReviewStage::Running => badge("running", Tone::Info),
-        InteractiveReviewStage::Completed => {
-            if app.error.is_some() {
-                badge("failed", Tone::Danger)
-            } else {
-                badge("complete", Tone::Success)
-            }
+        InteractiveReviewStage::Select if app.active_session_count() > 0 => {
+            badge("running", Tone::Info)
         }
+        InteractiveReviewStage::Select => badge("select", Tone::Accent),
+        InteractiveReviewStage::TicketReview => badge("review", Tone::Accent),
+        InteractiveReviewStage::TicketLoading => badge("loading", Tone::Info),
         InteractiveReviewStage::Empty => badge("empty", Tone::Muted),
     };
     let header = paragraph(
@@ -1157,7 +3488,7 @@ fn render_interactive_review(frame: &mut ratatui::Frame<'_>, app: &InteractiveRe
             Line::from(vec![
                 status_badge,
                 Span::raw(" "),
-                Span::styled("meta agents review", emphasis_style()),
+                Span::styled(app.command.dashboard_title(), emphasis_style()),
             ]),
             Line::from(app.status.clone()),
             Line::from(vec![
@@ -1167,35 +3498,269 @@ fn render_interactive_review(frame: &mut ratatui::Frame<'_>, app: &InteractiveRe
                     InteractiveReviewMode::Discovery => "guided queue".to_string(),
                 }),
                 Span::styled("  Candidates ", label_style()),
-                Span::raw(app.candidates.len().to_string()),
+                Span::raw(app.visible_candidate_indices().len().to_string()),
+                Span::styled("  Active ", label_style()),
+                Span::raw(app.active_session_count().to_string()),
             ]),
-            key_hints(&interactive_key_hints(app)),
         ]),
-        panel_title("Review Flow", false),
+        panel_title(
+            match app.command {
+                ReviewCommandKind::Review => "Review Flow",
+                ReviewCommandKind::Retro => "Retro Flow",
+            },
+            false,
+        ),
     );
     frame.render_widget(header, outer[0]);
 
-    render_interactive_candidate_list(frame, body[0], app);
+    render_interactive_navigation(frame, outer[1], app);
+
+    render_interactive_secondary_panel(frame, left[0], app);
+    render_interactive_primary_list(frame, left[1], app);
+
     let preview = scrollable_content_paragraph(
-        app.selected_candidate_text(),
+        if app.tab == InteractiveReviewTab::Candidates {
+            app.selected_candidate_text()
+        } else {
+            app.selected_session_text()
+        },
         panel_title(
-            match app.outcome {
-                Some(_) => "Review Output",
-                None => "Selected PR Preview",
+            match app.tab {
+                InteractiveReviewTab::Candidates => "Selected PR Preview",
+                InteractiveReviewTab::Sessions => "Session Detail",
             },
-            app.focus == InteractiveReviewFocus::Preview,
+            matches!(
+                app.focus,
+                InteractiveReviewFocus::CandidatePreview | InteractiveReviewFocus::SessionPreview
+            ),
         ),
-        &app.preview_scroll,
+        if app.tab == InteractiveReviewTab::Candidates {
+            &app.preview_scroll
+        } else {
+            &app.session_preview_scroll
+        },
     )
     .wrap(Wrap { trim: false });
     frame.render_widget(preview, body[1]);
 
     let footer = paragraph(
         interactive_footer_text(app),
-        panel_title("Next Step", false),
+        panel_title("Controls", false),
     )
     .wrap(Wrap { trim: false });
-    frame.render_widget(footer, outer[2]);
+    frame.render_widget(footer, outer[3]);
+}
+
+fn render_follow_up_ticket_review(
+    frame: &mut ratatui::Frame<'_>,
+    app: &FollowUpTicketReviewApp,
+) {
+    let layout = follow_up_ticket_review_layout(frame.area());
+
+    let items = app
+        .plan
+        .tickets
+        .iter()
+        .enumerate()
+        .map(|(index, ticket)| {
+            ListItem::new(format!(
+                "{} {}",
+                follow_up_ticket_review_marker(app.decisions.get(index).copied().unwrap_or_default()),
+                ticket.title
+            ))
+        })
+        .collect::<Vec<_>>();
+    let mut state = ListState::default();
+    if !app.plan.tickets.is_empty() {
+        state.select(Some(app.selected.min(app.plan.tickets.len().saturating_sub(1))));
+    }
+    let list_widget = list(
+        items,
+        panel_title(
+            "Suggested Tickets",
+            app.focus == FollowUpTicketReviewFocus::Tickets,
+        ),
+    );
+    frame.render_stateful_widget(list_widget, layout.issue_list, &mut state);
+
+    let detail = scrollable_content_paragraph(
+        app.selected_ticket_text(),
+        panel_title(
+            if app.focus == FollowUpTicketReviewFocus::SelectedTicket {
+                "Selected Ticket [scroll]"
+            } else {
+                "Selected Ticket"
+            },
+            app.focus == FollowUpTicketReviewFocus::SelectedTicket,
+        ),
+        &app.selected_ticket_scroll,
+    )
+    .wrap(Wrap { trim: false });
+    frame.render_widget(detail, layout.selected_ticket);
+
+    let overview = scrollable_content_paragraph(
+        app.overview_text(),
+        panel_title(
+            if app.focus == FollowUpTicketReviewFocus::Overview {
+                "Overview [scroll]"
+            } else {
+                "Overview"
+            },
+            app.focus == FollowUpTicketReviewFocus::Overview,
+        ),
+        &app.overview_scroll,
+    )
+    .wrap(Wrap { trim: false });
+    frame.render_widget(overview, layout.overview);
+
+    let merge = scrollable_content_paragraph(
+        app.combination_plan_text(),
+        panel_title(
+            if app.focus == FollowUpTicketReviewFocus::CombinationPlan {
+                "Combination Plan [scroll]"
+            } else {
+                "Combination Plan"
+            },
+            app.focus == FollowUpTicketReviewFocus::CombinationPlan,
+        ),
+        &app.combination_scroll,
+    )
+    .wrap(Wrap { trim: false });
+    frame.render_widget(merge, layout.combination_plan);
+
+    let help = paragraph(
+        Text::from(vec![
+            Line::from(
+                "Tab/Shift-Tab changes review focus. Space cycles [ ] skip -> [x] keep -> [1] -> [2] for the active ticket.",
+            ),
+            Line::from(
+                "Enter creates the checked batch or rebuilds the next preview when merge groups are present. `x` keeps, `s` skips, `u` clears all marks, and Esc returns to sessions.",
+            ),
+            if let Some(error) = app.error.as_deref() {
+                Line::from(format!("Error: {error}"))
+            } else {
+                Line::from("")
+            },
+        ]),
+        panel_title("Controls", false),
+    )
+    .wrap(Wrap { trim: false });
+    frame.render_widget(help, layout.footer);
+}
+
+fn render_interactive_navigation(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    app: &InteractiveReviewApp,
+) {
+    let text = Text::from(vec![
+        Line::from(vec![
+            Span::styled("View ", label_style()),
+            tab_label(
+                "Candidates",
+                app.tab == InteractiveReviewTab::Candidates,
+                app.visible_candidate_indices().len(),
+            ),
+            Span::raw("  "),
+            tab_label(
+                "Sessions",
+                app.tab == InteractiveReviewTab::Sessions,
+                app.sessions.len(),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Focus ", label_style()),
+            badge(interactive_focus_label(app.focus), Tone::Accent),
+            Span::raw("  "),
+            Span::styled("Tab ", label_style()),
+            Span::raw("rotate panes"),
+            Span::raw("  "),
+            Span::styled("Esc ", label_style()),
+            Span::raw("back to candidates"),
+        ]),
+    ]);
+    frame.render_widget(
+        paragraph(text, panel_title("Navigation", false)).wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn render_interactive_secondary_panel(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    app: &InteractiveReviewApp,
+) {
+    match app.tab {
+        InteractiveReviewTab::Candidates => {
+            let rendered = app.query.render(
+                "Search by PR number, title, author, branch, or Linear identifier...",
+                app.focus == InteractiveReviewFocus::CandidateList,
+            );
+            let title = if app.focus == InteractiveReviewFocus::CandidateList {
+                "Candidate Search [active]"
+            } else {
+                "Candidate Search"
+            };
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .title(title)
+                .padding(Padding::new(1, 1, 1, 0));
+            let inner = block.inner(area);
+            frame.render_widget(rendered.paragraph(block), area);
+            rendered.set_cursor(frame, inner);
+        }
+        InteractiveReviewTab::Sessions => {
+            let text = Text::from(vec![
+                Line::from(vec![
+                    Span::styled("Active ", label_style()),
+                    Span::raw(app.active_session_count().to_string()),
+                    Span::styled("  Completed ", label_style()),
+                    Span::raw(
+                        app.sessions
+                            .iter()
+                            .filter(|session| matches!(session.phase, ReviewPhase::Completed))
+                            .count()
+                            .to_string(),
+                    ),
+                    Span::styled("  Blocked ", label_style()),
+                    Span::raw(
+                        app.sessions
+                            .iter()
+                            .filter(|session| matches!(session.phase, ReviewPhase::Blocked))
+                            .count()
+                            .to_string(),
+                    ),
+                ]),
+                Line::from(""),
+                Line::from(
+                    "Press Esc to return to candidates and queue more reviews or follow-up ticket ideas while current sessions keep running.",
+                ),
+            ]);
+            let widget = ratatui::widgets::Paragraph::new(text)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(panel_title(
+                            "Session Summary",
+                            app.focus == InteractiveReviewFocus::SessionList,
+                        ))
+                        .padding(Padding::new(1, 1, 1, 0)),
+                )
+                .wrap(Wrap { trim: false });
+            frame.render_widget(widget, area);
+        }
+    }
+}
+
+fn render_interactive_primary_list(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    app: &InteractiveReviewApp,
+) {
+    match app.tab {
+        InteractiveReviewTab::Candidates => render_interactive_candidate_list(frame, area, app),
+        InteractiveReviewTab::Sessions => render_interactive_session_list(frame, area, app),
+    }
 }
 
 fn render_interactive_candidate_list(
@@ -1203,22 +3768,43 @@ fn render_interactive_candidate_list(
     area: Rect,
     app: &InteractiveReviewApp,
 ) {
-    let items = if app.candidates.is_empty() {
+    let visible = app.visible_candidate_indices();
+    let items = if visible.is_empty() {
         vec![ListItem::new(empty_state(
-            "No pull requests are currently queued for review.",
-            "Add the `metastack` label to a PR or press `q` to exit.",
+            "No pull requests matched the current candidate query.",
+            "Adjust the search text or press `R` to refresh the candidate queue.",
         ))]
     } else {
-        app.candidates
+        visible
             .iter()
+            .filter_map(|index| app.candidates.get(*index))
             .map(|candidate| {
                 let linear = candidate
                     .linear_identifier
                     .clone()
                     .unwrap_or_else(|| "unresolved".to_string());
+                let review_active =
+                    app.has_active_session(candidate.pr_number, InteractiveSessionKind::Review);
+                let ideas_active = app.has_active_session(
+                    candidate.pr_number,
+                    InteractiveSessionKind::FollowUpTickets,
+                );
+                let selected = if app.selected_prs.contains(&candidate.pr_number) {
+                    badge("selected", Tone::Success)
+                } else if review_active && ideas_active {
+                    badge("2 active", Tone::Info)
+                } else if review_active {
+                    badge("review", Tone::Info)
+                } else if ideas_active {
+                    badge("ideas", Tone::Info)
+                } else {
+                    badge("ready", Tone::Muted)
+                };
                 ListItem::new(Text::from(vec![
                     Line::from(vec![
                         badge(format!("#{}", candidate.pr_number), Tone::Accent),
+                        Span::raw(" "),
+                        selected,
                         Span::raw(" "),
                         Span::styled(candidate.title.clone(), emphasis_style()),
                     ]),
@@ -1238,22 +3824,71 @@ fn render_interactive_candidate_list(
     };
 
     let mut state = ListState::default();
-    if !app.candidates.is_empty() {
+    if !visible.is_empty() {
+        state.select(Some(app.selected_index.min(visible.len().saturating_sub(1))));
+    }
+
+    let title = match app.mode {
+        InteractiveReviewMode::Direct => "Review Candidate",
+        InteractiveReviewMode::Discovery => "Candidate PRs",
+    };
+    let widget = list(
+        items,
+        panel_title(title, app.focus == InteractiveReviewFocus::CandidateList),
+    );
+    frame.render_stateful_widget(widget, area, &mut state);
+}
+
+fn render_interactive_session_list(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    app: &InteractiveReviewApp,
+) {
+    let items = if app.sessions.is_empty() {
+        vec![ListItem::new(empty_state(
+            "No agent sessions have started yet.",
+            "Queue one or more review or follow-up-ticket sessions to watch live progress here.",
+        ))]
+    } else {
+        app.sessions
+            .iter()
+            .map(|session| {
+                let tone = match session.phase {
+                    ReviewPhase::Completed => Tone::Success,
+                    ReviewPhase::Blocked => Tone::Danger,
+                    _ => Tone::Info,
+                };
+                ListItem::new(Text::from(vec![
+                    Line::from(vec![
+                        badge(format!("#{}", session.candidate.pr_number), Tone::Accent),
+                        Span::raw(" "),
+                        badge(session.kind.label(), session.kind.tone()),
+                        Span::raw(" "),
+                        badge(session.phase.display_label(), tone),
+                    ]),
+                    Line::from(Span::styled(
+                        session.candidate.title.clone(),
+                        emphasis_style(),
+                    )),
+                    Line::from(vec![
+                        Span::styled("Summary ", label_style()),
+                        Span::raw(session.summary.clone()),
+                    ]),
+                ]))
+            })
+            .collect()
+    };
+
+    let mut state = ListState::default();
+    if !app.sessions.is_empty() {
         state.select(Some(
-            app.selected_index
-                .min(app.candidates.len().saturating_sub(1)),
+            app.session_index.min(app.sessions.len().saturating_sub(1)),
         ));
     }
 
     let widget = list(
         items,
-        panel_title(
-            match app.mode {
-                InteractiveReviewMode::Direct => "Review Candidate",
-                InteractiveReviewMode::Discovery => "Candidate PRs",
-            },
-            app.focus == InteractiveReviewFocus::Candidates,
-        ),
+        panel_title("Agent Sessions", app.focus == InteractiveReviewFocus::SessionList),
     );
     frame.render_stateful_widget(widget, area, &mut state);
 }
@@ -1261,67 +3896,90 @@ fn render_interactive_candidate_list(
 fn interactive_footer_text(app: &InteractiveReviewApp) -> Text<'static> {
     if let Some(error) = app.error.as_deref() {
         return Text::from(vec![
-            Line::from(Span::styled("The review flow failed.", emphasis_style())),
+            Line::from(Span::styled(
+                match app.command {
+                    ReviewCommandKind::Review => "The review flow failed.",
+                    ReviewCommandKind::Retro => "The retro flow failed.",
+                },
+                emphasis_style(),
+            )),
             Line::from(""),
             Line::from(error.to_string()),
             Line::from(""),
-            Line::from(
-                "Press `q` to exit, or `Esc` to return to the candidate list when available.",
-            ),
+            key_hints(&[("Esc", "back"), ("q", "exit")]),
         ]);
     }
 
     match app.stage {
         InteractiveReviewStage::Loading => Text::from(vec![
-            Line::from("The dashboard is gathering discovery and prerequisite state."),
+            Line::from(match app.command {
+                ReviewCommandKind::Review => {
+                    "The dashboard is gathering discovery and prerequisite state."
+                }
+                ReviewCommandKind::Retro => {
+                    "The dashboard is gathering retro candidate and prerequisite state."
+                }
+            }),
             Line::from(""),
             Line::from(
                 "Stay in this screen while MetaStack verifies auth, loads PR metadata, and prepares review previews.",
             ),
-        ]),
-        InteractiveReviewStage::Select => Text::from(vec![
-            Line::from("Review is human-gated."),
             Line::from(""),
-            Line::from(
-                "Use Up/Down to choose a PR. Tab moves into the preview pane. Enter opens the approval screen; no review work starts until you confirm.",
-            ),
+            key_hints(&interactive_key_hints(app)),
         ]),
-        InteractiveReviewStage::Confirm => Text::from(vec![
-            Line::from("This PR will be reviewed only after explicit approval."),
-            Line::from(""),
-            Line::from(
-                "Press Enter to start the audit and possible remediation flow, or Esc to go back without launching anything.",
-            ),
-        ]),
-        InteractiveReviewStage::Running => Text::from(vec![
-            Line::from("A review session is active."),
-            Line::from(""),
-            Line::from(
-                "The dashboard will stay on this screen until the review completes so the current phase and remediation status remain visible.",
-            ),
-        ]),
-        InteractiveReviewStage::Completed => Text::from(vec![
-            Line::from("The review session finished."),
-            Line::from(""),
-            Line::from(match app.outcome.as_ref() {
-                Some(outcome) if outcome.remediation_required => {
-                    "Required fixes were found and a remediation PR was opened."
+        InteractiveReviewStage::Select => Text::from(match app.command {
+            ReviewCommandKind::Review => vec![
+                Line::from("Search candidates, mark PRs with Space, then press Enter to queue reviews."),
+                Line::from("Use the Navigation strip to track the active view and focused pane."),
+                Line::from(""),
+                key_hints(&interactive_key_hints(app)),
+            ],
+            ReviewCommandKind::Retro => vec![
+                Line::from("Search candidates, mark PRs with Space, then press Enter to queue retro ticket analysis."),
+                Line::from("Use the Navigation strip to track the active view and focused pane."),
+                Line::from(""),
+                key_hints(&interactive_key_hints(app)),
+            ],
+        }),
+        InteractiveReviewStage::Confirm => {
+            let detail = match app.dialog {
+                Some(InteractiveReviewDialog::LaunchReviews(_)) => {
+                    "Press Enter to start the selected reviews."
                 }
-                Some(_) => "No remediation PR was needed for the selected review.",
-                None => "The session ended without a completed review artifact.",
-            }),
-            Line::from(""),
-            Line::from(match app.mode {
-                InteractiveReviewMode::Direct => "Press Enter or q to exit this review session.",
-                InteractiveReviewMode::Discovery => {
-                    "Press Esc to return to the candidate list for another review, or q to exit."
+                Some(InteractiveReviewDialog::LaunchFollowUpTickets(_)) => {
+                    "Press Enter to analyze the selected PRs for follow-up Linear ticket recommendations."
                 }
-            }),
+                Some(InteractiveReviewDialog::StartRemediation(_)) => {
+                    "Press Enter to create the remediation PR from the review report."
+                }
+                Some(InteractiveReviewDialog::CancelSession(_, _)) => {
+                    "Press Enter to cancel the selected session at the next checkpoint."
+                }
+                None => "Press Enter to continue, or Esc to go back.",
+            };
+            Text::from(vec![
+                Line::from(detail),
+                Line::from(""),
+                key_hints(&interactive_key_hints(app)),
+            ])
+        }
+        InteractiveReviewStage::TicketReview => Text::from(""),
+        InteractiveReviewStage::TicketLoading => Text::from(vec![
+            Line::from("MetaStack is rebuilding the curated follow-up ticket batch or creating the selected issues in Linear."),
+            Line::from(""),
+            key_hints(&[("q", "exit after load")]),
         ]),
         InteractiveReviewStage::Empty => Text::from(vec![
-            Line::from("No review candidates were found."),
+            Line::from(match app.command {
+                ReviewCommandKind::Review => "No review candidates were found.",
+                ReviewCommandKind::Retro => "No retro candidates were found.",
+            }),
             Line::from(""),
-            Line::from("Press q to exit. Run the command again after PRs are labeled for review."),
+            Line::from(
+                "Press `R` to refresh discovery, or `q` to exit and return when additional PRs are labeled for review.",
+            ),
+            Line::from(""),
+            key_hints(&interactive_key_hints(app)),
         ]),
     }
 }
@@ -1329,25 +3987,130 @@ fn interactive_footer_text(app: &InteractiveReviewApp) -> Text<'static> {
 fn interactive_key_hints(app: &InteractiveReviewApp) -> Vec<(&'static str, &'static str)> {
     match app.stage {
         InteractiveReviewStage::Loading => vec![("q", "exit after load")],
-        InteractiveReviewStage::Select => vec![
-            ("Up/Down", "move"),
-            ("Tab", "focus"),
-            ("PgUp/PgDn", "scroll preview"),
-            ("Enter", "approve screen"),
-            ("q", "exit"),
-        ],
-        InteractiveReviewStage::Confirm => {
-            vec![("Enter", "start review"), ("Esc", "back"), ("q", "exit")]
-        }
-        InteractiveReviewStage::Running => vec![("q", "disabled while running")],
-        InteractiveReviewStage::Completed => match app.mode {
-            InteractiveReviewMode::Direct => vec![("Enter", "exit"), ("q", "exit")],
-            InteractiveReviewMode::Discovery => {
-                vec![("Esc", "back to list"), ("q", "exit")]
-            }
+        InteractiveReviewStage::Select => match app.tab {
+            InteractiveReviewTab::Candidates => match app.command {
+                ReviewCommandKind::Review => vec![
+                    ("Type", "search"),
+                    ("Up/Down", "move"),
+                    ("Space", "select"),
+                    ("Tab", "focus"),
+                    ("PgUp/PgDn", "scroll"),
+                    ("Enter", "queue review"),
+                    ("R", "refresh"),
+                    ("q", "exit"),
+                ],
+                ReviewCommandKind::Retro => vec![
+                    ("Type", "search"),
+                    ("Up/Down", "move"),
+                    ("Space", "select"),
+                    ("Tab", "focus"),
+                    ("PgUp/PgDn", "scroll"),
+                    ("Enter", "queue retro"),
+                    ("R", "refresh"),
+                    ("q", "exit"),
+                ],
+            },
+            InteractiveReviewTab::Sessions => session_key_hints(app),
         },
-        InteractiveReviewStage::Empty => vec![("q", "exit")],
+        InteractiveReviewStage::Confirm => {
+            vec![("Enter", "confirm"), ("Esc", "back"), ("q", "exit")]
+        }
+        InteractiveReviewStage::TicketReview => vec![("Esc", "sessions"), ("q", "exit")],
+        InteractiveReviewStage::TicketLoading => vec![("q", "exit after load")],
+        InteractiveReviewStage::Empty => vec![("R", "refresh"), ("q", "exit")],
     }
+}
+
+fn session_key_hints(app: &InteractiveReviewApp) -> Vec<(&'static str, &'static str)> {
+    let mut hints = vec![
+        ("Up/Down", "move"),
+        ("Tab", "focus"),
+        ("PgUp/PgDn", "scroll"),
+    ];
+
+    if let Some(session) = app.selected_session() {
+        if InteractiveReviewApp::session_has_ticket_review(session) {
+            hints.push(("Enter", "review tickets"));
+        }
+        if InteractiveReviewApp::session_needs_remediation_decision(session) {
+            hints.push(("A", "create PR"));
+            hints.push(("N", "keep report"));
+        }
+        if InteractiveReviewApp::session_can_cancel(session) {
+            hints.push(("C", "cancel"));
+        }
+    }
+
+    hints.push(("Esc", "candidates"));
+    hints.push(("q", "exit"));
+    hints
+}
+
+fn tab_label(label: &str, active: bool, count: usize) -> Span<'static> {
+    if active {
+        Span::styled(
+            format!("[{} {}]", label, count),
+            emphasis_style(),
+        )
+    } else {
+        Span::styled(format!("{} {}", label, count), muted_style())
+    }
+}
+
+fn interactive_focus_label(focus: InteractiveReviewFocus) -> &'static str {
+    match focus {
+        InteractiveReviewFocus::CandidateList => "candidate list",
+        InteractiveReviewFocus::CandidatePreview => "candidate detail",
+        InteractiveReviewFocus::SessionList => "session list",
+        InteractiveReviewFocus::SessionPreview => "session detail",
+    }
+}
+
+fn render_markdown_preview(markdown: &str) -> Text<'static> {
+    let mut lines = Vec::new();
+    let mut in_code_block = false;
+
+    for raw_line in markdown.lines() {
+        let trimmed = raw_line.trim_end();
+        if trimmed.starts_with("```") {
+            in_code_block = !in_code_block;
+            lines.push(Line::from(Span::styled(trimmed.to_string(), muted_style())));
+            continue;
+        }
+        if trimmed.is_empty() {
+            lines.push(Line::from(""));
+            continue;
+        }
+        if in_code_block {
+            lines.push(Line::from(Span::styled(trimmed.to_string(), muted_style())));
+            continue;
+        }
+        if let Some(heading) = trimmed.strip_prefix("### ") {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(heading.to_string(), emphasis_style())));
+            continue;
+        }
+        if let Some(heading) = trimmed.strip_prefix("## ") {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(heading.to_string(), emphasis_style())));
+            continue;
+        }
+        if let Some(heading) = trimmed.strip_prefix("# ") {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(heading.to_string(), emphasis_style())));
+            continue;
+        }
+        if let Some(item) = trimmed.strip_prefix("- ").or_else(|| trimmed.strip_prefix("* ")) {
+            lines.push(Line::from(vec![
+                Span::styled("• ", label_style()),
+                Span::raw(item.to_string()),
+            ]));
+            continue;
+        }
+        lines.push(Line::from(trimmed.to_string()));
+    }
+
+    Text::from(lines)
 }
 
 fn verify_gh_auth(root: &Path) -> Result<()> {
@@ -1380,32 +4143,49 @@ fn fetch_pr_metadata(gh: &GhCli, root: &Path, pr_number: u64) -> Result<GhPrMeta
 }
 
 fn resolve_linear_identifier(pr: &GhPrMetadata) -> Result<String> {
-    let identifiers = collect_linear_identifiers(pr);
-    match identifiers.as_slice() {
-        [identifier] => Ok(identifier.clone()),
-        [] => bail!(
-            "no Linear ticket identifier found in PR #{} title, branch, or body. \
-             Expected a pattern like `MET-42` or `ENG-1234`.",
-            pr.number
-        ),
-        _ => bail!(
-            "multiple Linear ticket identifiers found in PR #{}: {}. \
-             Link exactly one ticket in the title, branch, or body.",
-            pr.number,
-            identifiers.join(", ")
-        ),
+    for identifiers in [
+        collect_linear_identifiers_from_labels(&pr.labels),
+        collect_linear_identifiers_from_single_source(&pr.title),
+        collect_linear_identifiers_from_single_source(&pr.head_ref_name),
+        collect_linear_identifiers_from_single_source(pr.body.as_deref().unwrap_or("")),
+    ] {
+        match identifiers.as_slice() {
+            [identifier] => return Ok(identifier.clone()),
+            [] => continue,
+            _ => {
+                bail!(
+                    "multiple Linear ticket identifiers found in PR #{}: {}. \
+                     Link exactly one ticket in the PR label, title, branch, or body.",
+                    pr.number,
+                    identifiers.join(", ")
+                )
+            }
+        }
     }
+
+    bail!(
+        "no Linear ticket identifier found in PR #{} label, title, branch, or body. \
+         Expected a pattern like `MET-42` or `ENG-1234`.",
+        pr.number
+    )
 }
 
-fn collect_linear_identifiers(pr: &GhPrMetadata) -> Vec<String> {
+fn collect_linear_identifiers_from_labels(labels: &[GhPrLabel]) -> Vec<String> {
     let mut identifiers = BTreeSet::new();
-    for candidate in [
-        &pr.title as &str,
-        &pr.head_ref_name,
-        pr.body.as_deref().unwrap_or(""),
-    ] {
-        collect_linear_identifiers_from_text(candidate, &mut identifiers);
+    for label in labels {
+        let Some(raw_identifier) = label.name.strip_prefix("id-") else {
+            continue;
+        };
+        if is_linear_identifier(raw_identifier) {
+            identifiers.insert(raw_identifier.to_uppercase());
+        }
     }
+    identifiers.into_iter().collect()
+}
+
+fn collect_linear_identifiers_from_single_source(text: &str) -> Vec<String> {
+    let mut identifiers = BTreeSet::new();
+    collect_linear_identifiers_from_text(text, &mut identifiers);
     identifiers.into_iter().collect()
 }
 
@@ -1719,6 +4499,90 @@ fn assemble_review_prompt(
         diff_display = diff_display,
         review_instructions = REVIEW_INSTRUCTIONS,
         ticket_context = ticket_context,
+        workflow_contract = workflow_contract,
+        context_bundle = context_bundle,
+        repo_map = repo_map,
+    )
+}
+
+fn assemble_follow_up_linear_prompt(
+    pr: &GhPrMetadata,
+    linear_identifier: &str,
+    diff: &str,
+    context_bundle: &str,
+    workflow_contract: &str,
+    repo_map: &str,
+    ticket_context: &str,
+) -> String {
+    let diff_display = if diff.len() > 100_000 {
+        format!(
+            "{}\n\n... (diff truncated at 100,000 chars; {} total)",
+            &diff[..100_000],
+            diff.len()
+        )
+    } else {
+        diff.to_string()
+    };
+
+    format!(
+        r#"# Follow-Up Linear Ticket Recommendation Request
+
+## PR Metadata
+- Number: #{number}
+- Title: {title}
+- URL: {url}
+- Author: {author}
+- Head Branch: {head}
+- Base Branch: {base}
+- Changed Files: {changed_files}
+- Additions: +{additions}
+- Deletions: -{deletions}
+- Labels: {labels}
+- Linked Linear Ticket: {linear_identifier}
+
+## Linked Linear Ticket
+{ticket_context}
+
+## PR Description
+{body}
+
+## Diff
+```diff
+{diff_display}
+```
+
+## Recommendation Instructions
+{instructions}
+
+## Workflow Contract
+{workflow_contract}
+
+## Codebase Context
+{context_bundle}
+
+## Repository Map
+{repo_map}
+"#,
+        number = pr.number,
+        title = pr.title,
+        url = pr.url,
+        author = pr.author.login,
+        head = pr.head_ref_name,
+        base = pr.base_ref_name,
+        changed_files = pr.changed_files,
+        additions = pr.additions,
+        deletions = pr.deletions,
+        labels = pr
+            .labels
+            .iter()
+            .map(|l| l.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
+        linear_identifier = linear_identifier,
+        ticket_context = ticket_context,
+        body = pr.body.as_deref().unwrap_or("(no description)"),
+        diff_display = diff_display,
+        instructions = VIEW_LINEAR_INSTRUCTIONS,
         workflow_contract = workflow_contract,
         context_bundle = context_bundle,
         repo_map = repo_map,
@@ -2577,7 +5441,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_linear_identifier_rejects_ambiguous_ticket_links() {
+    fn resolve_linear_identifier_prefers_title_over_body_mentions() {
         let pr = GhPrMetadata {
             number: 42,
             title: "MET-74: Review flow".to_string(),
@@ -2596,12 +5460,69 @@ mod tests {
             review_decision: None,
         };
 
-        let error = resolve_linear_identifier(&pr).expect_err("multiple tickets should fail");
-        assert!(
-            error
-                .to_string()
-                .contains("multiple Linear ticket identifiers")
+        assert_eq!(
+            resolve_linear_identifier(&pr).expect("title identifier should win"),
+            "MET-74".to_string()
         );
+    }
+
+    #[test]
+    fn resolve_linear_identifier_prefers_linear_id_label() {
+        let pr = GhPrMetadata {
+            number: 17,
+            title: "Technical: Promote listen-managed PRs and dashboard state".to_string(),
+            url: "https://example.test/pull/17".to_string(),
+            body: Some("Parent MET-48\nChild MET-53".to_string()),
+            author: GhPrAuthor {
+                login: "metasudo".to_string(),
+            },
+            head_ref_name: "technical-review-flow".to_string(),
+            base_ref_name: "main".to_string(),
+            changed_files: 1,
+            additions: 1,
+            deletions: 0,
+            state: "OPEN".to_string(),
+            labels: vec![GhPrLabel {
+                name: "id-MET-53".to_string(),
+            }],
+            review_decision: None,
+        };
+
+        assert_eq!(
+            resolve_linear_identifier(&pr).expect("label identifier should win"),
+            "MET-53".to_string()
+        );
+    }
+
+    #[test]
+    fn resolve_linear_identifier_rejects_ambiguous_ticket_labels() {
+        let pr = GhPrMetadata {
+            number: 42,
+            title: "Review flow".to_string(),
+            url: "https://example.test/pull/42".to_string(),
+            body: Some("Also references MET-99".to_string()),
+            author: GhPrAuthor {
+                login: "metasudo".to_string(),
+            },
+            head_ref_name: "review-flow".to_string(),
+            base_ref_name: "main".to_string(),
+            changed_files: 1,
+            additions: 1,
+            deletions: 0,
+            state: "OPEN".to_string(),
+            labels: vec![
+                GhPrLabel {
+                    name: "id-MET-74".to_string(),
+                },
+                GhPrLabel {
+                    name: "id-MET-99".to_string(),
+                },
+            ],
+            review_decision: None,
+        };
+
+        let error = resolve_linear_identifier(&pr).expect_err("multiple labels should fail");
+        assert!(error.to_string().contains("multiple Linear ticket identifiers"));
     }
 
     #[test]
@@ -2659,7 +5580,8 @@ mod tests {
 
     #[test]
     fn interactive_dashboard_copy_mentions_explicit_approval() -> Result<()> {
-        let mut app = InteractiveReviewApp::new(InteractiveReviewMode::Discovery);
+        let mut app =
+            InteractiveReviewApp::new(InteractiveReviewMode::Discovery, ReviewCommandKind::Review);
         app.load_candidates(vec![ReviewLaunchCandidate {
             pr_number: 42,
             title: "MET-74 Improve review UX".to_string(),
@@ -2680,8 +5602,8 @@ mod tests {
         terminal.draw(|frame| render_interactive_review(frame, &app))?;
         let snapshot = format!("{}", terminal.backend());
 
-        assert!(snapshot.contains("Review is human-gated"));
-        assert!(snapshot.contains("Enter opens the approval screen"));
+        assert!(snapshot.contains("Navigation"));
+        assert!(snapshot.contains("candidate list"));
         Ok(())
     }
 }
