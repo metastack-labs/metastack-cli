@@ -170,6 +170,11 @@ pub struct PlanningTicketContextSettings {
 pub struct PlanningSyncSettings {
     pub discussion_file_char_limit: Option<usize>,
     pub discussion_prompt_char_limit: Option<usize>,
+    /// When `true`, `meta backlog sync pull` and `meta backlog sync push` default to
+    /// operating on every linked backlog entry rather than requiring `--all` or a single
+    /// `<ISSUE>` argument.
+    #[serde(default)]
+    pub sync_all: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -994,6 +999,11 @@ impl PlanningSyncSettings {
     pub fn discussion_prompt_char_limit(&self) -> usize {
         self.discussion_prompt_char_limit
             .unwrap_or(DEFAULT_SYNC_DISCUSSION_PROMPT_CHAR_LIMIT)
+    }
+
+    /// Returns `true` when this repository enables sync-all behavior by default.
+    pub fn sync_all(&self) -> bool {
+        self.sync_all.unwrap_or(false)
     }
 
     fn validate(&self) -> Result<()> {
@@ -2121,7 +2131,7 @@ mod tests {
         DEFAULT_MERGE_VALIDATION_TRANSIENT_RETRY_ATTEMPTS, InstallDefaults, InstallLinearDefaults,
         InstallListenSettings, InstallPlanSettings, InstallUiSettings, ListenAssignmentScope,
         METASTACK_CONFIG_ENV, MergeSettings, NoAgentSelectedError, PlanningAgentSettings,
-        PlanningIssueLabels, PlanningListenSettings, PlanningMeta, PlanningPlanSettings,
+        PlanningIssueLabels, PlanningListenSettings, PlanningMeta, PlanningPlanSettings, PlanningSyncSettings,
         VelocityAutoAssign, VelocityDefaults, is_no_agent_selected_error,
         no_agent_selected_route_key, normalize_agent_route_key, parse_listen_required_labels_csv,
         resolve_agent_config, resolve_agent_route, validate_agent_reasoning,
@@ -3158,5 +3168,26 @@ mod tests {
                 .to_string()
                 .contains("supported reasoning: low, medium, high, max")
         );
+    }
+
+    #[test]
+    fn sync_all_defaults_to_false_when_unset() {
+        let settings = PlanningSyncSettings::default();
+        assert!(!settings.sync_all());
+    }
+
+    #[test]
+    fn sync_all_resolves_from_explicit_value() {
+        let settings = PlanningSyncSettings {
+            sync_all: Some(true),
+            ..Default::default()
+        };
+        assert!(settings.sync_all());
+
+        let settings = PlanningSyncSettings {
+            sync_all: Some(false),
+            ..Default::default()
+        };
+        assert!(!settings.sync_all());
     }
 }

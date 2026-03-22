@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::Utc;
@@ -27,8 +28,8 @@ use crate::linear::{
 use crate::output::{MachineIssueSummary, render_json_success};
 use crate::scaffold::ensure_planning_layout;
 use crate::sync_dashboard::{
-    SyncDashboardData, SyncDashboardExit, SyncDashboardIssue, SyncDashboardOptions,
-    SyncSelectionAction, run_sync_dashboard,
+    IssueLoadState, IssueUpdate, SyncDashboardData, SyncDashboardExit, SyncDashboardIssue,
+    SyncDashboardOptions, SyncSelectionAction, run_sync_dashboard,
 };
 use crate::text_diff::render_text_diff;
 use crate::{LinearCommandContext, load_linear_command_context};
@@ -117,81 +118,172 @@ pub async fn run_sync_dashboard_command(
     } = load_linear_command_context(client_args, None)?;
     let title = sync_dashboard_title(project_override, default_project_id.as_deref());
 
-    match run_sync_dashboard(
-        SyncDashboardData {
-            title,
-            issues: load_sync_dashboard_issues(&service, &entries).await?,
-        },
-        options,
-    )? {
+    let (issues, rx) = if options.render_once {
+        let mut issues = Vec::with_capacity(entries.len());
+        for entry in &entries {
+            issues.push(load_single_sync_dashboard_issue(&service, entry).await);
+        }
+        (issues, None)
+    } else {
+        let placeholder_issues = build_placeholder_issues(&entries);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let service = Arc::new(service);
+
+        for (index, entry) in entries.iter().enumerate() {
+            let entry = entry.clone();
+            let service = Arc::clone(&service);
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let loaded = load_single_sync_dashboard_issue(&service, &entry).await;
+                let _ = tx.send(IssueUpdate {
+                    index,
+                    issue: loaded,
+                });
+            });
+        }
+        drop(tx);
+
+        (placeholder_issues, Some(rx))
+    };
+
+    let exit = run_sync_dashboard(SyncDashboardData { title, issues }, options, rx)?;
+
+    match exit {
         SyncDashboardExit::Snapshot(snapshot) => println!("{snapshot}"),
         SyncDashboardExit::Cancelled => println!("Sync canceled."),
-        SyncDashboardExit::Selected(selection) => match selection.action {
-            SyncSelectionAction::Pull => {
-                run_sync_pull(
-                    client_args,
-                    false,
-                    &SyncPullArgs {
-                        issue: Some(selection.issue_identifier),
-                        all: false,
-                    },
-                )
-                .await?
+        SyncDashboardExit::Selected(selections) => {
+            for selection in selections {
+                match selection.action {
+                    SyncSelectionAction::Pull => {
+                        run_sync_pull(
+                            client_args,
+                            false,
+                            &SyncPullArgs {
+                                issue: Some(selection.issue_identifier),
+                                all: false,
+                            },
+                        )
+                        .await?
+                    }
+                    SyncSelectionAction::Push => {
+                        run_sync_push(
+                            client_args,
+                            false,
+                            &SyncPushArgs {
+                                issue: Some(selection.issue_identifier),
+                                all: false,
+                                update_description: false,
+                            },
+                        )
+                        .await?
+                    }
+                }
             }
-            SyncSelectionAction::Push => {
-                run_sync_push(
-                    client_args,
-                    false,
-                    &SyncPushArgs {
-                        issue: Some(selection.issue_identifier),
-                        all: false,
-                        update_description: false,
-                    },
-                )
-                .await?
-            }
-        },
+        }
     }
 
     Ok(())
 }
 
-async fn load_sync_dashboard_issues(
-    service: &LinearService<ReqwestLinearClient>,
-    entries: &[BacklogSyncEntry],
-) -> Result<Vec<SyncDashboardIssue>> {
-    let mut dashboard_issues = Vec::with_capacity(entries.len());
-    for entry in entries {
-        let metadata = entry.metadata.as_ref();
-        if metadata.is_none() {
-            dashboard_issues.push(build_unlinked_sync_dashboard_issue(entry));
-            continue;
-        }
-        let remote_issue = if let Some(metadata) = metadata {
-            service.load_issue(&metadata.identifier).await.ok()
-        } else {
-            None
-        };
-        let remote_hash = remote_issue
-            .as_ref()
-            .map(issue_remote_hash)
-            .or_else(|| metadata.and_then(|metadata| metadata.remote_hash.clone()));
-        let resolution =
-            resolve_backlog_sync_status(metadata, entry.local_hash.clone(), remote_hash);
-        let issue = match remote_issue {
-            Some(issue) => issue,
-            None => build_local_dashboard_issue(entry)?,
-        };
+/// Build placeholder issues from local backlog entries for immediate dashboard rendering.
+fn build_placeholder_issues(entries: &[BacklogSyncEntry]) -> Vec<SyncDashboardIssue> {
+    entries
+        .iter()
+        .map(|entry| {
+            if entry.metadata.is_none() {
+                build_unlinked_sync_dashboard_issue(entry)
+            } else {
+                let slug = entry.slug.clone();
+                let metadata = entry.metadata.as_ref();
+                SyncDashboardIssue {
+                    entry_slug: slug.clone(),
+                    issue: IssueSummary {
+                        id: metadata
+                            .map(|m| m.issue_id.clone())
+                            .unwrap_or_else(|| format!("loading:{slug}")),
+                        identifier: metadata
+                            .map(|m| m.identifier.clone())
+                            .unwrap_or_else(|| slug.clone()),
+                        title: entry.title.clone(),
+                        description: None,
+                        url: metadata
+                            .map(|m| m.url.clone())
+                            .unwrap_or_else(|| format!(".metastack/backlog/{slug}")),
+                        priority: None,
+                        estimate: None,
+                        updated_at: "-".to_string(),
+                        team: TeamRef {
+                            id: "loading".to_string(),
+                            key: metadata
+                                .map(|m| m.team_key.clone())
+                                .unwrap_or_else(|| "...".to_string()),
+                            name: "Loading...".to_string(),
+                        },
+                        project: metadata.and_then(|m| {
+                            Some(ProjectRef {
+                                id: m.project_id.clone()?,
+                                name: m
+                                    .project_name
+                                    .clone()
+                                    .unwrap_or_else(|| "Loading...".to_string()),
+                            })
+                        }),
+                        assignee: None,
+                        labels: Vec::new(),
+                        comments: Vec::new(),
+                        state: None,
+                        attachments: Vec::new(),
+                        parent: None,
+                        children: Vec::new(),
+                    },
+                    linked_issue_identifier: metadata.map(|m| m.identifier.clone()),
+                    local_status: BacklogSyncStatus::Unlinked,
+                    load_state: IssueLoadState::Loading,
+                }
+            }
+        })
+        .collect()
+}
 
-        dashboard_issues.push(SyncDashboardIssue {
-            entry_slug: entry.slug.clone(),
-            issue,
-            linked_issue_identifier: metadata.map(|metadata| metadata.identifier.clone()),
-            local_status: resolution.status,
-        });
+/// Load a single dashboard issue from Linear, falling back to local data on failure.
+async fn load_single_sync_dashboard_issue(
+    service: &LinearService<ReqwestLinearClient>,
+    entry: &BacklogSyncEntry,
+) -> SyncDashboardIssue {
+    let metadata = entry.metadata.as_ref();
+    if metadata.is_none() {
+        return build_unlinked_sync_dashboard_issue(entry);
     }
 
-    Ok(dashboard_issues)
+    let remote_issue = if let Some(metadata) = metadata {
+        service.load_issue(&metadata.identifier).await.ok()
+    } else {
+        None
+    };
+    let remote_hash = remote_issue
+        .as_ref()
+        .map(issue_remote_hash)
+        .or_else(|| metadata.and_then(|metadata| metadata.remote_hash.clone()));
+    let resolution = resolve_backlog_sync_status(metadata, entry.local_hash.clone(), remote_hash);
+    let issue = match remote_issue {
+        Some(issue) => issue,
+        None => match build_local_dashboard_issue(entry) {
+            Ok(issue) => issue,
+            Err(_) => {
+                let mut unlinked = build_unlinked_sync_dashboard_issue(entry);
+                unlinked.load_state = IssueLoadState::Failed;
+                return unlinked;
+            }
+        },
+    };
+
+    SyncDashboardIssue {
+        entry_slug: entry.slug.clone(),
+        issue,
+        linked_issue_identifier: metadata.map(|metadata| metadata.identifier.clone()),
+        local_status: resolution.status,
+        load_state: IssueLoadState::Loaded,
+    }
 }
 
 fn build_unlinked_sync_dashboard_issue(entry: &BacklogSyncEntry) -> SyncDashboardIssue {
@@ -232,6 +324,7 @@ fn build_unlinked_sync_dashboard_issue(entry: &BacklogSyncEntry) -> SyncDashboar
         },
         linked_issue_identifier: None,
         local_status: BacklogSyncStatus::Unlinked,
+        load_state: IssueLoadState::Loaded,
     }
 }
 
@@ -547,7 +640,8 @@ pub async fn run_sync_pull(
     ensure_planning_layout(&root, false)?;
     let LinearCommandContext { service, .. } = load_linear_command_context(client_args, None)?;
 
-    if args.all {
+    let effective_all = args.all || (args.issue.is_none() && planning_meta.sync.sync_all());
+    if effective_all {
         return run_sync_pull_all(&root, &service, discussion_budgets, json_output).await;
     }
 
@@ -589,11 +683,12 @@ pub async fn run_sync_push(
     args: &SyncPushArgs,
 ) -> Result<()> {
     let root = canonicalize_existing_dir(&client_args.root)?;
-    let _planning_meta = load_required_planning_meta(&root, "sync")?;
+    let planning_meta = load_required_planning_meta(&root, "sync")?;
     ensure_planning_layout(&root, false)?;
     let LinearCommandContext { service, .. } = load_linear_command_context(client_args, None)?;
 
-    if args.all {
+    let effective_all = args.all || (args.issue.is_none() && planning_meta.sync.sync_all());
+    if effective_all {
         return run_sync_push_all(&root, &service, args.update_description, json_output).await;
     }
 
