@@ -115,7 +115,8 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
     };
     let mut session_tokens =
         load_existing_session_tokens(&source_root, project_selector, &args.issue)?;
-    let mut session_id = load_existing_session_id(&source_root, project_selector, &args.issue)?;
+    let mut provider_session_id =
+        load_existing_provider_session_id(&source_root, project_selector, &args.issue)?;
     let mut saw_implementation_progress = workspace_has_meaningful_progress(&workspace_path)?;
     let mut stalled_turns = 0u32;
     let log_path = agent_log_path(&source_root, args.project.as_deref(), &args.issue);
@@ -154,7 +155,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                 ),
                 &session_context,
                 turns_completed,
-                session_id.as_deref(),
+                provider_session_id.as_deref(),
                 &session_tokens,
             ),
         )?;
@@ -171,7 +172,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     compact_completed_summary(None, turns_completed, &issue_state_label(&issue)),
                     &session_context,
                     turns_completed,
-                    session_id.as_deref(),
+                    provider_session_id.as_deref(),
                     &session_tokens,
                 ),
             )?;
@@ -198,7 +199,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     ),
                     &session_context,
                     turns_completed,
-                    session_id.as_deref(),
+                    provider_session_id.as_deref(),
                     &session_tokens,
                 ),
             )?;
@@ -227,22 +228,23 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                 ),
                 &session_context,
                 turns_completed,
-                session_id.as_deref(),
+                provider_session_id.as_deref(),
                 &session_tokens,
             ),
         )?;
 
-        let session_id_state = RefCell::new(session_id.clone());
+        // Keep provider-native manual resume handles separate from provider session bookkeeping.
+        let provider_session_id_state = RefCell::new(provider_session_id.clone());
         let turn_result = match execute_agent_turn(
             &issue,
             turn_number,
             &turn_context,
             session_context.latest_resume_handle.as_ref(),
             |current_session_id| {
-                if session_id_state.borrow().as_deref() == Some(current_session_id) {
+                if provider_session_id_state.borrow().as_deref() == Some(current_session_id) {
                     return Ok(());
                 }
-                *session_id_state.borrow_mut() = Some(current_session_id.to_string());
+                *provider_session_id_state.borrow_mut() = Some(current_session_id.to_string());
                 write_listen_session(
                     &source_root,
                     project_selector,
@@ -257,7 +259,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                         ),
                         &session_context,
                         turns_completed,
-                        session_id_state.borrow().as_deref(),
+                        provider_session_id_state.borrow().as_deref(),
                         &session_tokens,
                     ),
                 )
@@ -282,7 +284,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                         ),
                         &session_context,
                         turns_completed,
-                        session_id_state.borrow().as_deref(),
+                        provider_session_id_state.borrow().as_deref(),
                         &displayed_tokens,
                     ),
                 )
@@ -303,7 +305,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                         ),
                         &session_context,
                         turns_completed,
-                        session_id.as_deref(),
+                        provider_session_id.as_deref(),
                         &session_tokens,
                     ),
                 )?;
@@ -313,9 +315,9 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
         session_context.latest_resume_handle = turn_result
             .latest_resume_handle
             .or(session_context.latest_resume_handle);
-        session_id = turn_result
+        provider_session_id = turn_result
             .session_id
-            .or_else(|| session_id_state.into_inner());
+            .or_else(|| provider_session_id_state.into_inner());
         if let Some(usage) = turn_result.usage {
             session_tokens.accumulate(&TokenUsage {
                 input: usage.input,
@@ -362,7 +364,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                             ),
                             &session_context,
                             turns_completed,
-                            session_id.as_deref(),
+                            provider_session_id.as_deref(),
                             &session_tokens,
                         ),
                     )?;
@@ -418,7 +420,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                             summary,
                             &session_context,
                             turns_completed,
-                            session_id.as_deref(),
+                            provider_session_id.as_deref(),
                             &session_tokens,
                         ),
                     )?;
@@ -438,7 +440,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                         ),
                         &session_context,
                         turns_completed,
-                        session_id.as_deref(),
+                        provider_session_id.as_deref(),
                         &session_tokens,
                     ),
                 )?;
@@ -474,7 +476,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                         ),
                         &session_context,
                         turns_completed,
-                        session_id.as_deref(),
+                        provider_session_id.as_deref(),
                         &session_tokens,
                     ),
                 )?;
@@ -495,7 +497,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     ),
                     &session_context,
                     turns_completed,
-                    session_id.as_deref(),
+                    provider_session_id.as_deref(),
                     &session_tokens,
                 ),
             )?;
@@ -509,7 +511,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     compact_running_summary(None, turns_completed, args.max_turns, stalled_turns),
                     &session_context,
                     turns_completed,
-                    session_id.as_deref(),
+                    provider_session_id.as_deref(),
                     &session_tokens,
                 ),
             )?;
@@ -1491,7 +1493,7 @@ fn load_existing_session_tokens(
         .unwrap_or_default())
 }
 
-fn load_existing_session_id(
+fn load_existing_provider_session_id(
     root: &Path,
     project_selector: Option<&str>,
     issue_identifier: &str,
