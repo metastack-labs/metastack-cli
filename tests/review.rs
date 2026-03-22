@@ -708,3 +708,412 @@ NO
         .any(|l| l.trim().starts_with("yes"));
     assert!(!found_yes, "should not detect YES");
 }
+
+// ---------------------------------------------------------------------------
+// Help text: --fix-pr and --skip-pr flags
+// ---------------------------------------------------------------------------
+
+#[test]
+fn review_help_shows_fix_pr_and_skip_pr_flags() {
+    cli()
+        .args(["agents", "review", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--fix-pr"))
+        .stdout(predicate::str::contains("--skip-pr"));
+}
+
+// ---------------------------------------------------------------------------
+// Argument parsing: --fix-pr / --skip-pr conflicts
+// ---------------------------------------------------------------------------
+
+#[test]
+fn review_fix_pr_conflicts_with_once() {
+    cli()
+        .args([
+            "agents", "review", "--fix-pr", "42", "--once", "--root", ".",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be used with"));
+}
+
+#[test]
+fn review_fix_pr_conflicts_with_check() {
+    cli()
+        .args([
+            "agents", "review", "--fix-pr", "42", "--check", "--root", ".",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be used with"));
+}
+
+#[test]
+fn review_fix_pr_conflicts_with_dry_run() {
+    cli()
+        .args([
+            "agents",
+            "review",
+            "42",
+            "--fix-pr",
+            "42",
+            "--dry-run",
+            "--root",
+            ".",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be used with"));
+}
+
+#[test]
+fn review_skip_pr_conflicts_with_once() {
+    cli()
+        .args([
+            "agents",
+            "review",
+            "--skip-pr",
+            "42",
+            "--once",
+            "--root",
+            ".",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be used with"));
+}
+
+#[test]
+fn review_skip_pr_conflicts_with_fix_pr() {
+    cli()
+        .args([
+            "agents",
+            "review",
+            "--skip-pr",
+            "42",
+            "--fix-pr",
+            "99",
+            "--root",
+            ".",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be used with"));
+}
+
+// ---------------------------------------------------------------------------
+// --fix-pr with no eligible session (failure path)
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+fn review_project_store_dir(
+    config_path: &Path,
+    repo_root: &Path,
+) -> Result<PathBuf, Box<dyn Error>> {
+    let source_root = repo_root.canonicalize()?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    source_root.display().to_string().hash(&mut hasher);
+    let project_key = format!("{:016x}", hasher.finish());
+    Ok(config_path
+        .parent()
+        .expect("config path should have a parent")
+        .join("data")
+        .join("review")
+        .join("projects")
+        .join(project_key))
+}
+
+#[cfg(unix)]
+fn seed_review_session(
+    config_path: &Path,
+    repo_root: &Path,
+    session_json: &str,
+) -> Result<(), Box<dyn Error>> {
+    let store_dir = review_project_store_dir(config_path, repo_root)?;
+    fs::create_dir_all(&store_dir)?;
+    fs::write(store_dir.join("session.json"), session_json)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn fix_pr_fails_with_no_review_session() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo = temp.path().join("repo");
+    let config_path = temp.path().join("meta.toml");
+    fs::write(
+        &config_path,
+        "[onboarding]\ncompleted = true\n\n[agents]\ndefault_agent = \"codex\"\ndefault_model = \"gpt-5.4\"\n",
+    )?;
+
+    let meta_dir = repo.join(".metastack");
+    fs::create_dir_all(&meta_dir)?;
+    fs::write(
+        meta_dir.join("meta.json"),
+        r#"{"version":1,"project":{"name":"test"}}"#,
+    )?;
+    init_repo_with_origin(&repo)?;
+
+    meta()
+        .args([
+            "agents",
+            "review",
+            "--fix-pr",
+            "42",
+            "--root",
+            repo.to_str().unwrap(),
+        ])
+        .env("METASTACK_CONFIG", config_path.to_str().unwrap())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "no review session found for PR #42",
+        ));
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// --fix-pr with ineligible session phase (failure path)
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+#[test]
+fn fix_pr_fails_with_ineligible_session_phase() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo = temp.path().join("repo");
+    let config_path = temp.path().join("meta.toml");
+    fs::write(
+        &config_path,
+        "[onboarding]\ncompleted = true\n\n[agents]\ndefault_agent = \"codex\"\ndefault_model = \"gpt-5.4\"\n",
+    )?;
+
+    let meta_dir = repo.join(".metastack");
+    fs::create_dir_all(&meta_dir)?;
+    fs::write(
+        meta_dir.join("meta.json"),
+        r#"{"version":1,"project":{"name":"test"}}"#,
+    )?;
+    init_repo_with_origin(&repo)?;
+
+    // Seed a session in Running phase (not eligible for fix-pr dispatch)
+    let state_json = r#"{
+        "version": 1,
+        "sessions": [{
+            "pr_number": 42,
+            "pr_title": "MET-42 Test PR",
+            "pr_url": "https://example.test/pull/42",
+            "pr_author": "dev",
+            "head_branch": "met-42-test",
+            "base_branch": "main",
+            "linear_identifier": "MET-42",
+            "phase": "running",
+            "summary": "Running agent review",
+            "updated_at_epoch_seconds": 9999999999,
+            "remediation_required": null,
+            "remediation_pr_number": null,
+            "remediation_pr_url": null
+        }]
+    }"#;
+    seed_review_session(&config_path, &repo, state_json)?;
+
+    meta()
+        .args([
+            "agents",
+            "review",
+            "--fix-pr",
+            "42",
+            "--root",
+            repo.to_str().unwrap(),
+        ])
+        .env("METASTACK_CONFIG", config_path.to_str().unwrap())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "not eligible for fix-agent dispatch",
+        ));
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// --skip-pr with seeded review_complete session (success path, JSON)
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+#[test]
+fn skip_pr_transitions_to_skipped_with_json_output() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo = temp.path().join("repo");
+    let config_path = temp.path().join("meta.toml");
+    fs::write(
+        &config_path,
+        "[onboarding]\ncompleted = true\n\n[agents]\ndefault_agent = \"codex\"\ndefault_model = \"gpt-5.4\"\n",
+    )?;
+
+    let meta_dir = repo.join(".metastack");
+    fs::create_dir_all(&meta_dir)?;
+    fs::write(
+        meta_dir.join("meta.json"),
+        r#"{"version":1,"project":{"name":"test"}}"#,
+    )?;
+    init_repo_with_origin(&repo)?;
+
+    // Seed a session in review_complete with remediation_required=true
+    let state_json = r#"{
+        "version": 1,
+        "sessions": [{
+            "pr_number": 42,
+            "pr_title": "MET-42 Test PR",
+            "pr_url": "https://example.test/pull/42",
+            "pr_author": "dev",
+            "head_branch": "met-42-test",
+            "base_branch": "main",
+            "linear_identifier": "MET-42",
+            "phase": "review_complete",
+            "summary": "Review complete, remediation required",
+            "updated_at_epoch_seconds": 9999999999,
+            "remediation_required": true,
+            "remediation_pr_number": null,
+            "remediation_pr_url": null
+        }]
+    }"#;
+    seed_review_session(&config_path, &repo, state_json)?;
+
+    let output = meta()
+        .args([
+            "agents",
+            "review",
+            "--skip-pr",
+            "42",
+            "--json",
+            "--root",
+            repo.to_str().unwrap(),
+        ])
+        .env("METASTACK_CONFIG", config_path.to_str().unwrap())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let payload: serde_json::Value = serde_json::from_slice(&output)?;
+    assert_eq!(payload["result"]["pr_number"], 42);
+    assert_eq!(payload["result"]["phase"], "skipped");
+    assert_eq!(payload["status"], "ok");
+
+    // Verify persisted state was updated
+    let store_dir = review_project_store_dir(&config_path, &repo)?;
+    let persisted: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(store_dir.join("session.json"))?)?;
+    let sessions = persisted["sessions"]
+        .as_array()
+        .expect("sessions should be an array");
+    assert_eq!(sessions[0]["phase"], "skipped");
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// --skip-pr with no eligible session (failure path)
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+#[test]
+fn skip_pr_fails_with_no_review_session() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo = temp.path().join("repo");
+    let config_path = temp.path().join("meta.toml");
+    fs::write(
+        &config_path,
+        "[onboarding]\ncompleted = true\n\n[agents]\ndefault_agent = \"codex\"\ndefault_model = \"gpt-5.4\"\n",
+    )?;
+
+    let meta_dir = repo.join(".metastack");
+    fs::create_dir_all(&meta_dir)?;
+    fs::write(
+        meta_dir.join("meta.json"),
+        r#"{"version":1,"project":{"name":"test"}}"#,
+    )?;
+    init_repo_with_origin(&repo)?;
+
+    meta()
+        .args([
+            "agents",
+            "review",
+            "--skip-pr",
+            "42",
+            "--root",
+            repo.to_str().unwrap(),
+        ])
+        .env("METASTACK_CONFIG", config_path.to_str().unwrap())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "no review session found for PR #42",
+        ));
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// --skip-pr with ineligible phase (failure: already skipped)
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+#[test]
+fn skip_pr_fails_with_already_skipped_session() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo = temp.path().join("repo");
+    let config_path = temp.path().join("meta.toml");
+    fs::write(
+        &config_path,
+        "[onboarding]\ncompleted = true\n\n[agents]\ndefault_agent = \"codex\"\ndefault_model = \"gpt-5.4\"\n",
+    )?;
+
+    let meta_dir = repo.join(".metastack");
+    fs::create_dir_all(&meta_dir)?;
+    fs::write(
+        meta_dir.join("meta.json"),
+        r#"{"version":1,"project":{"name":"test"}}"#,
+    )?;
+    init_repo_with_origin(&repo)?;
+
+    // Seed a session already in Skipped phase
+    let state_json = r#"{
+        "version": 1,
+        "sessions": [{
+            "pr_number": 42,
+            "pr_title": "MET-42 Test PR",
+            "pr_url": "https://example.test/pull/42",
+            "pr_author": "dev",
+            "head_branch": "met-42-test",
+            "base_branch": "main",
+            "linear_identifier": "MET-42",
+            "phase": "skipped",
+            "summary": "Already skipped",
+            "updated_at_epoch_seconds": 9999999999,
+            "remediation_required": true,
+            "remediation_pr_number": null,
+            "remediation_pr_url": null
+        }]
+    }"#;
+    seed_review_session(&config_path, &repo, state_json)?;
+
+    meta()
+        .args([
+            "agents",
+            "review",
+            "--skip-pr",
+            "42",
+            "--root",
+            repo.to_str().unwrap(),
+        ])
+        .env("METASTACK_CONFIG", config_path.to_str().unwrap())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not eligible for skip"));
+
+    Ok(())
+}
