@@ -1161,7 +1161,7 @@ Each reviewed PR transitions through a per-PR state model:
 6. **Fix Agent Complete** - Remediation PR created and pushed.
 7. **Skipped** - User explicitly declined remediation.
 
-When a review requires remediation, the interactive dashboard shows `[a] Create fix PR` and `[n] Skip` actions on the selected session. Press `d` to delete a stored session after confirmation when you no longer want it in the session view. Dispatching a fix agent does not exit the TUI; the dashboard remains active and shows live progress for the remediation run. Multiple reviewed PRs maintain independent state in the same session, and restored sessions remain actionable across dashboard restarts because the review report is persisted.
+When a review requires remediation, the interactive dashboard shows `[a] Create fix PR` and `[n] Skip` actions on the selected session. Press `d` to delete a stored session after confirmation when you no longer want it in the session view. Dispatching a fix agent does not exit the TUI; the dashboard remains active and shows live progress for the remediation run. Multiple reviewed PRs maintain independent state in the same session, and each new `meta agents review` run starts from a fresh session set instead of restoring prior runs into the dashboard.
 
 For scripted and CI usage, `--fix-pr N` and `--skip-pr N` act on a previously reviewed PR without requiring the interactive TUI. Both produce JSON output with `--json`.
 

@@ -69,6 +69,7 @@ const METASTACK_LABEL: &str = "metastack";
 const INPUT_POLL_INTERVAL_MILLIS: u64 = 100;
 const TERMINAL_REFRESH_INTERVAL_SECONDS: u64 = 1;
 const DEFAULT_POLL_INTERVAL_SECONDS: u64 = 60;
+const REMEDIATION_RETRY_DELAY_SECONDS: u64 = 2;
 
 /// Dashboard data for the review listener.
 #[derive(Debug, Clone, Serialize)]
@@ -677,6 +678,9 @@ fn run_review_interactive(
     let planning_meta = crate::config::load_required_planning_meta(&root, command.command_name())?;
     let gh = GhCli;
     let store = ReviewProjectStore::resolve(&root).ok();
+    if let Some(ref store) = store {
+        reset_review_store(store)?;
+    }
     let mode = if pr_number.is_some() {
         InteractiveReviewMode::Direct
     } else {
@@ -2096,7 +2100,7 @@ impl InteractiveReviewApp {
                             );
                         }
                     }
-                    KeyCode::Char('c') | KeyCode::Char('C')
+                    KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Char('x') | KeyCode::Char('X')
                         if self.tab == InteractiveReviewTab::Sessions
                             && self
                                 .selected_session()
@@ -2121,8 +2125,7 @@ impl InteractiveReviewApp {
                         }
                     }
                     KeyCode::Char('f') | KeyCode::Char('F')
-                        if self.command == ReviewCommandKind::Retro
-                            && self.tab == InteractiveReviewTab::Candidates =>
+                        if self.tab == InteractiveReviewTab::Candidates =>
                     {
                         self.open_filter_panel();
                     }
@@ -3765,14 +3768,34 @@ fn execute_remediation_with_progress(
         remediation_required: Some(true),
     });
 
-    match run_remediation(
-        context.root,
-        &pr,
-        &request.linear_identifier,
-        &request.review_output,
-        context.config,
-        context.planning_meta,
-        context.args,
+    let remediation_context = RemediationContext {
+        root: context.root,
+        pr: &pr,
+        linear_identifier: &request.linear_identifier,
+        review_output: &request.review_output,
+        config: context.config,
+        planning_meta: context.planning_meta,
+        args: context.args,
+    };
+
+    match run_remediation_with_retry(
+        &remediation_context,
+        Some(context.cancel),
+        |attempt, error| {
+            emit(ReviewExecutionEvent::Progress {
+                kind: InteractiveSessionKind::Review,
+                candidate: request.candidate.clone(),
+                phase: ReviewPhase::FixAgentInProgress,
+                summary: format!(
+                    "Fix agent retrying for PR #{}",
+                    request.candidate.pr_number
+                ),
+                note: Some(format!(
+                    "Remediation attempt #{attempt} failed: {error}. Retrying until the PR is created or you cancel the session."
+                )),
+                remediation_required: Some(true),
+            });
+        },
     ) {
         Ok(remediation) => {
             let outcome = InteractiveReviewOutcome {
@@ -4942,6 +4965,7 @@ fn interactive_footer_text(app: &InteractiveReviewApp) -> Text<'static> {
                 Line::from(
                     "After a review finishes, switch to Sessions and press `A` to launch the remediation agent PR.",
                 ),
+                interactive_action_line(app),
                 Line::from("Use the Navigation strip to track the active view and focused pane."),
                 Line::from(""),
                 key_hints(&interactive_key_hints(app)),
@@ -4950,6 +4974,7 @@ fn interactive_footer_text(app: &InteractiveReviewApp) -> Text<'static> {
                 Line::from(
                     "Search candidates, mark PRs with Space, then press Enter to queue retro ticket analysis.",
                 ),
+                interactive_action_line(app),
                 Line::from("Use the Navigation strip to track the active view and focused pane."),
                 Line::from(""),
                 key_hints(&interactive_key_hints(app)),
@@ -5013,6 +5038,7 @@ fn interactive_key_hints(app: &InteractiveReviewApp) -> Vec<(&'static str, &'sta
             InteractiveReviewTab::Candidates => match app.command {
                 ReviewCommandKind::Review => vec![
                     ("Type", "search"),
+                    ("F", "filter"),
                     ("Up/Down", "move"),
                     ("Space", "select"),
                     ("Tab", "focus"),
@@ -5068,6 +5094,42 @@ fn session_key_hints(app: &InteractiveReviewApp) -> Vec<(&'static str, &'static 
     hints.push(("Esc", "candidates"));
     hints.push(("q", "exit"));
     hints
+}
+
+fn interactive_action_line(app: &InteractiveReviewApp) -> Line<'static> {
+    if app.tab != InteractiveReviewTab::Sessions {
+        return Line::from(vec![
+            badge("Enter", Tone::Accent),
+            Span::raw(" queue selected work  "),
+            badge("F", Tone::Info),
+            Span::raw(" filter candidates  "),
+            badge("R", Tone::Info),
+            Span::raw(" refresh"),
+        ]);
+    }
+
+    let mut spans = vec![
+        badge("D", Tone::Muted),
+        Span::raw(" delete stored session"),
+    ];
+    if let Some(session) = app.selected_session() {
+        if InteractiveReviewApp::session_needs_remediation_decision(session) {
+            spans = vec![
+                badge("A", Tone::Success),
+                Span::raw(" launch remediation PR  "),
+                badge("N", Tone::Muted),
+                Span::raw(" keep report  "),
+                badge("D", Tone::Muted),
+                Span::raw(" delete"),
+            ];
+        }
+        if InteractiveReviewApp::session_can_cancel(session) {
+            spans.push(Span::raw("  "));
+            spans.push(badge("C", Tone::Danger));
+            spans.push(Span::raw(" cancel active work"));
+        }
+    }
+    Line::from(spans)
 }
 
 fn tab_label(label: &str, active: bool, count: usize) -> Span<'static> {
@@ -5698,6 +5760,16 @@ struct RemediationOutcome {
     pr_url: String,
 }
 
+struct RemediationContext<'a> {
+    root: &'a Path,
+    pr: &'a GhPrMetadata,
+    linear_identifier: &'a str,
+    review_output: &'a str,
+    config: &'a AppConfig,
+    planning_meta: &'a PlanningMeta,
+    args: &'a ReviewRunArgs,
+}
+
 fn run_remediation(
     root: &Path,
     pr: &GhPrMetadata,
@@ -5707,30 +5779,71 @@ fn run_remediation(
     planning_meta: &PlanningMeta,
     args: &ReviewRunArgs,
 ) -> Result<RemediationOutcome> {
+    let context = RemediationContext {
+        root,
+        pr,
+        linear_identifier,
+        review_output,
+        config,
+        planning_meta,
+        args,
+    };
+    run_remediation_with_retry(&context, None, |_attempt, _error| {})
+}
+
+fn run_remediation_with_retry(
+    context: &RemediationContext<'_>,
+    cancel: Option<&AtomicBool>,
+    mut on_retry: impl FnMut(usize, &str),
+) -> Result<RemediationOutcome> {
+    let mut attempt = 1usize;
+    let mut previous_error: Option<String> = None;
+    loop {
+        if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+            bail!("remediation cancelled before PR creation completed");
+        }
+
+        match run_remediation_attempt(context, attempt, previous_error.as_deref()) {
+            Ok(outcome) => return Ok(outcome),
+            Err(error) => {
+                let message = error.to_string();
+                on_retry(attempt, &message);
+                previous_error = Some(message);
+                attempt += 1;
+                thread::sleep(Duration::from_secs(REMEDIATION_RETRY_DELAY_SECONDS));
+            }
+        }
+    }
+}
+
+fn run_remediation_attempt(
+    context: &RemediationContext<'_>,
+    attempt: usize,
+    previous_error: Option<&str>,
+) -> Result<RemediationOutcome> {
     let gh = GhCli;
-    let remediation_branch = format!("review/remediation-pr-{}", pr.number);
-    let remediation_base_branch = remediation_target_branch(pr);
-    let workspace_path = prepare_remediation_workspace(root, pr.number)?;
-    materialize_pull_request_head(&workspace_path, pr.number, &remediation_branch)?;
+    let remediation_branch = format!("review/remediation-pr-{}", context.pr.number);
+    let remediation_base_branch = remediation_target_branch(context.pr);
+    let workspace_path = prepare_remediation_workspace(context.root, context.pr.number)?;
+    let remediation_branch_exists =
+        materialize_pull_request_head(&workspace_path, context.pr.number, &remediation_branch)?;
     let starting_head = git_stdout(&workspace_path, &["rev-parse", "HEAD"])?;
 
-    let fix_prompt = format!(
-        "You are applying required fixes from a code review to this branch.\n\n\
-         ## Review Output\n{review_output}\n\n\
-         ## Instructions\n\
-         Apply ONLY the required fixes identified in the review above. Do not apply optional recommendations.\n\
-         Make minimal, targeted changes. Commit each logical fix separately with clear commit messages.\n\
-         After applying all fixes, verify the changes compile and pass basic checks.\n"
+    let fix_prompt = remediation_fix_prompt(
+        context.review_output,
+        attempt,
+        previous_error,
+        remediation_branch_exists,
     );
 
     let fix_args = RunAgentArgs {
         root: Some(workspace_path.clone()),
         route_key: Some(AGENT_ROUTE_AGENTS_REVIEW.to_string()),
-        agent: args.agent.clone(),
+        agent: context.args.agent.clone(),
         prompt: fix_prompt,
         instructions: None,
-        model: args.model.clone(),
-        reasoning: args.reasoning.clone(),
+        model: context.args.model.clone(),
+        reasoning: context.args.reasoning.clone(),
         transport: None,
         attachments: Vec::new(),
     };
@@ -5738,11 +5851,15 @@ fn run_remediation(
     let report = run_agent_capture(&fix_args)?;
     eprintln!("{}", report.stdout.trim());
 
-    ensure_remediation_commits_created(&workspace_path, &starting_head)?;
+    ensure_remediation_commits_created(
+        &workspace_path,
+        &starting_head,
+        remediation_branch_exists,
+    )?;
 
     run_git(
         &workspace_path,
-        &["push", "-u", "origin", &remediation_branch],
+        &["push", "--force-with-lease", "-u", "origin", &remediation_branch],
     )
     .map_err(|e| {
         anyhow!(
@@ -5751,9 +5868,14 @@ fn run_remediation(
         )
     })?;
 
-    let pr_title = format!("review: remediation for PR #{}", pr.number);
+    let pr_title = format!("review: remediation for PR #{}", context.pr.number);
     let pr_body =
-        remediation_pull_request_body(pr.number, remediation_base_branch, review_output, linear_identifier);
+        remediation_pull_request_body(
+            context.pr.number,
+            remediation_base_branch,
+            context.review_output,
+            context.linear_identifier,
+        );
     let body_path = workspace_path.join(".metastack").join("review-pr-body.md");
     ensure_dir(&workspace_path.join(".metastack"))?;
     std::fs::write(&body_path, &pr_body).context("failed to write remediation PR body")?;
@@ -5780,17 +5902,17 @@ fn run_remediation(
     eprintln!("Remediation PR #{} created: {}", result.number, result.url);
 
     post_linear_remediation_comment(
-        root,
-        config,
-        planning_meta,
-        linear_identifier,
+        context.root,
+        context.config,
+        context.planning_meta,
+        context.linear_identifier,
         &result.url,
-        pr.number,
+        context.pr.number,
     )?;
 
     let _ = std::fs::remove_file(&body_path);
 
-    println!("{review_output}");
+    println!("{}", context.review_output);
     println!(
         "\nRemediation PR #{} opened against `{}` from `{}`: {}",
         result.number,
@@ -5803,6 +5925,42 @@ fn run_remediation(
         pr_number: result.number,
         pr_url: result.url,
     })
+}
+
+fn remediation_fix_prompt(
+    review_output: &str,
+    attempt: usize,
+    previous_error: Option<&str>,
+    remediation_branch_exists: bool,
+) -> String {
+    let retry_context = previous_error
+        .map(|error| {
+            format!(
+                "\n## Retry Context\n\
+                 This is remediation attempt #{attempt}.\n\
+                 The previous attempt failed with:\n\
+                 {error}\n"
+            )
+        })
+        .unwrap_or_default();
+    let existing_branch_context = if remediation_branch_exists {
+        "\n## Existing Remediation Branch\n\
+         A remediation branch already exists remotely. Reuse and update it instead of starting over from scratch.\n"
+    } else {
+        ""
+    };
+
+    format!(
+        "You are applying required fixes from a code review to this branch.\n\n\
+         ## Review Output\n{review_output}\n\
+         {retry_context}\
+         {existing_branch_context}\
+         ## Instructions\n\
+         Apply ONLY the required fixes identified in the review above. Do not apply optional recommendations.\n\
+         Make minimal, targeted changes. Commit each logical fix separately with clear commit messages.\n\
+         If the branch already contains prior remediation work, continue from it instead of undoing it.\n\
+         After applying all fixes, verify the changes compile and pass basic checks.\n"
+    )
 }
 
 fn remediation_target_branch(pr: &GhPrMetadata) -> &str {
@@ -5870,7 +6028,7 @@ fn materialize_pull_request_head(
     workspace_path: &Path,
     pr_number: u64,
     remediation_branch: &str,
-) -> Result<()> {
+) -> Result<bool> {
     let output = Command::new("gh")
         .args(["pr", "checkout", &pr_number.to_string(), "--detach"])
         .current_dir(workspace_path)
@@ -5883,19 +6041,50 @@ fn materialize_pull_request_head(
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
-    run_git(
-        workspace_path,
-        &["checkout", "-B", remediation_branch, "HEAD"],
-    )?;
-    Ok(())
+    let branch_exists = remote_branch_exists(workspace_path, remediation_branch)?;
+    if branch_exists {
+        run_git(
+            workspace_path,
+            &["fetch", "origin", remediation_branch],
+        )?;
+        run_git(
+            workspace_path,
+            &["checkout", "-B", remediation_branch, &format!("origin/{remediation_branch}")],
+        )?;
+    } else {
+        run_git(
+            workspace_path,
+            &["checkout", "-B", remediation_branch, "HEAD"],
+        )?;
+    }
+    Ok(branch_exists)
 }
 
-fn ensure_remediation_commits_created(workspace_path: &Path, starting_head: &str) -> Result<()> {
+fn remote_branch_exists(workspace_path: &Path, branch: &str) -> Result<bool> {
+    let output = Command::new("git")
+        .args(["ls-remote", "--heads", "origin", branch])
+        .current_dir(workspace_path)
+        .output()
+        .context("failed to inspect existing remediation branch")?;
+    if !output.status.success() {
+        bail!(
+            "failed to inspect remediation branch `{branch}`: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
+}
+
+fn ensure_remediation_commits_created(
+    workspace_path: &Path,
+    starting_head: &str,
+    remediation_branch_exists: bool,
+) -> Result<()> {
     let commit_count = git_stdout(
         workspace_path,
         &["rev-list", "--count", &format!("{starting_head}..HEAD")],
     )?;
-    if commit_count.trim() == "0" {
+    if commit_count.trim() == "0" && !remediation_branch_exists {
         bail!(
             "remediation agent did not create any commits in `{}`",
             workspace_path.display()
@@ -6001,6 +6190,7 @@ async fn run_review_listener(args: &ReviewRunArgs) -> Result<()> {
 
     verify_gh_auth(&root)?;
     let store = ReviewProjectStore::resolve(&root)?;
+    reset_review_store(&store)?;
 
     if args.once || args.json {
         return run_review_once(&root, &store, args);
@@ -6052,6 +6242,10 @@ fn run_review_check(root: &Path, args: &ReviewRunArgs) -> Result<()> {
 
     println!("\nAll review prerequisites satisfied.");
     Ok(())
+}
+
+fn reset_review_store(store: &ReviewProjectStore) -> Result<()> {
+    store.save_state(&state::ReviewState::default())
 }
 
 fn run_review_once(root: &Path, store: &ReviewProjectStore, args: &ReviewRunArgs) -> Result<()> {
@@ -6652,6 +6846,7 @@ mod tests {
             additions: 10,
             deletions: 2,
             state: "OPEN".to_string(),
+            assignees: vec![],
             labels: vec![GhPrLabel {
                 name: "id-MET-42".to_string(),
             }],
@@ -7077,6 +7272,7 @@ mod tests {
             phase: ReviewPhase::ReviewComplete,
             summary: "Review complete".to_string(),
             updated_at_epoch_seconds: 1000,
+            review_output: Some("### Remediation Required\nYES".to_string()),
             remediation_required: Some(true),
             remediation_pr_number: None,
             remediation_pr_url: None,
@@ -7580,16 +7776,13 @@ mod tests {
     }
 
     #[test]
-    fn f_key_does_not_open_filter_panel_in_review_mode() {
+    fn f_key_opens_filter_panel_in_review_mode() {
         let mut app =
             InteractiveReviewApp::new(InteractiveReviewMode::Discovery, ReviewCommandKind::Review);
         app.load_candidates(vec![make_test_candidate(1)]);
         let f_key = crossterm::event::KeyEvent::new(KeyCode::Char('F'), KeyModifiers::NONE);
         let _ = app.handle_key(f_key, Rect::default());
-        assert!(
-            !app.filter_panel_open,
-            "filter panel should not open in review mode"
-        );
+        assert!(app.filter_panel_open, "filter panel should open in review mode");
     }
 
     #[test]
