@@ -5453,6 +5453,158 @@ printf '%s' '{"type":"result","subtype":"success","result":"claude listen ok","s
 
 #[cfg(unix)]
 #[test]
+fn listen_worker_reuses_stored_codex_resume_handle() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let home_dir = temp.path().join("home");
+    let stub_dir = temp.path().join("stub-output");
+    let server = DynamicLinearServer::start_with_completion_after_refreshes(1_000_000)?;
+    let api_url = server.url.clone();
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&home_dir)?;
+    fs::create_dir_all(&stub_dir)?;
+    fs::create_dir_all(home_dir.join(".codex"))?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+    write_onboarded_config(
+        &config_path,
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+"#,
+        ),
+    )?;
+    fs::write(
+        home_dir.join(".codex/config.toml"),
+        r#"approval_policy = "never"
+sandbox_mode = "danger-full-access"
+"#,
+    )?;
+
+    let codex_path = bin_dir.join("codex");
+    fs::write(
+        &codex_path,
+        r#"#!/bin/sh
+if [ "$1" = "--help" ]; then
+  cat <<'EOF'
+-a, --ask-for-approval <APPROVAL_POLICY>
+-s, --sandbox <SANDBOX_MODE>
+-C, --cd <DIR>
+    --add-dir <DIR>
+    --dangerously-bypass-approvals-and-sandbox
+EOF
+  exit 0
+fi
+if [ "$1" = "exec" ] && [ "$2" = "--help" ]; then
+  cat <<'EOF'
+-m, --model <MODEL>
+-c, --config <key=value>
+    --json
+EOF
+  exit 0
+fi
+printf '%s\n' "$@" > "$TEST_OUTPUT_DIR/codex-args.txt"
+printf '%s\n' '{"type":"thread.started","thread_id":"provider-thread-new"}'
+printf '%s' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"summary\":\"codex listen ok\"}"}}'
+"#,
+    )?;
+    let mut permissions = fs::metadata(&codex_path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&codex_path, permissions)?;
+
+    init_repo_with_origin(&repo_root)?;
+    let workspace = create_workspace_clone_checkout(&repo_root, "repo-workspace/MET-32")?;
+
+    let state_path = write_listen_store_session(
+        &config_path,
+        &repo_root,
+        vec![json!({
+            "issue_id": "issue-32",
+            "issue_identifier": "MET-32",
+            "issue_title": "Resume codex worker from stored provider handle",
+            "project_name": "MetaStack CLI",
+            "team_key": "MET",
+            "issue_url": "https://linear.app/issues/MET-32",
+            "phase": "blocked",
+            "summary": "Waiting for worker retry",
+            "brief_path": null,
+            "workspace_path": workspace.display().to_string(),
+            "workpad_comment_id": "comment-32",
+            "updated_at_epoch_seconds": 1_773_575_101u64,
+            "pid": null,
+            "session_id": "legacy-session-should-not-be-used",
+            "latest_resume_handle": {
+                "provider": "codex",
+                "id": "provider-thread-32"
+            },
+            "turns": 2,
+            "tokens": {},
+            "log_path": "logs/MET-32.log"
+        })],
+    )?;
+
+    let current_path = std::env::var("PATH")?;
+    meta()
+        .current_dir(&workspace)
+        .env("HOME", &home_dir)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &stub_dir)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "listen-worker",
+            "--source-root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+            "--workspace",
+            workspace.to_str().expect("workspace path should be utf-8"),
+            "--issue",
+            "MET-32",
+            "--workpad-comment-id",
+            "comment-32",
+            "--api-key",
+            "token",
+            "--api-url",
+            &api_url,
+            "--agent",
+            "codex",
+            "--max-turns",
+            "1",
+        ])
+        .assert()
+        .success();
+
+    let args_path = stub_dir.join("codex-args.txt");
+    wait_for_path(&args_path)?;
+    let args = fs::read_to_string(args_path)?;
+    assert!(args.contains("resume"));
+    assert!(args.contains("provider-thread-32"));
+    assert!(!args.contains("legacy-session-should-not-be-used"));
+
+    wait_for_path(&state_path)?;
+    let state = fs::read_to_string(state_path)?;
+    assert!(state.contains("\"latest_resume_handle\""));
+    assert!(state.contains("\"provider\": \"codex\""));
+    assert!(state.contains("\"id\": \"provider-thread-new\""));
+    assert!(state.contains("\"session_id\": \"provider-thread-new\""));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn listen_worker_publishes_the_initial_branch_pull_request_as_a_draft() -> Result<(), Box<dyn Error>>
 {
     let _guard = listen_test_lock();
