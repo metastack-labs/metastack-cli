@@ -19,16 +19,22 @@ fn onboarded_cli(config_path: &Path) -> Command {
 /// Create a temporary git repo with `.metastack/` directory and an initial commit.
 fn init_test_repo() -> tempfile::TempDir {
     let tmp = tempdir().unwrap();
-    std::process::Command::new("git")
-        .args(["init"])
+    let init_status = std::process::Command::new("git")
+        .args(["init", "-b", "main"])
         .current_dir(tmp.path())
-        .output()
+        .status()
         .unwrap();
-    std::process::Command::new("git")
+    assert!(init_status.success());
+
+    configure_git_identity(tmp.path()).unwrap();
+
+    let commit_status = std::process::Command::new("git")
         .args(["commit", "--allow-empty", "-m", "init"])
         .current_dir(tmp.path())
-        .output()
+        .status()
         .unwrap();
+    assert!(commit_status.success());
+
     fs::create_dir_all(tmp.path().join(".metastack")).unwrap();
     tmp
 }
