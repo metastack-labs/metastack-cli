@@ -54,7 +54,10 @@ pub use state::{
     AgentSession, LatestResumeHandle, PendingIssue, PullRequestStatus, PullRequestSummary,
     ResumeProvider, SessionPhase, TokenUsage,
 };
-use state::{COMPLETED_SESSION_TTL_SECONDS, ListenState};
+use state::{
+    COMPLETED_SESSION_TTL_SECONDS, ListenState, explicit_resume_id_label,
+    explicit_resume_provider_label,
+};
 use store::{
     ListenProjectStore, ListenSessionDetail, SessionSelector, StoredListenProjectSummary,
     pid_is_running, resolve_source_project_root,
@@ -377,6 +380,11 @@ fn demo_session_details(reference_now: u64) -> HashMap<String, ListenSessionDeta
                     url: Some("https://github.com/metastack-labs/metastack-cli/pull/321".to_string()),
                     status: PullRequestStatus::Draft,
                 },
+                latest_resume_handle: Some(LatestResumeHandle {
+                    provider: ResumeProvider::Codex,
+                    id: "019cedb4-2293-7651-b0b4-dfac4af6a640-019cedb4-229b-7453-825e-3e3da4e1bf2a"
+                        .to_string(),
+                }),
                 references: store::SessionDetailReferences {
                     workspace_path: Some("/tmp/metastack-cli-workspace/MET-13".to_string()),
                     backlog_path: Some(".metastack/backlog/MET-14".to_string()),
@@ -449,6 +457,11 @@ fn demo_session_details(reference_now: u64) -> HashMap<String, ListenSessionDeta
                     output: Some(49_960),
                 },
                 pull_request: PullRequestSummary::default(),
+                latest_resume_handle: Some(LatestResumeHandle {
+                    provider: ResumeProvider::Claude,
+                    id: "019ceda5-0a41-7ef1-bf96-4f26683c1570-019ceda5-0a57-7820-b050-c05e112d66dd"
+                        .to_string(),
+                }),
                 references: store::SessionDetailReferences {
                     workspace_path: Some("/tmp/metastack-cli-workspace/MET-17".to_string()),
                     backlog_path: None,
@@ -528,7 +541,6 @@ impl CodexLiveTokenHydrator {
             let Some(thread_id) = self.resolve_thread_id(session)? else {
                 continue;
             };
-            session.session_id = Some(thread_id.clone());
             if let Some(usage) = self.load_usage(&thread_id)? {
                 session.tokens.accumulate(&usage);
             }
@@ -538,7 +550,11 @@ impl CodexLiveTokenHydrator {
     }
 
     fn resolve_thread_id(&mut self, session: &AgentSession) -> Result<Option<String>> {
-        if let Some(candidate) = session.session_id.as_deref()
+        if let Some(candidate) = session
+            .latest_resume_handle
+            .as_ref()
+            .filter(|resume| resume.provider == ResumeProvider::Codex)
+            .map(|resume| resume.id.as_str())
             && self.session_file_path(candidate)?.is_some()
         {
             return Ok(Some(candidate.to_string()));
@@ -1687,7 +1703,7 @@ where
             workpad_comment_id: artifacts.workpad_comment.map(|comment| comment.id.clone()),
             updated_at_epoch_seconds,
             pid: artifacts.pid.filter(|pid| *pid > 0),
-            session_id: Some(issue.id.clone()),
+            session_id: None,
             latest_resume_handle: None,
             turns: artifacts.turns.or(Some(0)),
             tokens: TokenUsage::default(),
@@ -2150,10 +2166,10 @@ pub fn run_listen_session_list(_: &ListenSessionListArgs) -> Result<String> {
             .map(|session| session.issue_identifier.clone())
             .unwrap_or_else(|| "-".to_string());
         let provider = latest
-            .map(AgentSession::latest_resume_provider_label)
+            .map(|session| explicit_resume_provider_label(session.latest_resume_handle.as_ref()))
             .unwrap_or_else(|| "-".to_string());
         let resume_id = latest
-            .map(AgentSession::latest_resume_id_label)
+            .map(|session| explicit_resume_id_label(session.latest_resume_handle.as_ref()))
             .unwrap_or_else(|| "-".to_string());
         lines.push(format!(
             "{}  {}  {}  {}  {}  {}  {}  {}",
@@ -2215,11 +2231,11 @@ pub fn run_listen_session_inspect(args: &ListenSessionInspectArgs) -> Result<Str
         ));
         lines.push(format!(
             "  - Resume provider: {}",
-            session.latest_resume_provider_label()
+            explicit_resume_provider_label(session.latest_resume_handle.as_ref())
         ));
         lines.push(format!(
             "  - Resume ID: {}",
-            session.latest_resume_id_label()
+            explicit_resume_id_label(session.latest_resume_handle.as_ref())
         ));
         if let Some(workspace_path) = session.workspace_path {
             lines.push(format!("  - Workspace: {workspace_path}"));
@@ -2266,6 +2282,14 @@ fn append_session_inspect_detail_lines(lines: &mut Vec<String>, detail: &ListenS
     lines.push(format!(
         "  - Detail PR: {}",
         detail.pull_request.compact_label()
+    ));
+    lines.push(format!(
+        "  - Detail resume provider: {}",
+        explicit_resume_provider_label(detail.latest_resume_handle.as_ref())
+    ));
+    lines.push(format!(
+        "  - Detail resume ID: {}",
+        explicit_resume_id_label(detail.latest_resume_handle.as_ref())
     ));
 
     if let Some(url) = detail.pull_request.url.as_deref() {
@@ -3714,6 +3738,102 @@ mod tests {
         assert_eq!(
             super::parse_codex_thread_id_from_log(&log_path)?,
             Some("thread-2".to_string())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn codex_live_token_hydrator_ignores_legacy_session_id_without_resume_handle() -> Result<()> {
+        let temp = tempdir()?;
+        let sessions_root = temp.path().join(".codex").join("sessions");
+        fs::create_dir_all(&sessions_root)?;
+        fs::write(
+            sessions_root.join("legacy-session-1.jsonl"),
+            "{\"type\":\"event_msg\"}\n",
+        )?;
+
+        let mut hydrator = super::CodexLiveTokenHydrator {
+            sessions_root: Some(sessions_root),
+            snapshots: HashMap::new(),
+        };
+        let session = AgentSession {
+            issue_id: Some("issue-1".to_string()),
+            issue_identifier: "ENG-9".to_string(),
+            issue_title: "Legacy continuation bookkeeping".to_string(),
+            project_name: None,
+            team_key: "ENG".to_string(),
+            issue_url: "https://linear.app/issues/ENG-9".to_string(),
+            phase: SessionPhase::Running,
+            summary: "running".to_string(),
+            brief_path: None,
+            backlog_issue_identifier: None,
+            backlog_issue_title: None,
+            backlog_path: None,
+            workspace_path: None,
+            branch: None,
+            pull_request: PullRequestSummary::default(),
+            workpad_comment_id: None,
+            updated_at_epoch_seconds: 1,
+            pid: None,
+            session_id: Some("legacy-session-1".to_string()),
+            latest_resume_handle: None,
+            turns: None,
+            tokens: TokenUsage::default(),
+            log_path: None,
+        };
+
+        assert_eq!(hydrator.resolve_thread_id(&session)?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn codex_live_token_hydrator_uses_log_thread_when_resume_handle_missing() -> Result<()> {
+        let temp = tempdir()?;
+        let sessions_root = temp.path().join(".codex").join("sessions");
+        fs::create_dir_all(&sessions_root)?;
+        fs::write(
+            sessions_root.join("thread-log-derived.jsonl"),
+            "{\"type\":\"event_msg\"}\n",
+        )?;
+        let log_path = temp.path().join("ENG-10.log");
+        fs::write(
+            &log_path,
+            "{\"type\":\"thread.started\",\"thread_id\":\"thread-log-derived\"}\n",
+        )?;
+
+        let mut hydrator = super::CodexLiveTokenHydrator {
+            sessions_root: Some(sessions_root),
+            snapshots: HashMap::new(),
+        };
+        let session = AgentSession {
+            issue_id: Some("issue-1".to_string()),
+            issue_identifier: "ENG-10".to_string(),
+            issue_title: "Codex thread from log".to_string(),
+            project_name: None,
+            team_key: "ENG".to_string(),
+            issue_url: "https://linear.app/issues/ENG-10".to_string(),
+            phase: SessionPhase::Running,
+            summary: "running".to_string(),
+            brief_path: None,
+            backlog_issue_identifier: None,
+            backlog_issue_title: None,
+            backlog_path: None,
+            workspace_path: None,
+            branch: None,
+            pull_request: PullRequestSummary::default(),
+            workpad_comment_id: None,
+            updated_at_epoch_seconds: 1,
+            pid: None,
+            session_id: Some("legacy-session-1".to_string()),
+            latest_resume_handle: None,
+            turns: None,
+            tokens: TokenUsage::default(),
+            log_path: Some(log_path.display().to_string()),
+        };
+
+        assert_eq!(
+            hydrator.resolve_thread_id(&session)?,
+            Some("thread-log-derived".to_string())
         );
         Ok(())
     }

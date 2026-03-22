@@ -19,16 +19,38 @@ fn onboarded_cli(config_path: &Path) -> Command {
 /// Create a temporary git repo with `.metastack/` directory and an initial commit.
 fn init_test_repo() -> tempfile::TempDir {
     let tmp = tempdir().unwrap();
-    std::process::Command::new("git")
-        .args(["init"])
-        .current_dir(tmp.path())
-        .output()
-        .unwrap();
-    std::process::Command::new("git")
-        .args(["commit", "--allow-empty", "-m", "init"])
-        .current_dir(tmp.path())
-        .output()
-        .unwrap();
+    assert!(
+        std::process::Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(tmp.path())
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        std::process::Command::new("git")
+            .args(["config", "user.name", "MetaStack Tests"])
+            .current_dir(tmp.path())
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        std::process::Command::new("git")
+            .args(["config", "user.email", "tests@example.com"])
+            .current_dir(tmp.path())
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        std::process::Command::new("git")
+            .args(["commit", "--allow-empty", "-m", "init"])
+            .current_dir(tmp.path())
+            .status()
+            .unwrap()
+            .success()
+    );
     fs::create_dir_all(tmp.path().join(".metastack")).unwrap();
     tmp
 }
