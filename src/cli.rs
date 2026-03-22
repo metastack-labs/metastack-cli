@@ -35,11 +35,16 @@ Examples:
   meta backlog dependencies --root . --fetch --json
   meta backlog dependencies --root . --fetch --apply --yes
   meta backlog tech MET-35
+  meta backlog release --root . --name sprint-1 --batch-size 5
   meta backlog split MET-35
   meta backlog sync status
   meta backlog sync link MET-35 --entry manual-notes --pull
   meta backlog sync pull --all
-  meta backlog sync push MET-35 --update-description";
+  meta backlog sync push MET-35 --update-description
+  meta backlog release --root .
+  meta backlog release --root . --name v0.4
+  meta backlog release --root . --fetch --json
+  meta backlog release --root . --fetch --apply --yes";
 
 const BACKLOG_IMPROVE_HELP: &str = "\
 Use `meta backlog improve` for a repo-scoped backlog sweep across existing issues in one state.
@@ -63,6 +68,13 @@ Examples:
   meta agents orchestrate --root . --staging-branch staging/release-v2
   meta agents orchestrate --root . --render-once
   meta agents orchestrate --root . --status --json
+  meta agents review 42 --root .
+  meta agents review 42 --root . --dry-run
+  meta agents review --root .
+  meta agents review --root . --check
+  meta agents review --root . --once
+  meta agents retro 42 --root .
+  meta agents retro --root .
   meta agents workflows list --root .
   meta agents workflows run ticket-implementation --root .
   meta agents workflows run ticket-implementation --root . --no-interactive --param issue=MET-93
@@ -309,6 +321,8 @@ pub enum BacklogCommands {
     Improve(BacklogImproveArgs),
     /// Propose dependency relationships, rollout order, and optional Linear updates for repo backlog packets.
     Dependencies(BacklogDependenciesArgs),
+    /// Slice repo-scoped backlog issues into milestone-ready execution batches.
+    Release(BacklogReleaseArgs),
     /// Create a backlog sub-issue and local planning files from a parent issue.
     #[command(name = "tech", visible_alias = "split", visible_alias = "derive")]
     Tech(TechnicalArgs),
@@ -364,6 +378,27 @@ pub struct BacklogDependenciesArgs {
     #[arg(long)]
     pub json: bool,
     /// Apply the proposed parent and issue-relation changes after showing a dry-run preview.
+    #[arg(long)]
+    pub apply: bool,
+    /// Skip the interactive confirmation prompt for `--apply`.
+    #[arg(long)]
+    pub yes: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct BacklogReleaseArgs {
+    #[command(flatten)]
+    pub client: LinearClientArgs,
+    /// Name for the release plan. Defaults to a timestamp-based slug when omitted.
+    #[arg(long)]
+    pub name: Option<String>,
+    /// Enrich the release analysis with current Linear issue metadata such as state and priority.
+    #[arg(long)]
+    pub fetch: bool,
+    /// Emit the result as machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+    /// Push the selected release grouping into Linear-compatible metadata.
     #[arg(long)]
     pub apply: bool,
     /// Skip the interactive confirmation prompt for `--apply`.
@@ -469,6 +504,10 @@ pub enum AgentsCommands {
     Listen(ListenArgs),
     /// Orchestrate backlog promotion, PR review coordination, and staging-branch integration.
     Orchestrate(OrchestrateArgs),
+    /// Review open GitHub PRs through a guided one-shot dashboard with explicit human approval.
+    Review(ReviewArgs),
+    /// Analyze merged work for follow-up Linear tickets through a guided retro dashboard.
+    Retro(RetroArgs),
     /// List, explain, and run reusable workflow playbooks.
     #[command(alias = "workflow")]
     Workflows(WorkflowsArgs),
@@ -1490,8 +1529,9 @@ pub struct SyncStatusArgs {
 
 #[derive(Debug, Clone, Args)]
 pub struct SyncPullArgs {
-    /// Existing issue identifier, for example MET-35.
-    #[arg(value_name = "IDENTIFIER", required_unless_present = "all")]
+    /// Existing issue identifier, for example MET-35. Omit when `--all` is set or when
+    /// `sync.sync_all` is enabled in repo metadata.
+    #[arg(value_name = "IDENTIFIER")]
     pub issue: Option<String>,
     /// Pull every linked backlog entry.
     #[arg(long, conflicts_with = "issue")]
@@ -1500,8 +1540,9 @@ pub struct SyncPullArgs {
 
 #[derive(Debug, Clone, Args)]
 pub struct SyncPushArgs {
-    /// Existing issue identifier, for example MET-35.
-    #[arg(value_name = "IDENTIFIER", required_unless_present = "all")]
+    /// Existing issue identifier, for example MET-35. Omit when `--all` is set or when
+    /// `sync.sync_all` is enabled in repo metadata.
+    #[arg(value_name = "IDENTIFIER")]
     pub issue: Option<String>,
     /// Push every linked backlog entry.
     #[arg(long, conflicts_with = "issue")]
@@ -1555,6 +1596,76 @@ pub struct ListenWorkerArgs {
     /// Override the resolved built-in reasoning option for this worker.
     #[arg(long)]
     pub reasoning: Option<String>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ReviewArgs {
+    /// GitHub PR number for guided review. Omit to search and multi-select candidate PRs in the dashboard first.
+    #[arg(value_name = "PR_NUMBER")]
+    pub pr_number: Option<u64>,
+    #[command(flatten)]
+    pub run: ReviewRunArgs,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct RetroArgs {
+    /// GitHub PR number for retro analysis. Omit to search and multi-select candidate PRs in the dashboard first.
+    #[arg(value_name = "PR_NUMBER")]
+    pub pr_number: Option<u64>,
+    #[command(flatten)]
+    pub run: ReviewRunArgs,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ReviewRunArgs {
+    /// Repository root containing the `.metastack` workspace.
+    #[arg(long, value_name = "PATH", default_value = ".")]
+    pub root: PathBuf,
+    /// Show planned execution and resolved provider/model/reasoning without mutating GitHub or Linear.
+    #[arg(long, conflicts_with_all = ["once", "render_once", "check"])]
+    pub dry_run: bool,
+    /// Run review prerequisite checks and exit without reviewing or polling.
+    #[arg(long, conflicts_with_all = ["once", "render_once"])]
+    pub check: bool,
+    /// Execute a single listener poll cycle and print a textual summary.
+    #[arg(long, conflicts_with = "render_once")]
+    pub once: bool,
+    /// Emit the single poll-cycle result as JSON. Requires `--once`.
+    #[arg(long, conflicts_with = "render_once")]
+    pub json: bool,
+    /// Execute a single cycle and print a deterministic ratatui snapshot.
+    #[arg(long)]
+    pub render_once: bool,
+    /// Apply review-dashboard actions before a render-once snapshot.
+    #[arg(long, hide = true, value_enum, value_delimiter = ',')]
+    pub events: Vec<ReviewDashboardEventArg>,
+    /// Snapshot width when --render-once is set.
+    #[arg(long, default_value_t = 120)]
+    pub width: u16,
+    /// Snapshot height when --render-once is set.
+    #[arg(long, default_value_t = 32)]
+    pub height: u16,
+    /// Override the configured default agent/provider for review.
+    #[arg(long)]
+    pub agent: Option<String>,
+    /// Override the configured default model for review.
+    #[arg(long)]
+    pub model: Option<String>,
+    /// Override the resolved built-in reasoning option for review.
+    #[arg(long)]
+    pub reasoning: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ReviewDashboardEventArg {
+    Up,
+    Down,
+    Tab,
+    Enter,
+    Back,
+    Esc,
+    PageUp,
+    PageDown,
 }
 
 #[derive(Debug, Clone)]
@@ -2009,6 +2120,7 @@ impl Cli {
             Command::Backlog(args) => match &args.command {
                 BacklogCommands::Plan(args) if args.no_interactive => Some("backlog.plan"),
                 BacklogCommands::Dependencies(args) if args.json => Some("backlog.dependencies"),
+                BacklogCommands::Release(args) if args.json => Some("backlog.release"),
                 BacklogCommands::Tech(args) if args.no_interactive => Some("backlog.tech"),
                 BacklogCommands::Sync(args) if args.no_interactive || args.json => {
                     Some("backlog.sync")
@@ -2018,6 +2130,8 @@ impl Cli {
             Command::Agents(args) => match &args.command {
                 AgentsCommands::Listen(args) if args.run.json => Some("agents.listen"),
                 AgentsCommands::Orchestrate(args) if args.json => Some("agents.orchestrate"),
+                AgentsCommands::Review(args) if args.run.json => Some("agents.review"),
+                AgentsCommands::Retro(args) if args.run.json => Some("agents.retro"),
                 _ => None,
             },
             Command::Linear(args) => match &args.command {
@@ -2122,6 +2236,7 @@ fn infer_backlog_machine_output(tokens: &[String]) -> Option<&'static str> {
     match command.as_str() {
         "plan" if has_flag(rest, "--no-interactive") => Some("backlog.plan"),
         "dependencies" if has_flag(rest, "--json") => Some("backlog.dependencies"),
+        "release" if has_flag(rest, "--json") => Some("backlog.release"),
         "tech" | "split" | "derive" if has_flag(rest, "--no-interactive") => Some("backlog.tech"),
         "sync" if has_flag(rest, "--json") || has_flag(rest, "--no-interactive") => {
             Some("backlog.sync")
@@ -2135,6 +2250,8 @@ fn infer_agents_machine_output(tokens: &[String]) -> Option<&'static str> {
     match command.as_str() {
         "listen" if has_flag(rest, "--json") => Some("agents.listen"),
         "orchestrate" if has_flag(rest, "--json") => Some("agents.orchestrate"),
+        "review" if has_flag(rest, "--json") => Some("agents.review"),
+        "retro" if has_flag(rest, "--json") => Some("agents.retro"),
         _ => None,
     }
 }

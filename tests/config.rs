@@ -1398,7 +1398,7 @@ provider = "claude"
     );
     assert_eq!(
         payload["error"]["context"][0],
-        "unknown agent command route key `backlogoops`; supported keys: backlog.spec, backlog.plan, backlog.improve, backlog.split, context.scan, context.reload, linear.issues.refine, agents.listen, agents.workflows.run, runtime.cron.prompt, merge.run"
+        "unknown agent command route key `backlogoops`; supported keys: backlog.spec, backlog.plan, backlog.improve, backlog.split, context.scan, context.reload, linear.issues.refine, agents.listen, agents.workflows.run, runtime.cron.prompt, agents.review, merge.run"
     );
 
     Ok(())

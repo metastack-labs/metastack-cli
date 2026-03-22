@@ -28,9 +28,11 @@ Most planning tools split work across issue trackers, docs, scripts, and ad hoc 
 - `meta runtime config` saves install-scoped Linear and agent defaults.
 - `meta runtime setup` bootstraps the repo and saves repo-scoped defaults under `.metastack/`.
 - `meta context scan` turns the codebase into reusable planning context.
-- `meta backlog spec`, `meta backlog plan`, `meta backlog improve`, `meta backlog dependencies`, `meta backlog tech`, `meta linear issues refine`, and `meta agents workflows` generate structured backlog work.
+- `meta backlog spec`, `meta backlog plan`, `meta backlog improve`, `meta backlog dependencies`, `meta backlog release`, `meta backlog tech`, `meta linear issues refine`, and `meta agents workflows` generate structured backlog work.
 - `meta merge` batches open GitHub PRs into one isolated aggregate merge run and publish step.
 - `meta linear ...` and `meta backlog sync` keep Linear and local files aligned.
+- `meta agents review` audits GitHub PRs in a guided dashboard, queues `metastack`-labeled PRs for explicit human approval, and can open remediation PRs when required.
+- `meta agents retro` analyzes shipped PRs for follow-up backlog opportunities and opens a plan-style Linear ticket curation flow.
 - `meta agents listen` runs unattended ticket execution in dedicated workspace clones instead of your source checkout.
 - `meta workspace` inventories and cleans those sibling listener workspace clones after the listener finishes.
 
@@ -117,6 +119,7 @@ meta backlog spec --root .
 meta context scan
 meta context show
 meta backlog plan --request "Break the next release into Linear-ready tickets"
+meta backlog release --name sprint-1 --batch-size 5
 ```
 
 If you are ready to supervise issue execution:
@@ -182,7 +185,7 @@ The preferred public surface is domain-first. Legacy top-level commands such as 
 
 | Command family | Use it for |
 | --- | --- |
-| `meta backlog` | Plan, analyze dependencies, create technical backlog children, and sync backlog work for the current repository |
+| `meta backlog` | Plan, analyze dependencies, batch into releases, create technical backlog children, and sync backlog work for the current repository |
 | `meta linear` | Browse, create, edit, refine, and dashboard Linear work |
 | `meta agents` | Run the unattended listener and reusable workflow playbooks |
 | `meta context` | Inspect, map, doctor, scan, or reload the effective agent context |
@@ -220,7 +223,7 @@ A typical end-to-end loop looks like this:
 2. Run `meta runtime setup` once per repository to scaffold `.metastack/` and save repo defaults.
 3. Run `meta backlog spec` to create or refine the repo-local `.metastack/SPEC.md`.
 4. Run `meta context scan` to refresh the repo context under `.metastack/codebase/`.
-5. Use `meta backlog plan` or `meta backlog tech` to create structured backlog work.
+5. Use `meta backlog plan`, `meta backlog release`, or `meta backlog tech` to create structured backlog work.
 6. Use `meta linear ...`, `meta dashboard ...`, or `meta backlog sync` to coordinate with Linear.
 7. Use `meta merge` when you want to batch open GitHub PRs in one isolated aggregate merge run.
 8. Use `meta agents listen` when you want unattended ticket execution inside a dedicated workspace clone.
@@ -235,6 +238,7 @@ meta runtime setup --team MET --project "MetaStack CLI"
 meta backlog spec --root .
 meta context scan
 meta backlog plan --request "Break the next release into Linear-ready tickets"
+meta backlog release --name sprint-1 --batch-size 5
 meta backlog tech MET-35
 ```
 
@@ -945,6 +949,38 @@ Side effects:
 - with `--apply`, prints a dry-run preview first and requires confirmation unless `--yes` is present
 - with `--apply`, mutates only the proposed parent and issue-relation edges in Linear; unrelated issue descriptions and attachments remain untouched
 
+### `backlog release`
+
+Slice existing repo-scoped backlog items into milestone-ready execution batches and write the release plan locally before any optional Linear edits:
+
+```bash
+meta backlog release --root .
+meta backlog release --root . --name v0.4
+meta backlog release --root . --fetch --json
+meta backlog release --root . --fetch --apply --yes
+```
+
+`meta backlog release` reads local backlog packets from `.metastack/backlog/<ISSUE>/`, optionally enriches them with live Linear issue data via `--fetch`, uses priority and dependency signals to classify items into Must-Have / Should-Have / Deferred batches, and writes an execution packet under `.metastack/releases/<NAME>/`.
+
+The generated packet includes:
+
+- priority-based batches (Must-Have, Should-Have, Deferred) with rationale
+- dependency-aware ordering within each batch
+- a concrete recommended cut line with included vs deferred counts
+- risk analysis (unestimated items, unprioritized items, external blockers)
+- both Markdown (`plan.md`) and machine-readable JSON (`plan.json`) output
+
+Pass `--apply` only when you want to push the release grouping into Linear-compatible metadata. The command writes the local release plan first so the planning run stays auditable.
+
+Side effects:
+
+- reads all local backlog packets under `.metastack/backlog/`, ignoring `_TEMPLATE`
+- writes `.metastack/releases/<NAME>/plan.md`
+- writes `.metastack/releases/<NAME>/plan.json`
+- empty backlogs or insufficient items produce a clear message instead of an empty plan
+- with `--fetch`, enriches local analysis with current Linear state, priority, and estimate data
+- with `--apply`, writes the local plan first, then pushes the selected metadata to Linear
+
 ### `issues refine`
 
 Critique and rewrite one or more existing Linear issues that already belong to the active repository scope:
@@ -1077,6 +1113,56 @@ Required auth:
 - `LINEAR_API_KEY`
 - optional: `LINEAR_API_URL`
 - optional: `LINEAR_TEAM`
+
+### `agents review`
+
+Review open GitHub PRs with a holistic audit pipeline that gathers PR metadata, review state, changed files, diff scope, linked Linear ticket details, and repository context. Interactive TTY runs stay inside one guided dashboard flow:
+
+- **Direct review**: `meta agents review <PR_NUMBER>` loads one PR into the dashboard, shows a review preview, and waits for explicit approval before the audit starts.
+- **Guided queue review**: `meta agents review` (no PR number) discovers open PRs with the `metastack` label via `gh`, shows a searchable candidate queue, and waits for a human to approve starting each review session.
+
+The interactive dashboard keeps candidates and live sessions in separate views so you can search, multi-select, and queue more PRs while earlier reviews are still running. `Enter` queues a normal review, `Tab` rotates focus between the candidate list, candidate preview, session list, and session detail panes, and `R` refreshes the candidate discovery set without leaving the dashboard.
+
+```bash
+# One-shot review
+meta agents review 42 --root .
+meta agents review 42 --root . --dry-run
+meta agents review 42 --root . --agent claude --model opus
+
+# Prerequisite check
+meta agents review --check --root .
+
+# Guided queue mode
+meta agents review --root .
+meta agents review --root . --once
+meta agents review --root . --once --json
+meta agents review --root . --render-once
+```
+
+The review instructions are stored as source-controlled artifacts at `src/artifacts/REVIEW.md` and `src/artifacts/VIEW_LINEAR.md`, and loaded at compile time via `include_str!`.
+
+When required fixes are found, the command creates a workspace-safe follow-up branch from the original PR context, applies agent-authored fixes, commits and pushes them, opens a remediation PR, and posts a Linear comment describing why the remediation PR was opened. When no remediation is required, the command exits cleanly without creating a branch, PR, or Linear comment.
+
+### `agents retro`
+
+Analyze completed PRs for non-blocking follow-up backlog opportunities. Interactive TTY runs stay inside a guided retro dashboard:
+
+- **Direct retro**: `meta agents retro <PR_NUMBER>` loads one PR into the dashboard and waits for explicit approval before the retro analysis starts.
+- **Guided queue retro**: `meta agents retro` (no PR number) discovers open PRs with the `metastack` label via `gh`, shows a searchable candidate queue, and waits for a human to approve starting each retro session.
+
+After a retro analysis finishes, selecting that session and pressing `Enter` opens a dedicated backlog-plan-style review screen. From there you can keep, skip, or merge suggested tickets before creating the curated batch in Linear.
+
+```bash
+meta agents retro 42 --root .
+meta agents retro --root .
+```
+
+Interactive runs now show explicit loading states for auth, PR discovery, context assembly, agent review, and remediation so the current phase stays visible throughout the session.
+
+Prerequisites:
+- `gh` CLI installed and authenticated (`gh auth login`)
+- Repository with a configured `.metastack/meta.json`
+- For guided queue mode: open PRs must carry the `metastack` label
 
 ### `agents listen`
 

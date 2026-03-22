@@ -39,6 +39,7 @@ pub const AGENT_ROUTE_LINEAR_ISSUES_REFINE: &str = "linear.issues.refine";
 pub const AGENT_ROUTE_AGENTS_LISTEN: &str = "agents.listen";
 pub const AGENT_ROUTE_AGENTS_WORKFLOWS_RUN: &str = "agents.workflows.run";
 pub const AGENT_ROUTE_RUNTIME_CRON_PROMPT: &str = "runtime.cron.prompt";
+pub const AGENT_ROUTE_AGENTS_REVIEW: &str = "agents.review";
 pub const AGENT_ROUTE_MERGE: &str = "merge.run";
 #[allow(dead_code)]
 pub const AGENT_ROUTE_AGENTS_ORCHESTRATE: &str = "agents.orchestrate";
@@ -170,6 +171,11 @@ pub struct PlanningTicketContextSettings {
 pub struct PlanningSyncSettings {
     pub discussion_file_char_limit: Option<usize>,
     pub discussion_prompt_char_limit: Option<usize>,
+    /// When `true`, `meta backlog sync pull` and `meta backlog sync push` default to
+    /// operating on every linked backlog entry rather than requiring `--all` or a single
+    /// `<ISSUE>` argument.
+    #[serde(default)]
+    pub sync_all: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -996,6 +1002,11 @@ impl PlanningSyncSettings {
             .unwrap_or(DEFAULT_SYNC_DISCUSSION_PROMPT_CHAR_LIMIT)
     }
 
+    /// Returns `true` when this repository enables sync-all behavior by default.
+    pub fn sync_all(&self) -> bool {
+        self.sync_all.unwrap_or(false)
+    }
+
     fn validate(&self) -> Result<()> {
         if matches!(self.discussion_file_char_limit, Some(0)) {
             return Err(anyhow!(
@@ -1396,6 +1407,11 @@ pub fn supported_agent_route_definitions() -> &'static [AgentRouteDefinition] {
             key: AGENT_ROUTE_RUNTIME_CRON_PROMPT,
             family: "runtime.cron",
             label: "meta runtime cron prompt jobs",
+        },
+        AgentRouteDefinition {
+            key: AGENT_ROUTE_AGENTS_REVIEW,
+            family: "agents",
+            label: "meta agents review",
         },
         AgentRouteDefinition {
             key: AGENT_ROUTE_MERGE,
@@ -2122,7 +2138,7 @@ mod tests {
         InstallListenSettings, InstallPlanSettings, InstallUiSettings, ListenAssignmentScope,
         METASTACK_CONFIG_ENV, MergeSettings, NoAgentSelectedError, PlanningAgentSettings,
         PlanningIssueLabels, PlanningListenSettings, PlanningMeta, PlanningPlanSettings,
-        VelocityAutoAssign, VelocityDefaults, is_no_agent_selected_error,
+        PlanningSyncSettings, VelocityAutoAssign, VelocityDefaults, is_no_agent_selected_error,
         no_agent_selected_route_key, normalize_agent_route_key, parse_listen_required_labels_csv,
         resolve_agent_config, resolve_agent_route, validate_agent_reasoning,
         validate_interactive_plan_follow_up_question_limit, validate_listen_poll_interval_seconds,
@@ -3158,5 +3174,26 @@ mod tests {
                 .to_string()
                 .contains("supported reasoning: low, medium, high, max")
         );
+    }
+
+    #[test]
+    fn sync_all_defaults_to_false_when_unset() {
+        let settings = PlanningSyncSettings::default();
+        assert!(!settings.sync_all());
+    }
+
+    #[test]
+    fn sync_all_resolves_from_explicit_value() {
+        let settings = PlanningSyncSettings {
+            sync_all: Some(true),
+            ..Default::default()
+        };
+        assert!(settings.sync_all());
+
+        let settings = PlanningSyncSettings {
+            sync_all: Some(false),
+            ..Default::default()
+        };
+        assert!(!settings.sync_all());
     }
 }
