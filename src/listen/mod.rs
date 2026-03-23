@@ -4202,6 +4202,7 @@ mod tests {
             turns: None,
             tokens: TokenUsage::default(),
             log_path: None,
+            origin: SessionOrigin::default(),
         };
 
         assert_eq!(hydrator.resolve_thread_id(&session)?, None);
@@ -4251,6 +4252,7 @@ mod tests {
             turns: None,
             tokens: TokenUsage::default(),
             log_path: Some(log_path.display().to_string()),
+            origin: SessionOrigin::default(),
         };
 
         assert_eq!(

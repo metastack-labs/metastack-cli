@@ -1589,7 +1589,7 @@ fn listen_render_once_demo_detail_shows_execute_origin_for_execute_session()
             "--width",
             "200",
             "--height",
-            "56",
+            "58",
             "--root",
             repo_root.to_str().expect("temp path should be utf-8"),
         ])
