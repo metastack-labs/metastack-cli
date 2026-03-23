@@ -217,6 +217,31 @@ impl TokenUsage {
     }
 }
 
+/// Distinguishes whether a session was created by the continuous `listen` daemon
+/// or by a one-off `agents execute` invocation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionOrigin {
+    /// Session was created by `meta agents listen` (default for backwards compatibility).
+    #[default]
+    Listen,
+    /// Session was created by `meta agents execute <ISSUE_ID>`.
+    Execute,
+}
+
+impl SessionOrigin {
+    pub fn display_label(self) -> &'static str {
+        match self {
+            Self::Listen => "Listen",
+            Self::Execute => "Execute",
+        }
+    }
+
+    pub fn is_execute(self) -> bool {
+        matches!(self, Self::Execute)
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PullRequestStatus {
@@ -297,6 +322,8 @@ pub struct AgentSession {
     pub tokens: TokenUsage,
     #[serde(default)]
     pub log_path: Option<String>,
+    #[serde(default)]
+    pub origin: SessionOrigin,
 }
 
 impl AgentSession {
@@ -327,6 +354,10 @@ impl AgentSession {
             .as_ref()
             .map(|resume| compact_identifier(&resume.id))
             .unwrap_or_else(|| "-".to_string())
+    }
+
+    pub(super) fn origin_label(&self) -> &'static str {
+        self.origin.display_label()
     }
 
     pub(super) fn latest_resume_provider_label(&self) -> String {
@@ -495,7 +526,8 @@ impl ListenState {
 mod tests {
     use super::{
         AgentSession, LatestResumeHandle, PullRequestStatus, PullRequestSummary, ResumeProvider,
-        SessionPhase, TokenUsage, explicit_resume_id_label, explicit_resume_provider_label,
+        SessionOrigin, SessionPhase, TokenUsage, explicit_resume_id_label,
+        explicit_resume_provider_label,
     };
 
     fn session() -> AgentSession {
@@ -523,7 +555,24 @@ mod tests {
             turns: Some(1),
             tokens: TokenUsage::default(),
             log_path: None,
+            origin: SessionOrigin::Listen,
         }
+    }
+
+    #[test]
+    fn session_origin_defaults_to_listen() {
+        let session = session();
+        assert_eq!(session.origin, SessionOrigin::Listen);
+        assert_eq!(session.origin_label(), "Listen");
+        assert!(!session.origin.is_execute());
+    }
+
+    #[test]
+    fn session_origin_execute_label() {
+        let mut session = session();
+        session.origin = SessionOrigin::Execute;
+        assert_eq!(session.origin_label(), "Execute");
+        assert!(session.origin.is_execute());
     }
 
     #[test]

@@ -1062,7 +1062,8 @@ mod tests {
 
     use crate::config::data_root_from_config_path;
     use crate::listen::{
-        LatestResumeHandle, ListenSessionDetail, PullRequestSummary, ResumeProvider, TokenUsage,
+        LatestResumeHandle, ListenSessionDetail, PullRequestSummary, ResumeProvider, SessionOrigin,
+        TokenUsage,
     };
 
     use super::{
@@ -1199,6 +1200,7 @@ mod tests {
             turns: Some(1),
             tokens: TokenUsage::default(),
             log_path: Some(format!("logs/{issue_identifier}.log")),
+            origin: SessionOrigin::Listen,
         }
     }
 

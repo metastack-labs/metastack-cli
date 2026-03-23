@@ -1019,7 +1019,9 @@ fn listen_once_demo_outputs_terminal_summary_without_browser_endpoints()
         .stdout(predicate::str::contains("Dashboard: terminal summary"))
         .stdout(predicate::str::contains("http://").not())
         .stdout(predicate::str::contains("127.0.0.1").not())
-        .stdout(predicate::str::contains("localhost").not());
+        .stdout(predicate::str::contains("localhost").not())
+        .stdout(predicate::str::contains("(execute-origin)"))
+        .stdout(predicate::str::contains("MET-17"));
 
     Ok(())
 }
@@ -1371,6 +1373,98 @@ fn listen_sessions_inspect_surfaces_detail_pr_ref_without_url() -> Result<(), Bo
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn listen_sessions_inspect_shows_execute_origin_label() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    write_onboarded_config(&config_path, "")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+    init_repo_with_origin(&repo_root)?;
+
+    let mut session = listen_session_json("MET-45", "running", 1_773_575_100, Some(99999));
+    session["origin"] = json!("execute");
+
+    write_listen_store_session(&config_path, &repo_root, vec![session])?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "inspect",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Origin: Execute"))
+        .stdout(predicate::str::contains("MET-45"));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_sessions_inspect_shows_listen_origin_by_default() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    write_onboarded_config(&config_path, "")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+    init_repo_with_origin(&repo_root)?;
+
+    write_listen_store_session(
+        &config_path,
+        &repo_root,
+        vec![listen_session_json(
+            "MET-50",
+            "running",
+            1_773_575_100,
+            Some(99999),
+        )],
+    )?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "inspect",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Origin: Listen"))
+        .stdout(predicate::str::contains("MET-50"));
+
+    Ok(())
+}
+
 #[test]
 fn listen_render_once_demo_outputs_dashboard_snapshot() -> Result<(), Box<dyn Error>> {
     let _guard = listen_test_lock();
@@ -1411,7 +1505,8 @@ fn listen_render_once_demo_outputs_dashboard_snapshot() -> Result<(), Box<dyn Er
         .stdout(predicate::str::contains("SESSION"))
         .stdout(predicate::str::contains("PROGRESS"))
         .stdout(predicate::str::contains("draft #321"))
-        .stdout(predicate::str::contains("MET-13"));
+        .stdout(predicate::str::contains("MET-13"))
+        .stdout(predicate::str::contains("MET-17"));
 
     Ok(())
 }
@@ -1456,7 +1551,56 @@ fn listen_render_once_demo_can_snapshot_selected_session_detail() -> Result<(), 
         .stdout(predicate::str::contains("Selected Session"))
         .stdout(predicate::str::contains("PR: draft #321"))
         .stdout(predicate::str::contains("Prompt Context"))
-        .stdout(predicate::str::contains("Workpad: comment-met-13"));
+        .stdout(predicate::str::contains("Workpad: comment-met-13"))
+        .stdout(predicate::str::contains("Origin: Listen"));
+
+    Ok(())
+}
+
+#[test]
+fn listen_render_once_demo_detail_shows_execute_origin_for_execute_session()
+-> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    write_onboarded_config(&config_path, "")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "agents",
+            "listen",
+            "--demo",
+            "--render-once",
+            "--events",
+            "down,enter",
+            "--width",
+            "200",
+            "--height",
+            "56",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Selected Session"))
+        .stdout(predicate::str::contains("MET-17"))
+        .stdout(predicate::str::contains("Origin: Execute"))
+        .stdout(predicate::str::contains(
+            "This session was started by `meta agents execute`",
+        ));
 
     Ok(())
 }

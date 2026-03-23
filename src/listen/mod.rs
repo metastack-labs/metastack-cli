@@ -52,7 +52,7 @@ use crate::output::render_json_success;
 use crate::scaffold::ensure_planning_layout;
 pub use state::{
     ActiveIssue, AgentSession, LatestResumeHandle, PendingIssue, PullRequestStatus,
-    PullRequestSummary, ResumeProvider, SessionPhase, TokenUsage,
+    PullRequestSummary, ResumeProvider, SessionOrigin, SessionPhase, TokenUsage,
 };
 use state::{
     COMPLETED_SESSION_TTL_SECONDS, ListenState, explicit_resume_id_label,
@@ -127,10 +127,16 @@ impl ListenDashboardData {
         if !self.sessions.is_empty() {
             lines.push("Sessions:".to_string());
             for session in &self.sessions {
+                let origin_tag = if session.origin.is_execute() {
+                    " (execute-origin)"
+                } else {
+                    ""
+                };
                 lines.push(format!(
-                    "  - {} [{}] {}",
+                    "  - {} [{}]{} {}",
                     session.issue_identifier,
                     session.phase.display_label(),
+                    origin_tag,
                     session.summary
                 ));
             }
@@ -358,6 +364,7 @@ impl ListenCycleData {
                         output: Some(8_120),
                     },
                     log_path: Some(".metastack/agents/sessions/MET-13.log".to_string()),
+                    origin: SessionOrigin::Listen,
                 },
                 AgentSession {
                     issue_id: Some("019ceda50a417ef1bf964f26683c1570".to_string()),
@@ -393,6 +400,7 @@ impl ListenCycleData {
                         output: Some(49_960),
                     },
                     log_path: Some(".metastack/agents/sessions/MET-17.log".to_string()),
+                    origin: state::SessionOrigin::Execute,
                 },
             ],
             session_details: demo_session_details(reference_now),
@@ -1341,6 +1349,26 @@ where
                 continue;
             }
 
+            // Execute-origin sessions must not be auto-resumed by the listen daemon;
+            // they require explicit operator takeover through `meta listen sessions resume`.
+            if session.origin.is_execute() {
+                session.phase = SessionPhase::Blocked;
+                session.summary = compact_session_summary([
+                    Some("Execute-origin | awaiting manual takeover".to_string()),
+                    session
+                        .backlog_issue_identifier
+                        .as_ref()
+                        .map(|identifier| format!("backlog {identifier}")),
+                ]);
+                session.updated_at_epoch_seconds = now_epoch_seconds();
+                notes.push(format!(
+                    "{} is execute-origin; skipping automatic resume — use `meta listen sessions resume` to adopt.",
+                    issue.identifier
+                ));
+                reconciled.push(session);
+                continue;
+            }
+
             match self.spawn_listen_worker_from_context(
                 &issue,
                 &workspace_path,
@@ -1384,6 +1412,17 @@ where
 
     async fn ensure_backlog_issue(
         &self,
+        parent_issue: &IssueSummary,
+        workspace_path: &Path,
+    ) -> Result<BacklogIssueContext> {
+        Self::ensure_backlog_issue_standalone(parent_issue, workspace_path).await
+    }
+
+    /// Shared backlog-issue bootstrap that does not require a daemon instance.
+    ///
+    /// Both `pickup_issue` (via `ensure_backlog_issue`) and `run_execute` call this
+    /// to provision the local backlog directory for the target issue.
+    async fn ensure_backlog_issue_standalone(
         parent_issue: &IssueSummary,
         workspace_path: &Path,
     ) -> Result<BacklogIssueContext> {
@@ -1788,6 +1827,7 @@ where
             turns: artifacts.turns.or(Some(0)),
             tokens: TokenUsage::default(),
             log_path: artifacts.log_path,
+            origin: SessionOrigin::Listen,
         }
     }
 
@@ -2302,6 +2342,7 @@ pub fn run_listen_session_inspect(args: &ListenSessionInspectArgs) -> Result<Str
         lines.push(format!("  - Issue: {}", session.issue_identifier));
         lines.push(format!("  - Title: {}", session.issue_title));
         lines.push(format!("  - Phase: {}", session.phase.display_label()));
+        lines.push(format!("  - Origin: {}", session.origin_label()));
         lines.push(format!("  - Summary: {}", session.summary));
         lines.push(format!("  - PR: {}", session.pull_request_label()));
         lines.push(format!("  - Tokens: {}", session.tokens.display_compact()));
@@ -2483,6 +2524,238 @@ pub async fn run_listen_session_resume(args: &ListenSessionResumeArgs) -> Result
     run_args.root = store.identity().source_root.clone();
     run_args.project = store.identity().project_selector.clone();
     run_listen(&run_args).await
+}
+
+/// Run a one-off headless agent execution for a single Linear issue.
+///
+/// This reuses the shared listener bootstrap path (workspace provisioning, backlog setup,
+/// workpad creation, worker launch) but records the session origin as `Execute` so that
+/// the listen dashboard can surface the run without auto-claiming it.
+pub async fn run_execute(args: &crate::cli::ExecuteArgs) -> Result<()> {
+    let requested_root = canonicalize_existing_dir(&args.root)?;
+    let root = resolve_source_project_root(&requested_root)?;
+    let planning_meta = load_required_planning_meta(&root, "execute")?;
+    ensure_planning_layout(&root, false)?;
+    let app_config = AppConfig::load()?;
+    let listen_settings = planning_meta.listen.clone();
+
+    let config = LinearConfig::new_with_root(
+        Some(&root),
+        LinearConfigOverrides {
+            api_key: args.api_key.clone(),
+            api_url: args.api_url.clone(),
+            default_team: args.team.clone(),
+            profile: args.profile.clone(),
+        },
+    )?;
+    let store =
+        resolve_project_store_for_run(&root, args.project.as_deref(), &planning_meta, &app_config)?;
+    let client = ReqwestLinearClient::new(config.clone())?;
+    let service = LinearService::new(client, config.default_team.clone());
+
+    let issue = service.load_issue(&args.issue).await?;
+
+    let state = store.load_state()?;
+    if state.blocks_pickup(&issue.identifier) {
+        bail!(
+            "issue `{}` already has an active session; use `meta agents listen` to adopt it or `meta listen sessions clear {}` to remove the existing session first",
+            issue.identifier,
+            issue.identifier,
+        );
+    }
+
+    let updated_issue = service
+        .edit_issue(crate::linear::IssueEditSpec {
+            identifier: issue.identifier.clone(),
+            title: None,
+            description: None,
+            project: None,
+            state: Some(IN_PROGRESS_STATE.to_string()),
+            priority: None,
+            estimate: None,
+            labels: None,
+            parent_identifier: None,
+        })
+        .await?;
+
+    let detailed_issue = service.load_issue(&updated_issue.identifier).await?;
+    let workspace = ensure_ticket_workspace(
+        &root,
+        listen_settings.refresh_policy(),
+        &detailed_issue.identifier,
+        &detailed_issue.title,
+    )?;
+
+    let brief_metadata = crate::agents::TicketMetadata {
+        title: Some(detailed_issue.title.clone()),
+        description: detailed_issue.description.clone(),
+        url: Some(detailed_issue.url.clone()),
+        state: detailed_issue
+            .state
+            .as_ref()
+            .map(|s| s.name.clone())
+            .or_else(|| Some(IN_PROGRESS_STATE.to_string())),
+    };
+
+    let backlog_issue = AgentDaemon::<ReqwestLinearClient>::ensure_backlog_issue_standalone(
+        &detailed_issue,
+        &workspace.workspace_path,
+    )
+    .await?;
+
+    let attachment_context =
+        sync_issue_attachment_context(&service, &workspace.workspace_path, &detailed_issue).await?;
+
+    let brief_path = crate::agents::write_agent_brief(
+        &workspace.workspace_path,
+        crate::agents::AgentBriefRequest {
+            ticket: detailed_issue.identifier.clone(),
+            title_override: Some(detailed_issue.title.clone()),
+            goal: Some("Dispatched by `meta agents execute`.".to_string()),
+            metadata: brief_metadata,
+            output: None,
+        },
+    )
+    .map(|path| path.display().to_string())
+    .ok();
+
+    let timestamp = now_timestamp();
+    let workpad_body = workpad::render_bootstrap_workpad(&detailed_issue, &workspace, &timestamp);
+    let existing_workpad_comment = active_workpad_comment(&detailed_issue);
+    let workpad_reused = existing_workpad_comment.is_some();
+    let workpad_comment = if let Some(comment) = existing_workpad_comment {
+        comment
+    } else {
+        service
+            .upsert_workpad_comment(&detailed_issue, workpad_body)
+            .await?
+    };
+
+    let log_path = store.log_path(&detailed_issue.identifier);
+    let updated_at_epoch_seconds = now_epoch_seconds();
+
+    let current_exe = std::env::current_exe().context("failed to resolve the meta executable")?;
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create `{}`", parent.display()))?;
+    }
+    let stdout = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .with_context(|| format!("failed to open `{}`", log_path.display()))?;
+    let stderr = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .with_context(|| format!("failed to open `{}`", log_path.display()))?;
+
+    let mut command = Command::new(current_exe);
+    command.current_dir(&root);
+    command.arg("listen-worker").arg("--source-root").arg(
+        root.to_str()
+            .ok_or_else(|| anyhow!("source root is not valid utf-8"))?,
+    );
+    if let Some(project_selector) = store.identity().project_selector.as_deref() {
+        command.arg("--project").arg(project_selector);
+    }
+    command
+        .arg("--workspace")
+        .arg(
+            workspace
+                .workspace_path
+                .to_str()
+                .ok_or_else(|| anyhow!("workspace path is not valid utf-8"))?,
+        )
+        .arg("--issue")
+        .arg(&detailed_issue.identifier)
+        .arg("--workpad-comment-id")
+        .arg(&workpad_comment.id)
+        .arg("--max-turns")
+        .arg(args.max_turns.to_string());
+    command
+        .arg("--backlog-issue")
+        .arg(&backlog_issue.issue.identifier);
+    if let Some(agent) = args.agent.as_deref() {
+        command.arg("--agent").arg(agent);
+    }
+    if let Some(model) = args.model.as_deref() {
+        command.arg("--model").arg(model);
+    }
+    if let Some(reasoning) = args.reasoning.as_deref() {
+        command.arg("--reasoning").arg(reasoning);
+    }
+    command.stdout(Stdio::from(stdout));
+    command.stderr(Stdio::from(stderr));
+    command.stdin(Stdio::null());
+    command.env("LINEAR_API_KEY", &config.api_key);
+    command.env("LINEAR_API_URL", &config.api_url);
+    if let Some(team) = config.default_team.as_deref() {
+        command.env("LINEAR_TEAM", team);
+    }
+    command.env("METASTACK_WORKSPACE_PATH", &workspace.workspace_path);
+    command.env("METASTACK_SOURCE_ROOT", &root);
+
+    let child = command
+        .spawn()
+        .context("failed to launch the execute worker")?;
+    let pid = child.id();
+
+    let session = AgentSession {
+        issue_id: Some(detailed_issue.id.clone()),
+        issue_identifier: detailed_issue.identifier.clone(),
+        issue_title: detailed_issue.title.clone(),
+        project_name: detailed_issue.project.as_ref().map(|p| p.name.clone()),
+        team_key: detailed_issue.team.key.clone(),
+        issue_url: detailed_issue.url.clone(),
+        phase: SessionPhase::Running,
+        summary: compact_pickup_summary(workpad_reused, &attachment_context, pid),
+        brief_path,
+        backlog_issue_identifier: Some(backlog_issue.issue.identifier.clone()),
+        backlog_issue_title: Some(backlog_issue.issue.title.clone()),
+        backlog_path: Some(backlog_issue.issue_dir.display().to_string()),
+        workspace_path: Some(workspace.workspace_path.display().to_string()),
+        branch: Some(workspace.branch.clone()),
+        pull_request: PullRequestSummary::default(),
+        workpad_comment_id: Some(workpad_comment.id.clone()),
+        updated_at_epoch_seconds,
+        pid: Some(pid),
+        session_id: Some(detailed_issue.id.clone()),
+        latest_resume_handle: None,
+        turns: Some(0),
+        tokens: TokenUsage::default(),
+        log_path: Some(log_path.display().to_string()),
+        origin: state::SessionOrigin::Execute,
+    };
+
+    write_listen_session(&root, args.project.as_deref(), session)?;
+
+    if args.json {
+        println!(
+            "{}",
+            render_json_success(
+                "agents.execute",
+                &serde_json::json!({
+                    "issue_identifier": detailed_issue.identifier,
+                    "workspace_path": workspace.workspace_path.display().to_string(),
+                    "branch": workspace.branch,
+                    "pid": pid,
+                    "log_path": log_path.display().to_string(),
+                    "origin": "execute",
+                })
+            )?
+        );
+    } else {
+        println!(
+            "Started execute worker for {} (pid {}, workspace {}, log {}).",
+            detailed_issue.identifier,
+            pid,
+            workspace.workspace_path.display(),
+            log_path.display(),
+        );
+    }
+
+    Ok(())
 }
 
 pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
@@ -3594,9 +3867,9 @@ impl Drop for TerminalCleanup {
 mod tests {
     use super::{
         AgentDaemon, AgentSession, DashboardRuntimeContext, ListenCycleData, ListenState,
-        PullRequestSummary, SessionPhase, TODO_STATE, TokenUsage, capture_workspace_snapshot,
-        compact_identifier, format_duration, format_number, listen_browser_action,
-        listen_scope_label, mark_running_session_stale, render_agent_prompt,
+        PullRequestSummary, SessionOrigin, SessionPhase, TODO_STATE, TokenUsage,
+        capture_workspace_snapshot, compact_identifier, format_duration, format_number,
+        listen_browser_action, listen_scope_label, mark_running_session_stale, render_agent_prompt,
         required_label_skip_reason,
     };
     use crate::config::{
@@ -3711,6 +3984,7 @@ mod tests {
                     output: None,
                 },
                 log_path: None,
+                origin: SessionOrigin::Listen,
             },
             AgentSession {
                 issue_id: Some("issue-2".to_string()),
@@ -3739,6 +4013,7 @@ mod tests {
                     output: Some(25),
                 },
                 log_path: None,
+                origin: SessionOrigin::Listen,
             },
         ];
 
@@ -3777,6 +4052,7 @@ mod tests {
                 output: None,
             },
             log_path: None,
+            origin: SessionOrigin::Listen,
         }];
 
         let totals = super::aggregate_token_usage(&sessions).expect("usage totals should exist");
@@ -3820,6 +4096,7 @@ mod tests {
                     output: None,
                 },
                 log_path: None,
+                origin: SessionOrigin::Listen,
             }],
             notes: Vec::new(),
             state_file: "/tmp/session.json".to_string(),
@@ -4132,6 +4409,7 @@ mod tests {
             turns: Some(2),
             tokens: TokenUsage::default(),
             log_path: Some("logs/ENG-10163.log".to_string()),
+            origin: SessionOrigin::Listen,
         };
 
         mark_running_session_stale(&mut session, "ENG-10163", Path::new("fallback.log"), 42_424);
@@ -4603,6 +4881,7 @@ mod tests {
             tokens: TokenUsage::default(),
             log_path: None,
             latest_resume_handle: None,
+            origin: SessionOrigin::Listen,
         }]);
         let mut notes = Vec::new();
 
