@@ -272,9 +272,7 @@ printf '%s' '{"summary":"Create one fast ticket.","issues":[{"title":"Fast plan 
     assert!(payload.contains("## TESTING.md"));
     assert!(!payload.contains("## CONCERNS.md"));
     assert!(!payload.contains("## INTEGRATIONS.md"));
-    assert!(payload.contains(
-        "_Missing `ARCHITECTURE.md`. Run `meta scan` to generate it._"
-    ));
+    assert!(payload.contains("_Missing `ARCHITECTURE.md`. Run `meta scan` to generate it._"));
     assert!(!payload.contains("meta context reload"));
     assert!(!payload.contains("Ask at most"));
 

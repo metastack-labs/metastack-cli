@@ -3000,7 +3000,9 @@ mod tests {
 
         let summary = render_summary(&view, false);
 
-        assert!(summary.contains("Install listen assignee scope: Only issues assigned to the authenticated viewer"));
+        assert!(summary.contains(
+            "Install listen assignee scope: Only issues assigned to the authenticated viewer"
+        ));
         assert!(!summary.contains("Install listen assignee scope: ViewerOnly"));
     }
 

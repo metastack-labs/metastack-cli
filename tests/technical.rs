@@ -522,9 +522,7 @@ JSON
     assert!(payload.contains("## STACK.md"));
     assert!(payload.contains("## STRUCTURE.md"));
     assert!(payload.contains("## TESTING.md"));
-    assert!(payload.contains(
-        "_Missing `INTEGRATIONS.md`. Run `meta scan` to generate it._"
-    ));
+    assert!(payload.contains("_Missing `INTEGRATIONS.md`. Run `meta scan` to generate it._"));
     assert!(!payload.contains("meta context reload"));
     assert!(payload.contains("Selected acceptance criteria for this technical sub-ticket"));
     assert!(payload.contains("- Generate backlog docs from the template"));
