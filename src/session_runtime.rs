@@ -26,6 +26,7 @@ impl WorkflowRootLayout {
     }
 
     /// Create a repo-local workflow layout under the provided repository root.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn repo_scoped(
         repo_root: &Path,
         relative_root: impl AsRef<Path>,
@@ -38,6 +39,7 @@ impl WorkflowRootLayout {
     }
 
     /// Return the workflow root directory.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn root(&self) -> &Path {
         &self.root
     }
@@ -59,6 +61,7 @@ impl WorkflowRootLayout {
 }
 
 /// Shared layout for workflows that store per-session directories under a root.
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone)]
 pub(crate) struct WorkflowSessionLayout {
     workflow: WorkflowRootLayout,
@@ -67,6 +70,7 @@ pub(crate) struct WorkflowSessionLayout {
 
 impl WorkflowSessionLayout {
     /// Create a session-oriented workflow layout from an existing root layout.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn with_sessions_dir(workflow: WorkflowRootLayout, sessions_dir_name: &str) -> Self {
         let sessions_dir = workflow.path(sessions_dir_name);
         Self {
@@ -76,16 +80,19 @@ impl WorkflowSessionLayout {
     }
 
     /// Return the shared workflow root layout.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn workflow(&self) -> &WorkflowRootLayout {
         &self.workflow
     }
 
     /// Return the directory that stores per-session subdirectories.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn sessions_dir(&self) -> &Path {
         &self.sessions_dir
     }
 
     /// Return the directory for a specific session identifier.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn session_dir(&self, session_id: &str) -> PathBuf {
         self.sessions_dir.join(session_id)
     }
@@ -108,6 +115,7 @@ impl<T> ActiveSessionFile<T> {
     }
 
     /// Return the underlying marker path.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }
@@ -118,6 +126,7 @@ where
     T: Serialize + DeserializeOwned,
 {
     /// Persist the marker payload, creating parent directories when needed.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn store(&self, value: &T) -> Result<()> {
         write_json(&self.path, value)
     }
@@ -208,6 +217,7 @@ pub(crate) fn push_optional_summary_field<T>(
 }
 
 /// Render aligned labeled summary fields into a text buffer.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn write_summary_fields(
     out: &mut impl fmt::Write,
     fields: &[SummaryField],
@@ -276,6 +286,7 @@ where
 }
 
 /// Load every JSON record in a directory, skipping malformed entries with a warning.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn load_json_records<T>(
     dir: &Path,
     dir_label: &str,
@@ -348,6 +359,10 @@ mod tests {
             sessions.session_dir("sess-1"),
             Path::new("/tmp/example/.metastack/orchestrate/sessions/sess-1")
         );
+        assert_eq!(
+            sessions.workflow().active_session_path(),
+            workflow.active_session_path()
+        );
     }
 
     #[test]
@@ -358,6 +373,10 @@ mod tests {
             value: "lock".to_string(),
         };
 
+        assert_eq!(file.path(), dir.path().join("active.json").as_path());
+        file.store(&marker).unwrap();
+        assert_eq!(file.load_optional().unwrap(), Some(marker.clone()));
+        fs::remove_file(file.path()).unwrap();
         assert!(file.try_create_new(&marker).unwrap());
         assert!(!file.try_create_new(&marker).unwrap());
         assert_eq!(file.load_optional().unwrap(), Some(marker.clone()));
@@ -380,5 +399,18 @@ mod tests {
                 value: "ok".to_string()
             }]
         );
+    }
+
+    #[test]
+    fn write_summary_fields_aligns_labels() {
+        let mut out = String::new();
+        let fields = vec![
+            SummaryField::new("Short", "one"),
+            SummaryField::new("Longer Label", "two"),
+        ];
+
+        write_summary_fields(&mut out, &fields, 14).unwrap();
+
+        assert_eq!(out, "Short:        one\nLonger Label: two\n");
     }
 }

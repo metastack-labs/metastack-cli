@@ -247,6 +247,7 @@ pub struct StagingState {
 
 impl StagingState {
     /// Create a new staging state record.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn new(branch_name: String, base_sha: String) -> Self {
         let now = Utc::now().to_rfc3339();
         Self {
@@ -305,7 +306,6 @@ pub struct CurrentSession {
 pub struct OrchestratePaths {
     layout: WorkflowSessionLayout,
     pub root: PathBuf,
-    pub sessions_dir: PathBuf,
     pub current_path: PathBuf,
 }
 
@@ -316,12 +316,10 @@ impl OrchestratePaths {
             WorkflowRootLayout::repo_scoped(repo_root, ".metastack/orchestrate", "current.json");
         let layout = WorkflowSessionLayout::with_sessions_dir(workflow, "sessions");
         let root = layout.workflow().root().to_path_buf();
-        let sessions_dir = layout.sessions_dir().to_path_buf();
         let current_path = layout.workflow().active_session_path().to_path_buf();
         Self {
             layout,
             root,
-            sessions_dir,
             current_path,
         }
     }
@@ -426,6 +424,7 @@ pub fn save_cycle(
 }
 
 /// Save an issue readiness record.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn save_issue_readiness(
     paths: &OrchestratePaths,
     session_id: &str,
@@ -438,6 +437,7 @@ pub fn save_issue_readiness(
 }
 
 /// Load an issue readiness record, returning None if it does not exist.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn load_issue_readiness(
     paths: &OrchestratePaths,
     session_id: &str,
@@ -462,6 +462,7 @@ pub fn load_all_issue_readiness(
 }
 
 /// Save a review record.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn save_review_record(
     paths: &OrchestratePaths,
     session_id: &str,
