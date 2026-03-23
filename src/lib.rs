@@ -28,6 +28,7 @@ mod scaffold;
 mod scan;
 mod scan_dashboard;
 mod scan_prompts;
+mod session_runtime;
 mod setup;
 mod sync_command;
 mod sync_dashboard;

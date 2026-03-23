@@ -7,6 +7,7 @@ use ratatui::widgets::{Cell, List, ListItem, Paragraph, Row, Table, Wrap};
 use ratatui::{Frame, Terminal};
 
 use super::{ActiveIssue, ListenDashboardData, ListenSessionDetail, SessionListView, SessionPhase};
+use crate::session_runtime::{SummaryField, push_optional_summary_field};
 use crate::tui::scroll::{clamp_offset, plain_text, wrapped_rows};
 use crate::tui::spaced_list::spaced_list_item;
 use crate::tui::theme::{Tone, badge, content_panel, empty_state, key_hints, panel, panel_title};
@@ -935,6 +936,48 @@ fn render_session_detail_text(
     session: &super::AgentSession,
     detail: &ListenSessionDetail,
 ) -> Text<'static> {
+    let mut summary_fields = vec![
+        SummaryField::new("Summary", detail.summary.clone()),
+        SummaryField::new("Turns", detail.turns.unwrap_or(0).to_string()),
+        SummaryField::new("Tokens", detail.tokens.display_compact()),
+        SummaryField::new("PR", detail.pull_request.compact_label()),
+    ];
+    if let Some(url) = detail.pull_request.url.as_deref() {
+        summary_fields.push(SummaryField::new("PR URL", url));
+    } else if let Some(number) = detail.pull_request.number {
+        summary_fields.push(SummaryField::new("PR Ref", format!("#{number}")));
+    }
+    push_optional_summary_field(
+        &mut summary_fields,
+        "Branch",
+        detail.references.branch.clone(),
+    );
+    push_optional_summary_field(
+        &mut summary_fields,
+        "Workspace",
+        detail.references.workspace_path.clone(),
+    );
+    push_optional_summary_field(
+        &mut summary_fields,
+        "Backlog",
+        detail.references.backlog_path.clone(),
+    );
+    push_optional_summary_field(
+        &mut summary_fields,
+        "Brief",
+        detail.references.brief_path.clone(),
+    );
+    push_optional_summary_field(
+        &mut summary_fields,
+        "Workpad",
+        detail.references.workpad_comment_id.clone(),
+    );
+    push_optional_summary_field(
+        &mut summary_fields,
+        "Log",
+        detail.references.log_path.clone(),
+    );
+
     let mut lines = vec![
         Line::from(vec![
             Span::styled(
@@ -950,35 +993,12 @@ fn render_session_detail_text(
             Style::default().fg(Color::Gray),
         )),
         Line::from(""),
-        detail_line("Summary", &detail.summary),
-        detail_line("Turns", &detail.turns.unwrap_or(0).to_string()),
-        detail_line("Tokens", &detail.tokens.display_compact()),
-        detail_line("PR", &detail.pull_request.compact_label()),
     ];
-
-    if let Some(url) = detail.pull_request.url.as_deref() {
-        lines.push(detail_line("PR URL", url));
-    } else if let Some(number) = detail.pull_request.number {
-        lines.push(detail_line("PR Ref", &format!("#{number}")));
-    }
-    if let Some(branch) = detail.references.branch.as_deref() {
-        lines.push(detail_line("Branch", branch));
-    }
-    if let Some(workspace) = detail.references.workspace_path.as_deref() {
-        lines.push(detail_line("Workspace", workspace));
-    }
-    if let Some(backlog) = detail.references.backlog_path.as_deref() {
-        lines.push(detail_line("Backlog", backlog));
-    }
-    if let Some(brief) = detail.references.brief_path.as_deref() {
-        lines.push(detail_line("Brief", brief));
-    }
-    if let Some(workpad_comment_id) = detail.references.workpad_comment_id.as_deref() {
-        lines.push(detail_line("Workpad", workpad_comment_id));
-    }
-    if let Some(log_path) = detail.references.log_path.as_deref() {
-        lines.push(detail_line("Log", log_path));
-    }
+    lines.extend(
+        summary_fields
+            .iter()
+            .map(|field| detail_line(field.label, &field.value)),
+    );
 
     if !detail.prompt_context.is_empty() {
         lines.push(Line::from(""));
