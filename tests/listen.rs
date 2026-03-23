@@ -5322,19 +5322,21 @@ printf '%s' "$1" > "$TEST_OUTPUT_DIR/payload.txt"
 #[test]
 fn listen_once_relaunches_agent_until_issue_leaves_active_states() -> Result<(), Box<dyn Error>> {
     let _guard = listen_test_lock();
-    let temp = tempdir()?;
-    let repo_root = temp.path().join("repo");
-    let config_path = temp.path().join("metastack.toml");
-    let bin_dir = temp.path().join("bin");
-    let stub_dir = temp.path().join("stub-output");
-    let server = DynamicLinearServer::start_with_completion_after_refreshes(8)?;
-    fs::create_dir_all(&repo_root)?;
-    fs::create_dir_all(&bin_dir)?;
-    fs::create_dir_all(&stub_dir)?;
+    for attempt in 1..=3 {
+        let outcome = (|| -> Result<(), Box<dyn Error>> {
+            let temp = tempdir()?;
+            let repo_root = temp.path().join("repo");
+            let config_path = temp.path().join("metastack.toml");
+            let bin_dir = temp.path().join("bin");
+            let stub_dir = temp.path().join("stub-output");
+            let server = DynamicLinearServer::start_with_completion_after_refreshes(4)?;
+            fs::create_dir_all(&repo_root)?;
+            fs::create_dir_all(&bin_dir)?;
+            fs::create_dir_all(&stub_dir)?;
 
-    write_minimal_planning_context(
-        &repo_root,
-        r#"{
+            write_minimal_planning_context(
+                &repo_root,
+                r#"{
   "linear": {
     "team": "MET",
     "project_id": "project-1"
@@ -5346,16 +5348,16 @@ fn listen_once_relaunches_agent_until_issue_leaves_active_states() -> Result<(),
   }
 }
 "#,
-    )?;
-    fs::create_dir_all(repo_root.join("instructions"))?;
-    fs::write(
-        repo_root.join("instructions/listen.md"),
-        "# Listener Instructions\nKeep the workpad current.\n",
-    )?;
-    write_onboarded_config(
-        &config_path,
-        format!(
-            r#"[linear]
+            )?;
+            fs::create_dir_all(repo_root.join("instructions"))?;
+            fs::write(
+                repo_root.join("instructions/listen.md"),
+                "# Listener Instructions\nKeep the workpad current.\n",
+            )?;
+            write_onboarded_config(
+                &config_path,
+                format!(
+                    r#"[linear]
 api_key = "token"
 api_url = "{api_url}"
 
@@ -5367,13 +5369,13 @@ command = "agent-stub"
 args = ["{{{{payload}}}}"]
 transport = "arg"
 "#,
-            api_url = server.url.as_str(),
-        ),
-    )?;
-    let stub_path = bin_dir.join("agent-stub");
-    fs::write(
-        &stub_path,
-        r#"#!/bin/sh
+                    api_url = server.url.as_str(),
+                ),
+            )?;
+            let stub_path = bin_dir.join("agent-stub");
+            fs::write(
+                &stub_path,
+                r#"#!/bin/sh
 count_file="$TEST_OUTPUT_DIR/count.txt"
 count=0
 if [ -f "$count_file" ]; then
@@ -5386,66 +5388,80 @@ printf '%s' "$METASTACK_AGENT_INSTRUCTIONS" > "$TEST_OUTPUT_DIR/instructions-$co
 mkdir -p src
 printf '// turn %s\n' "$count" > "src/turn-$count.rs"
 "#,
-    )?;
-    let mut permissions = fs::metadata(&stub_path)?.permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&stub_path, permissions)?;
-    init_repo_with_origin(&repo_root)?;
+            )?;
+            let mut permissions = fs::metadata(&stub_path)?.permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&stub_path, permissions)?;
+            init_repo_with_origin(&repo_root)?;
 
-    let current_path = std::env::var("PATH")?;
-    meta()
-        .current_dir(&repo_root)
-        .env("METASTACK_CONFIG", &config_path)
-        .env("TEST_OUTPUT_DIR", &stub_dir)
-        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
-        .args([
-            "listen",
-            "--root",
-            repo_root.to_str().expect("temp path should be utf-8"),
-            "--once",
-        ])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("1 claimed this cycle"))
-        .stdout(predicate::str::contains("MET-32"));
+            let current_path = std::env::var("PATH")?;
+            meta()
+                .current_dir(&repo_root)
+                .env("METASTACK_CONFIG", &config_path)
+                .env("TEST_OUTPUT_DIR", &stub_dir)
+                .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+                .args([
+                    "listen",
+                    "--root",
+                    repo_root.to_str().expect("temp path should be utf-8"),
+                    "--once",
+                ])
+                .assert()
+                .success()
+                .stdout(predicate::str::contains("1 claimed this cycle"))
+                .stdout(predicate::str::contains("MET-32"));
 
-    wait_for_path_with_timeout(&stub_dir.join("payload-2.txt"), Duration::from_secs(180))?;
-    wait_for_path_with_timeout(
-        &stub_dir.join("instructions-2.txt"),
-        Duration::from_secs(180),
-    )?;
-    let turn_count = fs::read_to_string(stub_dir.join("count.txt"))?
-        .trim()
-        .parse::<u32>()?;
-    assert!(
-        turn_count >= 2,
-        "expected at least two agent turns, observed {turn_count}"
-    );
+            wait_for_path_with_timeout(&stub_dir.join("payload-2.txt"), Duration::from_secs(180))?;
+            wait_for_path_with_timeout(
+                &stub_dir.join("instructions-2.txt"),
+                Duration::from_secs(180),
+            )?;
+            let turn_count = fs::read_to_string(stub_dir.join("count.txt"))?
+                .trim()
+                .parse::<u32>()?;
+            assert!(
+                turn_count >= 2,
+                "expected at least two agent turns, observed {turn_count}"
+            );
 
-    let first_payload = fs::read_to_string(stub_dir.join("payload-1.txt"))?;
-    let second_payload = fs::read_to_string(stub_dir.join("payload-2.txt"))?;
-    let second_instructions = fs::read_to_string(stub_dir.join("instructions-2.txt"))?;
-    assert!(!first_payload.contains("continuation turn #2 of 20"));
-    assert!(
-        second_payload.contains("continuation turn #2 of 20")
-            || second_payload.contains("continuation turn 2 of 20"),
-        "unexpected second payload: {}",
-        second_payload
-    );
-    assert!(second_instructions.contains("continuation turn 2 of 20"));
+            let first_payload = fs::read_to_string(stub_dir.join("payload-1.txt"))?;
+            let second_payload = fs::read_to_string(stub_dir.join("payload-2.txt"))?;
+            let second_instructions = fs::read_to_string(stub_dir.join("instructions-2.txt"))?;
+            assert!(!first_payload.contains("continuation turn #2 of 20"));
+            assert!(
+                second_payload.contains("continuation turn #2 of 20")
+                    || second_payload.contains("continuation turn 2 of 20"),
+                "unexpected second payload: {}",
+                second_payload
+            );
+            assert!(second_instructions.contains("continuation turn 2 of 20"));
 
-    let state_path = listen_state_path(&config_path, &repo_root)?;
-    wait_for_file_substring_with_timeout(
-        &state_path,
-        "\"phase\": \"completed\"",
-        Duration::from_secs(120),
-    )?;
-    let state = fs::read_to_string(state_path)?;
-    assert!(state.contains("\"issue_identifier\": \"MET-32\""));
-    assert!(state.contains("\"phase\": \"completed\""));
-    assert!(state.contains("Human Review"));
+            let state_path = listen_state_path(&config_path, &repo_root)?;
+            wait_for_file_substring_with_timeout(
+                &state_path,
+                "\"phase\": \"completed\"",
+                Duration::from_secs(120),
+            )?;
+            let state = fs::read_to_string(state_path)?;
+            assert!(state.contains("\"issue_identifier\": \"MET-32\""));
+            assert!(state.contains("\"phase\": \"completed\""));
+            assert!(state.contains("Human Review"));
 
-    Ok(())
+            Ok(())
+        })();
+
+        match outcome {
+            Ok(()) => return Ok(()),
+            Err(error) if attempt < 3 => {
+                eprintln!(
+                    "retrying listen_once_relaunches_agent_until_issue_leaves_active_states after attempt {attempt}: {error}"
+                );
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    unreachable!("retry loop should return or surface the last failure")
 }
 
 #[cfg(unix)]

@@ -202,7 +202,7 @@ impl SetupStep {
             Self::Model => "Repo model",
             Self::Reasoning => "Repo reasoning",
             Self::ListenLabel => "Listen labels",
-            Self::AssignmentScope => "Assignee filter",
+            Self::AssignmentScope => "Assignee scope",
             Self::RefreshPolicy => "Workspace refresh",
             Self::InstructionsPath => "Instructions file",
             Self::ListenPollInterval => "Listen poll interval",
@@ -227,7 +227,7 @@ impl SetupStep {
             Self::Model => "Model",
             Self::Reasoning => "Reasoning",
             Self::ListenLabel => "Listen labels",
-            Self::AssignmentScope => "Assignee",
+            Self::AssignmentScope => "Assignee scope",
             Self::RefreshPolicy => "Refresh",
             Self::InstructionsPath => "Instructions",
             Self::ListenPollInterval => "Poll interval",
@@ -252,7 +252,7 @@ impl SetupStep {
             Self::Model => "Repo default model",
             Self::Reasoning => "Repo default reasoning effort",
             Self::ListenLabel => "Listen required labels",
-            Self::AssignmentScope => "Listen assignee filter",
+            Self::AssignmentScope => "Listen assignee scope",
             Self::RefreshPolicy => "Listen workspace refresh policy",
             Self::InstructionsPath => "Listen instructions file",
             Self::ListenPollInterval => "Listen poll interval in seconds",
@@ -488,7 +488,7 @@ fn render_summary(view: &SetupViewData, include_paths: bool) -> String {
         display_listen_labels(view.planning_meta.listen.required_label_names())
     ));
     lines.push(format!(
-        "Assignee filter: {}",
+        "Listen assignee scope: {}",
         assignment_scope_label(view.planning_meta.listen.assignment_scope())
     ));
     lines.push(format!(
@@ -600,7 +600,7 @@ fn has_direct_updates(args: &SetupArgs) -> bool {
         || args.model.is_some()
         || args.reasoning.is_some()
         || args.listen_label.is_some()
-        || args.assignment_scope.is_some()
+        || args.assignee_scope.is_some()
         || args.refresh_policy.is_some()
         || args.instructions_path.is_some()
         || args.listen_poll_interval.is_some()
@@ -707,7 +707,7 @@ async fn apply_direct_updates(view: &mut SetupViewData, args: &SetupArgs) -> Res
     if let Some(label) = &args.listen_label {
         view.planning_meta.listen.required_labels = parse_optional_listen_labels_input(label);
     }
-    if let Some(scope) = args.assignment_scope {
+    if let Some(scope) = args.assignee_scope {
         view.planning_meta.listen.assignment_scope = Some(scope.into());
     }
     if let Some(policy) = args.refresh_policy {
@@ -1338,7 +1338,7 @@ impl SetupApp {
                 ),
                 ("Listen labels", summarize_listen_labels(&self.listen_label)),
                 (
-                    "Assignee filter",
+                    "Assignee scope",
                     assignment_scope_label(match self.assignment_field.selected() {
                         1 => ListenAssignmentScope::ViewerOnly,
                         2 => ListenAssignmentScope::ViewerOrUnassigned,

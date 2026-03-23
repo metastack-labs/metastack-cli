@@ -871,6 +871,7 @@ default_reasoning = "medium"
     cli()
         .env("METASTACK_CONFIG", &config_path)
         .args([
+            "runtime",
             "config",
             "--root",
             repo_root.to_string_lossy().as_ref(),
@@ -1070,6 +1071,7 @@ default_model = "gpt-5.4"
     cli()
         .env("METASTACK_CONFIG", &config_path)
         .args([
+            "runtime",
             "setup",
             "--root",
             repo_root.to_string_lossy().as_ref(),
