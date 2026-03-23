@@ -2929,6 +2929,9 @@ fn listen_browser_action(code: KeyCode, vim_mode: bool) -> Option<dashboard::Ses
     }
 }
 
+// The dashboard loop injects separate closures for cycle progression and session actions so
+// tests can stub each side effect independently without threading a wider trait object through
+// the listen runtime.
 #[allow(clippy::too_many_arguments)]
 async fn run_live_loop<F, Fut, S, RP, PP, R>(
     _args: &ListenRunArgs,

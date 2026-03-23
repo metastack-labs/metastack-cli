@@ -38,9 +38,12 @@ use crate::backlog_defaults::{
     resolve_technical_ticket_defaults, save_remembered_backlog_selection,
 };
 use crate::cli::{RunAgentArgs, TechnicalArgs};
+use crate::codebase_context::{
+    CodebaseContextSection, MissingCodebaseContextHint, load_codebase_context_bundle,
+};
 use crate::config::{AGENT_ROUTE_BACKLOG_SPLIT, AppConfig, load_required_planning_meta};
 use crate::context::load_workflow_contract;
-use crate::fs::{PlanningPaths, canonicalize_existing_dir, display_path};
+use crate::fs::{canonicalize_existing_dir, display_path};
 use crate::linear::browser::{
     IssueSearchResult, render_issue_preview, render_issue_row, search_issues,
 };
@@ -1521,27 +1524,20 @@ fn slugify(value: &str) -> String {
 }
 
 fn load_context_bundle(root: &Path) -> Result<String> {
-    let paths = PlanningPaths::new(root);
-    let sections = [
-        ("SCAN.md", paths.scan_path()),
-        ("ARCHITECTURE.md", paths.architecture_path()),
-        ("CONCERNS.md", paths.concerns_path()),
-        ("CONVENTIONS.md", paths.conventions_path()),
-        ("INTEGRATIONS.md", paths.integrations_path()),
-        ("STACK.md", paths.stack_path()),
-        ("STRUCTURE.md", paths.structure_path()),
-        ("TESTING.md", paths.testing_path()),
-    ];
-    let mut lines = Vec::new();
-
-    for (title, path) in sections {
-        lines.push(format!("## {title}"));
-        lines.push(String::new());
-        lines.push(read_context(&path)?);
-        lines.push(String::new());
-    }
-
-    Ok(lines.join("\n"))
+    load_codebase_context_bundle(
+        root,
+        &[
+            CodebaseContextSection::Scan,
+            CodebaseContextSection::Architecture,
+            CodebaseContextSection::Concerns,
+            CodebaseContextSection::Conventions,
+            CodebaseContextSection::Integrations,
+            CodebaseContextSection::Stack,
+            CodebaseContextSection::Structure,
+            CodebaseContextSection::Testing,
+        ],
+        MissingCodebaseContextHint::Scan,
+    )
 }
 
 fn render_repository_snapshot(root: &Path) -> Result<String> {
@@ -1615,19 +1611,6 @@ fn should_skip_snapshot_entry(name: &str) -> bool {
         name,
         ".git" | "target" | "node_modules" | ".next" | "dist" | "build" | "coverage"
     )
-}
-
-fn read_context(path: &PathBuf) -> Result<String> {
-    match fs::read_to_string(path) {
-        Ok(contents) => Ok(contents),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(format!(
-            "_Missing `{}`. Run `meta scan` to generate it._",
-            path.file_name()
-                .map(|value| value.to_string_lossy())
-                .unwrap_or_default()
-        )),
-        Err(error) => Err(error).with_context(|| format!("failed to read `{}`", path.display())),
-    }
 }
 
 fn parse_agent_json<T>(raw: &str, phase: &str) -> Result<T>

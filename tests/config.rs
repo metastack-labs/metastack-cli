@@ -894,8 +894,8 @@ default_reasoning = "medium"
         .stdout(predicate::str::contains("Plan mode"))
         .stdout(predicate::str::contains("Fast single-ticket"))
         .stdout(predicate::str::contains("Fast plan questions"))
-        .stdout(predicate::str::contains("Plan label"))
-        .stdout(predicate::str::contains("Tech label"));
+        .stdout(predicate::str::contains("14. Plan label"))
+        .stdout(predicate::str::contains("15. Tech label"));
 
     Ok(())
 }

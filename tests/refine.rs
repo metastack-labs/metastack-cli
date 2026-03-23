@@ -26,6 +26,7 @@ fn refine_command_writes_critique_only_artifacts_without_mutating_linear()
 }
 "#,
     )?;
+    fs::remove_file(repo_root.join(".metastack/codebase/STACK.md"))?;
     write_refine_config(&config_path, &api_url, &stub_path)?;
     write_refine_stub(
         &stub_path,
@@ -103,12 +104,23 @@ JSON
     let findings = fs::read_to_string(run_dir.join("pass-01-findings.md"))?;
     let rewrite = fs::read_to_string(run_dir.join("final-proposed.md"))?;
     let summary = fs::read_to_string(run_dir.join("summary.json"))?;
+    let payload = fs::read_to_string(output_dir.join("payload-1.txt"))?;
 
     assert_eq!(original, "Current Linear description");
     assert!(findings.contains("Missing Requirements"));
     assert!(rewrite.contains("# Refined MET-148"));
     assert!(summary.contains("\"critique_only\": true"));
     assert!(summary.contains("\"requested\": false"));
+    assert!(payload.contains("## SCAN.md"));
+    assert!(payload.contains("## ARCHITECTURE.md"));
+    assert!(payload.contains("## CONVENTIONS.md"));
+    assert!(payload.contains("## STACK.md"));
+    assert!(payload.contains("## TESTING.md"));
+    assert!(!payload.contains("## CONCERNS.md"));
+    assert!(!payload.contains("## INTEGRATIONS.md"));
+    assert!(!payload.contains("## STRUCTURE.md"));
+    assert!(payload.contains("_Missing `STACK.md`. Run `meta scan` to generate it._"));
+    assert!(!payload.contains("meta context reload"));
     assert!(
         !repo_root
             .join(".metastack/backlog/MET-148/index.md")

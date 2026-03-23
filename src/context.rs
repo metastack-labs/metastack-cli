@@ -1,4 +1,3 @@
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow};
@@ -6,6 +5,10 @@ use anyhow::{Result, anyhow};
 use crate::cli::{
     ContextArgs, ContextCommands, ContextDoctorArgs, ContextMapArgs, ContextReloadArgs,
     ContextShowArgs, ScanArgs,
+};
+use crate::codebase_context::{
+    CodebaseContextSection, MissingCodebaseContextHint, codebase_context_paths,
+    load_codebase_context_bundle as load_shared_codebase_context_bundle,
 };
 use crate::config::AGENT_ROUTE_CONTEXT_RELOAD;
 use crate::config::{AppConfig, PlanningMeta, detect_supported_agents};
@@ -43,16 +46,20 @@ pub fn run_context_command(args: &ContextArgs) -> Result<String> {
 }
 
 pub(crate) fn load_codebase_context_bundle(root: &Path) -> Result<String> {
-    let mut lines = Vec::new();
-
-    for (title, path) in codebase_context_paths(root) {
-        lines.push(format!("## {title}"));
-        lines.push(String::new());
-        lines.push(read_context_file(&path)?);
-        lines.push(String::new());
-    }
-
-    Ok(lines.join("\n"))
+    load_shared_codebase_context_bundle(
+        root,
+        &[
+            CodebaseContextSection::Scan,
+            CodebaseContextSection::Architecture,
+            CodebaseContextSection::Concerns,
+            CodebaseContextSection::Conventions,
+            CodebaseContextSection::Integrations,
+            CodebaseContextSection::Stack,
+            CodebaseContextSection::Structure,
+            CodebaseContextSection::Testing,
+        ],
+        MissingCodebaseContextHint::ReloadOrScan,
+    )
 }
 
 pub(crate) fn load_effective_instructions(root: &Path) -> Result<String> {
@@ -76,7 +83,19 @@ fn run_context_show(args: &ContextShowArgs) -> Result<String> {
     let app_config = AppConfig::load()?;
     let workflow_bundle = WorkflowInstructionBundle::load(&root, RepoTarget::from_root(&root))?;
     let repo_map = render_repo_map(&root)?;
-    let codebase_paths = codebase_context_paths(&root);
+    let codebase_paths = codebase_context_paths(
+        &root,
+        &[
+            CodebaseContextSection::Scan,
+            CodebaseContextSection::Architecture,
+            CodebaseContextSection::Concerns,
+            CodebaseContextSection::Conventions,
+            CodebaseContextSection::Integrations,
+            CodebaseContextSection::Stack,
+            CodebaseContextSection::Structure,
+            CodebaseContextSection::Testing,
+        ],
+    );
     let mut lines = vec![
         "# Effective Context".to_string(),
         String::new(),
@@ -252,10 +271,22 @@ fn diagnose_context(root: &Path) -> Result<DoctorReport> {
         notices.push("No repo-scoped instructions file is configured.".to_string());
     }
 
-    let missing_codebase = codebase_context_paths(root)
-        .into_iter()
-        .filter_map(|(_, path)| (!path.is_file()).then(|| display_path(&path, root)))
-        .collect::<Vec<_>>();
+    let missing_codebase = codebase_context_paths(
+        root,
+        &[
+            CodebaseContextSection::Scan,
+            CodebaseContextSection::Architecture,
+            CodebaseContextSection::Concerns,
+            CodebaseContextSection::Conventions,
+            CodebaseContextSection::Integrations,
+            CodebaseContextSection::Stack,
+            CodebaseContextSection::Structure,
+            CodebaseContextSection::Testing,
+        ],
+    )
+    .into_iter()
+    .filter_map(|(_, path)| (!path.is_file()).then(|| display_path(&path, root)))
+    .collect::<Vec<_>>();
     if missing_codebase.is_empty() {
         notices.push("All expected `.metastack/codebase/*.md` files are present.".to_string());
     } else {
@@ -306,43 +337,6 @@ fn render_source_block(source: Option<&InstructionSource>, root: &Path) -> Vec<S
     }
 }
 
-fn codebase_context_paths(root: &Path) -> Vec<(&'static str, PathBuf)> {
-    let paths = PlanningPaths::new(root);
-    vec![
-        ("SCAN.md", paths.scan_path()),
-        ("ARCHITECTURE.md", paths.architecture_path()),
-        ("CONCERNS.md", paths.concerns_path()),
-        ("CONVENTIONS.md", paths.conventions_path()),
-        ("INTEGRATIONS.md", paths.integrations_path()),
-        ("STACK.md", paths.stack_path()),
-        ("STRUCTURE.md", paths.structure_path()),
-        ("TESTING.md", paths.testing_path()),
-    ]
-}
-
-fn read_context_file(path: &Path) -> Result<String> {
-    match fs::read_to_string(path) {
-        Ok(contents) => Ok(contents),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(format!(
-            "_Missing `{}`. Run `meta context reload --root {}` or `meta context scan --root {}` to generate it._",
-            path.file_name()
-                .map(|value| value.to_string_lossy())
-                .unwrap_or_default(),
-            path.parent()
-                .and_then(Path::parent)
-                .and_then(Path::parent)
-                .map(|root| root.display().to_string())
-                .unwrap_or_else(|| ".".to_string()),
-            path.parent()
-                .and_then(Path::parent)
-                .and_then(Path::parent)
-                .map(|root| root.display().to_string())
-                .unwrap_or_else(|| ".".to_string())
-        )),
-        Err(error) => Err(error.into()),
-    }
-}
-
 impl DoctorReport {
     fn render(&self) -> String {
         let mut lines = vec![format!("Context doctor for `{}`", self.root.display())];
@@ -370,5 +364,33 @@ impl DoctorReport {
         }
 
         lines.join("\n")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn bundled_context_includes_all_sections_and_reload_or_scan_hints() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let root = temp.path();
+        let paths = PlanningPaths::new(root);
+        fs::create_dir_all(&paths.codebase_dir).expect("codebase dir should be created");
+
+        let bundle = load_codebase_context_bundle(root).expect("bundle should render");
+
+        assert!(bundle.contains("## SCAN.md"));
+        assert!(bundle.contains("## ARCHITECTURE.md"));
+        assert!(bundle.contains("## CONCERNS.md"));
+        assert!(bundle.contains("## CONVENTIONS.md"));
+        assert!(bundle.contains("## INTEGRATIONS.md"));
+        assert!(bundle.contains("## STACK.md"));
+        assert!(bundle.contains("## STRUCTURE.md"));
+        assert!(bundle.contains("## TESTING.md"));
+        assert!(bundle.contains("_Missing `SCAN.md`. Run `meta context reload --root "));
+        assert!(bundle.contains("` or `meta context scan --root "));
+        assert!(bundle.contains("` to generate it._"));
     }
 }
