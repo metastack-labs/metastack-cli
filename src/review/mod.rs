@@ -4184,8 +4184,54 @@ fn render_follow_up_ticket_issue_description(
     lines.join("\n")
 }
 
+/// Parse agent output into a [`FollowUpTicketSet`], tolerating markdown code
+/// fences and surrounding prose that Claude commonly wraps around JSON.
+///
+/// Tries, in order: raw trimmed input, code-fence-stripped input, and
+/// first-`{`-to-last-`}` extraction.
 fn parse_follow_up_ticket_set(output: &str) -> Result<FollowUpTicketSet> {
-    serde_json::from_str(output.trim()).context("follow-up ticket analysis returned invalid JSON")
+    let trimmed = output.trim();
+    let mut candidates = vec![trimmed.to_string()];
+
+    if let Some(stripped) = strip_follow_up_code_fence(trimmed) {
+        candidates.push(stripped);
+    }
+    if let (Some(start), Some(end)) = (trimmed.find('{'), trimmed.rfind('}'))
+        && start <= end
+    {
+        candidates.push(trimmed[start..=end].to_string());
+    }
+
+    for candidate in candidates {
+        if let Ok(parsed) = serde_json::from_str::<FollowUpTicketSet>(&candidate) {
+            return Ok(parsed);
+        }
+    }
+
+    bail!(
+        "follow-up ticket analysis returned invalid JSON: {}",
+        preview_follow_up_text(trimmed)
+    )
+}
+
+fn strip_follow_up_code_fence(raw: &str) -> Option<String> {
+    let stripped = raw.strip_prefix("```")?;
+    let stripped = stripped
+        .strip_prefix("json\n")
+        .or_else(|| stripped.strip_prefix("JSON\n"))
+        .or_else(|| stripped.strip_prefix('\n'))
+        .unwrap_or(stripped);
+    let stripped = stripped.strip_suffix("```")?;
+    Some(stripped.trim().to_string())
+}
+
+fn preview_follow_up_text(value: &str) -> String {
+    const MAX_PREVIEW_LEN: usize = 240;
+    if value.len() <= MAX_PREVIEW_LEN {
+        value.to_string()
+    } else {
+        format!("{}...", &value[..MAX_PREVIEW_LEN])
+    }
 }
 
 fn normalize_follow_up_ticket_set(parsed: FollowUpTicketSet) -> Result<FollowUpTicketSet> {
@@ -7840,5 +7886,31 @@ mod tests {
         assert_eq!(candidate.candidate_labels, vec!["bug", "metastack"]);
         assert_eq!(candidate.candidate_assignees, vec!["alice", "bob"]);
         assert_eq!(candidate.author, "alice");
+    }
+
+    const FOLLOW_UP_JSON: &str = r#"{"summary":"summary","tickets":[{"title":"T","why_now":"W","outcome":"O","scope":"S","acceptance_criteria":["A"],"priority":1}],"notes":["N"]}"#;
+
+    #[test]
+    fn parse_follow_up_ticket_set_bare_json() {
+        let parsed = parse_follow_up_ticket_set(FOLLOW_UP_JSON).unwrap();
+        assert_eq!(parsed.summary, "summary");
+        assert_eq!(parsed.tickets.len(), 1);
+        assert_eq!(parsed.tickets[0].title, "T");
+    }
+
+    #[test]
+    fn parse_follow_up_ticket_set_code_fenced() {
+        let input = format!("```json\n{}\n```", FOLLOW_UP_JSON);
+        let parsed = parse_follow_up_ticket_set(&input).unwrap();
+        assert_eq!(parsed.summary, "summary");
+        assert_eq!(parsed.tickets[0].title, "T");
+    }
+
+    #[test]
+    fn parse_follow_up_ticket_set_surrounded_by_text() {
+        let input = format!("Here is the analysis:\n{}\nDone.", FOLLOW_UP_JSON);
+        let parsed = parse_follow_up_ticket_set(&input).unwrap();
+        assert_eq!(parsed.summary, "summary");
+        assert_eq!(parsed.tickets[0].title, "T");
     }
 }

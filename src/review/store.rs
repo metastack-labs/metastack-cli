@@ -193,7 +193,7 @@ impl ReviewProjectStore {
         };
         mutate(&mut state);
         let result = write_json(&self.paths.state_path, &state);
-        // Lock is released when `lock` is dropped.
+        drop(lock); // Release the exclusive lock before returning.
         result
     }
 
