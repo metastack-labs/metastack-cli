@@ -20,8 +20,6 @@ pub struct PlanningPaths {
     pub cron_runtime_logs_dir: PathBuf,
     pub cron_runtime_runs_dir: PathBuf,
     #[allow(dead_code)]
-    pub orchestrate_dir: PathBuf,
-    #[allow(dead_code)]
     pub improve_dir: PathBuf,
     pub improve_sessions_dir: PathBuf,
 }
@@ -42,7 +40,6 @@ impl PlanningPaths {
         let cron_runtime_jobs_dir = cron_runtime_dir.join("jobs");
         let cron_runtime_logs_dir = cron_runtime_dir.join("logs");
         let cron_runtime_runs_dir = cron_runtime_dir.join("runs");
-        let orchestrate_dir = metastack_dir.join("orchestrate");
         let improve_dir = agent_dir.join("improve");
         let improve_sessions_dir = improve_dir.join("sessions");
 
@@ -61,7 +58,6 @@ impl PlanningPaths {
             cron_runtime_jobs_dir,
             cron_runtime_logs_dir,
             cron_runtime_runs_dir,
-            orchestrate_dir,
             improve_dir,
             improve_sessions_dir,
         }

@@ -1,6 +1,6 @@
 # MetaStack CLI
 
-This directory contains the MetaStack CLI agent orchestration service that polls Linear, creates per-issue workspaces, and runs Codex in app-server mode.
+This directory contains the MetaStack CLI agent service that polls Linear, creates per-issue workspaces, and runs agents in app-server mode.
 
 ## Environment
 

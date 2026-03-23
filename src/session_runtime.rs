@@ -338,26 +338,26 @@ mod tests {
     fn workflow_layout_builds_expected_paths() {
         let workflow = WorkflowRootLayout::repo_scoped(
             Path::new("/tmp/example"),
-            ".metastack/orchestrate",
+            ".metastack/improve",
             "current.json",
         );
         let sessions = WorkflowSessionLayout::with_sessions_dir(workflow.clone(), "sessions");
 
         assert_eq!(
             workflow.root(),
-            Path::new("/tmp/example/.metastack/orchestrate")
+            Path::new("/tmp/example/.metastack/improve")
         );
         assert_eq!(
             workflow.active_session_path(),
-            Path::new("/tmp/example/.metastack/orchestrate/current.json")
+            Path::new("/tmp/example/.metastack/improve/current.json")
         );
         assert_eq!(
             sessions.sessions_dir(),
-            Path::new("/tmp/example/.metastack/orchestrate/sessions")
+            Path::new("/tmp/example/.metastack/improve/sessions")
         );
         assert_eq!(
             sessions.session_dir("sess-1"),
-            Path::new("/tmp/example/.metastack/orchestrate/sessions/sess-1")
+            Path::new("/tmp/example/.metastack/improve/sessions/sess-1")
         );
         assert_eq!(
             sessions.workflow().active_session_path(),

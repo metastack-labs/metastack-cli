@@ -19,7 +19,6 @@ mod listen;
 mod merge;
 mod merge_dashboard;
 mod onboarding;
-mod orchestrate;
 mod output;
 mod plan;
 mod progress;
@@ -76,7 +75,6 @@ use crate::merge_dashboard::MergeDashboardAction;
 use crate::onboarding::{
     OnboardingLaunchMode, OnboardingOptions, OnboardingResult, run_onboarding,
 };
-use crate::orchestrate::run_orchestrate;
 use crate::output::{render_json_clap_error, render_json_error};
 use crate::plan::run_plan;
 use crate::review::{run_retro, run_review};
@@ -251,9 +249,6 @@ async fn dispatch(cli: Cli) -> Result<()> {
                     run_listen(&args.run).await?;
                 }
             },
-            AgentsCommands::Orchestrate(args) => {
-                run_orchestrate(&args).await?;
-            }
             AgentsCommands::Review(args) => {
                 run_review(&args).await?;
             }
