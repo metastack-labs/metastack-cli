@@ -107,12 +107,17 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
         workpad_comment_id: &args.workpad_comment_id,
         backlog_issue: backlog_issue.as_ref(),
         pid: Some(worker_pid),
-        latest_resume_handle: None,
+        latest_resume_handle: load_existing_latest_resume_handle(
+            &source_root,
+            project_selector,
+            &args.issue,
+        )?,
         pull_request: load_existing_pull_request(&source_root, project_selector, &args.issue)?,
     };
     let mut session_tokens =
         load_existing_session_tokens(&source_root, project_selector, &args.issue)?;
-    let mut session_id = load_existing_session_id(&source_root, project_selector, &args.issue)?;
+    let mut provider_session_id =
+        load_existing_provider_session_id(&source_root, project_selector, &args.issue)?;
     let mut saw_implementation_progress = workspace_has_meaningful_progress(&workspace_path)?;
     let mut stalled_turns = 0u32;
     let log_path = agent_log_path(&source_root, args.project.as_deref(), &args.issue);
@@ -151,7 +156,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                 ),
                 &session_context,
                 turns_completed,
-                session_id.as_deref(),
+                provider_session_id.as_deref(),
                 &session_tokens,
             ),
         )?;
@@ -168,7 +173,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     compact_completed_summary(None, turns_completed, &issue_state_label(&issue)),
                     &session_context,
                     turns_completed,
-                    session_id.as_deref(),
+                    provider_session_id.as_deref(),
                     &session_tokens,
                 ),
             )?;
@@ -195,7 +200,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     ),
                     &session_context,
                     turns_completed,
-                    session_id.as_deref(),
+                    provider_session_id.as_deref(),
                     &session_tokens,
                 ),
             )?;
@@ -210,7 +215,6 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                 backlog_progress_for_issue_dir(&workspace_path, &backlog_issue.identifier)
             })
             .transpose()?;
-        session_context.latest_resume_handle = None;
         write_listen_session(
             &source_root,
             project_selector,
@@ -225,21 +229,23 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                 ),
                 &session_context,
                 turns_completed,
-                session_id.as_deref(),
+                provider_session_id.as_deref(),
                 &session_tokens,
             ),
         )?;
 
-        let session_id_state = RefCell::new(session_id.clone());
+        // Keep provider-native manual resume handles separate from provider session bookkeeping.
+        let provider_session_id_state = RefCell::new(provider_session_id.clone());
         let turn_result = match execute_agent_turn(
             &issue,
             turn_number,
             &turn_context,
+            session_context.latest_resume_handle.as_ref(),
             |current_session_id| {
-                if session_id_state.borrow().as_deref() == Some(current_session_id) {
+                if provider_session_id_state.borrow().as_deref() == Some(current_session_id) {
                     return Ok(());
                 }
-                *session_id_state.borrow_mut() = Some(current_session_id.to_string());
+                *provider_session_id_state.borrow_mut() = Some(current_session_id.to_string());
                 write_listen_session(
                     &source_root,
                     project_selector,
@@ -254,7 +260,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                         ),
                         &session_context,
                         turns_completed,
-                        session_id_state.borrow().as_deref(),
+                        provider_session_id_state.borrow().as_deref(),
                         &session_tokens,
                     ),
                 )
@@ -279,7 +285,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                         ),
                         &session_context,
                         turns_completed,
-                        session_id_state.borrow().as_deref(),
+                        provider_session_id_state.borrow().as_deref(),
                         &displayed_tokens,
                     ),
                 )
@@ -300,17 +306,19 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                         ),
                         &session_context,
                         turns_completed,
-                        session_id.as_deref(),
+                        provider_session_id.as_deref(),
                         &session_tokens,
                     ),
                 )?;
                 return Err(error);
             }
         };
-        session_context.latest_resume_handle = turn_result.latest_resume_handle;
-        session_id = turn_result
+        session_context.latest_resume_handle = turn_result
+            .latest_resume_handle
+            .or(session_context.latest_resume_handle);
+        provider_session_id = turn_result
             .session_id
-            .or_else(|| session_id_state.into_inner());
+            .or_else(|| provider_session_id_state.into_inner());
         if let Some(usage) = turn_result.usage {
             session_tokens.accumulate(&TokenUsage {
                 input: usage.input,
@@ -357,7 +365,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                             ),
                             &session_context,
                             turns_completed,
-                            session_id.as_deref(),
+                            provider_session_id.as_deref(),
                             &session_tokens,
                         ),
                     )?;
@@ -413,7 +421,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                             summary,
                             &session_context,
                             turns_completed,
-                            session_id.as_deref(),
+                            provider_session_id.as_deref(),
                             &session_tokens,
                         ),
                     )?;
@@ -433,7 +441,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                         ),
                         &session_context,
                         turns_completed,
-                        session_id.as_deref(),
+                        provider_session_id.as_deref(),
                         &session_tokens,
                     ),
                 )?;
@@ -469,7 +477,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                         ),
                         &session_context,
                         turns_completed,
-                        session_id.as_deref(),
+                        provider_session_id.as_deref(),
                         &session_tokens,
                     ),
                 )?;
@@ -490,7 +498,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     ),
                     &session_context,
                     turns_completed,
-                    session_id.as_deref(),
+                    provider_session_id.as_deref(),
                     &session_tokens,
                 ),
             )?;
@@ -504,7 +512,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     compact_running_summary(None, turns_completed, args.max_turns, stalled_turns),
                     &session_context,
                     turns_completed,
-                    session_id.as_deref(),
+                    provider_session_id.as_deref(),
                     &session_tokens,
                 ),
             )?;
@@ -895,6 +903,7 @@ fn execute_agent_turn(
     issue: &IssueSummary,
     turn_number: u32,
     context: &ListenTurnContext<'_>,
+    continuation_handle: Option<&LatestResumeHandle>,
     mut on_session_started: impl FnMut(&str) -> Result<()>,
     mut on_usage: impl FnMut(&AgentTokenUsage) -> Result<()>,
 ) -> Result<TurnExecutionResult> {
@@ -906,13 +915,14 @@ fn execute_agent_turn(
     )?;
     let capture_output = invocation.builtin_provider;
     let command_args = if capture_output {
+        let continuation = continuation_id_for_invocation(&invocation.agent, continuation_handle);
         command_args_for_invocation_with_options(
             &invocation,
             AgentExecutionOptions {
                 working_dir: Some(context.workspace_path.to_path_buf()),
                 extra_env: Vec::new(),
                 capture_output: true,
-                continuation: None,
+                continuation,
             },
         )?
     } else {
@@ -1164,6 +1174,15 @@ fn execute_agent_turn(
     }
 
     Ok(TurnExecutionResult::default())
+}
+
+fn continuation_id_for_invocation(
+    agent: &str,
+    continuation_handle: Option<&LatestResumeHandle>,
+) -> Option<String> {
+    continuation_handle
+        .filter(|handle| handle.matches_agent(agent))
+        .map(|handle| handle.id.clone())
 }
 
 fn parse_resume_handle_line(agent: &str, line: &[u8]) -> Option<LatestResumeHandle> {
@@ -1469,9 +1488,7 @@ fn build_worker_session(
         workpad_comment_id: Some(context.workpad_comment_id.to_string()),
         updated_at_epoch_seconds: now_epoch_seconds(),
         pid: context.pid.filter(|value| *value > 0),
-        session_id: session_id
-            .map(str::to_string)
-            .or_else(|| Some(issue.id.clone())),
+        session_id: session_id.map(str::to_string),
         latest_resume_handle: context.latest_resume_handle.clone(),
         turns: Some(turns),
         tokens: tokens.clone(),
@@ -1502,7 +1519,7 @@ fn load_existing_session_tokens(
         .unwrap_or_default())
 }
 
-fn load_existing_session_id(
+fn load_existing_provider_session_id(
     root: &Path,
     project_selector: Option<&str>,
     issue_identifier: &str,
@@ -1514,6 +1531,20 @@ fn load_existing_session_id(
         .into_iter()
         .find(|session| session.issue_matches(issue_identifier))
         .and_then(|session| session.session_id))
+}
+
+fn load_existing_latest_resume_handle(
+    root: &Path,
+    project_selector: Option<&str>,
+    issue_identifier: &str,
+) -> Result<Option<LatestResumeHandle>> {
+    let store = super::store::ListenProjectStore::resolve(root, project_selector)?;
+    let state = store.load_state()?;
+    Ok(state
+        .sessions
+        .into_iter()
+        .find(|session| session.issue_matches(issue_identifier))
+        .and_then(|session| session.latest_resume_handle))
 }
 
 fn load_existing_pull_request(
@@ -1535,8 +1566,8 @@ fn load_existing_pull_request(
 mod tests {
     use super::{
         LatestResumeHandle, Path, ResumeProvider, Value, WorkerSessionContext,
-        build_worker_session, parse_claude_resume_handle, parse_codex_resume_handle,
-        query_codex_threads, read_codex_session_index,
+        build_worker_session, continuation_id_for_invocation, parse_claude_resume_handle,
+        parse_codex_resume_handle, query_codex_threads, read_codex_session_index,
     };
     use crate::linear::{IssueSummary, TeamRef};
     use crate::listen::{PullRequestSummary, SessionPhase, TokenUsage};
@@ -1708,6 +1739,29 @@ mod tests {
                 id: "019d0766-1ca5-70c3-ae80-afafe1fb7bff".to_string(),
             })
         );
+    }
+
+    #[test]
+    fn continuation_id_for_invocation_reuses_matching_resume_handle() {
+        let handle = LatestResumeHandle {
+            provider: ResumeProvider::Codex,
+            id: "thread-123".to_string(),
+        };
+
+        assert_eq!(
+            continuation_id_for_invocation("codex", Some(&handle)),
+            Some("thread-123".to_string())
+        );
+    }
+
+    #[test]
+    fn continuation_id_for_invocation_rejects_mismatched_provider() {
+        let handle = LatestResumeHandle {
+            provider: ResumeProvider::Claude,
+            id: "session-123".to_string(),
+        };
+
+        assert_eq!(continuation_id_for_invocation("codex", Some(&handle)), None);
     }
 
     #[test]

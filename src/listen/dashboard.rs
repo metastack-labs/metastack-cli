@@ -6,7 +6,9 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Cell, List, ListItem, Paragraph, Row, Table, Wrap};
 use ratatui::{Frame, Terminal};
 
+use super::state::{explicit_resume_id_label, explicit_resume_provider_label};
 use super::{ActiveIssue, ListenDashboardData, ListenSessionDetail, SessionListView, SessionPhase};
+use crate::session_runtime::{SummaryField, push_optional_summary_field};
 use crate::tui::scroll::{clamp_offset, plain_text, wrapped_rows};
 use crate::tui::spaced_list::spaced_list_item;
 use crate::tui::theme::{Tone, badge, content_panel, empty_state, key_hints, panel, panel_title};
@@ -935,6 +937,56 @@ fn render_session_detail_text(
     session: &super::AgentSession,
     detail: &ListenSessionDetail,
 ) -> Text<'static> {
+    let mut summary_fields = vec![
+        SummaryField::new("Summary", detail.summary.clone()),
+        SummaryField::new("Turns", detail.turns.unwrap_or(0).to_string()),
+        SummaryField::new("Tokens", detail.tokens.display_compact()),
+        SummaryField::new("PR", detail.pull_request.compact_label()),
+        SummaryField::new(
+            "Resume Provider",
+            explicit_resume_provider_label(detail.latest_resume_handle.as_ref()),
+        ),
+        SummaryField::new(
+            "Resume ID",
+            explicit_resume_id_label(detail.latest_resume_handle.as_ref()),
+        ),
+    ];
+    if let Some(url) = detail.pull_request.url.as_deref() {
+        summary_fields.push(SummaryField::new("PR URL", url));
+    } else if let Some(number) = detail.pull_request.number {
+        summary_fields.push(SummaryField::new("PR Ref", format!("#{number}")));
+    }
+    push_optional_summary_field(
+        &mut summary_fields,
+        "Branch",
+        detail.references.branch.clone(),
+    );
+    push_optional_summary_field(
+        &mut summary_fields,
+        "Workspace",
+        detail.references.workspace_path.clone(),
+    );
+    push_optional_summary_field(
+        &mut summary_fields,
+        "Backlog",
+        detail.references.backlog_path.clone(),
+    );
+    push_optional_summary_field(
+        &mut summary_fields,
+        "Brief",
+        detail.references.brief_path.clone(),
+    );
+    push_optional_summary_field(
+        &mut summary_fields,
+        "Workpad",
+        detail.references.workpad_comment_id.clone(),
+    );
+    push_optional_summary_field(
+        &mut summary_fields,
+        "Log",
+        detail.references.log_path.clone(),
+    );
+
     let mut lines = vec![
         Line::from(vec![
             Span::styled(
@@ -950,35 +1002,12 @@ fn render_session_detail_text(
             Style::default().fg(Color::Gray),
         )),
         Line::from(""),
-        detail_line("Summary", &detail.summary),
-        detail_line("Turns", &detail.turns.unwrap_or(0).to_string()),
-        detail_line("Tokens", &detail.tokens.display_compact()),
-        detail_line("PR", &detail.pull_request.compact_label()),
     ];
-
-    if let Some(url) = detail.pull_request.url.as_deref() {
-        lines.push(detail_line("PR URL", url));
-    } else if let Some(number) = detail.pull_request.number {
-        lines.push(detail_line("PR Ref", &format!("#{number}")));
-    }
-    if let Some(branch) = detail.references.branch.as_deref() {
-        lines.push(detail_line("Branch", branch));
-    }
-    if let Some(workspace) = detail.references.workspace_path.as_deref() {
-        lines.push(detail_line("Workspace", workspace));
-    }
-    if let Some(backlog) = detail.references.backlog_path.as_deref() {
-        lines.push(detail_line("Backlog", backlog));
-    }
-    if let Some(brief) = detail.references.brief_path.as_deref() {
-        lines.push(detail_line("Brief", brief));
-    }
-    if let Some(workpad_comment_id) = detail.references.workpad_comment_id.as_deref() {
-        lines.push(detail_line("Workpad", workpad_comment_id));
-    }
-    if let Some(log_path) = detail.references.log_path.as_deref() {
-        lines.push(detail_line("Log", log_path));
-    }
+    lines.extend(
+        summary_fields
+            .iter()
+            .map(|field| detail_line(field.label, &field.value)),
+    );
 
     if !detail.prompt_context.is_empty() {
         lines.push(Line::from(""));
@@ -1344,6 +1373,50 @@ mod tests {
     }
 
     #[test]
+    fn detail_snapshot_shows_full_resume_handle() {
+        let data = build_dashboard_data(
+            &demo_cycle(),
+            &DashboardRuntimeContext {
+                started_at_epoch_seconds: 1_773_568_249,
+                now_epoch_seconds: 1_773_575_600,
+                poll_interval_seconds: 7,
+                dashboard_label: "terminal dashboard (TUI)",
+                dashboard_refresh_seconds: 1,
+                linear_refresh_seconds: 15,
+                vim_mode: false,
+                show_active_issues: true,
+                show_preview: true,
+                resolved_agent: Some("codex".to_string()),
+            },
+        );
+
+        let state = SessionBrowserState {
+            detail_mode: true,
+            ..SessionBrowserState::default()
+        };
+        let session = state
+            .selected_session(&data)
+            .expect("demo data should include a selected session");
+        let detail = data
+            .detail_for_session(&session.issue_identifier)
+            .expect("demo data should include detail for the selected session");
+        let text = render_session_detail_text(session, detail);
+        let rendered = text
+            .lines
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("Resume Provider: codex"));
+        assert!(
+            rendered.contains(
+                "019cedb4-2293-7651-b0b4-dfac4af6a640-019cedb4-229b-7453-825e-3e3da4e1bf2a"
+            )
+        );
+    }
+
+    #[test]
     fn snapshot_shows_explicit_runtime_and_session_token_breakdown() {
         let cycle = demo_cycle();
         let data = build_dashboard_data(
@@ -1567,7 +1640,7 @@ mod tests {
             64,
             SessionBrowserState {
                 detail_mode: true,
-                detail_scroll: 10,
+                detail_scroll: u16::MAX,
                 ..SessionBrowserState::default()
             },
         )
