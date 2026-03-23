@@ -55,6 +55,7 @@ use crate::progress::{LoadingPanelData, SPINNER_FRAMES, render_loading_panel};
 use crate::scaffold::ensure_planning_layout;
 use crate::text_diff::render_text_diff;
 use crate::tui::fields::InputFieldState;
+use crate::tui::markdown::render_markdown;
 use crate::tui::prompt_images::PromptImageAttachment;
 use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph_with_block, wrapped_rows};
 use crate::tui::theme::content_panel;
@@ -2115,8 +2116,8 @@ fn render_fast_review_frame(frame: &mut Frame<'_>, app: &FastReviewApp) {
                 .unwrap_or_else(|| "unset".to_string())
         )),
         Line::from(""),
-        Line::from(selected.description.clone()),
     ];
+    detail_lines.extend(render_markdown(&selected.description, Style::default(), &[]).lines);
     if !selected.acceptance_criteria.is_empty() {
         detail_lines.push(Line::from(""));
         detail_lines.push(Line::from("Acceptance Criteria"));
@@ -2576,8 +2577,8 @@ impl ReviewApp {
                     .unwrap_or_else(|| "unset".to_string())
             )),
             Line::from(""),
-            Line::from(selected.description.clone()),
         ];
+        detail_lines.extend(render_markdown(&selected.description, Style::default(), &[]).lines);
         if !selected.acceptance_criteria.is_empty() {
             detail_lines.push(Line::from(""));
             detail_lines.push(Line::from("Acceptance Criteria"));

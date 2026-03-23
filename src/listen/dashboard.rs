@@ -9,6 +9,7 @@ use ratatui::{Frame, Terminal};
 use super::state::{explicit_resume_id_label, explicit_resume_provider_label};
 use super::{ActiveIssue, ListenDashboardData, ListenSessionDetail, SessionListView, SessionPhase};
 use crate::session_runtime::{SummaryField, push_optional_summary_field};
+use crate::tui::markdown::render_markdown;
 use crate::tui::scroll::{clamp_offset, plain_text, wrapped_rows};
 use crate::tui::spaced_list::spaced_list_item;
 use crate::tui::theme::{Tone, badge, content_panel, empty_state, key_hints, panel, panel_title};
@@ -709,12 +710,7 @@ fn render_active_issue_detail_text(issue: &ActiveIssue) -> Text<'static> {
     if let Some(description) = issue.description.as_deref() {
         lines.push(Line::from(""));
         lines.push(section_header("Description"));
-        for desc_line in description.lines() {
-            lines.push(Line::from(Span::styled(
-                desc_line.to_string(),
-                Style::default().fg(Color::White),
-            )));
-        }
+        lines.extend(render_markdown(description, Style::default().fg(Color::White), &[]).lines);
     }
 
     lines.push(Line::from(""));

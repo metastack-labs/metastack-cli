@@ -22,6 +22,7 @@ This directory contains the MetaStack CLI agent orchestration service that polls
   - Workspaces must stay under configured workspace root.
 - Orchestrator behavior is stateful and concurrency-sensitive; preserve retry, reconciliation, and cleanup semantics.
 - Follow `docs/logging.md` for logging conventions and required issue/session context fields.
+- Use `src/tui/markdown.rs` (`render_markdown`) as the default renderer for any TUI preview or detail pane that displays markdown-authored content. Do not introduce per-surface markdown rendering helpers.
 
 ## Tests and Validation
 
