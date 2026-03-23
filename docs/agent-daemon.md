@@ -6,7 +6,7 @@
 
 - Reuse the existing Linear client and `.metastack/` workspace instead of adding a one-off integration path.
 - Keep daemon state install-scoped and inspectable so a small team can understand what the
-  orchestrator has done across projects.
+  listener has done across projects.
 - Provide a deterministic dashboard render path that works in local development, tests, and CI.
 - Keep the runtime modular so later tickets can swap the placeholder pickup flow for real agent execution.
 
