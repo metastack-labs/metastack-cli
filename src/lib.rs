@@ -5,8 +5,10 @@ mod backlog_defaults;
 mod backlog_improve;
 mod backlog_spec;
 mod cli;
+mod codebase_context;
 mod config;
 mod config_command;
+mod config_resolution;
 mod context;
 mod cron;
 mod cron_dashboard;
@@ -52,7 +54,7 @@ use crate::backlog_spec::{BacklogSpecOutput, run_backlog_spec};
 use crate::cli::{
     AgentsCommands, BacklogCommands, Cli, Command, ConfigEventArg, DashboardCommands,
     DashboardEventArg, IssueCreateEventArg, IssueEditEventArg, LinearCommands,
-    ListenAssignmentScopeArg, MergeDashboardEventArg, RuntimeCommands, SpecEventArg, SyncCommands,
+    ListenAssigneeScopeArg, MergeDashboardEventArg, RuntimeCommands, SpecEventArg, SyncCommands,
     SyncDashboardEventArg,
 };
 use crate::config::ListenAssignmentScope;
@@ -67,8 +69,8 @@ use crate::linear::edit::IssueEditAction;
 pub(crate) use crate::linear::{LinearCommandContext, load_linear_command_context};
 use crate::linear::{run_dashboard_command, run_issues_command, run_projects_command};
 use crate::listen::{
-    run_listen, run_listen_session_clear, run_listen_session_inspect, run_listen_session_list,
-    run_listen_session_resume, run_listen_worker,
+    run_execute, run_listen, run_listen_session_clear, run_listen_session_inspect,
+    run_listen_session_list, run_listen_session_resume, run_listen_worker,
 };
 use crate::merge::run_merge;
 use crate::merge_dashboard::MergeDashboardAction;
@@ -228,6 +230,9 @@ async fn dispatch(cli: Cli) -> Result<()> {
             },
         },
         Command::Agents(args) => match args.command {
+            AgentsCommands::Execute(args) => {
+                run_execute(&args).await?;
+            }
             AgentsCommands::Listen(args) => match args.command {
                 Some(crate::cli::ListenCommands::Sessions(session_args)) => {
                     match session_args.command {
@@ -713,14 +718,12 @@ impl From<IssueEditEventArg> for IssueEditAction {
     }
 }
 
-impl From<ListenAssignmentScopeArg> for ListenAssignmentScope {
-    fn from(value: ListenAssignmentScopeArg) -> Self {
+impl From<ListenAssigneeScopeArg> for ListenAssignmentScope {
+    fn from(value: ListenAssigneeScopeArg) -> Self {
         match value {
-            ListenAssignmentScopeArg::Any => ListenAssignmentScope::Any,
-            ListenAssignmentScopeArg::ViewerOnly => ListenAssignmentScope::ViewerOnly,
-            ListenAssignmentScopeArg::ViewerOrUnassigned => {
-                ListenAssignmentScope::ViewerOrUnassigned
-            }
+            ListenAssigneeScopeArg::Any => ListenAssignmentScope::Any,
+            ListenAssigneeScopeArg::ViewerOnly => ListenAssignmentScope::ViewerOnly,
+            ListenAssigneeScopeArg::ViewerOrUnassigned => ListenAssignmentScope::ViewerOrUnassigned,
         }
     }
 }

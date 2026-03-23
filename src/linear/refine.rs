@@ -12,6 +12,9 @@ use crate::backlog::{
     write_issue_description,
 };
 use crate::cli::{IssueRefineArgs, LinearClientArgs, RunAgentArgs};
+use crate::codebase_context::{
+    CodebaseContextSection, MissingCodebaseContextHint, load_codebase_context_bundle,
+};
 use crate::config::AGENT_ROUTE_LINEAR_ISSUES_REFINE;
 use crate::fs::{
     PlanningPaths, canonicalize_existing_dir, display_path, ensure_dir, write_text_file,
@@ -595,37 +598,17 @@ fn max_backtick_run(value: &str) -> usize {
 }
 
 fn load_context_bundle(root: &Path) -> Result<String> {
-    let paths = PlanningPaths::new(root);
-    let sections = [
-        ("SCAN.md", paths.scan_path()),
-        ("ARCHITECTURE.md", paths.architecture_path()),
-        ("CONVENTIONS.md", paths.conventions_path()),
-        ("STACK.md", paths.stack_path()),
-        ("TESTING.md", paths.testing_path()),
-    ];
-    let mut lines = Vec::new();
-
-    for (title, path) in sections {
-        lines.push(format!("## {title}"));
-        lines.push(String::new());
-        lines.push(read_context(&path)?);
-        lines.push(String::new());
-    }
-
-    Ok(lines.join("\n"))
-}
-
-fn read_context(path: &Path) -> Result<String> {
-    match fs::read_to_string(path) {
-        Ok(contents) => Ok(contents),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(format!(
-            "_Missing `{}`. Run `meta scan` to generate it._",
-            path.file_name()
-                .map(|value| value.to_string_lossy())
-                .unwrap_or_default()
-        )),
-        Err(error) => Err(error).with_context(|| format!("failed to read `{}`", path.display())),
-    }
+    load_codebase_context_bundle(
+        root,
+        &[
+            CodebaseContextSection::Scan,
+            CodebaseContextSection::Architecture,
+            CodebaseContextSection::Conventions,
+            CodebaseContextSection::Stack,
+            CodebaseContextSection::Testing,
+        ],
+        MissingCodebaseContextHint::Scan,
+    )
 }
 
 fn render_findings_markdown(pass_number: usize, output: &RefinementPassOutput) -> String {

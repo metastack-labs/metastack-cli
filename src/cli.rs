@@ -56,6 +56,8 @@ acceptance criteria, priority/estimate, and parent-child structure opportunities
 const AGENTS_HELP_EXAMPLES: &str = "\
 Examples:
   meta agents listen --team MET --project \"MetaStack CLI\"
+  meta agents execute MET-45 --team MET --project \"MetaStack CLI\"
+  meta agents execute MET-45 --root . --max-turns 10
   meta agents review 42 --root .
   meta agents review 42 --root . --dry-run
   meta agents review --root .
@@ -454,6 +456,8 @@ pub struct UpgradeArgs {
 pub enum AgentsCommands {
     /// Listen for eligible Linear issues and supervise them through the interactive session browser.
     Listen(ListenArgs),
+    /// Execute a one-off headless agent run for a single Linear issue.
+    Execute(ExecuteArgs),
     /// Review open GitHub PRs through a guided one-shot dashboard with explicit human approval.
     Review(ReviewArgs),
     /// Analyze merged work for follow-up Linear tickets through a guided retro dashboard.
@@ -463,6 +467,46 @@ pub enum AgentsCommands {
     /// List, explain, and run reusable workflow playbooks.
     #[command(alias = "workflow")]
     Workflows(WorkflowsArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ExecuteArgs {
+    /// Linear issue identifier to execute, for example MET-45.
+    #[arg(value_name = "ISSUE_ID")]
+    pub issue: String,
+    /// Repository root containing the `.metastack` workspace.
+    #[arg(long, value_name = "PATH", default_value = ".")]
+    pub root: PathBuf,
+    /// Linear API token. Falls back to LINEAR_API_KEY.
+    #[arg(long, hide_env_values = true)]
+    pub api_key: Option<String>,
+    /// Override the Linear GraphQL endpoint.
+    #[arg(long)]
+    pub api_url: Option<String>,
+    /// Override the named Linear profile.
+    #[arg(long)]
+    pub profile: Option<String>,
+    /// Default Linear team key.
+    #[arg(long)]
+    pub team: Option<String>,
+    /// Filter to a single Linear project.
+    #[arg(long)]
+    pub project: Option<String>,
+    /// Maximum number of agent turns to allow before the worker stops.
+    #[arg(long, default_value_t = 20)]
+    pub max_turns: u32,
+    /// Override the configured default agent/provider for this run.
+    #[arg(long)]
+    pub agent: Option<String>,
+    /// Override the configured default model for this run.
+    #[arg(long)]
+    pub model: Option<String>,
+    /// Override the resolved built-in reasoning option for this run.
+    #[arg(long)]
+    pub reasoning: Option<String>,
+    /// Emit result as JSON on completion.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -1020,8 +1064,8 @@ pub struct ConfigArgs {
     #[arg(long)]
     pub listen_label: Option<String>,
     /// Update the install-scoped listen assignee scope.
-    #[arg(long, value_enum)]
-    pub assignment_scope: Option<ListenAssignmentScopeArg>,
+    #[arg(long = "assignee-scope", alias = "assignment-scope", value_enum)]
+    pub assignee_scope: Option<ListenAssigneeScopeArg>,
     /// Update the install-scoped listen refresh policy.
     #[arg(long, value_enum)]
     pub refresh_policy: Option<ListenRefreshPolicyArg>,
@@ -1120,9 +1164,9 @@ pub struct SetupArgs {
     /// Update the labels required for `meta listen` pickup. Provide a comma-separated list.
     #[arg(long)]
     pub listen_label: Option<String>,
-    /// Update the assignee filter used by `meta listen`.
-    #[arg(long, value_enum)]
-    pub assignment_scope: Option<ListenAssignmentScopeArg>,
+    /// Update the assignee scope used by `meta listen`.
+    #[arg(long = "assignee-scope", alias = "assignment-scope", value_enum)]
+    pub assignee_scope: Option<ListenAssigneeScopeArg>,
     /// Update how `meta listen` refreshes existing ticket workspaces.
     #[arg(long, value_enum)]
     pub refresh_policy: Option<ListenRefreshPolicyArg>,
@@ -2039,8 +2083,8 @@ pub enum PromptTransportArg {
     Stdin,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
-pub enum ListenAssignmentScopeArg {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ListenAssigneeScopeArg {
     Any,
     ViewerOnly,
     ViewerOrUnassigned,
@@ -2091,6 +2135,7 @@ impl Cli {
             },
             Command::Agents(args) => match &args.command {
                 AgentsCommands::Listen(args) if args.run.json => Some("agents.listen"),
+                AgentsCommands::Execute(args) if args.json => Some("agents.execute"),
                 AgentsCommands::Review(args) if args.run.json => Some("agents.review"),
                 AgentsCommands::Retro(args) if args.run.json => Some("agents.retro"),
                 _ => None,
@@ -2266,4 +2311,75 @@ fn matches_subcommand(tokens: &[String], name: &str) -> bool {
 
 fn has_flag(tokens: &[String], flag: &str) -> bool {
     tokens.iter().any(|token| token == flag)
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::{Cli, Command, ListenAssigneeScopeArg};
+
+    #[test]
+    fn config_accepts_public_assignee_scope_flag() {
+        let cli = Cli::try_parse_from(["meta", "config", "--assignee-scope", "viewer-only"])
+            .expect("config should parse public assignee-scope flag");
+
+        match cli.command {
+            Command::Config(args) => {
+                assert_eq!(
+                    args.assignee_scope,
+                    Some(ListenAssigneeScopeArg::ViewerOnly)
+                );
+            }
+            other => panic!("expected config command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn config_accepts_hidden_assignment_scope_alias() {
+        let cli = Cli::try_parse_from(["meta", "config", "--assignment-scope", "viewer-only"])
+            .expect("config should parse hidden assignment-scope alias");
+
+        match cli.command {
+            Command::Config(args) => {
+                assert_eq!(
+                    args.assignee_scope,
+                    Some(ListenAssigneeScopeArg::ViewerOnly)
+                );
+            }
+            other => panic!("expected config command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn setup_accepts_public_assignee_scope_flag() {
+        let cli = Cli::try_parse_from(["meta", "setup", "--assignee-scope", "viewer-only"])
+            .expect("setup should parse public assignee-scope flag");
+
+        match cli.command {
+            Command::Setup(args) => {
+                assert_eq!(
+                    args.assignee_scope,
+                    Some(ListenAssigneeScopeArg::ViewerOnly)
+                );
+            }
+            other => panic!("expected setup command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn setup_accepts_hidden_assignment_scope_alias() {
+        let cli = Cli::try_parse_from(["meta", "setup", "--assignment-scope", "viewer-only"])
+            .expect("setup should parse hidden assignment-scope alias");
+
+        match cli.command {
+            Command::Setup(args) => {
+                assert_eq!(
+                    args.assignee_scope,
+                    Some(ListenAssigneeScopeArg::ViewerOnly)
+                );
+            }
+            other => panic!("expected setup command, got {other:?}"),
+        }
+    }
 }

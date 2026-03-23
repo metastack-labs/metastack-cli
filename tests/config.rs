@@ -871,6 +871,7 @@ default_reasoning = "medium"
     cli()
         .env("METASTACK_CONFIG", &config_path)
         .args([
+            "runtime",
             "config",
             "--root",
             repo_root.to_string_lossy().as_ref(),
@@ -894,8 +895,8 @@ default_reasoning = "medium"
         .stdout(predicate::str::contains("Plan mode"))
         .stdout(predicate::str::contains("Fast single-ticket"))
         .stdout(predicate::str::contains("Fast plan questions"))
-        .stdout(predicate::str::contains("Plan label"))
-        .stdout(predicate::str::contains("Tech label"));
+        .stdout(predicate::str::contains("14. Plan label"))
+        .stdout(predicate::str::contains("15. Tech label"));
 
     Ok(())
 }
@@ -1070,6 +1071,7 @@ default_model = "gpt-5.4"
     cli()
         .env("METASTACK_CONFIG", &config_path)
         .args([
+            "runtime",
             "setup",
             "--root",
             repo_root.to_string_lossy().as_ref(),

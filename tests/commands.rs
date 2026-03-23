@@ -128,14 +128,41 @@ fn workspace_help_lists_lifecycle_commands() {
 }
 
 #[test]
-fn agents_help_lists_listen_and_workflows() {
+fn agents_help_lists_listen_execute_and_workflows() {
     cli()
         .args(["agents", "--help"])
         .assert()
         .success()
         .stdout(predicate::str::contains("\n  listen "))
+        .stdout(predicate::str::contains("\n  execute "))
         .stdout(predicate::str::contains("\n  improve "))
-        .stdout(predicate::str::contains("\n  workflows "));
+        .stdout(predicate::str::contains("\n  workflows "))
+        .stdout(predicate::str::contains("meta agents execute MET-45"));
+}
+
+#[test]
+fn agents_execute_help_describes_one_off_run() {
+    cli()
+        .args(["agents", "execute", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("one-off headless agent run"))
+        .stdout(predicate::str::contains("<ISSUE_ID>"))
+        .stdout(predicate::str::contains("--root"))
+        .stdout(predicate::str::contains("--max-turns"))
+        .stdout(predicate::str::contains("--json"))
+        .stdout(predicate::str::contains("--agent"))
+        .stdout(predicate::str::contains("--model"))
+        .stdout(predicate::str::contains("--reasoning"));
+}
+
+#[test]
+fn agents_execute_requires_issue_id() {
+    cli()
+        .args(["agents", "execute"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("<ISSUE_ID>"));
 }
 
 #[test]

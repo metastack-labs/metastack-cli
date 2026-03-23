@@ -36,6 +36,30 @@ use crate::tui::theme::{Tone, badge, content_panel, emphasis_style, label_style,
 
 const PROJECT_FETCH_LIMIT: usize = 100;
 
+fn assignee_scope_options() -> Vec<String> {
+    vec![
+        "Any eligible issue".to_string(),
+        "Only issues assigned to the authenticated viewer".to_string(),
+        "Viewer-assigned issues plus unassigned issues".to_string(),
+    ]
+}
+
+fn assignee_scope_index(scope: ListenAssignmentScope) -> usize {
+    match scope {
+        ListenAssignmentScope::Any => 0,
+        ListenAssignmentScope::ViewerOnly => 1,
+        ListenAssignmentScope::ViewerOrUnassigned => 2,
+    }
+}
+
+fn assignee_scope_from_index(index: usize) -> ListenAssignmentScope {
+    match index {
+        1 => ListenAssignmentScope::ViewerOnly,
+        2 => ListenAssignmentScope::ViewerOrUnassigned,
+        _ => ListenAssignmentScope::Any,
+    }
+}
+
 /// Entry mode for the shared onboarding wizard.
 #[derive(Debug, Clone)]
 pub enum OnboardingLaunchMode {
@@ -224,10 +248,6 @@ pub async fn run_onboarding(options: OnboardingOptions) -> Result<OnboardingResu
 impl OnboardingApp {
     fn new(app_config: &AppConfig, mode: OnboardingLaunchMode) -> Self {
         let selected_team = app_config.linear.team.clone().unwrap_or_default();
-        let assignment_scope_options = vec![
-            "Any eligible issue".to_string(),
-            "Viewer-assigned plus unassigned".to_string(),
-        ];
         let refresh_options = vec![
             "Reuse workspace and refresh from origin/main".to_string(),
             "Recreate workspace from origin/main".to_string(),
@@ -277,17 +297,14 @@ impl OnboardingApp {
                     .unwrap_or_default(),
             ),
             assignment_scope: SelectFieldState::new(
-                assignment_scope_options,
-                match app_config
-                    .defaults
-                    .listen
-                    .assignment_scope
-                    .unwrap_or_default()
-                {
-                    ListenAssignmentScope::Any => 0,
-                    ListenAssignmentScope::ViewerOnly => 1,
-                    ListenAssignmentScope::ViewerOrUnassigned => 1,
-                },
+                assignee_scope_options(),
+                assignee_scope_index(
+                    app_config
+                        .defaults
+                        .listen
+                        .assignment_scope
+                        .unwrap_or_default(),
+                ),
             ),
             refresh_policy: SelectFieldState::new(
                 refresh_options,
@@ -457,10 +474,7 @@ impl OnboardingApp {
             project_id,
             default_issue_status,
             listen_label: normalize_optional(self.listen_label.value()),
-            assignment_scope: match self.assignment_scope.selected() {
-                1 => ListenAssignmentScope::ViewerOrUnassigned,
-                _ => ListenAssignmentScope::Any,
-            },
+            assignment_scope: assignee_scope_from_index(self.assignment_scope.selected()),
             refresh_policy: match self.refresh_policy.selected() {
                 1 => ListenRefreshPolicy::RecreateFromOriginMain,
                 _ => ListenRefreshPolicy::ReuseAndRefresh,
@@ -1323,6 +1337,51 @@ mod tests {
 
         assert!(handled);
         assert!(app.review_scroll.offset() > 0);
+    }
+
+    #[test]
+    fn onboarding_preserves_viewer_only_selection_from_config() {
+        let app = OnboardingApp::new(
+            &AppConfig {
+                defaults: crate::config::InstallDefaults {
+                    listen: crate::config::InstallListenSettings {
+                        assignment_scope: Some(ListenAssignmentScope::ViewerOnly),
+                        ..crate::config::InstallListenSettings::default()
+                    },
+                    ..crate::config::InstallDefaults::default()
+                },
+                ..AppConfig::default()
+            },
+            OnboardingLaunchMode::Replay,
+        );
+
+        assert_eq!(app.assignment_scope.options(), &assignee_scope_options());
+        assert_eq!(app.assignment_scope.selected(), 1);
+    }
+
+    #[test]
+    fn onboarding_submission_round_trips_viewer_only_assignment_scope() {
+        let mut app = OnboardingApp::new(&AppConfig::default(), OnboardingLaunchMode::Replay);
+        let _ = app.api_key.paste("lin_api_test");
+        app.validation_state = ValidationState::Succeeded {
+            viewer: UserRef {
+                id: "user-1".to_string(),
+                name: "Meta User".to_string(),
+                email: Some("meta@example.com".to_string()),
+            },
+        };
+        app.team = SelectFieldState::new(vec!["Engineering (ENG)".to_string()], 0);
+        app.team_ids = vec!["ENG".to_string()];
+        app.assignment_scope.move_by(1);
+
+        let submission = app
+            .submission()
+            .expect("onboarding submission should preserve viewer-only");
+
+        assert_eq!(
+            submission.assignment_scope,
+            ListenAssignmentScope::ViewerOnly
+        );
     }
 
     #[tokio::test]

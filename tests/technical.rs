@@ -56,6 +56,7 @@ fn technical_command_creates_a_child_issue_and_local_backlog_files() -> Result<(
 }
 "#,
     )?;
+    fs::remove_file(repo_root.join(".metastack/codebase/INTEGRATIONS.md"))?;
     fs::create_dir_all(repo_root.join(".metastack/backlog/_TEMPLATE"))?;
     fs::write(
         repo_root.join(".metastack/backlog/_TEMPLATE/index.md"),
@@ -514,6 +515,15 @@ JSON
     assert!(payload.contains("tasks/workstream-template.md"));
     assert!(payload.contains("artifacts/artifact-template.md"));
     assert!(payload.contains("## SCAN.md"));
+    assert!(payload.contains("## ARCHITECTURE.md"));
+    assert!(payload.contains("## CONCERNS.md"));
+    assert!(payload.contains("## CONVENTIONS.md"));
+    assert!(payload.contains("## INTEGRATIONS.md"));
+    assert!(payload.contains("## STACK.md"));
+    assert!(payload.contains("## STRUCTURE.md"));
+    assert!(payload.contains("## TESTING.md"));
+    assert!(payload.contains("_Missing `INTEGRATIONS.md`. Run `meta scan` to generate it._"));
+    assert!(!payload.contains("meta context reload"));
     assert!(payload.contains("Selected acceptance criteria for this technical sub-ticket"));
     assert!(payload.contains("- Generate backlog docs from the template"));
     assert!(payload.contains("Parent issue context:"));
