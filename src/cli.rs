@@ -56,6 +56,7 @@ acceptance criteria, priority/estimate, and parent-child structure opportunities
 const AGENTS_HELP_EXAMPLES: &str = "\
 Examples:
   meta agents listen --team MET --project \"MetaStack CLI\"
+  meta agents orchestrate --root .
   meta agents review 42 --root .
   meta agents review 42 --root . --dry-run
   meta agents review --root .
@@ -454,6 +455,8 @@ pub struct UpgradeArgs {
 pub enum AgentsCommands {
     /// Listen for eligible Linear issues and supervise them through the interactive session browser.
     Listen(ListenArgs),
+    /// Orchestrate backlog promotion through persisted repository-local session state.
+    Orchestrate(OrchestrateArgs),
     /// Review open GitHub PRs through a guided one-shot dashboard with explicit human approval.
     Review(ReviewArgs),
     /// Analyze merged work for follow-up Linear tickets through a guided retro dashboard.
@@ -2110,6 +2113,7 @@ impl Cli {
             },
             Command::Agents(args) => match &args.command {
                 AgentsCommands::Listen(args) if args.run.json => Some("agents.listen"),
+                AgentsCommands::Orchestrate(args) if args.json => Some("agents.orchestrate"),
                 AgentsCommands::Review(args) if args.run.json => Some("agents.review"),
                 AgentsCommands::Retro(args) if args.run.json => Some("agents.retro"),
                 _ => None,
@@ -2227,6 +2231,7 @@ fn infer_agents_machine_output(tokens: &[String]) -> Option<&'static str> {
     let (command, rest) = tokens.split_first()?;
     match command.as_str() {
         "listen" if has_flag(rest, "--json") => Some("agents.listen"),
+        "orchestrate" if has_flag(rest, "--json") => Some("agents.orchestrate"),
         "review" if has_flag(rest, "--json") => Some("agents.review"),
         "retro" if has_flag(rest, "--json") => Some("agents.retro"),
         _ => None,

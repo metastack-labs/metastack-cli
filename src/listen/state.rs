@@ -20,12 +20,38 @@ impl ResumeProvider {
             Self::Codex => "codex",
         }
     }
+
+    pub(super) fn for_agent(agent: &str) -> Option<Self> {
+        match agent {
+            "claude" => Some(Self::Claude),
+            "codex" => Some(Self::Codex),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LatestResumeHandle {
     pub provider: ResumeProvider,
     pub id: String,
+}
+
+impl LatestResumeHandle {
+    pub(super) fn matches_agent(&self, agent: &str) -> bool {
+        ResumeProvider::for_agent(agent) == Some(self.provider)
+    }
+}
+
+pub(super) fn explicit_resume_provider_label(handle: Option<&LatestResumeHandle>) -> String {
+    handle
+        .map(|handle| handle.provider.label().to_string())
+        .unwrap_or_else(|| "unavailable".to_string())
+}
+
+pub(super) fn explicit_resume_id_label(handle: Option<&LatestResumeHandle>) -> String {
+    handle
+        .map(|handle| handle.id.clone())
+        .unwrap_or_else(|| "unavailable".to_string())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -310,13 +336,6 @@ impl AgentSession {
             .unwrap_or_else(|| "-".to_string())
     }
 
-    pub(super) fn latest_resume_id_label(&self) -> String {
-        self.latest_resume_handle
-            .as_ref()
-            .map(|resume| resume.id.clone())
-            .unwrap_or_else(|| "-".to_string())
-    }
-
     pub(super) fn pull_request_label(&self) -> String {
         self.pull_request.compact_label()
     }
@@ -476,7 +495,7 @@ impl ListenState {
 mod tests {
     use super::{
         AgentSession, LatestResumeHandle, PullRequestStatus, PullRequestSummary, ResumeProvider,
-        SessionPhase, TokenUsage,
+        SessionPhase, TokenUsage, explicit_resume_id_label, explicit_resume_provider_label,
     };
 
     fn session() -> AgentSession {
@@ -520,8 +539,30 @@ mod tests {
         assert_eq!(session.session_label(), "019c...f6a640");
         assert_eq!(session.latest_resume_provider_label(), "codex");
         assert_eq!(
-            session.latest_resume_id_label(),
-            "019cedb4-2293-7651-b0b4-dfac4af6a640"
+            session
+                .latest_resume_handle
+                .as_ref()
+                .map(|resume| resume.id.as_str()),
+            Some("019cedb4-2293-7651-b0b4-dfac4af6a640")
+        );
+    }
+
+    #[test]
+    fn explicit_resume_labels_share_unavailable_and_full_id_formatting() {
+        assert_eq!(explicit_resume_provider_label(None), "unavailable");
+        assert_eq!(explicit_resume_id_label(None), "unavailable");
+
+        let handle = LatestResumeHandle {
+            provider: ResumeProvider::Claude,
+            id: "provider-resume-123".to_string(),
+        };
+        assert_eq!(
+            explicit_resume_provider_label(Some(&handle)),
+            "claude".to_string()
+        );
+        assert_eq!(
+            explicit_resume_id_label(Some(&handle)),
+            "provider-resume-123".to_string()
         );
     }
 

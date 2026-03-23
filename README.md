@@ -1318,8 +1318,13 @@ dashboard `SESSION` column renders only the compact provider-native handle, whil
 `meta listen sessions list` and `meta listen sessions inspect` surface the latest provider plus the
 full resume ID so operators can copy the correct `codex` or `claude` resume target directly.
 Capture is latest-only and silent best effort: new listen turns overwrite the stored provider/ID
-when capture succeeds, and leave those fields empty when it does not. Older stored records are not
-backfilled.
+when capture succeeds, and leave those fields explicitly unavailable when it does not. The same
+`{ provider, id }` record is mirrored into the per-session detail artifact so dashboard detail and
+`inspect` render the same full handle, and built-in worker restarts reuse that stored
+provider-native handle instead of falling back to a legacy `session_id`. Codex live token
+hydration follows that same contract by resolving token files from the stored provider-native
+handle or the session log's `thread.started` record rather than from legacy continuation
+bookkeeping. Older stored records are not backfilled.
 
 Reference:
 
@@ -1346,6 +1351,7 @@ Sandbox and permission handling depends on the command path:
 
 - `meta agents listen` uses unrestricted execution for built-in providers so unattended workers can run validation, git/GitHub flows, and Linear updates. Codex uses `--dangerously-bypass-approvals-and-sandbox`; Claude uses `--permission-mode=bypassPermissions`.
 - `meta agents listen` also enables machine-readable provider output for built-in workers so the listener can capture the latest provider-native manual resume ID. Codex listen runs use `codex exec --json`, and Claude listen runs use `claude -p --verbose --output-format=stream-json`.
+- Built-in listen worker restarts and `meta listen sessions resume` only reuse a stored manual resume target when provider-native metadata exists for the active built-in provider; operator-facing detail falls back to explicit `unavailable`, not to legacy continuation bookkeeping.
 - `meta context scan`, `meta backlog spec`, `meta backlog plan`, `meta backlog improve`, `meta backlog split`, `meta linear issues refine`, workflow runs, merge flows, and cron prompts keep the built-in Codex adapter on `--sandbox workspace-write --ask-for-approval never`.
 
 Listen startup now runs a provider preflight before polling Linear, and worker pickup reruns it inside the workspace before the first agent turn. Codex checks require a readable `~/.codex/config.toml` with `approval_policy = "never"` and `sandbox_mode = "danger-full-access"` and warn when `[mcp_servers.linear]` is configured. Claude checks require `claude` on `PATH` and fail fast when `ANTHROPIC_API_KEY` is set. Both providers also validate that the resolved built-in launch command exposes the required unrestricted mode for unattended listen runs.

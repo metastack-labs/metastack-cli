@@ -26,6 +26,8 @@ The initial implementation delivered in `MET-13` focuses on the smallest end-to-
    `listen/projects/<PROJECT_KEY>/session.json`, per-session drill-down data is persisted under
    `listen/projects/<PROJECT_KEY>/session-details/<TICKET>.json`, and agent stdout/stderr are
    appended to `listen/projects/<PROJECT_KEY>/logs/<TICKET>.log`.
+   Built-in provider-native manual resume metadata is stored as the same `{ provider, id }`
+   record in both persisted artifacts.
 10. Session cleanup is record-only: targeted session records are removed or rewritten inside
     `session.json` without deleting `project.json`, `active-listener.lock.json`, or unrelated
     per-issue logs, and live worker PIDs are never cleared automatically.
@@ -70,7 +72,8 @@ Primary options:
 - `listen sessions list` and `inspect` now show the latest tracked provider-native manual resume
   metadata for built-in `codex` and `claude` workers. The dashboard keeps only the compact handle,
   while these commands print the full latest resume ID and provider so operators can copy the
-  correct resume target directly.
+  correct resume target directly. Missing metadata is shown as explicitly unavailable instead of
+  falling back to a legacy `session_id`.
 - `listen sessions clear` accepts an issue identifier, `--blocked`, `--completed`, `--stale`, or
   `--all`; it refuses to remove any targeted record whose stored PID is still alive.
 - Live dashboard keys: `Tab` toggles between active and completed sessions, `Left` selects active sessions, `Right` selects completed sessions, `Up` / `Down` move the selected row, `Enter` toggles the selected-session detail pane, `Esc` / `Backspace` close detail mode, `PgUp` / `PgDn` scroll the detail pane, `P` pauses the selected running worker, `R` resumes a paused worker or retries a blocked session, and `q` / `Ctrl-C` exits.
@@ -114,10 +117,16 @@ unsupported or missing counts still render as `n/a`.
 Listen-mode built-in launches also switch to machine-readable provider output so the worker can
 capture the latest provider-native resume target for the current turn. Codex uses
 `codex exec --json`, Claude uses `claude -p --verbose --output-format=stream-json`, and both
-capture paths are silent best effort with no backfill of older stored session records.
+capture paths are silent best effort with no backfill of older stored session records. Built-in
+worker restarts and `meta listen sessions resume` reuse the stored provider-native handle when it
+matches the active built-in provider. Codex live token hydration follows the same rule by
+resolving token files from the stored provider-native handle or the captured `thread.started`
+event in the listen log, not from legacy continuation bookkeeping.
 Structured session detail artifacts are best-effort companion state: malformed or missing
 `session-details/<TICKET>.json` files do not break the list view or reload path, and the next
-successful session refresh rewrites them.
+successful session refresh rewrites them. The detail artifact also stores the same
+provider-native resume record used in `session.json`, so dashboard detail and textual inspection
+render the same full manual resume target.
 
 ## Runtime Modules
 

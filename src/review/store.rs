@@ -176,10 +176,7 @@ impl ReviewProjectStore {
         self.ensure_layout()?;
         let lock_file = self.paths.state_path.with_extension("json.lock");
         let lock = File::create(&lock_file).with_context(|| {
-            format!(
-                "failed to create state lock file `{}`",
-                lock_file.display()
-            )
+            format!("failed to create state lock file `{}`", lock_file.display())
         })?;
         flock_exclusive(&lock).with_context(|| {
             format!(
@@ -266,23 +263,14 @@ fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let content =
         serde_json::to_string_pretty(value).context("failed to serialize JSON for review store")?;
     let dir = path.parent().ok_or_else(|| {
-        anyhow::anyhow!(
-            "cannot determine parent directory for `{}`",
-            path.display()
-        )
+        anyhow::anyhow!("cannot determine parent directory for `{}`", path.display())
     })?;
-    let mut tmp = tempfile::NamedTempFile::new_in(dir).with_context(|| {
-        format!(
-            "failed to create temporary file in `{}`",
-            dir.display()
-        )
-    })?;
-    tmp.write_all(content.as_bytes()).with_context(|| {
-        format!("failed to write review store file `{}`", path.display())
-    })?;
-    tmp.persist(path).with_context(|| {
-        format!("failed to persist review store file `{}`", path.display())
-    })?;
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)
+        .with_context(|| format!("failed to create temporary file in `{}`", dir.display()))?;
+    tmp.write_all(content.as_bytes())
+        .with_context(|| format!("failed to write review store file `{}`", path.display()))?;
+    tmp.persist(path)
+        .with_context(|| format!("failed to persist review store file `{}`", path.display()))?;
     Ok(())
 }
 
@@ -321,8 +309,7 @@ fn flock_exclusive(file: &File) -> Result<()> {
         use std::os::unix::io::AsRawFd;
         let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
         if ret != 0 {
-            return Err(std::io::Error::last_os_error())
-                .context("flock(LOCK_EX) failed");
+            return Err(std::io::Error::last_os_error()).context("flock(LOCK_EX) failed");
         }
         Ok(())
     }

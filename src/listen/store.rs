@@ -12,14 +12,17 @@ use serde_json::Value;
 use crate::config::resolve_data_root;
 use crate::fs::{PlanningPaths, canonicalize_existing_dir, ensure_dir};
 use crate::listen::compact_session_summary;
+use crate::session_runtime::{
+    ActiveSessionFile, WorkflowRootLayout, read_json, read_optional_json_lossy, write_json,
+};
 
 use super::state::{
-    AgentSession, COMPLETED_SESSION_TTL_SECONDS, ListenState, PullRequestStatus,
-    PullRequestSummary, SessionPhase, TokenUsage,
+    AgentSession, COMPLETED_SESSION_TTL_SECONDS, LatestResumeHandle, ListenState,
+    PullRequestStatus, PullRequestSummary, SessionPhase, TokenUsage,
 };
 
 const LISTEN_STORE_VERSION: u8 = 1;
-const LISTEN_SESSION_DETAIL_VERSION: u8 = 1;
+const LISTEN_SESSION_DETAIL_VERSION: u8 = 2;
 const LOG_EXCERPT_LIMIT: usize = 6;
 const LOG_EXCERPT_MAX_CHARS: usize = 120;
 
@@ -41,6 +44,7 @@ pub(super) struct ListenProjectIdentity {
 
 #[derive(Debug, Clone)]
 pub(super) struct ListenProjectPaths {
+    pub(super) layout: WorkflowRootLayout,
     pub(super) projects_root: PathBuf,
     pub(super) project_dir: PathBuf,
     pub(super) project_metadata_path: PathBuf,
@@ -138,6 +142,8 @@ pub(crate) struct ListenSessionDetail {
     #[serde(default)]
     pub pull_request: PullRequestSummary,
     #[serde(default)]
+    pub latest_resume_handle: Option<LatestResumeHandle>,
+    #[serde(default)]
     pub references: SessionDetailReferences,
     #[serde(default)]
     pub prompt_context: Vec<SessionContextReference>,
@@ -207,14 +213,17 @@ impl ListenProjectStore {
         let identity = resolve_project_identity(root, project_selector)?;
         let projects_root = data_root.join("listen").join("projects");
         let project_dir = projects_root.join(&identity.project_key);
+        let layout =
+            WorkflowRootLayout::install_scoped(project_dir.clone(), "active-listener.lock.json");
         let paths = ListenProjectPaths {
+            layout: layout.clone(),
             projects_root,
             project_dir: project_dir.clone(),
-            project_metadata_path: project_dir.join("project.json"),
-            state_path: project_dir.join("session.json"),
-            lock_path: project_dir.join("active-listener.lock.json"),
-            logs_dir: project_dir.join("logs"),
-            details_dir: project_dir.join("session-details"),
+            project_metadata_path: layout.path("project.json"),
+            state_path: layout.path("session.json"),
+            lock_path: layout.active_session_path().to_path_buf(),
+            logs_dir: layout.path("logs"),
+            details_dir: layout.path("session-details"),
         };
 
         Ok(Self { identity, paths })
@@ -243,14 +252,17 @@ impl ListenProjectStore {
             project_selector: metadata.project_selector.clone(),
             project_label: metadata.project_label.clone(),
         };
+        let layout =
+            WorkflowRootLayout::install_scoped(project_dir.clone(), "active-listener.lock.json");
         let paths = ListenProjectPaths {
+            layout: layout.clone(),
             projects_root: data_root.join("listen").join("projects"),
             project_dir: project_dir.clone(),
             project_metadata_path: metadata_path,
-            state_path: project_dir.join("session.json"),
-            lock_path: project_dir.join("active-listener.lock.json"),
-            logs_dir: project_dir.join("logs"),
-            details_dir: project_dir.join("session-details"),
+            state_path: layout.path("session.json"),
+            lock_path: layout.active_session_path().to_path_buf(),
+            logs_dir: layout.path("logs"),
+            details_dir: layout.path("session-details"),
         };
         Ok(Self { identity, paths })
     }
@@ -460,6 +472,7 @@ impl ListenProjectStore {
 
     pub(super) fn acquire_listener_lock(&self, pid: u32) -> Result<ListenerLockGuard> {
         self.ensure_layout()?;
+        let active_lock_file = self.active_lock_file();
 
         loop {
             if let Some(existing) = self.load_active_lock()? {
@@ -472,17 +485,8 @@ impl ListenProjectStore {
                     );
                 }
 
-                match fs::remove_file(&self.paths.lock_path) {
-                    Ok(()) => {}
-                    Err(error) if error.kind() == ErrorKind::NotFound => {}
-                    Err(error) => {
-                        return Err(error).with_context(|| {
-                            format!(
-                                "failed to remove stale `{}`",
-                                self.paths.lock_path.display()
-                            )
-                        });
-                    }
+                if active_lock_file.remove_if(|lock| lock.pid == existing.pid)? {
+                    continue;
                 }
                 continue;
             }
@@ -493,42 +497,20 @@ impl ListenProjectStore {
                 source_root: self.identity.source_root.display().to_string(),
                 metastack_root: self.identity.metastack_root.display().to_string(),
             };
-            let contents = serde_json::to_vec_pretty(&lock)
-                .context("failed to serialize the active listen lock")?;
-            match fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&self.paths.lock_path)
-            {
-                Ok(mut file) => {
-                    use std::io::Write;
-                    file.write_all(&contents).with_context(|| {
-                        format!("failed to write `{}`", self.paths.lock_path.display())
-                    })?;
+            match active_lock_file.try_create_new(&lock)? {
+                true => {
                     return Ok(ListenerLockGuard {
                         lock_path: self.paths.lock_path.clone(),
                         pid,
                     });
                 }
-                Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
-                Err(error) => {
-                    return Err(error).with_context(|| {
-                        format!("failed to create `{}`", self.paths.lock_path.display())
-                    });
-                }
+                false => continue,
             }
         }
     }
 
     pub(super) fn load_active_lock(&self) -> Result<Option<ActiveListenerLock>> {
-        match fs::read_to_string(&self.paths.lock_path) {
-            Ok(contents) => serde_json::from_str(&contents)
-                .map(Some)
-                .with_context(|| format!("failed to decode `{}`", self.paths.lock_path.display())),
-            Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error)
-                .with_context(|| format!("failed to read `{}`", self.paths.lock_path.display())),
-        }
+        self.active_lock_file().load_optional()
     }
 
     /// Removes the stored session entry, structured detail artifact, and per-ticket log file for
@@ -614,6 +596,10 @@ impl ListenProjectStore {
                     project_label: metadata.project_label.clone(),
                 },
                 paths: ListenProjectPaths {
+                    layout: WorkflowRootLayout::install_scoped(
+                        project_dir.clone(),
+                        "active-listener.lock.json",
+                    ),
                     projects_root: projects_root.clone(),
                     project_dir: project_dir.clone(),
                     project_metadata_path: metadata_path.clone(),
@@ -662,15 +648,10 @@ impl ListenProjectStore {
     }
 
     fn load_state_from_disk(&self) -> Result<(ListenState, bool)> {
-        match fs::read_to_string(&self.paths.state_path) {
-            Ok(contents) => serde_json::from_str(&contents)
-                .map(|state| (state, true))
-                .with_context(|| format!("failed to decode `{}`", self.paths.state_path.display())),
-            Err(error) if error.kind() == ErrorKind::NotFound => {
-                Ok((ListenState::default(), false))
-            }
-            Err(error) => Err(error)
-                .with_context(|| format!("failed to read `{}`", self.paths.state_path.display())),
+        match read_json(&self.paths.state_path) {
+            Ok(state) => Ok((state, true)),
+            Err(error) if is_not_found_error(&error) => Ok((ListenState::default(), false)),
+            Err(error) => Err(error),
         }
     }
 
@@ -689,6 +670,7 @@ impl ListenProjectStore {
                 turns: session.turns,
                 tokens: session.tokens.clone(),
                 pull_request: session.pull_request.clone(),
+                latest_resume_handle: session.latest_resume_handle.clone(),
                 references: SessionDetailReferences::default(),
                 prompt_context: Vec::new(),
                 milestones: Vec::new(),
@@ -705,6 +687,7 @@ impl ListenProjectStore {
         detail.turns = session.turns;
         detail.tokens = session.tokens.clone();
         detail.pull_request = session.pull_request.clone();
+        detail.latest_resume_handle = session.latest_resume_handle.clone();
         detail.references = SessionDetailReferences {
             workspace_path: session.workspace_path.clone(),
             backlog_path: session.backlog_path.clone(),
@@ -759,6 +742,10 @@ impl ListenProjectStore {
         }
 
         Ok(())
+    }
+
+    fn active_lock_file(&self) -> ActiveSessionFile<ActiveListenerLock> {
+        self.paths.layout.active_session_file()
     }
 }
 
@@ -870,51 +857,11 @@ fn git_stdout(root: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-fn write_json<T>(path: &Path, value: &T) -> Result<()>
-where
-    T: Serialize,
-{
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create `{}`", parent.display()))?;
-    }
-
-    let contents = serde_json::to_string_pretty(value)
-        .with_context(|| format!("failed to serialize `{}`", path.display()))?;
-    fs::write(path, contents).with_context(|| format!("failed to write `{}`", path.display()))
-}
-
-fn read_json<T>(path: &Path) -> Result<T>
-where
-    T: for<'de> Deserialize<'de>,
-{
-    let contents =
-        fs::read_to_string(path).with_context(|| format!("failed to read `{}`", path.display()))?;
-    serde_json::from_str(&contents)
-        .with_context(|| format!("failed to decode `{}`", path.display()))
-}
-
-fn read_optional_json<T>(path: &Path) -> Result<Option<T>>
-where
-    T: for<'de> Deserialize<'de>,
-{
-    match fs::read_to_string(path) {
-        Ok(contents) => serde_json::from_str(&contents)
-            .map(Some)
-            .with_context(|| format!("failed to decode `{}`", path.display())),
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error).with_context(|| format!("failed to read `{}`", path.display())),
-    }
-}
-
-fn read_optional_json_lossy<T>(path: &Path) -> Result<Option<T>>
-where
-    T: for<'de> Deserialize<'de>,
-{
-    match read_optional_json(path) {
-        Ok(value) => Ok(value),
-        Err(_error) => Ok(None),
-    }
+fn is_not_found_error(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<std::io::Error>())
+        .any(|io_error| io_error.kind() == ErrorKind::NotFound)
 }
 
 fn append_milestone(milestones: &mut Vec<SessionMilestone>, session: &AgentSession) {
@@ -1114,7 +1061,9 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::config::data_root_from_config_path;
-    use crate::listen::{ListenSessionDetail, PullRequestSummary, TokenUsage};
+    use crate::listen::{
+        LatestResumeHandle, ListenSessionDetail, PullRequestSummary, ResumeProvider, TokenUsage,
+    };
 
     use super::{
         ActiveListenerLock, AgentSession, COMPLETED_SESSION_TTL_SECONDS,
@@ -1467,6 +1416,7 @@ mod tests {
                 turns: Some(1),
                 tokens: TokenUsage::default(),
                 pull_request: PullRequestSummary::default(),
+                latest_resume_handle: None,
                 references: SessionDetailReferences::default(),
                 prompt_context: Vec::new(),
                 milestones: Vec::new(),
@@ -1506,6 +1456,10 @@ mod tests {
 
         let mut session = default_session(issue_identifier, SessionPhase::Running, 100);
         session.log_path = Some(store.log_path(issue_identifier).display().to_string());
+        session.latest_resume_handle = Some(LatestResumeHandle {
+            provider: ResumeProvider::Codex,
+            id: "thread-ENG-10163".to_string(),
+        });
         store.save_state(&ListenState::from_sessions(vec![session]))?;
 
         let detail = store
@@ -1513,6 +1467,14 @@ mod tests {
             .context("expected save_state to rewrite the invalid detail artifact")?;
         assert_eq!(detail.issue_identifier, issue_identifier);
         assert_eq!(detail.summary, format!("{issue_identifier} summary"));
+        assert_eq!(detail.version, LISTEN_SESSION_DETAIL_VERSION);
+        assert_eq!(
+            detail.latest_resume_handle,
+            Some(LatestResumeHandle {
+                provider: ResumeProvider::Codex,
+                id: "thread-ENG-10163".to_string(),
+            })
+        );
         Ok(())
     }
 
