@@ -17,12 +17,12 @@ use crate::session_runtime::{
 };
 
 use super::state::{
-    AgentSession, COMPLETED_SESSION_TTL_SECONDS, ListenState, PullRequestStatus,
-    PullRequestSummary, SessionPhase, TokenUsage,
+    AgentSession, COMPLETED_SESSION_TTL_SECONDS, LatestResumeHandle, ListenState,
+    PullRequestStatus, PullRequestSummary, SessionPhase, TokenUsage,
 };
 
 const LISTEN_STORE_VERSION: u8 = 1;
-const LISTEN_SESSION_DETAIL_VERSION: u8 = 1;
+const LISTEN_SESSION_DETAIL_VERSION: u8 = 2;
 const LOG_EXCERPT_LIMIT: usize = 6;
 const LOG_EXCERPT_MAX_CHARS: usize = 120;
 
@@ -141,6 +141,8 @@ pub(crate) struct ListenSessionDetail {
     pub tokens: TokenUsage,
     #[serde(default)]
     pub pull_request: PullRequestSummary,
+    #[serde(default)]
+    pub latest_resume_handle: Option<LatestResumeHandle>,
     #[serde(default)]
     pub references: SessionDetailReferences,
     #[serde(default)]
@@ -668,6 +670,7 @@ impl ListenProjectStore {
                 turns: session.turns,
                 tokens: session.tokens.clone(),
                 pull_request: session.pull_request.clone(),
+                latest_resume_handle: session.latest_resume_handle.clone(),
                 references: SessionDetailReferences::default(),
                 prompt_context: Vec::new(),
                 milestones: Vec::new(),
@@ -684,6 +687,7 @@ impl ListenProjectStore {
         detail.turns = session.turns;
         detail.tokens = session.tokens.clone();
         detail.pull_request = session.pull_request.clone();
+        detail.latest_resume_handle = session.latest_resume_handle.clone();
         detail.references = SessionDetailReferences {
             workspace_path: session.workspace_path.clone(),
             backlog_path: session.backlog_path.clone(),
@@ -1057,7 +1061,9 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::config::data_root_from_config_path;
-    use crate::listen::{ListenSessionDetail, PullRequestSummary, TokenUsage};
+    use crate::listen::{
+        LatestResumeHandle, ListenSessionDetail, PullRequestSummary, ResumeProvider, TokenUsage,
+    };
 
     use super::{
         ActiveListenerLock, AgentSession, COMPLETED_SESSION_TTL_SECONDS,
@@ -1410,6 +1416,7 @@ mod tests {
                 turns: Some(1),
                 tokens: TokenUsage::default(),
                 pull_request: PullRequestSummary::default(),
+                latest_resume_handle: None,
                 references: SessionDetailReferences::default(),
                 prompt_context: Vec::new(),
                 milestones: Vec::new(),
@@ -1449,6 +1456,10 @@ mod tests {
 
         let mut session = default_session(issue_identifier, SessionPhase::Running, 100);
         session.log_path = Some(store.log_path(issue_identifier).display().to_string());
+        session.latest_resume_handle = Some(LatestResumeHandle {
+            provider: ResumeProvider::Codex,
+            id: "thread-ENG-10163".to_string(),
+        });
         store.save_state(&ListenState::from_sessions(vec![session]))?;
 
         let detail = store
@@ -1456,6 +1467,14 @@ mod tests {
             .context("expected save_state to rewrite the invalid detail artifact")?;
         assert_eq!(detail.issue_identifier, issue_identifier);
         assert_eq!(detail.summary, format!("{issue_identifier} summary"));
+        assert_eq!(detail.version, LISTEN_SESSION_DETAIL_VERSION);
+        assert_eq!(
+            detail.latest_resume_handle,
+            Some(LatestResumeHandle {
+                provider: ResumeProvider::Codex,
+                id: "thread-ENG-10163".to_string(),
+            })
+        );
         Ok(())
     }
 

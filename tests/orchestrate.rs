@@ -34,7 +34,6 @@ fn init_test_repo() -> tempfile::TempDir {
         .status()
         .unwrap();
     assert!(commit_status.success());
-
     fs::create_dir_all(tmp.path().join(".metastack")).unwrap();
     tmp
 }
