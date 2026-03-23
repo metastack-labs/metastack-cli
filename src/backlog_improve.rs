@@ -47,6 +47,7 @@ use crate::progress::{LoadingPanelData, SPINNER_FRAMES, render_loading_panel};
 use crate::repo_target::RepoTarget;
 use crate::scaffold::ensure_planning_layout;
 use crate::tui::fields::InputFieldState;
+use crate::tui::markdown::render_markdown;
 use crate::tui::scroll::{ScrollState, plain_text, scrollable_content_paragraph, wrapped_rows};
 use crate::tui::spaced_list::spaced_list;
 use crate::tui::theme::{
@@ -1600,9 +1601,7 @@ fn render_review_comparison(app: &ImprovementReviewApp) -> Text<'static> {
         ]),
         Line::from(""),
     ];
-    for line in original_description.lines() {
-        lines.push(Line::from(Span::styled(line.to_string(), muted)));
-    }
+    lines.extend(render_markdown(&original_description, muted, &[]).lines);
     lines.push(Line::from(""));
     lines.push(Line::from(""));
 
@@ -1655,16 +1654,12 @@ fn render_review_comparison(app: &ImprovementReviewApp) -> Text<'static> {
     ]));
     lines.push(Line::from(""));
     let desc_changed = proposed_description != original_description;
-    for line in proposed_description.lines() {
-        lines.push(Line::from(Span::styled(
-            line.to_string(),
-            if desc_changed {
-                changed
-            } else {
-                Style::default()
-            },
-        )));
-    }
+    let desc_base_style = if desc_changed {
+        changed
+    } else {
+        Style::default()
+    };
+    lines.extend(render_markdown(&proposed_description, desc_base_style, &[]).lines);
 
     if !app.output.proposal.acceptance_criteria.is_empty() {
         lines.push(Line::from(""));

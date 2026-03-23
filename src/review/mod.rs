@@ -26,6 +26,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, ListItem, ListState, Padding, Wrap};
 
+use crate::tui::markdown::render_markdown;
 use crate::tui::spaced_list::{render_github_session_row, spaced_list, spaced_list_item};
 use serde::Serialize;
 
@@ -2498,7 +2499,7 @@ impl InteractiveReviewApp {
                 },
                 label_style(),
             )));
-            lines.extend(render_markdown_preview(output).lines);
+            lines.extend(render_markdown(output, muted_style(), &[]).lines);
         } else {
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled("Progress Notes", label_style())));
@@ -5201,65 +5202,6 @@ fn interactive_focus_label(focus: InteractiveReviewFocus) -> &'static str {
         InteractiveReviewFocus::SessionList => "session list",
         InteractiveReviewFocus::SessionPreview => "session detail",
     }
-}
-
-fn render_markdown_preview(markdown: &str) -> Text<'static> {
-    let mut lines = Vec::new();
-    let mut in_code_block = false;
-
-    for raw_line in markdown.lines() {
-        let trimmed = raw_line.trim_end();
-        if trimmed.starts_with("```") {
-            in_code_block = !in_code_block;
-            lines.push(Line::from(Span::styled(trimmed.to_string(), muted_style())));
-            continue;
-        }
-        if trimmed.is_empty() {
-            lines.push(Line::from(""));
-            continue;
-        }
-        if in_code_block {
-            lines.push(Line::from(Span::styled(trimmed.to_string(), muted_style())));
-            continue;
-        }
-        if let Some(heading) = trimmed.strip_prefix("### ") {
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                heading.to_string(),
-                emphasis_style(),
-            )));
-            continue;
-        }
-        if let Some(heading) = trimmed.strip_prefix("## ") {
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                heading.to_string(),
-                emphasis_style(),
-            )));
-            continue;
-        }
-        if let Some(heading) = trimmed.strip_prefix("# ") {
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                heading.to_string(),
-                emphasis_style(),
-            )));
-            continue;
-        }
-        if let Some(item) = trimmed
-            .strip_prefix("- ")
-            .or_else(|| trimmed.strip_prefix("* "))
-        {
-            lines.push(Line::from(vec![
-                Span::styled("• ", label_style()),
-                Span::raw(item.to_string()),
-            ]));
-            continue;
-        }
-        lines.push(Line::from(trimmed.to_string()));
-    }
-
-    Text::from(lines)
 }
 
 fn verify_gh_auth(root: &Path) -> Result<()> {

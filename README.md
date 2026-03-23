@@ -1041,7 +1041,7 @@ Notes:
 - `meta linear issues list` opens an interactive issue browser unless you pass `--json`
 - `meta linear issues list`, `meta dashboard linear`, and `meta dashboard team` share the same free-text search behavior when the issue list is focused: type to search by identifier, title, state, project, or description, with exact identifiers ranked ahead of broader matches
 - the shared Linear dashboards keep their existing filters, and the search query narrows the visible issue set after those filters are applied
-- Shared Linear issue previews now preserve markdown block structure for headings, bullet lists, blockquotes, fenced code blocks, and blank lines through one reusable renderer under `src/tui/`.
+- All TUI preview and detail panes that display markdown-authored content (Linear issue previews, PR bodies, review reports, planning ticket details, improvement comparisons, and listen session descriptions) render through the shared markdown renderer at `src/tui/markdown.rs`, preserving headings, bullet/ordered lists, blockquotes, fenced code blocks, inline bold/italic/code, tables, and blank lines.
 - `meta linear issues create` and `meta linear issues edit` open ratatui workflows when stdin/stdout are attached to a TTY
 - `meta linear issues create --no-interactive ...` and `meta linear issues edit --no-interactive ...` emit structured JSON instead of text
 - In the interactive create/edit forms, multiline descriptions advance on `Enter`, insert a newline on `Shift+Enter`, and support `Up`/`Down`, `PgUp`/`PgDn`, `Home`/`End`, plus mouse-wheel scrolling while the description pane is focused; the summary/review sidebar also scrolls with the mouse wheel when long descriptions overflow
