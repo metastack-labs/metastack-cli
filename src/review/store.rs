@@ -189,8 +189,9 @@ impl ReviewProjectStore {
             Err(_) => ReviewState::default(),
         };
         mutate(&mut state);
-        // Lock is released when `lock` is dropped.
-        write_json(&self.paths.state_path, &state)
+        let result = write_json(&self.paths.state_path, &state);
+        drop(lock); // Release the exclusive lock before returning.
+        result
     }
 
     fn load_state_from_disk(&self) -> Result<(ReviewState, bool)> {
