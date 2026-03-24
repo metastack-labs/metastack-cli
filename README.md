@@ -1203,7 +1203,7 @@ Legacy alias: `meta listen`
 
 The live terminal dashboard refreshes locally every second so session-state changes stay visible, while the configured listen poll interval continues to control how often Linear is queried. Steady-state listen runs stay entirely in the terminal TUI as an interactive session browser, `--render-once` emits a terminal snapshot, and `--once --json` emits one machine-readable poll-cycle payload without going through the ratatui snapshot path.
 
-When built-in `codex` or `claude` workers emit structured usage telemetry, `meta agents listen` accumulates session-level input and output tokens across repeated turns. Runtime summaries, detail panes, and textual inspection output render `in`, `out`, and `total`, while the session table keeps a compact total-only token column. The listener also persists canonical provider, model, reasoning, and token metadata into install-scoped session state plus mirrored detail artifacts so mixed-provider histories total correctly across Codex and Claude runs. On startup, the listener performs a best-effort historical repair pass from canonical detail data, legacy state, and worker logs; when exact counts still cannot be recovered, the dashboard and textual summaries continue to show `n/a`.
+When built-in `codex` or `claude` workers emit structured usage telemetry, `meta agents listen` accumulates session-level input and output tokens across repeated turns. Runtime summaries, detail panes, and default textual inspection output render session-level `in`, `out`, and `total`, while the session table keeps a compact total-only token column. The worker also appends one per-turn token summary line to the per-issue log and persists additive turn-history snapshots in the mirrored detail artifact so `meta listen sessions inspect --turns` can render the exact turn order, prompt mode (`full_prompt` or `continuation`), and per-turn token counts without reparsing raw provider JSON. The listener also persists canonical provider, model, reasoning, and token metadata into install-scoped session state plus mirrored detail artifacts so mixed-provider histories total correctly across Codex and Claude runs. On startup, the listener performs a best-effort historical repair pass from canonical detail data, legacy state, and worker logs; when exact counts still cannot be recovered, the dashboard and textual summaries continue to show `n/a`.
 The interactive dashboard has two primary panes: **Agent Sessions** (active and completed listener
 workers) and **In Progress Issues - All Users** (all Linear issues currently in `In Progress`). The In Progress Issues
 pane displays each issue's short title, assignee, and whether an open GitHub PR is attached.
@@ -1287,6 +1287,7 @@ Stored-session management commands:
 ```bash
 meta listen sessions list
 meta listen sessions inspect
+meta listen sessions inspect --turns
 meta listen sessions clear
 meta listen sessions resume --project-key <PROJECT_KEY> --once
 ```
@@ -1295,7 +1296,9 @@ meta listen sessions resume --project-key <PROJECT_KEY> --once
 `meta listen sessions inspect` now expands the latest stored session with structured detail-artifact
 fields when available, including PR URL/state, workspace/backlog/workpad references, recent
 milestones, prompt-context references, compact log excerpts, and a fallback `Detail PR Ref: #N`
-line when the detail artifact only carries a PR number.
+line when the detail artifact only carries a PR number. Pass `--turns` to append the persisted
+per-turn token breakdown (`turn N tokens: in ... | out ... | prompt_mode=...`) from the detail
+artifact; without that flag the inspect output stays compact.
 The interactive selected-session detail pane follows the same fallback contract and shows `PR Ref:
 #N` when the detail artifact has a PR number but no published PR URL yet.
 Within the live dashboard, `P` pauses the selected running worker, and `R` either resumes a paused

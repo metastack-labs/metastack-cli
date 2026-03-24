@@ -44,7 +44,7 @@ The initial implementation delivered in `MET-13` focuses on the smallest end-to-
 19. Completed sessions older than the default 24-hour TTL are pruned automatically during store
     loads and reconciliation, while blocked sessions are retained until explicit cleanup.
 20. Live mode keeps the ratatui dashboard open in the terminal and uses the same shared listen snapshot for deterministic `--render-once` output.
-21. Built-in `codex` and `claude` worker runs opportunistically capture structured input/output token usage when the provider surfaces it, accumulate those counts in the persisted session record across turns, and leave token fields blank instead of failing when providers omit exact usage data.
+21. Built-in `codex` and `claude` worker runs opportunistically capture structured input/output token usage when the provider surfaces it, accumulate those counts in the persisted session record across turns, append one explicit per-turn token summary line to the worker log after each completed turn, persist additive per-turn token history in `session-details/<TICKET>.json`, and leave token fields blank instead of failing when providers omit exact usage data.
 
 This mirrors the scheduler + status-surface split in Symphony while using one clear workspace
 contract: each claimed ticket gets its own standalone clone and ticket branch under the configured
@@ -86,6 +86,7 @@ meta listen sessions list
 meta agents listen --team MET --project "MetaStack CLI"
 meta agents listen --team MET --project "MetaStack API"
 meta listen sessions inspect --root . --project "MetaStack API"
+meta listen sessions inspect --root . --project "MetaStack API" --turns
 meta listen sessions clear --root . --project "MetaStack API"
 meta listen sessions resume --root . --project "MetaStack API" --once
 ```
@@ -113,7 +114,9 @@ resolved provider/model/reasoning, route key, and config sources through the com
 diagnostics and `METASTACK_AGENT_*` environment variables before the provider process starts.
 Structured built-in output is also parsed for token telemetry so persisted listen sessions and the
 dashboard can show cumulative `in`, `out`, and `total` counts when usage is available, while
-unsupported or missing counts still render as `n/a`.
+unsupported or missing counts still render as `n/a`. The same capture result now also produces a
+per-turn snapshot with `turn`, `prompt_mode`, and partial-or-complete token counts so the worker
+log and `meta listen sessions inspect --turns` share one source of truth for turn-by-turn usage.
 Listen-mode built-in launches also switch to machine-readable provider output so the worker can
 capture the latest provider-native resume target for the current turn. Codex uses
 `codex exec --json`, Claude uses `claude -p --verbose --output-format=stream-json`, and both
@@ -126,7 +129,8 @@ Structured session detail artifacts are best-effort companion state: malformed o
 `session-details/<TICKET>.json` files do not break the list view or reload path, and the next
 successful session refresh rewrites them. The detail artifact also stores the same
 provider-native resume record used in `session.json`, so dashboard detail and textual inspection
-render the same full manual resume target.
+render the same full manual resume target. The default inspect view stays compact; `--turns`
+opts into rendering the persisted turn-history breakdown.
 
 ## Runtime Modules
 

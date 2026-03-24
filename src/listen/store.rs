@@ -21,11 +21,11 @@ use crate::session_runtime::{
 use super::state::{
     AgentSession, COMPLETED_SESSION_TTL_SECONDS, CanonicalRepairRecord, CanonicalRepairStatus,
     CanonicalSessionData, LatestResumeHandle, ListenState, PullRequestStatus, PullRequestSummary,
-    SessionPhase, TokenUsage,
+    SessionPhase, TokenUsage, TurnTokenSnapshot,
 };
 
 const LISTEN_STORE_VERSION: u8 = 1;
-const LISTEN_SESSION_DETAIL_VERSION: u8 = 2;
+const LISTEN_SESSION_DETAIL_VERSION: u8 = 3;
 const LOG_EXCERPT_LIMIT: usize = 6;
 const LOG_EXCERPT_MAX_CHARS: usize = 120;
 
@@ -142,6 +142,8 @@ pub(crate) struct ListenSessionDetail {
     pub turns: Option<u32>,
     #[serde(default)]
     pub tokens: TokenUsage,
+    #[serde(default)]
+    pub turn_history: Vec<TurnTokenSnapshot>,
     #[serde(default)]
     pub canonical: CanonicalSessionData,
     #[serde(default)]
@@ -675,6 +677,7 @@ impl ListenProjectStore {
                 summary: session.summary.clone(),
                 turns: session.turns,
                 tokens: session.tokens.clone(),
+                turn_history: session.turn_history.clone(),
                 canonical: session.canonical.clone(),
                 pull_request: session.pull_request.clone(),
                 latest_resume_handle: session.latest_resume_handle.clone(),
@@ -693,6 +696,7 @@ impl ListenProjectStore {
         detail.summary = session.summary.clone();
         detail.turns = session.turns;
         detail.tokens = session.tokens.clone();
+        detail.turn_history = session.turn_history.clone();
         detail.canonical = session.canonical.clone();
         detail.pull_request = session.pull_request.clone();
         detail.latest_resume_handle = session.latest_resume_handle.clone();
@@ -949,6 +953,7 @@ fn repair_session(
     detail: Option<&ListenSessionDetail>,
 ) -> Result<bool> {
     let original_tokens = session.tokens.clone();
+    let original_turn_history = session.turn_history.clone();
     let original_canonical = session.canonical.clone();
     let log_path = resolve_store_path(
         store,
@@ -960,6 +965,14 @@ fn repair_session(
     let log_recovery = repair_from_worker_log(log_path.as_deref())?;
     let mut recovered_sources = Vec::new();
     let mut skip_notes = log_recovery.notes;
+
+    if session.turn_history.is_empty()
+        && let Some(turn_history) = detail
+            .map(|value| value.turn_history.clone())
+            .filter(|turn_history| !turn_history.is_empty())
+    {
+        session.turn_history = turn_history;
+    }
 
     if session.canonical.provider.is_none() {
         if let Some(provider) = detail.and_then(|value| value.canonical.provider.clone()) {
@@ -1050,7 +1063,9 @@ fn repair_session(
         });
     }
 
-    Ok(session.tokens != original_tokens || session.canonical != original_canonical)
+    Ok(session.tokens != original_tokens
+        || session.turn_history != original_turn_history
+        || session.canonical != original_canonical)
 }
 
 fn resolve_store_path(store: &ListenProjectStore, raw_path: Option<&str>) -> Option<PathBuf> {
@@ -1473,6 +1488,7 @@ mod tests {
             updated_at_epoch_seconds: updated_at,
             pid: None,
             session_id: Some(format!("session-{issue_identifier}")),
+            turn_history: Vec::new(),
             latest_resume_handle: None,
             turns: Some(1),
             tokens: TokenUsage::default(),
@@ -1695,6 +1711,7 @@ mod tests {
                 summary: "detail without state".to_string(),
                 turns: Some(1),
                 tokens: TokenUsage::default(),
+                turn_history: Vec::new(),
                 canonical: CanonicalSessionData::default(),
                 pull_request: PullRequestSummary::default(),
                 latest_resume_handle: None,

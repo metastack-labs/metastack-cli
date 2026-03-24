@@ -53,6 +53,7 @@ use crate::scaffold::ensure_planning_layout;
 pub use state::{
     ActiveIssue, AgentSession, CanonicalSessionData, LatestResumeHandle, PendingIssue,
     PullRequestStatus, PullRequestSummary, ResumeProvider, SessionOrigin, SessionPhase, TokenUsage,
+    TurnPromptMode, TurnTokenSnapshot,
 };
 use state::{COMPLETED_SESSION_TTL_SECONDS, ListenState, explicit_resume_id_label};
 use store::{
@@ -360,6 +361,7 @@ impl ListenCycleData {
                         input: Some(9_614_112),
                         output: Some(8_120),
                     },
+                    turn_history: Vec::new(),
                     canonical: CanonicalSessionData {
                         provider: Some("codex".to_string()),
                         model: Some("gpt-5.4".to_string()),
@@ -406,6 +408,7 @@ impl ListenCycleData {
                         input: Some(8_380_959),
                         output: Some(49_960),
                     },
+                    turn_history: Vec::new(),
                     canonical: CanonicalSessionData {
                         provider: Some("claude".to_string()),
                         model: Some("sonnet".to_string()),
@@ -460,6 +463,15 @@ fn demo_session_details(reference_now: u64) -> HashMap<String, ListenSessionDeta
                     input: Some(9_614_112),
                     output: Some(8_120),
                 },
+                turn_history: vec![TurnTokenSnapshot {
+                    turn: 1,
+                    prompt_mode: TurnPromptMode::FullPrompt,
+                    tokens: TokenUsage {
+                        input: Some(9_614_112),
+                        output: Some(8_120),
+                    },
+                    captured_at_epoch_seconds: reference_now - 1_180,
+                }],
                 canonical: CanonicalSessionData {
                     provider: Some("codex".to_string()),
                     model: Some("gpt-5.4".to_string()),
@@ -551,6 +563,15 @@ fn demo_session_details(reference_now: u64) -> HashMap<String, ListenSessionDeta
                     input: Some(8_380_959),
                     output: Some(49_960),
                 },
+                turn_history: vec![TurnTokenSnapshot {
+                    turn: 1,
+                    prompt_mode: TurnPromptMode::FullPrompt,
+                    tokens: TokenUsage {
+                        input: Some(8_380_959),
+                        output: Some(49_960),
+                    },
+                    captured_at_epoch_seconds: reference_now - 2_940,
+                }],
                 canonical: CanonicalSessionData {
                     provider: Some("claude".to_string()),
                     model: Some("sonnet".to_string()),
@@ -1863,6 +1884,7 @@ where
             latest_resume_handle: None,
             turns: artifacts.turns.or(Some(0)),
             tokens: TokenUsage::default(),
+            turn_history: Vec::new(),
             canonical: CanonicalSessionData::default(),
             log_path: artifacts.log_path,
             origin: SessionOrigin::Listen,
@@ -2411,7 +2433,7 @@ pub fn run_listen_session_inspect(args: &ListenSessionInspectArgs) -> Result<Str
         }
         lines.push(format!("  - Detail file: {}", detail_path.display()));
         if let Some(detail) = detail {
-            append_session_inspect_detail_lines(&mut lines, &detail);
+            append_session_inspect_detail_lines(&mut lines, &detail, args.turns);
         } else {
             lines.push("  - Detail status: unavailable".to_string());
         }
@@ -2435,7 +2457,11 @@ pub fn run_listen_session_inspect(args: &ListenSessionInspectArgs) -> Result<Str
     Ok(lines.join("\n"))
 }
 
-fn append_session_inspect_detail_lines(lines: &mut Vec<String>, detail: &ListenSessionDetail) {
+fn append_session_inspect_detail_lines(
+    lines: &mut Vec<String>,
+    detail: &ListenSessionDetail,
+    show_turns: bool,
+) {
     lines.push("  - Detail status: available".to_string());
     lines.push(format!(
         "  - Detail milestones: {}",
@@ -2520,6 +2546,17 @@ fn append_session_inspect_detail_lines(lines: &mut Vec<String>, detail: &ListenS
                 turns,
                 pull_request
             ));
+        }
+    }
+
+    if show_turns {
+        if detail.turn_history.is_empty() {
+            lines.push("  - Turn history: unavailable".to_string());
+        } else {
+            lines.push("  - Turn history:".to_string());
+            for snapshot in &detail.turn_history {
+                lines.push(format!("    - {}", snapshot.display_compact()));
+            }
         }
     }
 
@@ -2801,6 +2838,7 @@ pub async fn run_execute(args: &crate::cli::ExecuteArgs) -> Result<()> {
         latest_resume_handle: None,
         turns: Some(0),
         tokens: TokenUsage::default(),
+        turn_history: Vec::new(),
         canonical: CanonicalSessionData::default(),
         log_path: Some(log_path.display().to_string()),
         origin: state::SessionOrigin::Execute,
@@ -4061,6 +4099,7 @@ mod tests {
                     input: Some(100),
                     output: None,
                 },
+                turn_history: Vec::new(),
                 canonical: CanonicalSessionData::default(),
                 log_path: None,
                 origin: SessionOrigin::Listen,
@@ -4091,6 +4130,7 @@ mod tests {
                     input: None,
                     output: Some(25),
                 },
+                turn_history: Vec::new(),
                 canonical: CanonicalSessionData::default(),
                 log_path: None,
                 origin: SessionOrigin::Listen,
@@ -4131,6 +4171,7 @@ mod tests {
                 input: Some(100),
                 output: None,
             },
+            turn_history: Vec::new(),
             canonical: CanonicalSessionData::default(),
             log_path: None,
             origin: SessionOrigin::Listen,
@@ -4174,6 +4215,7 @@ mod tests {
                     latest_resume_handle: None,
                     turns: None,
                     tokens: TokenUsage::default(),
+                    turn_history: Vec::new(),
                     canonical: CanonicalSessionData {
                         provider: Some("codex".to_string()),
                         model: Some("gpt-5.4".to_string()),
@@ -4210,6 +4252,7 @@ mod tests {
                     latest_resume_handle: None,
                     turns: None,
                     tokens: TokenUsage::default(),
+                    turn_history: Vec::new(),
                     canonical: CanonicalSessionData {
                         provider: Some("claude".to_string()),
                         model: Some("sonnet".to_string()),
@@ -4246,6 +4289,7 @@ mod tests {
                     latest_resume_handle: None,
                     turns: None,
                     tokens: TokenUsage::default(),
+                    turn_history: Vec::new(),
                     canonical: CanonicalSessionData::default(),
                     log_path: None,
                     origin: SessionOrigin::Listen,
@@ -4307,6 +4351,7 @@ mod tests {
                     input: Some(100),
                     output: None,
                 },
+                turn_history: Vec::new(),
                 canonical: CanonicalSessionData::default(),
                 log_path: None,
                 origin: SessionOrigin::Listen,
@@ -4414,6 +4459,7 @@ mod tests {
             latest_resume_handle: None,
             turns: None,
             tokens: TokenUsage::default(),
+            turn_history: Vec::new(),
             canonical: CanonicalSessionData::default(),
             log_path: None,
             origin: SessionOrigin::default(),
@@ -4465,6 +4511,7 @@ mod tests {
             latest_resume_handle: None,
             turns: None,
             tokens: TokenUsage::default(),
+            turn_history: Vec::new(),
             canonical: CanonicalSessionData::default(),
             log_path: Some(log_path.display().to_string()),
             origin: SessionOrigin::default(),
@@ -4625,6 +4672,7 @@ mod tests {
             latest_resume_handle: None,
             turns: Some(2),
             tokens: TokenUsage::default(),
+            turn_history: Vec::new(),
             canonical: CanonicalSessionData::default(),
             log_path: Some("logs/ENG-10163.log".to_string()),
             origin: SessionOrigin::Listen,
@@ -5097,6 +5145,7 @@ mod tests {
             session_id: Some(issue.id.clone()),
             turns: Some(1),
             tokens: TokenUsage::default(),
+            turn_history: Vec::new(),
             canonical: CanonicalSessionData::default(),
             log_path: None,
             latest_resume_handle: None,

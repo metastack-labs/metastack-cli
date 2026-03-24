@@ -884,7 +884,7 @@ fn listen_sessions_inspect_surfaces_structured_detail_fields() -> Result<(), Box
     fs::write(
         &detail_path,
         serde_json::to_vec_pretty(&json!({
-            "version": 1,
+            "version": 3,
             "issue_identifier": "ENG-10181",
             "issue_title": "ENG-10181 title",
             "updated_at_epoch_seconds": 1_773_575_120u64,
@@ -896,6 +896,26 @@ fn listen_sessions_inspect_surfaces_structured_detail_fields() -> Result<(), Box
                 "input": 210,
                 "output": 34
             },
+            "turn_history": [
+                {
+                    "turn": 1,
+                    "prompt_mode": "full_prompt",
+                    "tokens": {
+                        "input": 210,
+                        "output": 34
+                    },
+                    "captured_at_epoch_seconds": 1_773_575_010u64
+                },
+                {
+                    "turn": 2,
+                    "prompt_mode": "continuation",
+                    "tokens": {
+                        "input": 80,
+                        "output": 13
+                    },
+                    "captured_at_epoch_seconds": 1_773_575_050u64
+                }
+            ],
             "pull_request": {
                 "number": 321,
                 "url": "https://github.com/metastack-labs/metastack-cli/pull/321",
@@ -980,6 +1000,28 @@ fn listen_sessions_inspect_surfaces_structured_detail_fields() -> Result<(), Box
         .stdout(predicate::str::contains("Recent milestones:"))
         .stdout(predicate::str::contains(
             "Running: Opened draft PR | turns 3 | draft #321",
+        ))
+        .stdout(predicate::str::contains("Turn history:").not());
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "inspect",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+            "--turns",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Turn history:"))
+        .stdout(predicate::str::contains(
+            "turn 1 tokens: in 210 | out 34 | prompt_mode=full_prompt",
+        ))
+        .stdout(predicate::str::contains(
+            "turn 2 tokens: in 80 | out 13 | prompt_mode=continuation",
         ));
 
     Ok(())
@@ -5649,6 +5691,177 @@ printf '// turn %s\n' "$count" > "src/turn-$count.rs"
     }
 
     unreachable!("retry loop should return or surface the last failure")
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_worker_writes_turn_token_summaries_and_persists_turn_history()
+-> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let stub_dir = temp.path().join("stub-output");
+    let server = DynamicLinearServer::start_with_completion_after_refreshes(4)?;
+    let api_url = server.url.clone();
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&stub_dir)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  },
+  "listen": {
+    "required_label": "agent",
+    "assignment_scope": "viewer"
+  }
+}
+"#,
+    )?;
+    write_onboarded_config(
+        &config_path,
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+
+[agents]
+default_agent = "claude"
+"#,
+        ),
+    )?;
+
+    let claude_path = bin_dir.join("claude");
+    fs::write(
+        &claude_path,
+        r#"#!/bin/sh
+set -eu
+if [ "$1" = "-p" ] && [ "$2" = "--help" ]; then
+  cat <<'EOF'
+-p, --print
+--model <model>
+--effort <level>
+--verbose
+--output-format <format>
+--permission-mode <mode>
+EOF
+  exit 0
+fi
+count_file="$TEST_OUTPUT_DIR/count.txt"
+count=0
+if [ -f "$count_file" ]; then
+  count=$(cat "$count_file")
+fi
+count=$((count + 1))
+printf '%s' "$count" > "$count_file"
+printf '%s' "$count" > "$TEST_OUTPUT_DIR/turn-$count.txt"
+mkdir -p src
+printf '// turn %s\n' "$count" > "src/turn-$count.rs"
+if [ "$count" -eq 1 ]; then
+  input=210
+  output=34
+else
+  input=80
+  output=13
+fi
+printf '{"type":"message_start","message":{"usage":{"input_tokens":%s}}}\n' "$input"
+printf '{"type":"message_delta","usage":{"output_tokens":%s}}\n' "$output"
+printf '{"type":"result","subtype":"success","result":"claude listen ok","session_id":"listen-session-%s"}' "$count"
+"#,
+    )?;
+    let mut permissions = fs::metadata(&claude_path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&claude_path, permissions)?;
+
+    init_repo_with_origin(&repo_root)?;
+
+    let current_path = std::env::var("PATH")?;
+    meta()
+        .current_dir(&repo_root)
+        .env_remove("ANTHROPIC_API_KEY")
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &stub_dir)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "listen",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+            "--once",
+        ])
+        .assert()
+        .success();
+
+    wait_for_path_with_timeout(&stub_dir.join("turn-2.txt"), Duration::from_secs(180))?;
+    let turn_count = fs::read_to_string(stub_dir.join("count.txt"))?
+        .trim()
+        .parse::<u32>()?;
+    assert!(
+        turn_count >= 2,
+        "expected at least two turns, observed {turn_count}"
+    );
+
+    let state_path = listen_state_path(&config_path, &repo_root)?;
+    wait_for_file_substring_with_timeout(
+        &state_path,
+        "\"phase\": \"completed\"",
+        Duration::from_secs(180),
+    )?;
+
+    let log_path = listen_log_path(&config_path, &repo_root, "MET-32")?;
+    let log = fs::read_to_string(&log_path)?;
+    assert!(log.contains("turn 1 tokens: in 210 | out 34 | prompt_mode=full_prompt"));
+    assert!(log.contains("turn 2 tokens: in 80 | out 13 | prompt_mode=continuation"));
+
+    let detail_path = listen_detail_path(&config_path, &repo_root, "MET-32")?;
+    let detail: serde_json::Value = serde_json::from_slice(&fs::read(&detail_path)?)?;
+    let turn_history = detail["turn_history"]
+        .as_array()
+        .expect("turn_history should be an array");
+    assert_eq!(turn_history.len(), 2);
+    assert_eq!(turn_history[0]["turn"], 1);
+    assert_eq!(turn_history[0]["prompt_mode"], "full_prompt");
+    assert_eq!(turn_history[0]["tokens"]["input"], 210);
+    assert_eq!(turn_history[0]["tokens"]["output"], 34);
+    assert_eq!(turn_history[1]["turn"], 2);
+    assert_eq!(turn_history[1]["prompt_mode"], "continuation");
+    assert_eq!(turn_history[1]["tokens"]["input"], 80);
+    assert_eq!(turn_history[1]["tokens"]["output"], 13);
+    assert!(
+        turn_history[0]["tokens"]["input"]
+            .as_u64()
+            .expect("turn 1 input tokens should be present")
+            > turn_history[1]["tokens"]["input"]
+                .as_u64()
+                .expect("turn 2 input tokens should be present")
+    );
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "inspect",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+            "--turns",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Turn history:"))
+        .stdout(predicate::str::contains(
+            "turn 1 tokens: in 210 | out 34 | prompt_mode=full_prompt",
+        ))
+        .stdout(predicate::str::contains(
+            "turn 2 tokens: in 80 | out 13 | prompt_mode=continuation",
+        ));
+
+    Ok(())
 }
 
 #[cfg(unix)]

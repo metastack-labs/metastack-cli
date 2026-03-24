@@ -1288,6 +1288,9 @@ pub struct ListenSessionListArgs {}
 pub struct ListenSessionInspectArgs {
     #[command(flatten)]
     pub target: ListenSessionTargetArgs,
+    /// Show persisted per-turn token history when detail artifacts include it.
+    #[arg(long)]
+    pub turns: bool,
 }
 
 #[derive(Debug, Clone, Args)]

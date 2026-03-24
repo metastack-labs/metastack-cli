@@ -221,6 +221,58 @@ impl TokenUsage {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnPromptMode {
+    #[default]
+    FullPrompt,
+    Continuation,
+}
+
+impl TurnPromptMode {
+    pub(super) fn for_turn(turn: u32) -> Self {
+        if turn > 1 {
+            Self::Continuation
+        } else {
+            Self::FullPrompt
+        }
+    }
+
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::FullPrompt => "full_prompt",
+            Self::Continuation => "continuation",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnTokenSnapshot {
+    pub turn: u32,
+    pub prompt_mode: TurnPromptMode,
+    #[serde(default)]
+    pub tokens: TokenUsage,
+    pub captured_at_epoch_seconds: u64,
+}
+
+impl TurnTokenSnapshot {
+    pub(super) fn display_compact(&self) -> String {
+        format!(
+            "turn {} tokens: in {} | out {} | prompt_mode={}",
+            self.turn,
+            self.tokens
+                .input
+                .map(format_number)
+                .unwrap_or_else(|| "n/a".to_string()),
+            self.tokens
+                .output
+                .map(format_number)
+                .unwrap_or_else(|| "n/a".to_string()),
+            self.prompt_mode.label()
+        )
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CanonicalSessionData {
     #[serde(default)]
@@ -360,6 +412,8 @@ pub struct AgentSession {
     pub turns: Option<u32>,
     #[serde(default)]
     pub tokens: TokenUsage,
+    #[serde(default)]
+    pub turn_history: Vec<TurnTokenSnapshot>,
     #[serde(default)]
     pub canonical: CanonicalSessionData,
     #[serde(default)]
@@ -616,6 +670,7 @@ mod tests {
             latest_resume_handle: None,
             turns: Some(1),
             tokens: TokenUsage::default(),
+            turn_history: Vec::new(),
             canonical: CanonicalSessionData::default(),
             log_path: None,
             origin: SessionOrigin::Listen,

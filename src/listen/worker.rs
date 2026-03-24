@@ -39,11 +39,11 @@ use crate::workflow_contract::render_workflow_contract;
 
 use super::{
     BACKLOG_STATE, CanonicalSessionData, LatestResumeHandle, MAX_STALLED_TURNS, PullRequestStatus,
-    PullRequestSummary, ResumeProvider, SessionPhase, TokenUsage, agent_log_path,
-    backlog_progress_for_issue_dir, capture_workspace_snapshot, compact_blocked_summary,
-    compact_completed_summary, compact_running_summary, compare_workspace_snapshots,
-    current_workspace_branch, issue_state_label, issue_team_key, listen_issue_is_active,
-    now_epoch_seconds, now_timestamp, preflight, render_agent_prompt,
+    PullRequestSummary, ResumeProvider, SessionPhase, TokenUsage, TurnPromptMode,
+    TurnTokenSnapshot, agent_log_path, backlog_progress_for_issue_dir, capture_workspace_snapshot,
+    compact_blocked_summary, compact_completed_summary, compact_running_summary,
+    compare_workspace_snapshots, current_workspace_branch, issue_state_label, issue_team_key,
+    listen_issue_is_active, now_epoch_seconds, now_timestamp, preflight, render_agent_prompt,
     try_transition_issue_to_review_state, workspace_has_meaningful_progress, write_listen_session,
 };
 
@@ -76,6 +76,16 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
         ReqwestLinearClient::new(linear_config.clone())?,
         linear_config.default_team.clone(),
     );
+    let log_path = agent_log_path(&source_root, args.project.as_deref(), &args.issue);
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create `{}`", parent.display()))?;
+    }
+    fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .with_context(|| format!("failed to open `{}`", log_path.display()))?;
     let branch = current_workspace_branch(&workspace_path).ok();
     let worker_pid = std::process::id();
     let mut turns_completed = 0u32;
@@ -113,6 +123,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
             project_selector,
             &args.issue,
         )?,
+        turn_history: load_existing_turn_history(&source_root, project_selector, &args.issue)?,
         canonical: load_existing_session_canonical(&source_root, project_selector, &args.issue)?,
         pull_request: load_existing_pull_request(&source_root, project_selector, &args.issue)?,
         origin: session_origin,
@@ -123,7 +134,6 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
         load_existing_provider_session_id(&source_root, project_selector, &args.issue)?;
     let mut saw_implementation_progress = workspace_has_meaningful_progress(&workspace_path)?;
     let mut stalled_turns = 0u32;
-    let log_path = agent_log_path(&source_root, args.project.as_deref(), &args.issue);
     if let Err(error) = preflight::run_listen_preflight(
         &service,
         &linear_config,
@@ -328,6 +338,29 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
             session_context.canonical.provider = Some(provider);
             session_context.canonical.model = turn_result.model;
             session_context.canonical.reasoning = turn_result.reasoning;
+        }
+        let turn_snapshot = TurnTokenSnapshot {
+            turn: turn_number,
+            prompt_mode: turn_result.prompt_mode,
+            tokens: turn_result
+                .usage
+                .as_ref()
+                .map(|usage| TokenUsage {
+                    input: usage.input,
+                    output: usage.output,
+                })
+                .unwrap_or_default(),
+            captured_at_epoch_seconds: now_epoch_seconds(),
+        };
+        append_turn_token_summary(&log_path, &turn_snapshot)?;
+        if let Some(existing) = session_context
+            .turn_history
+            .iter_mut()
+            .find(|snapshot| snapshot.turn == turn_snapshot.turn)
+        {
+            *existing = turn_snapshot.clone();
+        } else {
+            session_context.turn_history.push(turn_snapshot);
         }
         if let Some(usage) = turn_result.usage {
             session_tokens.accumulate(&TokenUsage {
@@ -552,6 +585,7 @@ struct WorkerSessionContext<'a> {
     backlog_issue: Option<&'a IssueSummary>,
     pid: Option<u32>,
     latest_resume_handle: Option<LatestResumeHandle>,
+    turn_history: Vec<TurnTokenSnapshot>,
     canonical: CanonicalSessionData,
     pull_request: PullRequestSummary,
     origin: super::state::SessionOrigin,
@@ -562,6 +596,7 @@ struct TurnExecutionResult {
     session_id: Option<String>,
     usage: Option<AgentTokenUsage>,
     latest_resume_handle: Option<LatestResumeHandle>,
+    prompt_mode: TurnPromptMode,
     provider: Option<String>,
     model: Option<String>,
     reasoning: Option<String>,
@@ -923,6 +958,7 @@ fn execute_agent_turn(
     mut on_session_started: impl FnMut(&str) -> Result<()>,
     mut on_usage: impl FnMut(&AgentTokenUsage) -> Result<()>,
 ) -> Result<TurnExecutionResult> {
+    let prompt_mode = TurnPromptMode::for_turn(turn_number);
     let run_args = build_listen_run_args(issue, turn_number, context)?;
     let invocation = resolve_agent_invocation_for_planning(
         context.app_config,
@@ -1172,6 +1208,7 @@ fn execute_agent_turn(
                     None
                 }
             }),
+            prompt_mode,
             provider: Some(invocation.agent.clone()),
             model: invocation.model.clone(),
             reasoning: invocation.reasoning.clone(),
@@ -1192,7 +1229,20 @@ fn execute_agent_turn(
         );
     }
 
-    Ok(TurnExecutionResult::default())
+    Ok(TurnExecutionResult {
+        prompt_mode,
+        ..TurnExecutionResult::default()
+    })
+}
+
+fn append_turn_token_summary(log_path: &Path, snapshot: &TurnTokenSnapshot) -> Result<()> {
+    let mut log = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .with_context(|| format!("failed to open `{}`", log_path.display()))?;
+    writeln!(log, "{}", snapshot.display_compact())
+        .with_context(|| format!("failed to write `{}`", log_path.display()))
 }
 
 fn continuation_id_for_invocation(
@@ -1511,6 +1561,7 @@ fn build_worker_session(
         latest_resume_handle: context.latest_resume_handle.clone(),
         turns: Some(turns),
         tokens: canonical.tokens.clone(),
+        turn_history: context.turn_history.clone(),
         canonical: canonical.clone(),
         log_path: Some(
             agent_log_path(
@@ -1537,6 +1588,21 @@ fn load_existing_session_tokens(
         .into_iter()
         .find(|session| session.issue_matches(issue_identifier))
         .map(|session| session.tokens)
+        .unwrap_or_default())
+}
+
+fn load_existing_turn_history(
+    root: &Path,
+    project_selector: Option<&str>,
+    issue_identifier: &str,
+) -> Result<Vec<TurnTokenSnapshot>> {
+    let store = super::store::ListenProjectStore::resolve(root, project_selector)?;
+    let state = store.load_state()?;
+    Ok(state
+        .sessions
+        .into_iter()
+        .find(|session| session.issue_matches(issue_identifier))
+        .map(|session| session.turn_history)
         .unwrap_or_default())
 }
 
@@ -1712,6 +1778,7 @@ mod tests {
             backlog_issue: None,
             pid: Some(1234),
             latest_resume_handle: None,
+            turn_history: Vec::new(),
             canonical: CanonicalSessionData::default(),
             pull_request: PullRequestSummary::default(),
             origin: SessionOrigin::Listen,
