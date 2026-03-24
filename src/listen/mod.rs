@@ -51,13 +51,10 @@ use crate::listen::workspace::{TicketWorkspace, ensure_ticket_workspace};
 use crate::output::render_json_success;
 use crate::scaffold::ensure_planning_layout;
 pub use state::{
-    ActiveIssue, AgentSession, LatestResumeHandle, PendingIssue, PullRequestStatus,
-    PullRequestSummary, ResumeProvider, SessionOrigin, SessionPhase, TokenUsage,
+    ActiveIssue, AgentSession, CanonicalSessionData, LatestResumeHandle, PendingIssue,
+    PullRequestStatus, PullRequestSummary, ResumeProvider, SessionOrigin, SessionPhase, TokenUsage,
 };
-use state::{
-    COMPLETED_SESSION_TTL_SECONDS, ListenState, explicit_resume_id_label,
-    explicit_resume_provider_label,
-};
+use state::{COMPLETED_SESSION_TTL_SECONDS, ListenState, explicit_resume_id_label};
 use store::{
     ListenProjectStore, ListenSessionDetail, SessionSelector, StoredListenProjectSummary,
     pid_is_running, resolve_source_project_root,
@@ -363,6 +360,16 @@ impl ListenCycleData {
                         input: Some(9_614_112),
                         output: Some(8_120),
                     },
+                    canonical: CanonicalSessionData {
+                        provider: Some("codex".to_string()),
+                        model: Some("gpt-5.4".to_string()),
+                        reasoning: Some("high".to_string()),
+                        tokens: TokenUsage {
+                            input: Some(9_614_112),
+                            output: Some(8_120),
+                        },
+                        repair: None,
+                    },
                     log_path: Some(".metastack/agents/sessions/MET-13.log".to_string()),
                     origin: SessionOrigin::Listen,
                 },
@@ -398,6 +405,16 @@ impl ListenCycleData {
                     tokens: TokenUsage {
                         input: Some(8_380_959),
                         output: Some(49_960),
+                    },
+                    canonical: CanonicalSessionData {
+                        provider: Some("claude".to_string()),
+                        model: Some("sonnet".to_string()),
+                        reasoning: Some("high".to_string()),
+                        tokens: TokenUsage {
+                            input: Some(8_380_959),
+                            output: Some(49_960),
+                        },
+                        repair: None,
                     },
                     log_path: Some(".metastack/agents/sessions/MET-17.log".to_string()),
                     origin: state::SessionOrigin::Execute,
@@ -442,6 +459,16 @@ fn demo_session_details(reference_now: u64) -> HashMap<String, ListenSessionDeta
                 tokens: TokenUsage {
                     input: Some(9_614_112),
                     output: Some(8_120),
+                },
+                canonical: CanonicalSessionData {
+                    provider: Some("codex".to_string()),
+                    model: Some("gpt-5.4".to_string()),
+                    reasoning: Some("high".to_string()),
+                    tokens: TokenUsage {
+                        input: Some(9_614_112),
+                        output: Some(8_120),
+                    },
+                    repair: None,
                 },
                 pull_request: PullRequestSummary {
                     number: Some(321),
@@ -523,6 +550,16 @@ fn demo_session_details(reference_now: u64) -> HashMap<String, ListenSessionDeta
                 tokens: TokenUsage {
                     input: Some(8_380_959),
                     output: Some(49_960),
+                },
+                canonical: CanonicalSessionData {
+                    provider: Some("claude".to_string()),
+                    model: Some("sonnet".to_string()),
+                    reasoning: Some("high".to_string()),
+                    tokens: TokenUsage {
+                        input: Some(8_380_959),
+                        output: Some(49_960),
+                    },
+                    repair: None,
                 },
                 pull_request: PullRequestSummary::default(),
                 latest_resume_handle: Some(LatestResumeHandle {
@@ -1826,6 +1863,7 @@ where
             latest_resume_handle: None,
             turns: artifacts.turns.or(Some(0)),
             tokens: TokenUsage::default(),
+            canonical: CanonicalSessionData::default(),
             log_path: artifacts.log_path,
             origin: SessionOrigin::Listen,
         }
@@ -2286,7 +2324,7 @@ pub fn run_listen_session_list(_: &ListenSessionListArgs) -> Result<String> {
             .map(|session| session.issue_identifier.clone())
             .unwrap_or_else(|| "-".to_string());
         let provider = latest
-            .map(|session| explicit_resume_provider_label(session.latest_resume_handle.as_ref()))
+            .map(|session| session.provider_label())
             .unwrap_or_else(|| "-".to_string());
         let resume_id = latest
             .map(|session| explicit_resume_id_label(session.latest_resume_handle.as_ref()))
@@ -2345,15 +2383,22 @@ pub fn run_listen_session_inspect(args: &ListenSessionInspectArgs) -> Result<Str
         lines.push(format!("  - Origin: {}", session.origin_label()));
         lines.push(format!("  - Summary: {}", session.summary));
         lines.push(format!("  - PR: {}", session.pull_request_label()));
-        lines.push(format!("  - Tokens: {}", session.tokens.display_compact()));
+        lines.push(format!(
+            "  - Tokens: {}",
+            session.canonical_tokens().display_compact()
+        ));
         lines.push(format!(
             "  - Updated: {}",
             now_timestamp_for_epoch(session.updated_at_epoch_seconds)
         ));
-        lines.push(format!(
-            "  - Resume provider: {}",
-            explicit_resume_provider_label(session.latest_resume_handle.as_ref())
-        ));
+        lines.push(format!("  - Provider: {}", session.provider_label()));
+        if let Some(model) = session.canonical.model.as_deref() {
+            lines.push(format!("  - Model: {model}"));
+        }
+        if let Some(reasoning) = session.canonical.reasoning.as_deref() {
+            lines.push(format!("  - Reasoning: {reasoning}"));
+        }
+        lines.push(format!("  - Resume provider: {}", session.provider_label()));
         lines.push(format!(
             "  - Resume ID: {}",
             explicit_resume_id_label(session.latest_resume_handle.as_ref())
@@ -2382,7 +2427,7 @@ pub fn run_listen_session_inspect(args: &ListenSessionInspectArgs) -> Result<Str
                 session.issue_identifier,
                 session.phase.display_label(),
                 session.summary,
-                session.tokens.display_compact()
+                session.canonical_tokens().display_compact()
             ));
         }
     }
@@ -2405,8 +2450,18 @@ fn append_session_inspect_detail_lines(lines: &mut Vec<String>, detail: &ListenS
         detail.pull_request.compact_label()
     ));
     lines.push(format!(
-        "  - Detail resume provider: {}",
-        explicit_resume_provider_label(detail.latest_resume_handle.as_ref())
+        "  - Detail provider: {}",
+        detail_provider_label(detail)
+    ));
+    if let Some(model) = detail.canonical.model.as_deref() {
+        lines.push(format!("  - Detail model: {model}"));
+    }
+    if let Some(reasoning) = detail.canonical.reasoning.as_deref() {
+        lines.push(format!("  - Detail reasoning: {reasoning}"));
+    }
+    lines.push(format!(
+        "  - Detail tokens: {}",
+        detail_tokens(detail).display_compact()
     ));
     lines.push(format!(
         "  - Detail resume ID: {}",
@@ -2477,6 +2532,28 @@ fn append_session_inspect_detail_lines(lines: &mut Vec<String>, detail: &ListenS
                 truncate_summary(&excerpt.text, 120)
             ));
         }
+    }
+}
+
+fn detail_provider_label(detail: &ListenSessionDetail) -> String {
+    detail
+        .canonical
+        .provider
+        .clone()
+        .or_else(|| {
+            detail
+                .latest_resume_handle
+                .as_ref()
+                .map(|resume| resume.provider.label().to_string())
+        })
+        .unwrap_or_else(|| "unavailable".to_string())
+}
+
+fn detail_tokens(detail: &ListenSessionDetail) -> &TokenUsage {
+    if detail.canonical.tokens.is_known() {
+        &detail.canonical.tokens
+    } else {
+        &detail.tokens
     }
 }
 
@@ -2724,6 +2801,7 @@ pub async fn run_execute(args: &crate::cli::ExecuteArgs) -> Result<()> {
         latest_resume_handle: None,
         turns: Some(0),
         tokens: TokenUsage::default(),
+        canonical: CanonicalSessionData::default(),
         log_path: Some(log_path.display().to_string()),
         origin: state::SessionOrigin::Execute,
     };
@@ -3445,10 +3523,10 @@ fn aggregate_token_usage(sessions: &[AgentSession]) -> Option<TokenTotals> {
     let mut output = None;
 
     for session in sessions {
-        if let Some(value) = session.tokens.input {
+        if let Some(value) = session.canonical_tokens().input {
             input = Some(input.unwrap_or(0) + value);
         }
-        if let Some(value) = session.tokens.output {
+        if let Some(value) = session.canonical_tokens().output {
             output = Some(output.unwrap_or(0) + value);
         }
     }
@@ -3866,8 +3944,8 @@ impl Drop for TerminalCleanup {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentDaemon, AgentSession, DashboardRuntimeContext, ListenCycleData, ListenState,
-        PullRequestSummary, SessionOrigin, SessionPhase, TODO_STATE, TokenUsage,
+        AgentDaemon, AgentSession, CanonicalSessionData, DashboardRuntimeContext, ListenCycleData,
+        ListenState, PullRequestSummary, SessionOrigin, SessionPhase, TODO_STATE, TokenUsage,
         capture_workspace_snapshot, compact_identifier, format_duration, format_number,
         listen_browser_action, listen_scope_label, mark_running_session_stale, render_agent_prompt,
         required_label_skip_reason,
@@ -3983,6 +4061,7 @@ mod tests {
                     input: Some(100),
                     output: None,
                 },
+                canonical: CanonicalSessionData::default(),
                 log_path: None,
                 origin: SessionOrigin::Listen,
             },
@@ -4012,6 +4091,7 @@ mod tests {
                     input: None,
                     output: Some(25),
                 },
+                canonical: CanonicalSessionData::default(),
                 log_path: None,
                 origin: SessionOrigin::Listen,
             },
@@ -4051,6 +4131,7 @@ mod tests {
                 input: Some(100),
                 output: None,
             },
+            canonical: CanonicalSessionData::default(),
             log_path: None,
             origin: SessionOrigin::Listen,
         }];
@@ -4059,6 +4140,137 @@ mod tests {
         assert_eq!(totals.input, Some(100));
         assert_eq!(totals.output, None);
         assert_eq!(totals.total, 100);
+    }
+
+    #[test]
+    fn dashboard_runtime_tokens_use_canonical_mixed_provider_totals() {
+        let cycle = ListenCycleData {
+            scope: "MET".to_string(),
+            watch_scope: "all assignees".to_string(),
+            pending_issues: Vec::new(),
+            active_issues: Vec::new(),
+            session_details: HashMap::new(),
+            sessions: vec![
+                AgentSession {
+                    issue_id: Some("issue-1".to_string()),
+                    issue_identifier: "ENG-1".to_string(),
+                    issue_title: "Codex".to_string(),
+                    project_name: None,
+                    team_key: "ENG".to_string(),
+                    issue_url: "https://linear.app/issues/ENG-1".to_string(),
+                    phase: SessionPhase::Running,
+                    summary: "running".to_string(),
+                    brief_path: None,
+                    backlog_issue_identifier: None,
+                    backlog_issue_title: None,
+                    backlog_path: None,
+                    workspace_path: None,
+                    branch: None,
+                    pull_request: PullRequestSummary::default(),
+                    workpad_comment_id: None,
+                    updated_at_epoch_seconds: 1,
+                    pid: None,
+                    session_id: None,
+                    latest_resume_handle: None,
+                    turns: None,
+                    tokens: TokenUsage::default(),
+                    canonical: CanonicalSessionData {
+                        provider: Some("codex".to_string()),
+                        model: Some("gpt-5.4".to_string()),
+                        reasoning: Some("high".to_string()),
+                        tokens: TokenUsage {
+                            input: Some(100),
+                            output: Some(10),
+                        },
+                        repair: None,
+                    },
+                    log_path: None,
+                    origin: SessionOrigin::Listen,
+                },
+                AgentSession {
+                    issue_id: Some("issue-2".to_string()),
+                    issue_identifier: "ENG-2".to_string(),
+                    issue_title: "Claude".to_string(),
+                    project_name: None,
+                    team_key: "ENG".to_string(),
+                    issue_url: "https://linear.app/issues/ENG-2".to_string(),
+                    phase: SessionPhase::Completed,
+                    summary: "done".to_string(),
+                    brief_path: None,
+                    backlog_issue_identifier: None,
+                    backlog_issue_title: None,
+                    backlog_path: None,
+                    workspace_path: None,
+                    branch: None,
+                    pull_request: PullRequestSummary::default(),
+                    workpad_comment_id: None,
+                    updated_at_epoch_seconds: 2,
+                    pid: None,
+                    session_id: None,
+                    latest_resume_handle: None,
+                    turns: None,
+                    tokens: TokenUsage::default(),
+                    canonical: CanonicalSessionData {
+                        provider: Some("claude".to_string()),
+                        model: Some("sonnet".to_string()),
+                        reasoning: Some("high".to_string()),
+                        tokens: TokenUsage {
+                            input: Some(20),
+                            output: Some(5),
+                        },
+                        repair: None,
+                    },
+                    log_path: None,
+                    origin: SessionOrigin::Listen,
+                },
+                AgentSession {
+                    issue_id: Some("issue-3".to_string()),
+                    issue_identifier: "ENG-3".to_string(),
+                    issue_title: "Unknown".to_string(),
+                    project_name: None,
+                    team_key: "ENG".to_string(),
+                    issue_url: "https://linear.app/issues/ENG-3".to_string(),
+                    phase: SessionPhase::Blocked,
+                    summary: "blocked".to_string(),
+                    brief_path: None,
+                    backlog_issue_identifier: None,
+                    backlog_issue_title: None,
+                    backlog_path: None,
+                    workspace_path: None,
+                    branch: None,
+                    pull_request: PullRequestSummary::default(),
+                    workpad_comment_id: None,
+                    updated_at_epoch_seconds: 3,
+                    pid: None,
+                    session_id: None,
+                    latest_resume_handle: None,
+                    turns: None,
+                    tokens: TokenUsage::default(),
+                    canonical: CanonicalSessionData::default(),
+                    log_path: None,
+                    origin: SessionOrigin::Listen,
+                },
+            ],
+            notes: Vec::new(),
+            state_file: "/tmp/session.json".to_string(),
+            rate_limits: None,
+            claimed_this_cycle: 0,
+        };
+        let runtime = DashboardRuntimeContext {
+            started_at_epoch_seconds: 1,
+            now_epoch_seconds: 11,
+            poll_interval_seconds: 5,
+            dashboard_label: "terminal snapshot",
+            dashboard_refresh_seconds: 1,
+            linear_refresh_seconds: 5,
+            vim_mode: false,
+            show_active_issues: true,
+            show_preview: true,
+            resolved_agent: Some("codex".to_string()),
+        };
+
+        let dashboard = super::build_dashboard_data(&cycle, &runtime);
+        assert_eq!(dashboard.runtime.tokens, "in 120 | out 15 | total 135");
     }
 
     #[test]
@@ -4095,6 +4307,7 @@ mod tests {
                     input: Some(100),
                     output: None,
                 },
+                canonical: CanonicalSessionData::default(),
                 log_path: None,
                 origin: SessionOrigin::Listen,
             }],
@@ -4201,6 +4414,7 @@ mod tests {
             latest_resume_handle: None,
             turns: None,
             tokens: TokenUsage::default(),
+            canonical: CanonicalSessionData::default(),
             log_path: None,
             origin: SessionOrigin::default(),
         };
@@ -4251,6 +4465,7 @@ mod tests {
             latest_resume_handle: None,
             turns: None,
             tokens: TokenUsage::default(),
+            canonical: CanonicalSessionData::default(),
             log_path: Some(log_path.display().to_string()),
             origin: SessionOrigin::default(),
         };
@@ -4410,6 +4625,7 @@ mod tests {
             latest_resume_handle: None,
             turns: Some(2),
             tokens: TokenUsage::default(),
+            canonical: CanonicalSessionData::default(),
             log_path: Some("logs/ENG-10163.log".to_string()),
             origin: SessionOrigin::Listen,
         };
@@ -4881,6 +5097,7 @@ mod tests {
             session_id: Some(issue.id.clone()),
             turns: Some(1),
             tokens: TokenUsage::default(),
+            canonical: CanonicalSessionData::default(),
             log_path: None,
             latest_resume_handle: None,
             origin: SessionOrigin::Listen,

@@ -215,6 +215,46 @@ impl TokenUsage {
             .map(format_number)
             .unwrap_or_else(|| "n/a".to_string())
     }
+
+    pub(super) fn is_known(&self) -> bool {
+        self.input.is_some() || self.output.is_some()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CanonicalSessionData {
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub reasoning: Option<String>,
+    #[serde(default)]
+    pub tokens: TokenUsage,
+    #[serde(default)]
+    pub repair: Option<CanonicalRepairRecord>,
+}
+
+impl CanonicalSessionData {
+    pub(super) fn provider_label(&self) -> Option<&str> {
+        self.provider.as_deref()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CanonicalRepairRecord {
+    pub status: CanonicalRepairStatus,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CanonicalRepairStatus {
+    Recovered,
+    Skipped,
 }
 
 /// Distinguishes whether a session was created by the continuous `listen` daemon
@@ -321,6 +361,8 @@ pub struct AgentSession {
     #[serde(default)]
     pub tokens: TokenUsage,
     #[serde(default)]
+    pub canonical: CanonicalSessionData,
+    #[serde(default)]
     pub log_path: Option<String>,
     #[serde(default)]
     pub origin: SessionOrigin,
@@ -346,7 +388,7 @@ impl AgentSession {
     }
 
     pub(super) fn table_tokens_label(&self) -> String {
-        self.tokens.display_table_compact()
+        self.canonical_tokens().display_table_compact()
     }
 
     pub(super) fn session_label(&self) -> String {
@@ -369,6 +411,26 @@ impl AgentSession {
 
     pub(super) fn pull_request_label(&self) -> String {
         self.pull_request.compact_label()
+    }
+
+    pub(super) fn canonical_tokens(&self) -> &TokenUsage {
+        if self.canonical.tokens.is_known() {
+            &self.canonical.tokens
+        } else {
+            &self.tokens
+        }
+    }
+
+    pub(super) fn provider_label(&self) -> String {
+        self.canonical
+            .provider_label()
+            .map(str::to_string)
+            .or_else(|| {
+                self.latest_resume_handle
+                    .as_ref()
+                    .map(|resume| resume.provider.label().to_string())
+            })
+            .unwrap_or_else(|| "unavailable".to_string())
     }
 }
 
@@ -525,9 +587,9 @@ impl ListenState {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentSession, LatestResumeHandle, PullRequestStatus, PullRequestSummary, ResumeProvider,
-        SessionOrigin, SessionPhase, TokenUsage, explicit_resume_id_label,
-        explicit_resume_provider_label,
+        AgentSession, CanonicalSessionData, LatestResumeHandle, PullRequestStatus,
+        PullRequestSummary, ResumeProvider, SessionOrigin, SessionPhase, TokenUsage,
+        explicit_resume_id_label, explicit_resume_provider_label,
     };
 
     fn session() -> AgentSession {
@@ -554,6 +616,7 @@ mod tests {
             latest_resume_handle: None,
             turns: Some(1),
             tokens: TokenUsage::default(),
+            canonical: CanonicalSessionData::default(),
             log_path: None,
             origin: SessionOrigin::Listen,
         }

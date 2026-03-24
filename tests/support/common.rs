@@ -28,6 +28,8 @@ use httpmock::Method::{GET, POST};
 use httpmock::MockServer;
 use predicates::prelude::*;
 use serde_json::json;
+#[cfg(unix)]
+use serde_json::Value;
 use tempfile::tempdir;
 
 const TEST_ENV_REMOVALS: &[&str] = &[
@@ -582,6 +584,42 @@ fn team_payload() -> serde_json::Value {
 #[cfg(unix)]
 fn wait_for_file_substring(path: &Path, expected: &str) -> Result<(), Box<dyn Error>> {
     wait_for_file_substring_with_timeout(path, expected, Duration::from_secs(60))
+}
+
+#[cfg(unix)]
+fn wait_for_json_pointer_value(
+    path: &Path,
+    pointer: &str,
+    expected: &Value,
+) -> Result<(), Box<dyn Error>> {
+    wait_for_json_pointer_value_with_timeout(path, pointer, expected, Duration::from_secs(60))
+}
+
+#[cfg(unix)]
+fn wait_for_json_pointer_value_with_timeout(
+    path: &Path,
+    pointer: &str,
+    expected: &Value,
+    timeout: Duration,
+) -> Result<(), Box<dyn Error>> {
+    let poll_interval = Duration::from_millis(100);
+    let attempts = timeout.as_millis() / poll_interval.as_millis();
+    for _ in 0..attempts {
+        if let Ok(contents) = fs::read_to_string(path)
+            && let Ok(value) = serde_json::from_str::<Value>(&contents)
+            && value.pointer(pointer) == Some(expected)
+        {
+            return Ok(());
+        }
+        thread::sleep(poll_interval);
+    }
+
+    Err(format!(
+        "timed out waiting for `{}` JSON pointer `{pointer}` to equal `{expected}` after {}s",
+        path.display(),
+        timeout.as_secs()
+    )
+    .into())
 }
 
 #[cfg(unix)]
