@@ -5218,22 +5218,42 @@ exit 99
 
     let state_path = listen_state_path(&config_path, &repo_root)?;
     let detail_path = listen_detail_path(&config_path, &repo_root, "MET-64")?;
-    wait_for_file_substring(&state_path, "\"provider\": \"claude\"")?;
-    wait_for_file_substring(&detail_path, "\"provider\": \"claude\"")?;
-    wait_for_file_substring(&detail_path, "\"input\": 210")?;
-    wait_for_file_substring(&detail_path, "\"output\": 34")?;
+    wait_for_json_pointer_value(
+        &state_path,
+        "/sessions/0/canonical/provider",
+        &json!("claude"),
+    )?;
+    wait_for_json_pointer_value(&state_path, "/sessions/0/canonical/model", &json!("sonnet"))?;
+    wait_for_json_pointer_value(
+        &state_path,
+        "/sessions/0/canonical/reasoning",
+        &json!("high"),
+    )?;
+    wait_for_json_pointer_value(&detail_path, "/canonical/provider", &json!("claude"))?;
+    wait_for_json_pointer_value(&detail_path, "/canonical/model", &json!("sonnet"))?;
+    wait_for_json_pointer_value(&detail_path, "/canonical/reasoning", &json!("high"))?;
 
-    let state = fs::read_to_string(state_path)?;
-    assert!(state.contains("\"provider\": \"claude\""));
-    assert!(state.contains("\"model\": \"sonnet\""));
-    assert!(state.contains("\"reasoning\": \"high\""));
+    let state: serde_json::Value = serde_json::from_str(&fs::read_to_string(state_path)?)?;
+    assert_eq!(
+        state.pointer("/sessions/0/canonical/provider"),
+        Some(&json!("claude"))
+    );
+    assert_eq!(
+        state.pointer("/sessions/0/canonical/model"),
+        Some(&json!("sonnet"))
+    );
+    assert_eq!(
+        state.pointer("/sessions/0/canonical/reasoning"),
+        Some(&json!("high"))
+    );
 
-    let detail = fs::read_to_string(detail_path)?;
-    assert!(detail.contains("\"provider\": \"claude\""));
-    assert!(detail.contains("\"model\": \"sonnet\""));
-    assert!(detail.contains("\"reasoning\": \"high\""));
-    assert!(detail.contains("\"input\": 210"));
-    assert!(detail.contains("\"output\": 34"));
+    let detail: serde_json::Value = serde_json::from_str(&fs::read_to_string(detail_path)?)?;
+    assert_eq!(
+        detail.pointer("/canonical/provider"),
+        Some(&json!("claude"))
+    );
+    assert_eq!(detail.pointer("/canonical/model"), Some(&json!("sonnet")));
+    assert_eq!(detail.pointer("/canonical/reasoning"), Some(&json!("high")));
 
     Ok(())
 }

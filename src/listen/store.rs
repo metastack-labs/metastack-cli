@@ -2014,6 +2014,44 @@ mod tests {
     }
 
     #[test]
+    fn save_state_persists_claude_canonical_tokens_in_detail_artifact() -> Result<()> {
+        let temp = tempdir()?;
+        let repo_root = temp.path().join("repo");
+        let data_root = temp.path().join("data");
+        fs::create_dir_all(repo_root.join(".metastack"))?;
+        let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
+
+        let issue_identifier = "ENG-10172";
+        let mut session = default_session(issue_identifier, SessionPhase::Completed, 100);
+        session.tokens = TokenUsage {
+            input: Some(210),
+            output: Some(34),
+        };
+        session.canonical = CanonicalSessionData {
+            provider: Some("claude".to_string()),
+            model: Some("sonnet".to_string()),
+            reasoning: Some("high".to_string()),
+            tokens: session.tokens.clone(),
+            repair: None,
+        };
+
+        store.save_state(&ListenState::from_sessions(vec![session]))?;
+
+        let detail = store
+            .load_session_detail(issue_identifier)?
+            .context("expected persisted detail artifact")?;
+        assert_eq!(detail.tokens.input, Some(210));
+        assert_eq!(detail.tokens.output, Some(34));
+        assert_eq!(detail.canonical.provider.as_deref(), Some("claude"));
+        assert_eq!(detail.canonical.model.as_deref(), Some("sonnet"));
+        assert_eq!(detail.canonical.reasoning.as_deref(), Some("high"));
+        assert_eq!(detail.canonical.tokens.input, Some(210));
+        assert_eq!(detail.canonical.tokens.output, Some(34));
+
+        Ok(())
+    }
+
+    #[test]
     fn load_state_marks_unrecoverable_historical_sessions_as_skipped() -> Result<()> {
         let temp = tempdir()?;
         let repo_root = temp.path().join("repo");
