@@ -5219,7 +5219,11 @@ exit 99
     let state_path = listen_state_path(&config_path, &repo_root)?;
     let detail_path = listen_detail_path(&config_path, &repo_root, "MET-64")?;
     wait_for_file_substring(&state_path, "\"provider\": \"claude\"")?;
+    wait_for_file_substring(&state_path, "\"input\": 210")?;
+    wait_for_file_substring(&state_path, "\"output\": 34")?;
     wait_for_file_substring(&detail_path, "\"provider\": \"claude\"")?;
+    wait_for_file_substring(&detail_path, "\"input\": 210")?;
+    wait_for_file_substring(&detail_path, "\"output\": 34")?;
 
     let state = fs::read_to_string(state_path)?;
     assert!(state.contains("\"provider\": \"claude\""));
