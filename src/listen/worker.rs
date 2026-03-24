@@ -1748,6 +1748,8 @@ mod tests {
         );
         assert_eq!(second.tokens.input, Some(120));
         assert_eq!(second.tokens.output, None);
+        assert_eq!(second.canonical.tokens.input, Some(120));
+        assert_eq!(second.canonical.tokens.output, None);
 
         tokens.accumulate(&TokenUsage {
             input: None,
@@ -1768,6 +1770,9 @@ mod tests {
         assert_eq!(third.tokens.input, Some(120));
         assert_eq!(third.tokens.output, Some(45));
         assert_eq!(third.tokens.total(), Some(165));
+        assert_eq!(third.canonical.tokens.input, Some(120));
+        assert_eq!(third.canonical.tokens.output, Some(45));
+        assert_eq!(third.canonical.tokens.total(), Some(165));
     }
 
     #[test]

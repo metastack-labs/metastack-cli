@@ -5219,8 +5219,6 @@ exit 99
     let state_path = listen_state_path(&config_path, &repo_root)?;
     let detail_path = listen_detail_path(&config_path, &repo_root, "MET-64")?;
     wait_for_file_substring(&state_path, "\"provider\": \"claude\"")?;
-    wait_for_file_substring(&state_path, "\"input\": 210")?;
-    wait_for_file_substring(&state_path, "\"output\": 34")?;
     wait_for_file_substring(&detail_path, "\"provider\": \"claude\"")?;
     wait_for_file_substring(&detail_path, "\"input\": 210")?;
     wait_for_file_substring(&detail_path, "\"output\": 34")?;
@@ -5229,8 +5227,6 @@ exit 99
     assert!(state.contains("\"provider\": \"claude\""));
     assert!(state.contains("\"model\": \"sonnet\""));
     assert!(state.contains("\"reasoning\": \"high\""));
-    assert!(state.contains("\"input\": 210"));
-    assert!(state.contains("\"output\": 34"));
 
     let detail = fs::read_to_string(detail_path)?;
     assert!(detail.contains("\"provider\": \"claude\""));
