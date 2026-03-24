@@ -38,13 +38,13 @@ use crate::repo_target::RepoTarget;
 use crate::workflow_contract::render_workflow_contract;
 
 use super::{
-    BACKLOG_STATE, LatestResumeHandle, MAX_STALLED_TURNS, PullRequestStatus, PullRequestSummary,
-    ResumeProvider, SessionPhase, TokenUsage, agent_log_path, backlog_progress_for_issue_dir,
-    capture_workspace_snapshot, compact_blocked_summary, compact_completed_summary,
-    compact_running_summary, compare_workspace_snapshots, current_workspace_branch,
-    issue_state_label, issue_team_key, listen_issue_is_active, now_epoch_seconds, now_timestamp,
-    preflight, render_agent_prompt, try_transition_issue_to_review_state,
-    workspace_has_meaningful_progress, write_listen_session,
+    BACKLOG_STATE, CanonicalSessionData, LatestResumeHandle, MAX_STALLED_TURNS, PullRequestStatus,
+    PullRequestSummary, ResumeProvider, SessionPhase, TokenUsage, agent_log_path,
+    backlog_progress_for_issue_dir, capture_workspace_snapshot, compact_blocked_summary,
+    compact_completed_summary, compact_running_summary, compare_workspace_snapshots,
+    current_workspace_branch, issue_state_label, issue_team_key, listen_issue_is_active,
+    now_epoch_seconds, now_timestamp, preflight, render_agent_prompt,
+    try_transition_issue_to_review_state, workspace_has_meaningful_progress, write_listen_session,
 };
 
 const REQUIRED_LISTEN_PR_LABEL: &str = "metastack";
@@ -113,6 +113,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
             project_selector,
             &args.issue,
         )?,
+        canonical: load_existing_session_canonical(&source_root, project_selector, &args.issue)?,
         pull_request: load_existing_pull_request(&source_root, project_selector, &args.issue)?,
         origin: session_origin,
     };
@@ -159,7 +160,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                 &session_context,
                 turns_completed,
                 provider_session_id.as_deref(),
-                &session_tokens,
+                &session_context.canonical,
             ),
         )?;
         return Err(error);
@@ -176,7 +177,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     &session_context,
                     turns_completed,
                     provider_session_id.as_deref(),
-                    &session_tokens,
+                    &session_context.canonical,
                 ),
             )?;
             return Ok(());
@@ -203,7 +204,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     &session_context,
                     turns_completed,
                     provider_session_id.as_deref(),
-                    &session_tokens,
+                    &session_context.canonical,
                 ),
             )?;
             return Ok(());
@@ -232,7 +233,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                 &session_context,
                 turns_completed,
                 provider_session_id.as_deref(),
-                &session_tokens,
+                &session_context.canonical,
             ),
         )?;
 
@@ -263,16 +264,18 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                         &session_context,
                         turns_completed,
                         provider_session_id_state.borrow().as_deref(),
-                        &session_tokens,
+                        &session_context.canonical,
                     ),
                 )
             },
             |usage| {
                 let mut displayed_tokens = session_tokens.clone();
+                let mut displayed_canonical = session_context.canonical.clone();
                 displayed_tokens.accumulate(&TokenUsage {
                     input: usage.input,
                     output: usage.output,
                 });
+                displayed_canonical.tokens = displayed_tokens.clone();
                 write_listen_session(
                     &source_root,
                     project_selector,
@@ -288,7 +291,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                         &session_context,
                         turns_completed,
                         provider_session_id_state.borrow().as_deref(),
-                        &displayed_tokens,
+                        &displayed_canonical,
                     ),
                 )
             },
@@ -309,7 +312,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                         &session_context,
                         turns_completed,
                         provider_session_id.as_deref(),
-                        &session_tokens,
+                        &session_context.canonical,
                     ),
                 )?;
                 return Err(error);
@@ -321,12 +324,18 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
         provider_session_id = turn_result
             .session_id
             .or_else(|| provider_session_id_state.into_inner());
+        if let Some(provider) = turn_result.provider {
+            session_context.canonical.provider = Some(provider);
+            session_context.canonical.model = turn_result.model;
+            session_context.canonical.reasoning = turn_result.reasoning;
+        }
         if let Some(usage) = turn_result.usage {
             session_tokens.accumulate(&TokenUsage {
                 input: usage.input,
                 output: usage.output,
             });
         }
+        session_context.canonical.tokens = session_tokens.clone();
 
         turns_completed = turn_number;
         let snapshot_after = capture_workspace_snapshot(&workspace_path, &args.issue)?;
@@ -368,7 +377,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                             &session_context,
                             turns_completed,
                             provider_session_id.as_deref(),
-                            &session_tokens,
+                            &session_context.canonical,
                         ),
                     )?;
                     return Ok(());
@@ -424,7 +433,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                             &session_context,
                             turns_completed,
                             provider_session_id.as_deref(),
-                            &session_tokens,
+                            &session_context.canonical,
                         ),
                     )?;
                     return Ok(());
@@ -444,7 +453,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                         &session_context,
                         turns_completed,
                         provider_session_id.as_deref(),
-                        &session_tokens,
+                        &session_context.canonical,
                     ),
                 )?;
                 return Ok(());
@@ -480,7 +489,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                         &session_context,
                         turns_completed,
                         provider_session_id.as_deref(),
-                        &session_tokens,
+                        &session_context.canonical,
                     ),
                 )?;
                 return Ok(());
@@ -501,7 +510,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     &session_context,
                     turns_completed,
                     provider_session_id.as_deref(),
-                    &session_tokens,
+                    &session_context.canonical,
                 ),
             )?;
         } else {
@@ -515,7 +524,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     &session_context,
                     turns_completed,
                     provider_session_id.as_deref(),
-                    &session_tokens,
+                    &session_context.canonical,
                 ),
             )?;
         }
@@ -543,6 +552,7 @@ struct WorkerSessionContext<'a> {
     backlog_issue: Option<&'a IssueSummary>,
     pid: Option<u32>,
     latest_resume_handle: Option<LatestResumeHandle>,
+    canonical: CanonicalSessionData,
     pull_request: PullRequestSummary,
     origin: super::state::SessionOrigin,
 }
@@ -552,6 +562,9 @@ struct TurnExecutionResult {
     session_id: Option<String>,
     usage: Option<AgentTokenUsage>,
     latest_resume_handle: Option<LatestResumeHandle>,
+    provider: Option<String>,
+    model: Option<String>,
+    reasoning: Option<String>,
 }
 
 impl From<PullRequestLifecycleResult> for PullRequestSummary {
@@ -1159,6 +1172,9 @@ fn execute_agent_turn(
                     None
                 }
             }),
+            provider: Some(invocation.agent.clone()),
+            model: invocation.model.clone(),
+            reasoning: invocation.reasoning.clone(),
         });
     }
 
@@ -1455,7 +1471,7 @@ fn build_worker_session(
     context: &WorkerSessionContext<'_>,
     turns: u32,
     session_id: Option<&str>,
-    tokens: &TokenUsage,
+    canonical: &CanonicalSessionData,
 ) -> super::AgentSession {
     super::AgentSession {
         issue_id: Some(issue.id.clone()),
@@ -1494,7 +1510,8 @@ fn build_worker_session(
         session_id: session_id.map(str::to_string),
         latest_resume_handle: context.latest_resume_handle.clone(),
         turns: Some(turns),
-        tokens: tokens.clone(),
+        tokens: canonical.tokens.clone(),
+        canonical: canonical.clone(),
         log_path: Some(
             agent_log_path(
                 context.source_root,
@@ -1520,6 +1537,21 @@ fn load_existing_session_tokens(
         .into_iter()
         .find(|session| session.issue_matches(issue_identifier))
         .map(|session| session.tokens)
+        .unwrap_or_default())
+}
+
+fn load_existing_session_canonical(
+    root: &Path,
+    project_selector: Option<&str>,
+    issue_identifier: &str,
+) -> Result<CanonicalSessionData> {
+    let store = super::store::ListenProjectStore::resolve(root, project_selector)?;
+    let state = store.load_state()?;
+    Ok(state
+        .sessions
+        .into_iter()
+        .find(|session| session.issue_matches(issue_identifier))
+        .map(|session| session.canonical)
         .unwrap_or_default())
 }
 
@@ -1589,7 +1621,9 @@ mod tests {
         parse_codex_resume_handle, query_codex_threads, read_codex_session_index,
     };
     use crate::linear::{IssueSummary, TeamRef};
-    use crate::listen::{PullRequestSummary, SessionOrigin, SessionPhase, TokenUsage};
+    use crate::listen::{
+        CanonicalSessionData, PullRequestSummary, SessionOrigin, SessionPhase, TokenUsage,
+    };
     use std::fs;
     use std::sync::{Mutex, OnceLock};
     use tempfile::tempdir;
@@ -1678,6 +1712,7 @@ mod tests {
             backlog_issue: None,
             pid: Some(1234),
             latest_resume_handle: None,
+            canonical: CanonicalSessionData::default(),
             pull_request: PullRequestSummary::default(),
             origin: SessionOrigin::Listen,
         };
@@ -1690,7 +1725,7 @@ mod tests {
             &context,
             0,
             Some("thread-1"),
-            &tokens,
+            &CanonicalSessionData::default(),
         );
         assert_eq!(first.tokens.input, None);
         assert_eq!(first.tokens.output, None);
@@ -1706,7 +1741,10 @@ mod tests {
             &context,
             1,
             Some("thread-1"),
-            &tokens,
+            &CanonicalSessionData {
+                tokens: tokens.clone(),
+                ..CanonicalSessionData::default()
+            },
         );
         assert_eq!(second.tokens.input, Some(120));
         assert_eq!(second.tokens.output, None);
@@ -1722,7 +1760,10 @@ mod tests {
             &context,
             2,
             Some("thread-1"),
-            &tokens,
+            &CanonicalSessionData {
+                tokens: tokens.clone(),
+                ..CanonicalSessionData::default()
+            },
         );
         assert_eq!(third.tokens.input, Some(120));
         assert_eq!(third.tokens.output, Some(45));

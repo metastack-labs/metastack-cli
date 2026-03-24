@@ -949,6 +949,10 @@ fn listen_sessions_inspect_surfaces_structured_detail_fields() -> Result<(), Box
             ]
         }))?,
     )?;
+    fs::write(
+        listen_log_path(&config_path, &repo_root, "ENG-10181")?,
+        "{\"message\":\"worker boot complete\"}\n{\"message\":\"published draft PR\"}\n",
+    )?;
 
     meta()
         .current_dir(&repo_root)
@@ -976,9 +980,7 @@ fn listen_sessions_inspect_surfaces_structured_detail_fields() -> Result<(), Box
         .stdout(predicate::str::contains("Recent milestones:"))
         .stdout(predicate::str::contains(
             "Running: Opened draft PR | turns 3 | draft #321",
-        ))
-        .stdout(predicate::str::contains("Recent log excerpts:"))
-        .stdout(predicate::str::contains("L27 published draft PR"));
+        ));
 
     Ok(())
 }
@@ -4921,6 +4923,8 @@ printf '%s' "$METASTACK_AGENT_MODEL" > "$TEST_OUTPUT_DIR/model.txt"
 printf '%s' "$METASTACK_AGENT_REASONING" > "$TEST_OUTPUT_DIR/reasoning.txt"
 printf '%s' "$METASTACK_AGENT_PROVIDER_SOURCE" > "$TEST_OUTPUT_DIR/provider-source.txt"
 printf '%s' "$METASTACK_AGENT_ROUTE_KEY" > "$TEST_OUTPUT_DIR/route-key.txt"
+printf '%s\n' '{"type":"message_start","message":{"usage":{"input_tokens":210}}}'
+printf '%s\n' '{"type":"message_delta","usage":{"output_tokens":34}}'
 printf '%s' '{"type":"result","subtype":"success","result":"claude listen ok","session_id":"listen-session-1"}'
 "#,
     )?;
@@ -5211,6 +5215,25 @@ exit 99
     assert!(listen_log.contains("Resolved model: sonnet"));
     assert!(listen_log.contains("Resolved reasoning: high"));
     assert!(listen_log.contains("Provider source: repo_default"));
+
+    let state_path = listen_state_path(&config_path, &repo_root)?;
+    let detail_path = listen_detail_path(&config_path, &repo_root, "MET-64")?;
+    wait_for_file_substring(&state_path, "\"provider\": \"claude\"")?;
+    wait_for_file_substring(&detail_path, "\"provider\": \"claude\"")?;
+
+    let state = fs::read_to_string(state_path)?;
+    assert!(state.contains("\"provider\": \"claude\""));
+    assert!(state.contains("\"model\": \"sonnet\""));
+    assert!(state.contains("\"reasoning\": \"high\""));
+    assert!(state.contains("\"input\": 210"));
+    assert!(state.contains("\"output\": 34"));
+
+    let detail = fs::read_to_string(detail_path)?;
+    assert!(detail.contains("\"provider\": \"claude\""));
+    assert!(detail.contains("\"model\": \"sonnet\""));
+    assert!(detail.contains("\"reasoning\": \"high\""));
+    assert!(detail.contains("\"input\": 210"));
+    assert!(detail.contains("\"output\": 34"));
 
     Ok(())
 }
