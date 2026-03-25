@@ -170,6 +170,9 @@ pub struct BacklogImproveArgs {
     /// Apply the proposed updates after persisting the local artifact trail.
     #[arg(long)]
     pub apply: bool,
+    /// Override the Linear project scope for targeted issues.
+    #[arg(long)]
+    pub project: Option<String>,
     /// Override the configured default agent/provider for backlog improvement.
     #[arg(long)]
     pub agent: Option<String>,

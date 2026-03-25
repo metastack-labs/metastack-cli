@@ -309,7 +309,7 @@ printf '\033[1m%s\033[0m' '{"summary":"Ready to apply.","needs_improvement":true
 "##,
     )?;
 
-    let issue_dir = repo_root.join(".metastack/backlog/MET-710");
+    let issue_dir = repo_root.join(format!("{}/backlog/MET-710", branding::PROJECT_DIR));
     fs::create_dir_all(&issue_dir)?;
     fs::write(issue_dir.join("index.md"), "# Original local packet\n")?;
 

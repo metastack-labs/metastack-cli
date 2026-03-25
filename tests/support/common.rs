@@ -71,20 +71,28 @@ fn isolated_home_dir() -> PathBuf {
 }
 
 fn test_command() -> Command {
-    let meta_bin = std::env::var_os("CARGO_BIN_EXE_meta")
+    let cargo_bin_var = format!("CARGO_BIN_EXE_{}", metastack_cli::branding::COMMAND_NAME);
+    let command_binary = std::env::var_os(&cargo_bin_var)
         .map(std::path::PathBuf::from)
         .or_else(|| {
             std::env::current_exe().ok().and_then(|path| {
                 let target_dir = path.parent()?.parent()?;
-                let candidates = ["meta", "meta.exe"];
-                candidates
-                    .into_iter()
-                    .map(|name| target_dir.join(name))
-                    .find(|candidate| candidate.is_file())
+                [
+                    metastack_cli::branding::COMMAND_NAME.to_string(),
+                    format!("{}.exe", metastack_cli::branding::COMMAND_NAME),
+                ]
+                .into_iter()
+                .map(|name| target_dir.join(name))
+                .find(|candidate| candidate.is_file())
             })
         })
-        .expect("meta binary should build for tests");
-    let mut command = Command::new(meta_bin);
+        .unwrap_or_else(|| {
+            panic!(
+                "{} binary should build for tests",
+                metastack_cli::branding::COMMAND_NAME
+            )
+        });
+    let mut command = Command::new(command_binary);
     for key in TEST_ENV_REMOVALS {
         command.env_remove(key);
     }

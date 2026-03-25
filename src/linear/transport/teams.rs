@@ -12,7 +12,7 @@ query Teams {
       id
       key
       name
-      states {
+      states(first: 50) {
         nodes {
           id
           name

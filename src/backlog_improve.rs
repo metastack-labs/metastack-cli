@@ -420,7 +420,14 @@ struct ImprovementDashboardApp {
 pub async fn run_backlog_improve(args: &BacklogImproveArgs) -> Result<()> {
     let root = canonicalize_existing_dir(&args.client.root)?;
     ensure_planning_layout(&root, false)?;
-    let command_context = load_linear_command_context(&args.client, None)?;
+    let mut command_context = load_linear_command_context(&args.client, None)?;
+    if let Some(project_name) = &args.project {
+        let project_id = command_context
+            .service
+            .resolve_project_selector_strict(project_name, command_context.default_team.as_deref())
+            .await?;
+        command_context.default_project_id = Some(project_id);
+    }
     let issues = load_backlog_improve_issues_with_loading(&command_context, args).await?;
 
     if issues.is_empty() {

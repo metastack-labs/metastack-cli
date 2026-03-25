@@ -6479,7 +6479,10 @@ transport = "arg"
             api_url = server.url.as_str(),
         ),
     )?;
-    fs::write(repo_root.join(".gitignore"), ".metastack\n")?;
+    fs::write(
+        repo_root.join(".gitignore"),
+        format!("{}\n", branding::PROJECT_DIR),
+    )?;
     fs::write(bin_dir.join("agent-stub"), "#!/bin/sh\n:\n")?;
     write_listen_github_stub(
         &bin_dir.join("gh"),
@@ -6529,7 +6532,7 @@ transport = "arg"
     // Keep an uncommitted change so review handoff auto-clean skips and the stored session
     // remains inspectable for this PR-promotion assertion.
     fs::write(workspace.join("dirty-skip.txt"), "local review note\n")?;
-    let backlog_dir = workspace.join(".metastack/backlog/MET-32");
+    let backlog_dir = workspace.join(format!("{}/backlog/MET-32", branding::PROJECT_DIR));
     fs::create_dir_all(&backlog_dir)?;
     fs::write(
         backlog_dir.join("index.md"),
@@ -6633,7 +6636,10 @@ transport = "arg"
             api_url = server.url.as_str(),
         ),
     )?;
-    fs::write(repo_root.join(".gitignore"), ".metastack\n")?;
+    fs::write(
+        repo_root.join(".gitignore"),
+        format!("{}\n", branding::PROJECT_DIR),
+    )?;
     fs::write(bin_dir.join("agent-stub"), "#!/bin/sh\n:\n")?;
     write_listen_github_stub(
         &bin_dir.join("gh"),
