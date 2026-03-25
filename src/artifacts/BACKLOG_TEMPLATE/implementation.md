@@ -10,4 +10,4 @@
 
 - CLI entrypoints:
 - Linear mutations/queries:
-- `.metastack/backlog` files:
+- `{{brand.project_dir}}/backlog` files:

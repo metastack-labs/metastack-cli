@@ -2,6 +2,8 @@
 
 include!("support/common.rs");
 
+use metastack_cli::branding;
+
 #[cfg(unix)]
 fn write_onboarded_config(
     config_path: &std::path::Path,
@@ -25,9 +27,10 @@ fn prepend_path(bin_dir: &std::path::Path) -> Result<String, Box<dyn Error>> {
 
 #[cfg(unix)]
 fn run_state_files(root: &std::path::Path) -> Result<Vec<std::path::PathBuf>, Box<dyn Error>> {
-    let mut paths = fs::read_dir(root.join(".metastack/cron/.runtime/runs"))?
-        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .collect::<Vec<_>>();
+    let mut paths =
+        fs::read_dir(root.join(format!("{}/cron/.runtime/runs", branding::PROJECT_DIR)))?
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .collect::<Vec<_>>();
     paths.sort();
     Ok(paths)
 }
@@ -53,12 +56,20 @@ fn cron_init_creates_a_markdown_job_template() -> Result<(), Box<dyn Error>> {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "Created cron job template at .metastack/cron/nightly.md",
-        ));
+        .stdout(predicate::str::contains(format!(
+            "Created cron job template at {}/cron/nightly.md",
+            branding::PROJECT_DIR
+        )));
 
-    let contents = fs::read_to_string(temp.path().join(".metastack/cron/nightly.md"))?;
-    assert!(temp.path().join(".metastack/cron/README.md").is_file());
+    let contents = fs::read_to_string(
+        temp.path()
+            .join(format!("{}/cron/nightly.md", branding::PROJECT_DIR)),
+    )?;
+    assert!(
+        temp.path()
+            .join(format!("{}/cron/README.md", branding::PROJECT_DIR))
+            .is_file()
+    );
     assert!(contents.contains("schedule: 0 * * * *"));
     assert!(contents.contains("command: echo hello"));
     assert!(!contents.contains("## Runbook"));
@@ -94,10 +105,11 @@ fn cron_init_render_once_shows_dashboard_fields() -> Result<(), Box<dyn Error>> 
 fn cron_init_render_once_prefills_existing_job_values() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let config_path = temp.path().join("metastack.toml");
-    fs::create_dir_all(temp.path().join(".metastack/cron"))?;
+    fs::create_dir_all(temp.path().join(format!("{}/cron", branding::PROJECT_DIR)))?;
     write_onboarded_config(&config_path, "")?;
     fs::write(
-        temp.path().join(".metastack/cron/nightly.md"),
+        temp.path()
+            .join(format!("{}/cron/nightly.md", branding::PROJECT_DIR)),
         r#"---
 schedule: "0 * * * *"
 command: "echo old"
@@ -132,10 +144,11 @@ Review old output
 fn cron_init_render_once_prefills_prompt_and_rejection_help() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let config_path = temp.path().join("metastack.toml");
-    fs::create_dir_all(temp.path().join(".metastack/cron"))?;
+    fs::create_dir_all(temp.path().join(format!("{}/cron", branding::PROJECT_DIR)))?;
     write_onboarded_config(&config_path, "")?;
     fs::write(
-        temp.path().join(".metastack/cron/nightly.md"),
+        temp.path()
+            .join(format!("{}/cron/nightly.md", branding::PROJECT_DIR)),
         r#"---
 schedule: "0 * * * *"
 agent: "codex"
@@ -190,12 +203,18 @@ fn cron_init_no_interactive_writes_agent_prompt_fields() -> Result<(), Box<dyn E
     assert_eq!(payload["command"], "runtime.cron.init");
     assert_eq!(payload["result"]["status"], "created");
     assert_eq!(payload["result"]["name"], "nightly");
-    assert_eq!(payload["result"]["path"], ".metastack/cron/nightly.md");
+    assert_eq!(
+        payload["result"]["path"],
+        format!("{}/cron/nightly.md", branding::PROJECT_DIR)
+    );
     assert_eq!(payload["result"]["schedule"], "0 * * * *");
     assert_eq!(payload["result"]["command"], "echo hello");
     assert_eq!(payload["result"]["agent"], "codex");
 
-    let contents = fs::read_to_string(temp.path().join(".metastack/cron/nightly.md"))?;
+    let contents = fs::read_to_string(
+        temp.path()
+            .join(format!("{}/cron/nightly.md", branding::PROJECT_DIR)),
+    )?;
     assert!(contents.contains("agent: codex"));
     assert!(!contents.contains("prompt: Review the command output"));
     assert!(contents.contains("Review the command output"));
@@ -332,8 +351,10 @@ fi
     assert!(prompt.contains("## Cron Execution Context"));
     assert!(prompt.contains("Command exit code: 0"));
     assert!(
-        fs::read_to_string(output_dir.join("log-path.txt"))?
-            .starts_with(".metastack/cron/.runtime/logs/nightly-")
+        fs::read_to_string(output_dir.join("log-path.txt"))?.starts_with(&format!(
+            "{}/cron/.runtime/logs/nightly-",
+            branding::PROJECT_DIR
+        ))
     );
     assert_eq!(
         fs::read_to_string(output_dir.join("provider-source.txt"))?,
@@ -344,7 +365,10 @@ fi
         "runtime.cron.prompt"
     );
     let runtime_log_path = fs::read_to_string(output_dir.join("log-path.txt"))?;
-    assert!(runtime_log_path.starts_with(".metastack/cron/.runtime/logs/nightly-"));
+    assert!(runtime_log_path.starts_with(&format!(
+        "{}/cron/.runtime/logs/nightly-",
+        branding::PROJECT_DIR
+    )));
     let runtime_log = fs::read_to_string(temp.path().join(runtime_log_path.trim()))?;
     assert!(runtime_log.contains("Resolved provider: stub"));
     assert!(runtime_log.contains("Resolved route key: runtime.cron.prompt"));
@@ -401,7 +425,10 @@ printf '%s' "$METASTACK_CRON_JOB_COMMAND_EXIT_CODE" > "$TEST_OUTPUT_DIR/command-
         .assert()
         .success();
 
-    let contents = fs::read_to_string(temp.path().join(".metastack/cron/nightly.md"))?;
+    let contents = fs::read_to_string(
+        temp.path()
+            .join(format!("{}/cron/nightly.md", branding::PROJECT_DIR)),
+    )?;
     assert!(!contents.contains("command:"));
     assert!(contents.contains("Scan reddit for top posts in r/programming and r/rust"));
 
@@ -575,7 +602,10 @@ exit 9
             "agent `stub` exited unsuccessfully (9)",
         ));
 
-    let state = fs::read_to_string(temp.path().join(".metastack/cron/.runtime/scheduler.json"))?;
+    let state = fs::read_to_string(temp.path().join(format!(
+        "{}/cron/.runtime/scheduler.json",
+        branding::PROJECT_DIR
+    )))?;
     let run_state_path = run_state_files(temp.path())?
         .into_iter()
         .next()
@@ -633,7 +663,9 @@ fn cron_status_reports_known_jobs_while_stopped() -> Result<(), Box<dyn Error>> 
 fn cron_start_replaces_a_stale_pid_and_restarts_the_scheduler() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let config_path = temp.path().join("metastack.toml");
-    let runtime_dir = temp.path().join(".metastack/cron/.runtime");
+    let runtime_dir = temp
+        .path()
+        .join(format!("{}/cron/.runtime", branding::PROJECT_DIR));
     let pid_path = runtime_dir.join("scheduler.pid");
     write_onboarded_config(&config_path, "")?;
     fs::create_dir_all(&runtime_dir)?;
@@ -700,7 +732,10 @@ fn cron_start_status_and_stop_manage_a_detached_scheduler() -> Result<(), Box<dy
             "Started cron scheduler in the background",
         ));
 
-    let pid_path = temp.path().join(".metastack/cron/.runtime/scheduler.pid");
+    let pid_path = temp.path().join(format!(
+        "{}/cron/.runtime/scheduler.pid",
+        branding::PROJECT_DIR
+    ));
     wait_for_path(&pid_path)?;
     let pid = fs::read_to_string(&pid_path)?.trim().parse::<u32>()?;
 
@@ -749,7 +784,7 @@ fn cron_list_prefers_repository_definitions_over_install_scoped_duplicates()
     let temp = tempdir()?;
     let config_path = temp.path().join("metastack.toml");
     let install_dir = temp.path().join("data/cron");
-    let repo_dir = temp.path().join(".metastack/cron");
+    let repo_dir = temp.path().join(format!("{}/cron", branding::PROJECT_DIR));
     write_onboarded_config(&config_path, "")?;
     fs::create_dir_all(&install_dir)?;
     fs::create_dir_all(&repo_dir)?;
@@ -785,7 +820,10 @@ steps:
         .success()
         .stdout(predicate::str::contains("- shared [valid] enabled"))
         .stdout(predicate::str::contains("source: repository"))
-        .stdout(predicate::str::contains("file: .metastack/cron/shared.md"))
+        .stdout(predicate::str::contains(format!(
+            "file: {}/cron/shared.md",
+            branding::PROJECT_DIR
+        )))
         .stdout(predicate::str::contains("schedule: 0 * * * *"))
         .stdout(predicate::str::contains("steps: 1"));
 
@@ -807,9 +845,10 @@ fn cron_validate_rejects_forward_when_references() -> Result<(), Box<dyn Error>>
     let temp = tempdir()?;
     let config_path = temp.path().join("metastack.toml");
     write_onboarded_config(&config_path, "")?;
-    fs::create_dir_all(temp.path().join(".metastack/cron"))?;
+    fs::create_dir_all(temp.path().join(format!("{}/cron", branding::PROJECT_DIR)))?;
     fs::write(
-        temp.path().join(".metastack/cron/invalid-when.md"),
+        temp.path()
+            .join(format!("{}/cron/invalid-when.md", branding::PROJECT_DIR)),
         r#"---
 schedule: "0 * * * *"
 mode: workflow
@@ -845,9 +884,10 @@ fn cron_validate_rejects_ambiguous_when_conditions() -> Result<(), Box<dyn Error
     let temp = tempdir()?;
     let config_path = temp.path().join("metastack.toml");
     write_onboarded_config(&config_path, "")?;
-    fs::create_dir_all(temp.path().join(".metastack/cron"))?;
+    fs::create_dir_all(temp.path().join(format!("{}/cron", branding::PROJECT_DIR)))?;
     fs::write(
-        temp.path().join(".metastack/cron/ambiguous-when.md"),
+        temp.path()
+            .join(format!("{}/cron/ambiguous-when.md", branding::PROJECT_DIR)),
         r#"---
 schedule: "0 * * * *"
 mode: workflow
@@ -884,9 +924,10 @@ fn cron_run_waits_for_approval_and_approve_resumes_the_run() -> Result<(), Box<d
     let temp = tempdir()?;
     let config_path = temp.path().join("metastack.toml");
     write_onboarded_config(&config_path, "")?;
-    fs::create_dir_all(temp.path().join(".metastack/cron"))?;
+    fs::create_dir_all(temp.path().join(format!("{}/cron", branding::PROJECT_DIR)))?;
     fs::write(
-        temp.path().join(".metastack/cron/review.md"),
+        temp.path()
+            .join(format!("{}/cron/review.md", branding::PROJECT_DIR)),
         r#"---
 schedule: "0 * * * *"
 mode: workflow
@@ -960,9 +1001,10 @@ fn cron_reject_marks_waiting_run_as_rejected() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let config_path = temp.path().join("metastack.toml");
     write_onboarded_config(&config_path, "")?;
-    fs::create_dir_all(temp.path().join(".metastack/cron"))?;
+    fs::create_dir_all(temp.path().join(format!("{}/cron", branding::PROJECT_DIR)))?;
     fs::write(
-        temp.path().join(".metastack/cron/review.md"),
+        temp.path()
+            .join(format!("{}/cron/review.md", branding::PROJECT_DIR)),
         r#"---
 schedule: "0 * * * *"
 steps:
@@ -1018,8 +1060,10 @@ fn cron_resume_reuses_completed_steps_after_a_failed_run() -> Result<(), Box<dyn
     let temp = tempdir()?;
     let config_path = temp.path().join("metastack.toml");
     write_onboarded_config(&config_path, "")?;
-    fs::create_dir_all(temp.path().join(".metastack/cron"))?;
-    let workflow_path = temp.path().join(".metastack/cron/resume.md");
+    fs::create_dir_all(temp.path().join(format!("{}/cron", branding::PROJECT_DIR)))?;
+    let workflow_path = temp
+        .path()
+        .join(format!("{}/cron/resume.md", branding::PROJECT_DIR));
     fs::write(
         &workflow_path,
         r#"---
@@ -1109,22 +1153,27 @@ fn cron_resume_rejects_runs_still_marked_running() -> Result<(), Box<dyn Error>>
     let temp = tempdir()?;
     let config_path = temp.path().join("metastack.toml");
     write_onboarded_config(&config_path, "")?;
-    fs::create_dir_all(temp.path().join(".metastack/cron/.runtime/runs"))?;
+    fs::create_dir_all(
+        temp.path()
+            .join(format!("{}/cron/.runtime/runs", branding::PROJECT_DIR)),
+    )?;
 
     let now = chrono::Utc::now().to_rfc3339();
     fs::write(
-        temp.path()
-            .join(".metastack/cron/.runtime/runs/running-demo.json"),
+        temp.path().join(format!(
+            "{}/cron/.runtime/runs/running-demo.json",
+            branding::PROJECT_DIR
+        )),
         format!(
             r#"{{
   "version": 1,
   "run_id": "running-demo",
   "job_name": "demo",
-  "definition_path": ".metastack/cron/demo.md",
+  "definition_path": "{project_dir}/cron/demo.md",
   "source": {{
     "kind": "repository",
     "label": "repository",
-    "path": ".metastack/cron"
+    "path": "{project_dir}/cron"
   }},
   "trigger": "manual",
   "status": "running",
@@ -1135,10 +1184,11 @@ fn cron_resume_rejects_runs_still_marked_running() -> Result<(), Box<dyn Error>>
     "max_attempts": 1,
     "backoff_seconds": 0
   }},
-  "log_path": ".metastack/cron/.runtime/logs/running-demo.log",
+  "log_path": "{project_dir}/cron/.runtime/logs/running-demo.log",
   "steps": [],
   "attempts": []
-}}"#
+}}"#,
+            project_dir = branding::PROJECT_DIR,
         ),
     )?;
 
@@ -1159,7 +1209,9 @@ fn cron_resume_rejects_runs_still_marked_running() -> Result<(), Box<dyn Error>>
 fn cron_validate_accepts_shipped_sample_workflows() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let config_path = temp.path().join("metastack.toml");
-    let repo_cron_dir = temp.path().join(".metastack/cron/samples");
+    let repo_cron_dir = temp
+        .path()
+        .join(format!("{}/cron/samples", branding::PROJECT_DIR));
     write_onboarded_config(&config_path, "")?;
     fs::create_dir_all(&repo_cron_dir)?;
 

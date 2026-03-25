@@ -32,6 +32,7 @@ use crate::backlog::{
     BacklogIssueMetadata, INDEX_FILE_NAME, ManagedFileRecord, save_issue_metadata,
     write_issue_description,
 };
+use crate::branding;
 use crate::cli::{BacklogImproveArgs, BacklogImproveModeArg, RunAgentArgs};
 use crate::config::AGENT_ROUTE_BACKLOG_IMPROVE;
 use crate::fs::{
@@ -885,7 +886,7 @@ fn render_improvement_dashboard(frame: &mut Frame<'_>, app: &ImprovementDashboar
                 ("Esc", "cancel"),
             ]),
         ]),
-        panel_title("meta backlog improve", false),
+        panel_title(format!("{} backlog improve", branding::COMMAND_NAME), false),
     );
     frame.render_widget(header, outer[0]);
 
@@ -1100,7 +1101,10 @@ fn continue_issue_with_follow_up_loading(
         continuation,
     )
     .with_context(|| {
-        "meta backlog improve requires a configured local agent to continue backlog issue review"
+        format!(
+            "{} backlog improve requires a configured local agent to continue backlog issue review",
+            branding::COMMAND_NAME
+        )
     })?;
     let parsed: ImprovementOutput =
         parse_agent_json(&report.stdout, "backlog improvement follow-up")?;
@@ -1351,7 +1355,7 @@ fn render_improvement_review(frame: &mut Frame<'_>, app: &ImprovementReviewApp) 
             Line::from(app.output.summary.clone()),
             key_hints(&review_key_hints(route, !app.questions.is_empty())),
         ]),
-        panel_title("meta backlog improve", false),
+        panel_title(format!("{} backlog improve", branding::COMMAND_NAME), false),
     );
     frame.render_widget(header, outer[0]);
 
@@ -1936,7 +1940,7 @@ fn render_instruction_prompt(frame: &mut Frame<'_>, app: &InstructionPromptApp) 
             )),
             key_hints(&hints),
         ]),
-        panel_title("meta backlog improve", false),
+        panel_title(format!("{} backlog improve", branding::COMMAND_NAME), false),
     );
     frame.render_widget(header, outer[0]);
 
@@ -2514,7 +2518,7 @@ fn analyze_issue(
         run_agent_capture(&agent_args)
     }
     .with_context(|| {
-        "meta backlog improve requires a configured local agent to review repo-scoped backlog issues"
+        format!("{} backlog improve requires a configured local agent to review repo-scoped backlog issues", branding::COMMAND_NAME)
     })?;
     let parsed: ImprovementOutput =
         parse_agent_json(&output.stdout, "backlog improvement proposal")?;
@@ -3042,7 +3046,7 @@ Instructions:\n\
 2. Inspect issue hygiene gaps: weak title, weak description, missing acceptance criteria, absent or unclear labels, missing priority/estimate, and opportunities to group work under an existing parent issue.\n\
 3. Stay inside the provided repository scope. Do not invent cross-repo work or new storage models.\n\
 4. When you propose a parent issue, choose only from the provided related backlog issue catalog and only when the relationship is strong.\n\
-5. When you propose description changes, return the full Markdown description ready for `.metastack/backlog/<ISSUE>/index.md`.\n\
+5. When you propose description changes, return the full Markdown description ready for `{project_dir}/backlog/<ISSUE>/index.md`.\n\
 6. In `basic` mode, prefer modest rewrites and safe metadata cleanup. In `advanced` mode, you may rewrite more substantially and use structure changes when justified.\n\
 7. First choose exactly one route:\n\
 - `no_update_needed`: the issue is already strong enough. Do not propose changes.\n\
@@ -3106,6 +3110,7 @@ Instructions:\n\
         children = issue.children.len(),
         url = issue.url,
         current_description_block = render_fenced_block("md", current_description),
+        project_dir = branding::PROJECT_DIR,
     ))
 }
 

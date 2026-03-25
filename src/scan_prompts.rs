@@ -1,3 +1,4 @@
+use crate::branding;
 use crate::repo_target::RepoTarget;
 
 pub(crate) struct ScanDocumentPrompt {
@@ -8,13 +9,18 @@ pub(crate) struct ScanDocumentPrompt {
 const SCAN_DOCUMENT_PROMPTS: [ScanDocumentPrompt; 7] = [
     ScanDocumentPrompt {
         file_name: "ARCHITECTURE.md",
-        instructions: r#"# Prompt Instructions: Generate ARCHITECTURE.md
+        instructions: concat!(
+            r#"# Prompt Instructions: Generate ARCHITECTURE.md
 
 ## Role & Goal
-You are an expert Software Architect analyzing the current repository. Your goal is to create or update `.metastack/codebase/ARCHITECTURE.md` to document the structural design, data flow, and core layers of the system.
+You are an expert Software Architect analyzing the current repository. Your goal is to create or update `"#,
+            env!("BRAND_PROJECT_DIR"),
+            r#"/codebase/ARCHITECTURE.md` to document the structural design, data flow, and core layers of the system.
 
 ## Action Steps
-1. Start with `.metastack/codebase/SCAN.md`, then inspect the main manifests, entrypoints, and top-level modules it references.
+1. Start with `"#,
+            env!("BRAND_PROJECT_DIR"),
+            r#"/codebase/SCAN.md`, then inspect the main manifests, entrypoints, and top-level modules it references.
 2. Identify the persistence, domain, API/service, integration, background job, and application layers that actually exist in this repo.
 3. Review the main command, app, worker, server, or library entry points and trace the major call paths.
 4. Identify cross-cutting concerns such as auth, error handling, configuration, logging, ownership boundaries, caching, and file processing.
@@ -36,14 +42,18 @@ The output file must exactly follow this markdown structure:
 ## Output Constraints
 - Keep descriptions concise and bulleted.
 - Provide explicit repo-relative file paths for examples.
-- Do not repeat the same information extensively between sections."#,
+- Do not repeat the same information extensively between sections."#
+        ),
     },
     ScanDocumentPrompt {
         file_name: "CONCERNS.md",
-        instructions: r#"# Prompt Instructions: Generate CONCERNS.md
+        instructions: concat!(
+            r#"# Prompt Instructions: Generate CONCERNS.md
 
 ## Role & Goal
-You are a Principal Security & Performance Engineer conducting a codebase audit. Your goal is to create or update `.metastack/codebase/CONCERNS.md` to catalog security issues, performance bottlenecks, technical debt, scaling limits, and architectural risks.
+You are a Principal Security & Performance Engineer conducting a codebase audit. Your goal is to create or update `"#,
+            env!("BRAND_PROJECT_DIR"),
+            r#"/codebase/CONCERNS.md` to catalog security issues, performance bottlenecks, technical debt, scaling limits, and architectural risks.
 
 ## Action Steps
 1. Search for exposed secrets, committed credentials, unsafe shelling, or unvalidated external inputs.
@@ -70,14 +80,18 @@ The output file must exactly follow this markdown structure:
 
 ## Output Constraints
 - Categorize roughly by priority/impact severity.
-- Provide clearly defined impacts and actionable recommendations for each concern."#,
+- Provide clearly defined impacts and actionable recommendations for each concern."#
+        ),
     },
     ScanDocumentPrompt {
         file_name: "CONVENTIONS.md",
-        instructions: r#"# Prompt Instructions: Generate CONVENTIONS.md
+        instructions: concat!(
+            r#"# Prompt Instructions: Generate CONVENTIONS.md
 
 ## Role & Goal
-You are a Staff Engineer standardizing codebase practices. Your goal is to create or update `.metastack/codebase/CONVENTIONS.md` to document the naming patterns, code style, imports, comments, and error handling practices actively used in this repository.
+You are a Staff Engineer standardizing codebase practices. Your goal is to create or update `"#,
+            env!("BRAND_PROJECT_DIR"),
+            r#"/codebase/CONVENTIONS.md` to document the naming patterns, code style, imports, comments, and error handling practices actively used in this repository.
 
 ## Action Steps
 1. Analyze the file tree to determine folder and file naming conventions.
@@ -105,14 +119,18 @@ The output file must exactly follow this markdown structure:
 
 ## Output Constraints
 - Provide specific, illustrative, and brief code snippets for every convention.
-- Emphasize the practices actually adopted in the codebase today."#,
+- Emphasize the practices actually adopted in the codebase today."#
+        ),
     },
     ScanDocumentPrompt {
         file_name: "INTEGRATIONS.md",
-        instructions: r#"# Prompt Instructions: Generate INTEGRATIONS.md
+        instructions: concat!(
+            r#"# Prompt Instructions: Generate INTEGRATIONS.md
 
 ## Role & Goal
-You are an Integration Architect mapping external dependencies. Your goal is to create or update `.metastack/codebase/INTEGRATIONS.md` summarizing third-party APIs, SaaS tools, and infrastructure services connected to the codebase.
+You are an Integration Architect mapping external dependencies. Your goal is to create or update `"#,
+            env!("BRAND_PROJECT_DIR"),
+            r#"/codebase/INTEGRATIONS.md` summarizing third-party APIs, SaaS tools, and infrastructure services connected to the codebase.
 
 ## Action Steps
 1. Scan manifests, lockfiles, and config for API SDKs, hosted services, observability tools, auth providers, storage clients, and deployment tooling.
@@ -140,14 +158,18 @@ The output file must exactly follow this markdown structure:
 
 ## Output Constraints
 - Specify exact SDK or package names and versions for major tools when manifests expose them.
-- Explain where each integration is wired in the repo with explicit file paths."#,
+- Explain where each integration is wired in the repo with explicit file paths."#
+        ),
     },
     ScanDocumentPrompt {
         file_name: "STACK.md",
-        instructions: r#"# Prompt Instructions: Generate STACK.md
+        instructions: concat!(
+            r#"# Prompt Instructions: Generate STACK.md
 
 ## Role & Goal
-You are a Lead Developer documenting the tech stack. Your goal is to create or update `.metastack/codebase/STACK.md` to detail the languages, runtimes, frameworks, and libraries powering the repository.
+You are a Lead Developer documenting the tech stack. Your goal is to create or update `"#,
+            env!("BRAND_PROJECT_DIR"),
+            r#"/codebase/STACK.md` to detail the languages, runtimes, frameworks, and libraries powering the repository.
 
 ## Action Steps
 1. Review the root manifest and workspace config to identify languages, package managers, build tools, and runtime requirements.
@@ -170,21 +192,27 @@ The output file must exactly follow this markdown structure:
 
 ## Output Constraints
 - Include exact version numbers of major frameworks and libraries when manifests expose them.
-- Provide a brief context note about what each major tool is used for in this repo."#,
+- Provide a brief context note about what each major tool is used for in this repo."#
+        ),
     },
     ScanDocumentPrompt {
         file_name: "STRUCTURE.md",
-        instructions: r#"# Prompt Instructions: Generate STRUCTURE.md
+        instructions: concat!(
+            r#"# Prompt Instructions: Generate STRUCTURE.md
 
 ## Role & Goal
-You are a Codebase Guide mapping repository taxonomy. Your goal is to create or update `.metastack/codebase/STRUCTURE.md` to explain the directory layout, package purposes, key file locations, and feature-extension patterns.
+You are a Codebase Guide mapping repository taxonomy. Your goal is to create or update `"#,
+            env!("BRAND_PROJECT_DIR"),
+            r#"/codebase/STRUCTURE.md` to explain the directory layout, package purposes, key file locations, and feature-extension patterns.
 
 ## Action Steps
 1. Run a shallow tree scan of the root and the major source/test/docs directories.
 2. Determine the role of each major directory, application, package, or crate.
 3. Identify the main entry points for the repo's runnable surfaces.
 4. Deduce the common pattern for adding a new feature, module, service, command, or shared utility.
-5. Explain the role of special non-code directories such as `.metastack`, `docs`, `scripts`, `assets`, `tmp`, or workspace-specific folders when present.
+5. Explain the role of special non-code directories such as `"#,
+            env!("BRAND_PROJECT_DIR"),
+            r#"`, `docs`, `scripts`, `assets`, `tmp`, or workspace-specific folders when present.
 
 ## Required Document Structure
 The output file must exactly follow this markdown structure:
@@ -195,19 +223,25 @@ The output file must exactly follow this markdown structure:
 - `## Key File Locations` (Entry points, config files, core logic, testing locations)
 - `## Naming Conventions` (Files, directories, modules, hooks/components, commands)
 - `## Where to Add New Code` (Highly actionable checklists for new features, components, utilities, styles, commands, or services)
-- `## Special Directories` (Explanation of `.metastack`, `docs`, `assets`, `scripts`, `tmp`, etc.)
+- `## Special Directories` (Explanation of `"#,
+            env!("BRAND_PROJECT_DIR"),
+            r#"`, `docs`, `assets`, `scripts`, `tmp`, etc.)
 - Footer: `---` \n `*Structure analysis: YYYY-MM-DD*`
 
 ## Output Constraints
 - The ASCII directory tree must accurately reflect the current workspace without becoming overwhelmingly deep.
-- The `Where to Add New Code` section must act like a practical how-to for future agents."#,
+- The `Where to Add New Code` section must act like a practical how-to for future agents."#
+        ),
     },
     ScanDocumentPrompt {
         file_name: "TESTING.md",
-        instructions: r#"# Prompt Instructions: Generate TESTING.md
+        instructions: concat!(
+            r#"# Prompt Instructions: Generate TESTING.md
 
 ## Role & Goal
-You are a QA Automation Lead surveying the testing strategy. Your goal is to create or update `.metastack/codebase/TESTING.md` to document the test frameworks, mocking patterns, file organization, and test execution rules in the repository.
+You are a QA Automation Lead surveying the testing strategy. Your goal is to create or update `"#,
+            env!("BRAND_PROJECT_DIR"),
+            r#"/codebase/TESTING.md` to document the test frameworks, mocking patterns, file organization, and test execution rules in the repository.
 
 ## Action Steps
 1. Determine the available test runners from manifests and config files.
@@ -235,7 +269,8 @@ The output file must exactly follow this markdown structure:
 
 ## Output Constraints
 - Include brief code snippets demonstrating how tests and mocks should be written in this repo.
-- Honestly reflect when test coverage is low or missing in significant areas."#,
+- Honestly reflect when test coverage is low or missing in significant areas."#
+        ),
     },
 ];
 
@@ -252,16 +287,20 @@ pub(crate) fn build_scan_agent_prompt(
         "Injected workflow contract:".to_string(),
         workflow_contract.to_string(),
         "Scan only the target repository rooted above. Do not broaden the analysis to parent directories, sibling repositories, or unrelated workspaces.".to_string(),
-        "Refresh the planning context under `.metastack/codebase/`.".to_string(),
-        "Use `.metastack/codebase/SCAN.md` as the deterministic fact base, then inspect the repository as needed to improve accuracy.".to_string(),
+        format!("Refresh the planning context under `{}/codebase/`.", branding::PROJECT_DIR),
+        format!("Use `{}/codebase/SCAN.md` as the deterministic fact base, then inspect the repository as needed to improve accuracy.", branding::PROJECT_DIR),
         "Do not invent missing systems, frameworks, or integrations. If something is absent, say so briefly.".to_string(),
-        "Only edit the required codebase-context files below; leave `.metastack/codebase/SCAN.md` as the generated source-of-truth snapshot from the CLI.".to_string(),
+        format!("Only edit the required codebase-context files below; leave `{}/codebase/SCAN.md` as the generated source-of-truth snapshot from the CLI.", branding::PROJECT_DIR),
         String::new(),
         "Required output files:".to_string(),
     ];
 
     for spec in SCAN_DOCUMENT_PROMPTS {
-        lines.push(format!("- `.metastack/codebase/{}`", spec.file_name));
+        lines.push(format!(
+            "- `{}/codebase/{}`",
+            branding::PROJECT_DIR,
+            spec.file_name
+        ));
     }
 
     lines.extend([
@@ -313,9 +352,10 @@ mod tests {
         ));
         assert!(prompt.contains("Scan only the target repository rooted above."));
         assert!(prompt.contains("Required output files:"));
-        assert!(prompt.contains(".metastack/codebase/ARCHITECTURE.md"));
-        assert!(prompt.contains(".metastack/codebase/CONCERNS.md"));
-        assert!(prompt.contains(".metastack/codebase/INTEGRATIONS.md"));
+        let project_dir = crate::branding::PROJECT_DIR;
+        assert!(prompt.contains(&format!("{project_dir}/codebase/ARCHITECTURE.md")));
+        assert!(prompt.contains(&format!("{project_dir}/codebase/CONCERNS.md")));
+        assert!(prompt.contains(&format!("{project_dir}/codebase/INTEGRATIONS.md")));
         assert!(prompt.contains("# Prompt Instructions: Generate ARCHITECTURE.md"));
         assert!(prompt.contains("# Prompt Instructions: Generate CONCERNS.md"));
         assert!(prompt.contains("# Prompt Instructions: Generate INTEGRATIONS.md"));

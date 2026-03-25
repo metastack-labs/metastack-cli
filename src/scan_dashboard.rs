@@ -12,6 +12,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::ListItem;
 use ratatui::{Frame, Terminal};
 
+use crate::branding;
 use crate::tui::spaced_list::{spaced_list, spaced_list_item};
 use crate::tui::theme::{Tone, badge, empty_state, key_hints, panel_title, paragraph};
 
@@ -127,7 +128,7 @@ fn render_dashboard(frame: &mut Frame<'_>, data: &ScanDashboardData) {
             Line::from("Live agent output stays hidden while the scan runs."),
             key_hints(&[("Ctrl-C", "exit"), ("Files", "update live")]),
         ]),
-        panel_title("meta scan", false),
+        panel_title(format!("{} scan", branding::COMMAND_NAME), false),
     );
     frame.render_widget(header, outer[0]);
 
@@ -217,7 +218,7 @@ mod tests {
             steps: vec![
                 ScanDashboardRow {
                     label: "Collect repository facts".to_string(),
-                    detail: ".metastack/codebase/SCAN.md is ready".to_string(),
+                    detail: format!("{}/codebase/SCAN.md is ready", crate::branding::PROJECT_DIR),
                     state: ScanItemState::Complete,
                 },
                 ScanDashboardRow {
@@ -228,31 +229,34 @@ mod tests {
             ],
             files: vec![
                 ScanDashboardRow {
-                    label: ".metastack/codebase/SCAN.md".to_string(),
+                    label: format!("{}/codebase/SCAN.md", crate::branding::PROJECT_DIR),
                     detail: "deterministic fact base".to_string(),
                     state: ScanItemState::Complete,
                 },
                 ScanDashboardRow {
-                    label: ".metastack/codebase/ARCHITECTURE.md".to_string(),
+                    label: format!("{}/codebase/ARCHITECTURE.md", crate::branding::PROJECT_DIR),
                     detail: "agent-authored context".to_string(),
                     state: ScanItemState::Running,
                 },
                 ScanDashboardRow {
-                    label: ".metastack/codebase/TESTING.md".to_string(),
+                    label: format!("{}/codebase/TESTING.md", crate::branding::PROJECT_DIR),
                     detail: "agent-authored context".to_string(),
                     state: ScanItemState::Pending,
                 },
             ],
-            log_path: ".metastack/agents/sessions/scan.log".to_string(),
+            log_path: format!("{}/agents/sessions/scan.log", crate::branding::PROJECT_DIR),
         };
 
         let snapshot = render_snapshot(&data, 120, 28).expect("snapshot should render");
 
-        assert!(snapshot.contains("meta scan"));
+        assert!(snapshot.contains(&format!("{} scan", branding::COMMAND_NAME)));
         assert!(snapshot.contains("Collect repository facts"));
         assert!(snapshot.contains("Refresh codebase docs with `scan-stub`"));
-        assert!(snapshot.contains(".metastack/codebase/ARCHITECTURE.md"));
-        assert!(snapshot.contains("Agent log: .metastack/agents/sessions/scan.log"));
+        let project_dir = crate::branding::PROJECT_DIR;
+        assert!(snapshot.contains(&format!("{project_dir}/codebase/ARCHITECTURE.md")));
+        assert!(snapshot.contains(&format!(
+            "Agent log: {project_dir}/agents/sessions/scan.log"
+        )));
     }
 
     #[test]
@@ -262,7 +266,7 @@ mod tests {
             status_line: "Waiting for the first agent update".to_string(),
             steps: Vec::new(),
             files: Vec::new(),
-            log_path: ".metastack/agents/sessions/scan.log".to_string(),
+            log_path: format!("{}/agents/sessions/scan.log", crate::branding::PROJECT_DIR),
         };
 
         let snapshot = render_snapshot(&data, 84, 28).expect("snapshot should render");

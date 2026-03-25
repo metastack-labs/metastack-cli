@@ -332,10 +332,10 @@ impl ListenCycleData {
                         .to_string(),
                     phase: SessionPhase::BriefReady,
                     summary: "Brief ready | backlog MET-14 | worker active".to_string(),
-                    brief_path: Some(".metastack/agents/briefs/MET-13.md".to_string()),
+                    brief_path: Some(format!("{}/agents/briefs/MET-13.md", crate::branding::PROJECT_DIR)),
                     backlog_issue_identifier: Some("MET-14".to_string()),
                     backlog_issue_title: Some("Technical: Agent Daemon".to_string()),
-                    backlog_path: Some(".metastack/backlog/MET-14".to_string()),
+                    backlog_path: Some(format!("{}/backlog/MET-14", crate::branding::PROJECT_DIR)),
                     workspace_path: Some("/tmp/metastack-cli-workspace/MET-13".to_string()),
                     branch: Some("met-13-agent-daemon".to_string()),
                     pull_request: PullRequestSummary {
@@ -372,7 +372,7 @@ impl ListenCycleData {
                         },
                         repair: None,
                     },
-                    log_path: Some(".metastack/agents/sessions/MET-13.log".to_string()),
+                    log_path: Some(format!("{}/agents/sessions/MET-13.log", crate::branding::PROJECT_DIR)),
                     origin: SessionOrigin::Listen,
                 },
                 AgentSession {
@@ -419,7 +419,7 @@ impl ListenCycleData {
                         },
                         repair: None,
                     },
-                    log_path: Some(".metastack/agents/sessions/MET-17.log".to_string()),
+                    log_path: Some(format!("{}/agents/sessions/MET-17.log", crate::branding::PROJECT_DIR)),
                     origin: state::SessionOrigin::Execute,
                 },
             ],
@@ -494,24 +494,24 @@ fn demo_session_details(reference_now: u64) -> HashMap<String, ListenSessionDeta
                 }),
                 references: store::SessionDetailReferences {
                     workspace_path: Some("/tmp/metastack-cli-workspace/MET-13".to_string()),
-                    backlog_path: Some(".metastack/backlog/MET-14".to_string()),
-                    brief_path: Some(".metastack/agents/briefs/MET-13.md".to_string()),
+                    backlog_path: Some(format!("{}/backlog/MET-14", crate::branding::PROJECT_DIR)),
+                    brief_path: Some(format!("{}/agents/briefs/MET-13.md", crate::branding::PROJECT_DIR)),
                     workpad_comment_id: Some("comment-met-13".to_string()),
-                    log_path: Some(".metastack/agents/sessions/MET-13.log".to_string()),
+                    log_path: Some(format!("{}/agents/sessions/MET-13.log", crate::branding::PROJECT_DIR)),
                     branch: Some("met-13-agent-daemon".to_string()),
                 },
                 prompt_context: vec![
                     store::SessionContextReference {
                         label: "Brief".to_string(),
-                        value: ".metastack/agents/briefs/MET-13.md".to_string(),
+                        value: format!("{}/agents/briefs/MET-13.md", crate::branding::PROJECT_DIR),
                     },
                     store::SessionContextReference {
                         label: "Backlog index".to_string(),
-                        value: ".metastack/backlog/MET-14/index.md".to_string(),
+                        value: format!("{}/backlog/MET-14/index.md", crate::branding::PROJECT_DIR),
                     },
                     store::SessionContextReference {
                         label: "Attachment context manifest".to_string(),
-                        value: ".metastack/agents/issue-context/MET-13/README.md".to_string(),
+                        value: format!("{}/agents/issue-context/MET-13/README.md", crate::branding::PROJECT_DIR),
                     },
                 ],
                 milestones: vec![
@@ -593,12 +593,12 @@ fn demo_session_details(reference_now: u64) -> HashMap<String, ListenSessionDeta
                     backlog_path: None,
                     brief_path: None,
                     workpad_comment_id: None,
-                    log_path: Some(".metastack/agents/sessions/MET-17.log".to_string()),
+                    log_path: Some(format!("{}/agents/sessions/MET-17.log", crate::branding::PROJECT_DIR)),
                     branch: Some("met-17-branch-pr-reconciliation".to_string()),
                 },
                 prompt_context: vec![store::SessionContextReference {
                     label: "Attachment context manifest".to_string(),
-                    value: ".metastack/agents/issue-context/MET-17/README.md".to_string(),
+                    value: format!("{}/agents/issue-context/MET-17/README.md", crate::branding::PROJECT_DIR),
                 }],
                 milestones: vec![store::SessionMilestone {
                     at_epoch_seconds: reference_now - 2_940,
@@ -2110,7 +2110,7 @@ fn workspace_entry_is_planning_artifact(entry: &str) -> bool {
         entry.trim()
     };
     let path = path.rsplit(" -> ").next().unwrap_or(path).trim();
-    path.starts_with(".metastack/")
+    path.starts_with(&format!("{}/", crate::branding::PROJECT_DIR))
 }
 
 fn workspace_has_meaningful_progress(workspace_path: &Path) -> Result<bool> {
@@ -3507,7 +3507,7 @@ fn build_dashboard_data(
         })
         .unwrap_or_else(|| "n/a".to_string());
     ListenDashboardData {
-        title: "meta listen".to_string(),
+        title: format!("{} listen", crate::branding::COMMAND_NAME),
         scope: cycle.scope.clone(),
         watch_scope: cycle.watch_scope.clone(),
         cycle_summary: format!(
@@ -4395,7 +4395,10 @@ mod tests {
     fn render_summary_includes_resolved_execution_agent() {
         let cycle = ListenCycleData::demo(
             Path::new("."),
-            ".metastack/agents/sessions/listen-state.json".to_string(),
+            format!(
+                "{}/agents/sessions/listen-state.json",
+                crate::branding::PROJECT_DIR
+            ),
         );
         let runtime = DashboardRuntimeContext {
             started_at_epoch_seconds: 1_773_568_249,
@@ -4671,10 +4674,13 @@ mod tests {
             issue_url: "https://linear.app/issues/eng-10163".to_string(),
             phase: SessionPhase::Running,
             summary: "Running".to_string(),
-            brief_path: Some(".metastack/agents/briefs/ENG-10163.md".to_string()),
+            brief_path: Some(format!(
+                "{}/agents/briefs/ENG-10163.md",
+                crate::branding::PROJECT_DIR
+            )),
             backlog_issue_identifier: Some("TECH-1".to_string()),
             backlog_issue_title: Some("Backlog".to_string()),
-            backlog_path: Some(".metastack/backlog/TECH-1".to_string()),
+            backlog_path: Some(format!("{}/backlog/TECH-1", crate::branding::PROJECT_DIR)),
             workspace_path: Some("/tmp/ENG-10163".to_string()),
             branch: Some("eng-10163".to_string()),
             pull_request: PullRequestSummary::default(),
@@ -4714,7 +4720,10 @@ mod tests {
         let cycle = ListenCycleData::loading(
             "MET / MetaStack CLI".to_string(),
             "all assignees".to_string(),
-            ".metastack/agents/sessions/listen-state.json".to_string(),
+            format!(
+                "{}/agents/sessions/listen-state.json",
+                crate::branding::PROJECT_DIR
+            ),
         );
 
         assert_eq!(cycle.scope, "MET / MetaStack CLI");
@@ -4732,7 +4741,10 @@ mod tests {
         );
         assert_eq!(
             cycle.state_file,
-            ".metastack/agents/sessions/listen-state.json"
+            format!(
+                "{}/agents/sessions/listen-state.json",
+                crate::branding::PROJECT_DIR
+            )
         );
         assert_eq!(cycle.rate_limits, None);
     }
@@ -4741,7 +4753,10 @@ mod tests {
     fn cycle_state_snapshot_refreshes_sessions_without_resetting_linear_data() {
         let mut cycle = ListenCycleData::demo(
             Path::new("."),
-            ".metastack/agents/sessions/listen-state.json".to_string(),
+            format!(
+                "{}/agents/sessions/listen-state.json",
+                crate::branding::PROJECT_DIR
+            ),
         );
         let existing_pending_count = cycle.pending_issues.len();
         let existing_pending_identifier = cycle
@@ -4800,7 +4815,10 @@ mod tests {
         run_git(repo, &["add", "README.md"]).expect("git add should succeed");
         run_git(repo, &["commit", "-m", "init"]).expect("git commit should succeed");
 
-        let brief_path = repo.join(".metastack/agents/briefs/MET-36.md");
+        let brief_path = repo.join(format!(
+            "{}/agents/briefs/MET-36.md",
+            crate::branding::PROJECT_DIR
+        ));
         fs::create_dir_all(
             brief_path
                 .parent()
@@ -4849,11 +4867,15 @@ mod tests {
     fn render_agent_prompt_includes_truncated_ticket_discussion_excerpt() {
         let temp = tempdir().expect("temp dir should build");
         let workspace = temp.path();
-        fs::create_dir_all(workspace.join(".metastack/backlog/MET-24/context"))
-            .expect("discussion dir should build");
-        fs::create_dir_all(workspace.join(".metastack")).expect("metastack dir should build");
+        fs::create_dir_all(workspace.join(format!(
+            "{}/backlog/MET-24/context",
+            crate::branding::PROJECT_DIR
+        )))
+        .expect("discussion dir should build");
+        fs::create_dir_all(workspace.join(crate::branding::PROJECT_DIR))
+            .expect("metastack dir should build");
         fs::write(
-            workspace.join(".metastack/meta.json"),
+            workspace.join(format!("{}/meta.json", crate::branding::PROJECT_DIR)),
             r#"{
   "sync": {
     "discussion_prompt_char_limit": 80
@@ -4863,7 +4885,7 @@ mod tests {
         )
         .expect("meta should write");
         fs::write(
-            workspace.join(".metastack/backlog/MET-24/context/ticket-discussion.md"),
+            workspace.join(format!("{}/backlog/MET-24/context/ticket-discussion.md", crate::branding::PROJECT_DIR)),
             "# Ticket Discussion\n\nOld details that should be truncated away.\n\nNewest discussion tail.",
         )
         .expect("discussion should write");
@@ -4968,7 +4990,7 @@ mod tests {
     ) -> Result<(tempfile::TempDir, AgentDaemon<ReassignmentClient>)> {
         let temp = tempdir()?;
         let repo = temp.path();
-        fs::create_dir_all(repo.join(".metastack"))?;
+        fs::create_dir_all(repo.join(crate::branding::PROJECT_DIR))?;
         let store = ListenProjectStore::resolve(repo, None)?;
         let service = LinearService::new(ReassignmentClient { issue }, Some("MET".to_string()));
         let daemon = AgentDaemon {
@@ -5134,7 +5156,7 @@ mod tests {
     async fn reconcile_sessions_marks_reassigned_issue_completed_after_turn_ends() -> Result<()> {
         let temp = tempdir()?;
         let repo = temp.path();
-        fs::create_dir_all(repo.join(".metastack"))?;
+        fs::create_dir_all(repo.join(crate::branding::PROJECT_DIR))?;
         run_git(repo, &["init"])?;
         run_git(repo, &["config", "user.email", "listen@example.com"])?;
         run_git(repo, &["config", "user.name", "Listen Tests"])?;

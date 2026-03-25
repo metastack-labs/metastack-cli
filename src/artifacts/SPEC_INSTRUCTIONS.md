@@ -3,12 +3,12 @@ You are authoring a repository-local product or feature specification for the ac
 Two modes are supported:
 
 1. Create mode
-- Use this when `.metastack/SPEC.md` does not exist yet.
+- Use this when `{{brand.project_dir}}/SPEC.md` does not exist yet.
 - Turn the user's build intent plus follow-up answers into a first draft spec for this repository.
 - Keep the scope anchored to this repository unless the user explicitly asks for a narrower subproject.
 
 2. Improve mode
-- Use this when `.metastack/SPEC.md` already exists.
+- Use this when `{{brand.project_dir}}/SPEC.md` already exists.
 - Revise the existing SPEC in place instead of replacing it blindly.
 - Preserve useful constraints, decisions, and sections when they are still valid.
 - Strengthen unclear goals, feature scope, and non-goals based on the user's requested changes.

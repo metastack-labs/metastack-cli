@@ -790,7 +790,8 @@ fn resolve_project_identity(
 ) -> Result<ListenProjectIdentity> {
     let requested_root = canonicalize_existing_dir(root)?;
     let source_root = resolve_source_root(&requested_root)?;
-    let metastack_root = canonicalize_existing_dir(&source_root.join(".metastack"))?;
+    let metastack_root =
+        canonicalize_existing_dir(&source_root.join(crate::branding::PROJECT_DIR))?;
     let source_label = source_root
         .file_name()
         .and_then(OsStr::to_str)
@@ -813,7 +814,7 @@ fn resolve_project_identity(
 }
 
 /// Resolves the source repository root for a requested path, collapsing git worktrees back to the
-/// owning repository when the shared `.metastack/` directory lives there.
+/// owning repository when the shared project directory (see `crate::branding::PROJECT_DIR`) lives there.
 ///
 /// Returns an error when the requested path cannot be resolved.
 pub(crate) fn resolve_source_project_root(root: &Path) -> Result<PathBuf> {
@@ -830,7 +831,7 @@ fn resolve_source_root(root: &Path) -> Result<PathBuf> {
         let common_dir = PathBuf::from(common_dir);
         if common_dir.file_name() == Some(OsStr::new(".git"))
             && let Some(source_root) = common_dir.parent()
-            && source_root.join(".metastack").is_dir()
+            && source_root.join(crate::branding::PROJECT_DIR).is_dir()
         {
             return canonicalize_existing_dir(source_root);
         }
@@ -1370,7 +1371,7 @@ mod tests {
         let temp = tempdir()?;
         let repo_root = temp.path().join("repo");
         let worktree_root = temp.path().join("repo-worktree");
-        fs::create_dir_all(repo_root.join(".metastack"))?;
+        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
         std::process::Command::new("git")
             .args(["init", "-b", "main", repo_root.to_string_lossy().as_ref()])
             .status()?;
@@ -1427,7 +1428,7 @@ mod tests {
     #[test]
     fn project_key_hash_is_stable_for_same_metastack_root() -> Result<()> {
         let temp = tempdir()?;
-        let metastack_root = temp.path().join("repo").join(".metastack");
+        let metastack_root = temp.path().join("repo").join(crate::branding::PROJECT_DIR);
         fs::create_dir_all(&metastack_root)?;
 
         assert_eq!(
@@ -1451,7 +1452,7 @@ mod tests {
         let temp = tempdir()?;
         let repo_root = temp.path().join("repo");
         let config_path = temp.path().join("metastack.toml");
-        fs::create_dir_all(repo_root.join(".metastack"))?;
+        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
         let data_root = data_root_from_config_path(&config_path)?;
         let store = ListenProjectStore::resolve_with_data_root(
             &repo_root,
@@ -1477,10 +1478,16 @@ mod tests {
             issue_url: format!("https://linear.app/metastack/{issue_identifier}"),
             phase,
             summary: format!("{issue_identifier} summary"),
-            brief_path: Some(format!(".metastack/agents/briefs/{issue_identifier}.md")),
+            brief_path: Some(format!(
+                "{}/agents/briefs/{issue_identifier}.md",
+                crate::branding::PROJECT_DIR
+            )),
             backlog_issue_identifier: Some(format!("TECH-{issue_identifier}")),
             backlog_issue_title: Some(format!("Backlog for {issue_identifier}")),
-            backlog_path: Some(format!(".metastack/backlog/{issue_identifier}")),
+            backlog_path: Some(format!(
+                "{}/backlog/{issue_identifier}",
+                crate::branding::PROJECT_DIR
+            )),
             workspace_path: Some(format!("/tmp/{issue_identifier}")),
             branch: Some(format!("branch-{issue_identifier}")),
             pull_request: Default::default(),
@@ -1520,7 +1527,7 @@ mod tests {
         let temp = tempdir()?;
         let repo_root = temp.path().join("repo");
         let data_root = temp.path().join("data");
-        fs::create_dir_all(repo_root.join(".metastack"))?;
+        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
         let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
         store.ensure_layout()?;
         fs::write(store.paths().state_path.clone(), "{}")?;
@@ -1530,7 +1537,10 @@ mod tests {
                 pid: 99_999,
                 acquired_at_epoch_seconds: 0,
                 source_root: repo_root.display().to_string(),
-                metastack_root: repo_root.join(".metastack").display().to_string(),
+                metastack_root: repo_root
+                    .join(crate::branding::PROJECT_DIR)
+                    .display()
+                    .to_string(),
             },
         )?;
         seed_state(
@@ -1567,7 +1577,7 @@ mod tests {
         let temp = tempdir()?;
         let repo_root = temp.path().join("repo");
         let data_root = temp.path().join("data");
-        fs::create_dir_all(repo_root.join(".metastack"))?;
+        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
         let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
 
         let mut stale = default_session("ENG-10163", SessionPhase::Blocked, 100);
@@ -1595,7 +1605,7 @@ mod tests {
         let temp = tempdir()?;
         let repo_root = temp.path().join("repo");
         let data_root = temp.path().join("data");
-        fs::create_dir_all(repo_root.join(".metastack"))?;
+        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
         let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
 
         let mut live = default_session("ENG-10163", SessionPhase::Running, 100);
@@ -1624,7 +1634,7 @@ mod tests {
         let temp = tempdir()?;
         let repo_root = temp.path().join("repo");
         let data_root = temp.path().join("data");
-        fs::create_dir_all(repo_root.join(".metastack"))?;
+        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
         let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
         let now = super::now_epoch_seconds();
         let ttl = COMPLETED_SESSION_TTL_SECONDS;
@@ -1667,7 +1677,7 @@ mod tests {
         let temp = tempdir()?;
         let repo_root = temp.path().join("repo");
         let data_root = temp.path().join("data");
-        fs::create_dir_all(repo_root.join(".metastack"))?;
+        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
         let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
         store.ensure_layout()?;
 
@@ -1694,7 +1704,7 @@ mod tests {
         let temp = tempdir()?;
         let repo_root = temp.path().join("repo");
         let data_root = temp.path().join("data");
-        fs::create_dir_all(repo_root.join(".metastack"))?;
+        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
         let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
         store.ensure_layout()?;
 
@@ -1742,7 +1752,7 @@ mod tests {
         let temp = tempdir()?;
         let repo_root = temp.path().join("repo");
         let data_root = temp.path().join("data");
-        fs::create_dir_all(repo_root.join(".metastack"))?;
+        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
         let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
         store.ensure_layout()?;
 
@@ -1781,7 +1791,7 @@ mod tests {
         let temp = tempdir()?;
         let repo_root = temp.path().join("repo");
         let data_root = temp.path().join("data");
-        fs::create_dir_all(repo_root.join(".metastack"))?;
+        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
         let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
         let now = super::now_epoch_seconds();
 
@@ -1818,7 +1828,7 @@ mod tests {
         let temp = tempdir()?;
         let repo_root = temp.path().join("repo");
         let data_root = temp.path().join("data");
-        fs::create_dir_all(repo_root.join(".metastack"))?;
+        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
         let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
         let now = super::now_epoch_seconds();
 
@@ -1857,7 +1867,7 @@ mod tests {
         let temp = tempdir()?;
         let repo_root = temp.path().join("repo");
         let data_root = temp.path().join("data");
-        fs::create_dir_all(repo_root.join(".metastack"))?;
+        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
         let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
         let now = super::now_epoch_seconds();
 
@@ -1878,7 +1888,7 @@ mod tests {
         let temp = tempdir()?;
         let repo_root = temp.path().join("repo");
         let data_root = temp.path().join("data");
-        fs::create_dir_all(repo_root.join(".metastack"))?;
+        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
         let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
         let now = super::now_epoch_seconds();
         let mut child = spawn_sleep_process()?;
@@ -1912,7 +1922,7 @@ mod tests {
         let temp = tempdir()?;
         let repo_root = temp.path().join("repo");
         let data_root = temp.path().join("data");
-        fs::create_dir_all(repo_root.join(".metastack"))?;
+        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
         let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
         let now = super::now_epoch_seconds();
         let mut child = spawn_sleep_process()?;
@@ -1946,7 +1956,7 @@ mod tests {
         let temp = tempdir()?;
         let repo_root = temp.path().join("repo");
         let data_root = temp.path().join("data");
-        fs::create_dir_all(repo_root.join(".metastack"))?;
+        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
         let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
         let now = super::now_epoch_seconds();
 
@@ -1974,7 +1984,7 @@ mod tests {
         let temp = tempdir()?;
         let repo_root = temp.path().join("repo");
         let data_root = temp.path().join("data");
-        fs::create_dir_all(repo_root.join(".metastack"))?;
+        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
         let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
 
         let issue_identifier = "ENG-10170";
@@ -2035,7 +2045,7 @@ mod tests {
         let temp = tempdir()?;
         let repo_root = temp.path().join("repo");
         let data_root = temp.path().join("data");
-        fs::create_dir_all(repo_root.join(".metastack"))?;
+        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
         let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
 
         let issue_identifier = "ENG-10172";
@@ -2073,7 +2083,7 @@ mod tests {
         let temp = tempdir()?;
         let repo_root = temp.path().join("repo");
         let data_root = temp.path().join("data");
-        fs::create_dir_all(repo_root.join(".metastack"))?;
+        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
         let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
 
         let issue_identifier = "ENG-10171";

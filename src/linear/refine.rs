@@ -11,6 +11,7 @@ use crate::backlog::{
     BacklogIssueMetadata, INDEX_FILE_NAME, ManagedFileRecord, save_issue_metadata,
     write_issue_description,
 };
+use crate::branding;
 use crate::cli::{IssueRefineArgs, LinearClientArgs, RunAgentArgs};
 use crate::codebase_context::{
     CodebaseContextSection, MissingCodebaseContextHint, load_codebase_context_bundle,
@@ -108,7 +109,10 @@ pub(crate) async fn run_issue_refine_command(
     let root = canonicalize_existing_dir(&client_args.root)?;
     ensure_planning_layout(&root, false)?;
     if args.passes == 0 {
-        bail!("`meta issues refine` requires `--passes` to be at least 1");
+        bail!(
+            "`{} issues refine` requires `--passes` to be at least 1",
+            branding::COMMAND_NAME
+        );
     }
     let command_context = load_linear_command_context(client_args, cli_default_team)?;
     let mut reports = Vec::with_capacity(args.issues.len());
@@ -227,7 +231,7 @@ async fn refine_issue(
             attachments: Vec::new(),
         })
         .with_context(|| {
-            "meta issues refine requires a configured local agent to critique and rewrite existing issues"
+            format!("{} issues refine requires a configured local agent to critique and rewrite existing issues", branding::COMMAND_NAME)
         })?;
         let parsed: RefinementPassOutput =
             parse_agent_json(&output.stdout, "issue refinement critique/rewrite")?;
@@ -458,7 +462,8 @@ fn guard_listen_issue_refine_apply(identifier: &str) -> Result<()> {
             .is_some_and(|value| value.eq_ignore_ascii_case(identifier))
     {
         bail!(
-            "`meta issues refine {identifier} --apply` is disabled during `meta listen` because it would overwrite the primary Linear issue description; update the workpad comment instead"
+            "`{cmd} issues refine {identifier} --apply` is disabled during `{cmd} listen` because it would overwrite the primary Linear issue description; update the workpad comment instead",
+            cmd = branding::COMMAND_NAME
         );
     }
 
@@ -546,7 +551,7 @@ Repository planning context:\n{planning_context}\n\n\
 Instructions:\n\
 1. Critique the current issue quality for this repository only.\n\
 2. Produce structured findings in these exact categories: `missing_requirements`, `unclear_scope`, `validation_gaps`, `dependency_risks`, and `follow_up_ideas`.\n\
-3. Rewrite the full issue description as polished Markdown ready to save into `.metastack/backlog/<ISSUE>/index.md` and, when explicitly approved, back into Linear.\n\
+3. Rewrite the full issue description as polished Markdown ready to save into `{project_dir}/backlog/<ISSUE>/index.md` and, when explicitly approved, back into Linear.\n\
 4. Keep the rewrite consistent with the configured repository scope. Do not invent a second storage model or work outside this repository.\n\
 5. When the issue changes CLI behavior, include concrete validation commands or command-path checks in the rewrite.\n\
 6. Use the previous pass as critique input when present, but improve it if you find gaps or ambiguity.\n\
@@ -568,6 +573,7 @@ Instructions:\n\
             .map(|state| state.name.as_str())
             .unwrap_or("Unknown"),
         url = issue.url,
+        project_dir = crate::branding::PROJECT_DIR,
     ))
 }
 

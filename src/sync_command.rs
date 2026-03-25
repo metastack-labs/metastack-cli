@@ -15,6 +15,7 @@ use crate::backlog::{
     compute_remote_sync_hash, load_issue_metadata, resolve_backlog_sync_status,
     save_issue_metadata, write_issue_attachment_file,
 };
+use crate::branding;
 use crate::cli::{LinearClientArgs, SyncLinkArgs, SyncPullArgs, SyncPushArgs, SyncStatusArgs};
 use crate::config::load_required_planning_meta;
 use crate::fs::{
@@ -249,9 +250,9 @@ fn build_placeholder_issues(entries: &[BacklogSyncEntry]) -> Vec<SyncDashboardIs
                             .unwrap_or_else(|| slug.clone()),
                         title: entry.title.clone(),
                         description: None,
-                        url: metadata
-                            .map(|m| m.url.clone())
-                            .unwrap_or_else(|| format!(".metastack/backlog/{slug}")),
+                        url: metadata.map(|m| m.url.clone()).unwrap_or_else(|| {
+                            format!("{}/backlog/{slug}", crate::branding::PROJECT_DIR)
+                        }),
                         priority: None,
                         estimate: None,
                         updated_at: "-".to_string(),
@@ -338,9 +339,10 @@ fn build_unlinked_sync_dashboard_issue(entry: &BacklogSyncEntry) -> SyncDashboar
             identifier: slug.clone(),
             title: entry.title.clone(),
             description: Some(format!(
-                "Local backlog entry under `.metastack/backlog/{slug}`. Link it with `meta backlog sync link <ISSUE> --entry {slug}` to enable pull and push."
+                "Local backlog entry under `{}/backlog/{slug}`. Link it with `meta backlog sync link <ISSUE> --entry {slug}` to enable pull and push.",
+                crate::branding::PROJECT_DIR
             )),
-            url: format!(".metastack/backlog/{slug}"),
+            url: format!("{}/backlog/{slug}", crate::branding::PROJECT_DIR),
             priority: None,
             estimate: None,
             updated_at: "local-only".to_string(),
@@ -536,7 +538,7 @@ pub async fn run_sync_link(
     Ok(())
 }
 
-/// Show the current sync state for every backlog entry under `.metastack/backlog/`.
+/// Show the current sync state for every backlog entry under `<PROJECT_DIR>/backlog/`.
 ///
 /// Returns an error when planning metadata is missing, backlog entries cannot be scanned, or
 /// `--fetch` is used and Linear issue state cannot be loaded.
@@ -566,7 +568,10 @@ pub async fn run_sync_status(
                 )?
             );
         } else {
-            println!("No backlog entries found under .metastack/backlog/.");
+            println!(
+                "No backlog entries found under {}/backlog/.",
+                crate::branding::PROJECT_DIR
+            );
         }
         return Ok(());
     }
@@ -824,7 +829,10 @@ async fn run_sync_pull_all(
         if json_output {
             emit_sync_batch_result(json_output, "pull", &summary)?;
         } else {
-            println!("No linked backlog entries found under .metastack/backlog/.");
+            println!(
+                "No linked backlog entries found under {}/backlog/.",
+                crate::branding::PROJECT_DIR
+            );
         }
         return Ok(());
     }
@@ -900,7 +908,10 @@ async fn run_sync_push_all(
         if json_output {
             emit_sync_batch_result(json_output, "push", &summary)?;
         } else {
-            println!("No linked backlog entries found under .metastack/backlog/.");
+            println!(
+                "No linked backlog entries found under {}/backlog/.",
+                crate::branding::PROJECT_DIR
+            );
         }
         return Ok(());
     }
@@ -1520,13 +1531,13 @@ fn sync_dashboard_title(
     default_project_id: Option<&str>,
 ) -> String {
     if let Some(project_name) = project_override {
-        return format!("meta backlog sync ({project_name})");
+        return format!("{} backlog sync ({project_name})", branding::COMMAND_NAME);
     }
 
     if let Some(project_id) = default_project_id {
-        format!("meta backlog sync ({project_id})")
+        format!("{} backlog sync ({project_id})", branding::COMMAND_NAME)
     } else {
-        "meta backlog sync".to_string()
+        format!("{} backlog sync", branding::COMMAND_NAME)
     }
 }
 
@@ -1690,13 +1701,19 @@ fn resolve_entry_by_slug(root: &Path, entries: &[BacklogSyncEntry], slug: &str) 
         .iter()
         .find(|entry| entry.slug == slug)
         .ok_or_else(|| {
-            anyhow!("backlog entry `{slug}` was not found under `.metastack/backlog/`")
+            anyhow!(
+                "backlog entry `{slug}` was not found under `{}/backlog/`",
+                crate::branding::PROJECT_DIR
+            )
         })?;
     if !entry
         .issue_dir
         .starts_with(PlanningPaths::new(root).backlog_dir)
     {
-        bail!("refusing to use backlog entry outside `.metastack/backlog/`");
+        bail!(
+            "refusing to use backlog entry outside `{}/backlog/`",
+            crate::branding::PROJECT_DIR
+        );
     }
     Ok(entry.issue_dir.clone())
 }

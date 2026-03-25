@@ -2,6 +2,8 @@
 
 include!("support/common.rs");
 
+use metastack_cli::branding;
+
 #[cfg(unix)]
 fn write_onboarded_config(
     config_path: &Path,
@@ -83,7 +85,7 @@ fn write_listen_store_session(
 ) -> Result<PathBuf, Box<dyn Error>> {
     let store_dir = listen_project_store_dir(config_path, repo_root, None)?;
     let source_root = listen_source_root(repo_root)?;
-    let metastack_root = source_root.join(".metastack").canonicalize()?;
+    let metastack_root = source_root.join(branding::PROJECT_DIR).canonicalize()?;
     fs::create_dir_all(store_dir.join("logs"))?;
     fs::write(
         store_dir.join("project.json"),
@@ -139,7 +141,7 @@ fn listen_session_json(
         "issue_url": format!("https://linear.app/issues/{issue_identifier}"),
         "phase": phase,
         "summary": format!("{issue_identifier} summary"),
-        "brief_path": format!(".metastack/agents/briefs/{issue_identifier}.md"),
+        "brief_path": format!("{}/agents/briefs/{issue_identifier}.md", branding::PROJECT_DIR),
         "workspace_path": format!("/tmp/{issue_identifier}"),
         "workpad_comment_id": format!("comment-{issue_identifier}"),
         "updated_at_epoch_seconds": updated_at_epoch_seconds,
@@ -853,8 +855,8 @@ fn listen_sessions_inspect_surfaces_structured_detail_fields() -> Result<(), Box
             "issue_url": "https://linear.app/issues/ENG-10181",
             "phase": "running",
             "summary": "Token telemetry is flowing",
-            "brief_path": ".metastack/agents/briefs/ENG-10181.md",
-            "backlog_path": ".metastack/backlog/ENG-10181",
+            "brief_path": format!("{}/agents/briefs/ENG-10181.md", branding::PROJECT_DIR),
+            "backlog_path": format!("{}/backlog/ENG-10181", branding::PROJECT_DIR),
             "workspace_path": "/tmp/ENG-10181",
             "branch": "met-27-detail",
             "pull_request": {
@@ -923,8 +925,8 @@ fn listen_sessions_inspect_surfaces_structured_detail_fields() -> Result<(), Box
             },
             "references": {
                 "workspace_path": "/tmp/ENG-10181",
-                "backlog_path": ".metastack/backlog/ENG-10181",
-                "brief_path": ".metastack/agents/briefs/ENG-10181.md",
+                "backlog_path": format!("{}/backlog/ENG-10181", branding::PROJECT_DIR),
+                "brief_path": format!("{}/agents/briefs/ENG-10181.md", branding::PROJECT_DIR),
                 "workpad_comment_id": "comment-10181",
                 "log_path": "logs/ENG-10181.log",
                 "branch": "met-27-detail"
@@ -932,11 +934,11 @@ fn listen_sessions_inspect_surfaces_structured_detail_fields() -> Result<(), Box
             "prompt_context": [
                 {
                     "label": "Brief",
-                    "value": ".metastack/agents/briefs/ENG-10181.md"
+                    "value": format!("{}/agents/briefs/ENG-10181.md", branding::PROJECT_DIR)
                 },
                 {
                     "label": "Backlog index",
-                    "value": ".metastack/backlog/ENG-10181/index.md"
+                    "value": format!("{}/backlog/ENG-10181/index.md", branding::PROJECT_DIR)
                 }
             ],
             "milestones": [
@@ -994,9 +996,10 @@ fn listen_sessions_inspect_surfaces_structured_detail_fields() -> Result<(), Box
         .stdout(predicate::str::contains("Detail branch: met-27-detail"))
         .stdout(predicate::str::contains("Detail workpad: comment-10181"))
         .stdout(predicate::str::contains("Prompt context:"))
-        .stdout(predicate::str::contains(
-            "Brief: .metastack/agents/briefs/ENG-10181.md",
-        ))
+        .stdout(predicate::str::contains(format!(
+            "Brief: {}/agents/briefs/ENG-10181.md",
+            branding::PROJECT_DIR
+        )))
         .stdout(predicate::str::contains("Recent milestones:"))
         .stdout(predicate::str::contains(
             "Running: Opened draft PR | turns 3 | draft #321",
@@ -1058,7 +1061,10 @@ fn listen_once_demo_outputs_terminal_summary_without_browser_endpoints()
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("meta listen"))
+        .stdout(predicate::str::contains(format!(
+            "{} listen",
+            branding::COMMAND_NAME
+        )))
         .stdout(predicate::str::contains("Watching: all assignees"))
         .stdout(predicate::str::contains("Dashboard: terminal summary"))
         .stdout(predicate::str::contains("http://").not())
@@ -1344,7 +1350,7 @@ fn listen_sessions_inspect_surfaces_detail_pr_ref_without_url() -> Result<(), Bo
             "issue_url": "https://linear.app/metastack-labs/issue/ENG-10182",
             "phase": "running",
             "summary": "Structured detail keeps PR number only",
-            "brief_path": format!(".metastack/agents/briefs/{issue_identifier}.md"),
+            "brief_path": format!("{}/agents/briefs/{issue_identifier}.md", branding::PROJECT_DIR),
             "backlog_issue_identifier": issue_identifier,
             "workspace_path": format!("/tmp/{issue_identifier}"),
             "workpad_comment_id": format!("comment-{issue_identifier}"),
@@ -1728,16 +1734,22 @@ fn legacy_listen_help_omits_browser_dashboard_flags() {
         .stdout(predicate::str::contains(
             "Press Enter on a selected item to open its detail pane",
         ))
-        .stdout(predicate::str::contains("meta listen sessions list"))
-        .stdout(predicate::str::contains(
-            "meta listen sessions inspect --root . --project \"MetaStack API\"",
-        ))
-        .stdout(predicate::str::contains(
-            "meta listen sessions clear --root . --project \"MetaStack API\"",
-        ))
-        .stdout(predicate::str::contains(
-            "meta agents listen --team MET --project \"MetaStack API\"",
-        ))
+        .stdout(predicate::str::contains(format!(
+            "{} listen sessions list",
+            branding::COMMAND_NAME
+        )))
+        .stdout(predicate::str::contains(format!(
+            "{} listen sessions inspect --root . --project \"MetaStack API\"",
+            branding::COMMAND_NAME
+        )))
+        .stdout(predicate::str::contains(format!(
+            "{} listen sessions clear --root . --project \"MetaStack API\"",
+            branding::COMMAND_NAME
+        )))
+        .stdout(predicate::str::contains(format!(
+            "{} agents listen --team MET --project \"MetaStack API\"",
+            branding::COMMAND_NAME
+        )))
         .stdout(predicate::str::contains("--all-assignees"))
         .stdout(predicate::str::contains("--dashboard-port").not())
         .stdout(predicate::str::contains("http://").not());
@@ -2554,7 +2566,7 @@ fn listen_rejects_duplicate_active_listener_lock_for_same_project() -> Result<()
             std::process::id(),
             listen_source_root(&repo_root)?.display(),
             listen_source_root(&repo_root)?
-                .join(".metastack")
+                .join(branding::PROJECT_DIR)
                 .canonicalize()?
                 .display()
         ),
@@ -2613,7 +2625,7 @@ fn listen_allows_active_listener_lock_for_different_project() -> Result<(), Box<
             std::process::id(),
             listen_source_root(&repo_root)?.display(),
             listen_source_root(&repo_root)?
-                .join(".metastack")
+                .join(branding::PROJECT_DIR)
                 .canonicalize()?
                 .display()
         ),
@@ -2678,7 +2690,7 @@ fn listen_recovers_stale_active_listener_lock() -> Result<(), Box<dyn Error>> {
 }}"#,
             listen_source_root(&repo_root)?.display(),
             listen_source_root(&repo_root)?
-                .join(".metastack")
+                .join(branding::PROJECT_DIR)
                 .canonicalize()?
                 .display()
         ),
@@ -3037,7 +3049,7 @@ exit 0
                     },
                     "turns": 3,
                     "tokens": {},
-                    "log_path": ".metastack/agents/sessions/MET-40.log"
+                    "log_path": format!("{}/agents/sessions/MET-40.log", branding::PROJECT_DIR)
                 },
                 {
                     "issue_id": "issue-41",
@@ -3064,7 +3076,7 @@ exit 0
                     },
                     "turns": 4,
                     "tokens": {},
-                    "log_path": ".metastack/agents/sessions/MET-41.log"
+                    "log_path": format!("{}/agents/sessions/MET-41.log", branding::PROJECT_DIR)
                 }
             ]
         }))?,
@@ -3115,7 +3127,10 @@ exit 0
         assert!(!rendered.contains("127.0.0.1"));
         assert!(!rendered.contains("localhost"));
         assert!(!rendered.contains("PID TTY"));
-        assert!(!rendered.contains("meta listen-worker --ticket MET-noise"));
+        assert!(!rendered.contains(&format!(
+            "{} listen-worker --ticket MET-noise",
+            branding::COMMAND_NAME
+        )));
     }
     for rendered in [&first_stderr, &second_stderr] {
         assert!(!rendered.contains("stderr-noise-from-ps"));
@@ -3583,7 +3598,9 @@ printf '%s' "$METASTACK_AGENT_INSTRUCTIONS" > "$TEST_OUTPUT_DIR/instructions.txt
             .contains(workspace_root.to_string_lossy().as_ref())
     );
 
-    let brief = fs::read_to_string(workspace_root.join(".metastack/agents/briefs/MET-21.md"))?;
+    let brief = fs::read_to_string(
+        workspace_root.join(format!("{}/agents/briefs/MET-21.md", branding::PROJECT_DIR)),
+    )?;
     assert!(brief.contains("Daemon pickup flow"));
     assert!(brief.contains("Picked up automatically by `meta listen`."));
 
@@ -3599,7 +3616,8 @@ printf '%s' "$METASTACK_AGENT_INSTRUCTIONS" > "$TEST_OUTPUT_DIR/instructions.txt
     assert!(instructions.contains("No repo overlay files were found"));
     assert!(instructions.contains("Shared automation keeps the `metastack` label attached"));
     assert!(instructions.contains("do not use the legacy `symphony` label"));
-    let backlog_index_path = workspace_root.join(".metastack/backlog/MET-21/index.md");
+    let backlog_index_path =
+        workspace_root.join(format!("{}/backlog/MET-21/index.md", branding::PROJECT_DIR));
     assert!(
         backlog_index_path.is_file(),
         "expected backlog index at {}\nstate: {:?}\nbacklog root: {}\nworkspace entries: {:?}",
@@ -3607,7 +3625,10 @@ printf '%s' "$METASTACK_AGENT_INSTRUCTIONS" > "$TEST_OUTPUT_DIR/instructions.txt
         listen_state_path(&config_path, &repo_root)
             .ok()
             .and_then(|path| fs::read_to_string(path).ok()),
-        workspace_root.join(".metastack/backlog").display(),
+        workspace_root
+            .join(branding::PROJECT_DIR)
+            .join("backlog")
+            .display(),
         fs::read_dir(&workspace_root)
             .map(|entries| entries.count())
             .ok()
@@ -3615,14 +3636,19 @@ printf '%s' "$METASTACK_AGENT_INSTRUCTIONS" > "$TEST_OUTPUT_DIR/instructions.txt
     let backlog_index = fs::read_to_string(&backlog_index_path)?;
     assert!(backlog_index.contains("## Requirements"));
     assert!(backlog_index.contains("Claim Todo work and create agent briefs"));
-    let validation_plan =
-        fs::read_to_string(workspace_root.join(".metastack/backlog/MET-21/validation.md"))?;
+    let validation_plan = fs::read_to_string(workspace_root.join(format!(
+        "{}/backlog/MET-21/validation.md",
+        branding::PROJECT_DIR
+    )))?;
     assert!(validation_plan.contains("must not overwrite the primary Linear issue description"));
     assert!(validation_plan.contains("Update the existing `## Codex Workpad` comment"));
-    assert!(!validation_plan.contains("meta sync push MET-21"));
+    assert!(!validation_plan.contains(&format!("{} sync push MET-21", branding::COMMAND_NAME)));
     assert!(
         workspace_root
-            .join(".metastack/backlog/MET-21/.linear.json")
+            .join(format!(
+                "{}/backlog/MET-21/.linear.json",
+                branding::PROJECT_DIR
+            ))
             .is_file()
     );
 
@@ -3652,7 +3678,10 @@ printf '%s' "$METASTACK_AGENT_INSTRUCTIONS" > "$TEST_OUTPUT_DIR/instructions.txt
     assert!(!state.contains("\"issue_identifier\": \"MET-22\""));
     assert!(
         !repo_root
-            .join(".metastack/agents/sessions/listen-state.json")
+            .join(format!(
+                "{}/agents/sessions/listen-state.json",
+                branding::PROJECT_DIR
+            ))
             .exists()
     );
 
@@ -4489,7 +4518,10 @@ printf '%s' "$METASTACK_LINEAR_ATTACHMENT_CONTEXT_PATH" > "$TEST_OUTPUT_DIR/atta
 
     wait_for_path(&stub_dir.join("attachment-context-path.txt"))?;
     let workspace_root = temp.path().join("repo-workspace/MET-24");
-    let context_dir = workspace_root.join(".metastack/agents/issue-context/MET-24");
+    let context_dir = workspace_root.join(format!(
+        "{}/agents/issue-context/MET-24",
+        branding::PROJECT_DIR
+    ));
     let reported_context_dir = PathBuf::from(fs::read_to_string(
         stub_dir.join("attachment-context-path.txt"),
     )?);
@@ -4621,7 +4653,7 @@ printf '%s' "$1" > "$TEST_OUTPUT_DIR/payload.txt"
         let status = ProcessCommand::new("git").args(args).status()?;
         assert!(status.success());
     }
-    let backlog_dir = workspace_root.join(".metastack/backlog/MET-50");
+    let backlog_dir = workspace_root.join(format!("{}/backlog/MET-50", branding::PROJECT_DIR));
     fs::create_dir_all(&backlog_dir)?;
     fs::write(
         backlog_dir.join("index.md"),
@@ -5361,7 +5393,7 @@ printf '%s' "$1" > "$TEST_OUTPUT_DIR/payload.txt"
 
     let workspace_root = create_workspace_clone_checkout(&repo_root, "repo-workspace/MET-52")?;
     fs::write(workspace_root.join("stale.txt"), "remove me\n")?;
-    let old_backlog_dir = workspace_root.join(".metastack/backlog/MET-52");
+    let old_backlog_dir = workspace_root.join(format!("{}/backlog/MET-52", branding::PROJECT_DIR));
     fs::create_dir_all(&old_backlog_dir)?;
     fs::write(
         old_backlog_dir.join("index.md"),
@@ -5535,8 +5567,9 @@ printf '%s' "$1" > "$TEST_OUTPUT_DIR/payload.txt"
 
     wait_for_path(&stub_dir.join("payload.txt"))?;
     assert!(!workspace_root.join("stale.txt").exists());
-    let recreated_backlog =
-        fs::read_to_string(workspace_root.join(".metastack/backlog/MET-52/index.md"))?;
+    let recreated_backlog = fs::read_to_string(
+        workspace_root.join(format!("{}/backlog/MET-52/index.md", branding::PROJECT_DIR)),
+    )?;
     assert!(recreated_backlog.contains("## Requirements"));
     assert!(recreated_backlog.contains("Recreate the local ticket workspace from origin/main"));
     assert_eq!(
@@ -5936,7 +5969,7 @@ printf '%s' "$METASTACK_AGENT_INSTRUCTIONS" > "$TEST_OUTPUT_DIR/instructions-$co
     fs::set_permissions(&stub_path, permissions)?;
     init_repo_with_origin(&repo_root)?;
     let workspace = create_workspace_clone_checkout(&repo_root, "repo-workspace/MET-32")?;
-    let backlog_dir = workspace.join(".metastack/backlog/MET-32");
+    let backlog_dir = workspace.join(format!("{}/backlog/MET-32", branding::PROJECT_DIR));
     fs::create_dir_all(&backlog_dir)?;
     fs::write(
         backlog_dir.join("index.md"),
@@ -6363,7 +6396,7 @@ printf 'pub fn turn_one() {}\n' > src/turn-one.rs
             branch,
         ])
         .status()?;
-    let backlog_dir = workspace.join(".metastack/backlog/MET-32");
+    let backlog_dir = workspace.join(format!("{}/backlog/MET-32", branding::PROJECT_DIR));
     fs::create_dir_all(&backlog_dir)?;
     fs::write(
         backlog_dir.join("index.md"),
@@ -6647,7 +6680,7 @@ transport = "arg"
             branch,
         ])
         .status()?;
-    let backlog_dir = workspace.join(".metastack/backlog/MET-32");
+    let backlog_dir = workspace.join(format!("{}/backlog/MET-32", branding::PROJECT_DIR));
     fs::create_dir_all(&backlog_dir)?;
     fs::write(
         backlog_dir.join("index.md"),
@@ -6796,7 +6829,7 @@ transport = "arg"
             branch,
         ])
         .status()?;
-    let backlog_dir = workspace.join(".metastack/backlog/MET-32");
+    let backlog_dir = workspace.join(format!("{}/backlog/MET-32", branding::PROJECT_DIR));
     fs::create_dir_all(&backlog_dir)?;
     fs::write(
         backlog_dir.join("index.md"),
@@ -6924,7 +6957,7 @@ transport = "arg"
             branch,
         ])
         .status()?;
-    let backlog_dir = workspace.join(".metastack/backlog/MET-32");
+    let backlog_dir = workspace.join(format!("{}/backlog/MET-32", branding::PROJECT_DIR));
     fs::create_dir_all(&backlog_dir)?;
     fs::write(
         backlog_dir.join("index.md"),
@@ -8147,7 +8180,7 @@ printf '%s' "$1" > "$TEST_OUTPUT_DIR/payload.txt"
     let state = fs::read_to_string(state_path)?;
     assert!(state.contains("\"issue_identifier\": \"MET-53\""));
     assert!(
-        fs::read_to_string(repo_root.join(".metastack/meta.json"))?
+        fs::read_to_string(repo_root.join(format!("{}/meta.json", branding::PROJECT_DIR)))?
             .contains("\"assignment_scope\": \"viewer\"")
     );
 

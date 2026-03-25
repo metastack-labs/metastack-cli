@@ -1,6 +1,7 @@
 #![allow(dead_code, unused_imports)]
 
 include!("support/common.rs");
+use metastack_cli::branding;
 
 #[cfg(unix)]
 #[test]
@@ -29,15 +30,14 @@ fn backlog_improve_scans_repo_backlog_and_writes_proposal_artifacts() -> Result<
     write_backlog_improve_config(&config_path, &api_url, &stub_path)?;
     write_backlog_improve_stub(
         &stub_path,
-        r##"#!/bin/sh
-cat > "$TEST_OUTPUT_DIR/payload-1.txt"
-cat <<'JSON'
-{"summary":"Needs a small cleanup before execution.","needs_improvement":true,"findings":{"title_gaps":["Title should say what gets improved."],"description_gaps":["Acceptance criteria are missing from the body."],"acceptance_criteria_gaps":["Add executable acceptance criteria."],"metadata_gaps":["Missing the planning label and estimate."],"structure_opportunities":[]},"proposal":{"title":"Improve backlog hygiene workflow","description":"# Improve backlog hygiene workflow\n\n## Acceptance Criteria\n\n- `meta backlog improve` scans repo backlog issues\n- Proposal artifacts are stored under `.metastack/backlog/MET-510/artifacts/improvement/`\n","priority":2,"estimate":3,"labels":["plan"," plan "],"acceptance_criteria":["`meta backlog improve` scans repo backlog issues","Proposal artifacts are stored under `.metastack/backlog/MET-510/artifacts/improvement/`"]}}
-JSON
-"##,
+        &format!(
+            "#!/bin/sh\ncat > \"$TEST_OUTPUT_DIR/payload-1.txt\"\ncat <<'JSON'\n{{\"summary\":\"Needs a small cleanup before execution.\",\"needs_improvement\":true,\"findings\":{{\"title_gaps\":[\"Title should say what gets improved.\"],\"description_gaps\":[\"Acceptance criteria are missing from the body.\"],\"acceptance_criteria_gaps\":[\"Add executable acceptance criteria.\"],\"metadata_gaps\":[\"Missing the planning label and estimate.\"],\"structure_opportunities\":[]}},\"proposal\":{{\"title\":\"Improve backlog hygiene workflow\",\"description\":\"# Improve backlog hygiene workflow\\n\\n## Acceptance Criteria\\n\\n- `{cmd} backlog improve` scans repo backlog issues\\n- Proposal artifacts are stored under `{dir}/backlog/MET-510/artifacts/improvement/`\\n\",\"priority\":2,\"estimate\":3,\"labels\":[\"plan\",\" plan \"],\"acceptance_criteria\":[\"`{cmd} backlog improve` scans repo backlog issues\",\"Proposal artifacts are stored under `{dir}/backlog/MET-510/artifacts/improvement/`\"]}}}}\nJSON\n",
+            cmd = branding::COMMAND_NAME,
+            dir = branding::PROJECT_DIR,
+        ),
     )?;
 
-    let issue_dir = repo_root.join(".metastack/backlog/MET-510");
+    let issue_dir = repo_root.join(format!("{}/backlog/MET-510", branding::PROJECT_DIR));
     fs::create_dir_all(&issue_dir)?;
     fs::write(issue_dir.join("index.md"), "# Existing local packet\n")?;
 
@@ -158,13 +158,22 @@ fn backlog_improve_apply_updates_local_packet_and_linear_issue() -> Result<(), B
     write_backlog_improve_config(&config_path, &api_url, &stub_path)?;
     write_backlog_improve_stub(
         &stub_path,
-        r##"#!/bin/sh
-cat > "$TEST_OUTPUT_DIR/payload-1.txt"
-printf '%s' '{"summary":"Ready to apply.","needs_improvement":true,"findings":{"title_gaps":[],"description_gaps":[],"acceptance_criteria_gaps":[],"metadata_gaps":["Set an estimate before execution."],"structure_opportunities":["Parenting is already fine."]},"proposal":{"title":"Applied backlog improvement","description":"# Applied backlog improvement\n\n## Acceptance Criteria\n\n- `meta backlog improve MET-610 --mode advanced --apply` updates the local packet before Linear\n","priority":1,"estimate":5,"acceptance_criteria":["`meta backlog improve MET-610 --mode advanced --apply` updates the local packet before Linear"]}}'
-"##,
+        &format!(
+            "#!/bin/sh\ncat > \"$TEST_OUTPUT_DIR/payload-1.txt\"\nprintf '%s' \
+'{{\"summary\":\"Ready to apply.\",\"needs_improvement\":true,\
+\"findings\":{{\"title_gaps\":[],\"description_gaps\":[],\"acceptance_criteria_gaps\":[],\
+\"metadata_gaps\":[\"Set an estimate before execution.\"],\
+\"structure_opportunities\":[\"Parenting is already fine.\"]}},\
+\"proposal\":{{\"title\":\"Applied backlog improvement\",\
+\"description\":\"# Applied backlog improvement\\n\\n## Acceptance Criteria\\n\\n\
+- `{cmd} backlog improve MET-610 --mode advanced --apply` updates the local packet before Linear\\n\",\
+\"priority\":1,\"estimate\":5,\
+\"acceptance_criteria\":[\"`{cmd} backlog improve MET-610 --mode advanced --apply` updates the local packet before Linear\"]}}}}'\n",
+            cmd = branding::COMMAND_NAME,
+        ),
     )?;
 
-    let issue_dir = repo_root.join(".metastack/backlog/MET-610");
+    let issue_dir = repo_root.join(format!("{}/backlog/MET-610", branding::PROJECT_DIR));
     fs::create_dir_all(&issue_dir)?;
     fs::write(issue_dir.join("index.md"), "# Previous local packet\n")?;
 
@@ -242,7 +251,10 @@ printf '%s' '{"summary":"Ready to apply.","needs_improvement":true,"findings":{"
 
     assert_eq!(
         fs::read_to_string(issue_dir.join("index.md"))?,
-        "# Applied backlog improvement\n\n## Acceptance Criteria\n\n- `meta backlog improve MET-610 --mode advanced --apply` updates the local packet before Linear"
+        format!(
+            "# Applied backlog improvement\n\n## Acceptance Criteria\n\n- `{} backlog improve MET-610 --mode advanced --apply` updates the local packet before Linear",
+            branding::COMMAND_NAME
+        )
     );
     let run_dir = latest_improvement_dir(&issue_dir)?;
     assert_eq!(

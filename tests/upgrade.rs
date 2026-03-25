@@ -1,6 +1,7 @@
 #![allow(dead_code, unused_imports)]
 
 include!("support/common.rs");
+use metastack_cli::branding;
 #[cfg(unix)]
 use sha2::{Digest, Sha256};
 
@@ -8,7 +9,11 @@ use sha2::{Digest, Sha256};
 fn write_meta_stub(path: &Path, version: &str) -> Result<(), Box<dyn Error>> {
     fs::write(
         path,
-        format!("#!/bin/sh\nset -eu\nprintf 'meta {}\\n'\n", version),
+        format!(
+            "#!/bin/sh\nset -eu\nprintf '{} {}\\n'\n",
+            branding::COMMAND_NAME,
+            version
+        ),
     )?;
     make_executable(path)?;
     Ok(())
@@ -52,7 +57,11 @@ fn archive_meta_binary(version_output: &str) -> Result<Vec<u8>, Box<dyn Error>> 
     fs::create_dir_all(&stage_dir)?;
     write_custom_meta_stub(
         &stage_dir.join("meta"),
-        &format!("#!/bin/sh\nset -eu\nprintf 'meta {}\\n'\n", version_output),
+        &format!(
+            "#!/bin/sh\nset -eu\nprintf '{} {}\\n'\n",
+            branding::COMMAND_NAME,
+            version_output
+        ),
     )?;
 
     let status = ProcessCommand::new("tar")
@@ -201,11 +210,18 @@ fn upgrade_help_describes_default_and_advanced_paths() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Default latest-stable path:"))
-        .stdout(predicate::str::contains("meta upgrade --check"))
-        .stdout(predicate::str::contains("meta upgrade --dry-run"))
-        .stdout(predicate::str::contains(
-            "meta upgrade --version 0.3.0-rc.1 --prerelease",
-        ))
+        .stdout(predicate::str::contains(format!(
+            "{} upgrade --check",
+            branding::COMMAND_NAME
+        )))
+        .stdout(predicate::str::contains(format!(
+            "{} upgrade --dry-run",
+            branding::COMMAND_NAME
+        )))
+        .stdout(predicate::str::contains(format!(
+            "{} upgrade --version 0.3.0-rc.1 --prerelease",
+            branding::COMMAND_NAME
+        )))
         .stdout(predicate::str::contains("--allow-downgrade"));
 }
 
@@ -237,7 +253,10 @@ fn upgrade_check_reports_latest_stable_release() -> Result<(), Box<dyn Error>> {
         .stdout(predicate::str::contains("target version: 0.2.0"))
         .stdout(predicate::str::contains("status: update available"));
 
-    assert_eq!(read_meta_version(&install_path)?, "meta 0.1.0");
+    assert_eq!(
+        read_meta_version(&install_path)?,
+        format!("{} 0.1.0", branding::COMMAND_NAME)
+    );
     Ok(())
 }
 
@@ -273,7 +292,10 @@ fn upgrade_dry_run_reports_the_planned_replacement_without_mutation() -> Result<
             "asset: metastack-cli-0.2.0-linux-x64.tar.gz",
         ));
 
-    assert_eq!(read_meta_version(&install_path)?, "meta 0.1.0");
+    assert_eq!(
+        read_meta_version(&install_path)?,
+        format!("{} 0.1.0", branding::COMMAND_NAME)
+    );
     Ok(())
 }
 
@@ -301,11 +323,15 @@ fn upgrade_refuses_cargo_installs_with_remediation_text() -> Result<(), Box<dyn 
         .assert()
         .failure()
         .stderr(predicate::str::contains("looks like a Cargo install"))
-        .stderr(predicate::str::contains(
-            "reinstall from GitHub Releases to enable `meta upgrade`",
-        ));
+        .stderr(predicate::str::contains(format!(
+            "reinstall from GitHub Releases to enable `{} upgrade`",
+            branding::COMMAND_NAME
+        )));
 
-    assert_eq!(read_meta_version(&install_path)?, "meta 0.1.0");
+    assert_eq!(
+        read_meta_version(&install_path)?,
+        format!("{} 0.1.0", branding::COMMAND_NAME)
+    );
     Ok(())
 }
 
@@ -333,11 +359,15 @@ fn upgrade_replaces_the_installed_binary_after_checksum_verification() -> Result
     upgrade_command(&server, &install_path)
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "upgraded meta from 0.1.0 to 0.2.0",
-        ));
+        .stdout(predicate::str::contains(format!(
+            "upgraded {} from 0.1.0 to 0.2.0",
+            branding::COMMAND_NAME
+        )));
 
-    assert_eq!(read_meta_version(&install_path)?, "meta 0.2.0");
+    assert_eq!(
+        read_meta_version(&install_path)?,
+        format!("{} 0.2.0", branding::COMMAND_NAME)
+    );
     Ok(())
 }
 
@@ -369,7 +399,10 @@ fn upgrade_fails_when_the_release_checksum_does_not_match() -> Result<(), Box<dy
         .failure()
         .stderr(predicate::str::contains("checksum mismatch"));
 
-    assert_eq!(read_meta_version(&install_path)?, "meta 0.1.0");
+    assert_eq!(
+        read_meta_version(&install_path)?,
+        format!("{} 0.1.0", branding::COMMAND_NAME)
+    );
     Ok(())
 }
 
@@ -392,7 +425,10 @@ fn upgrade_fails_when_the_release_is_missing_the_platform_asset() -> Result<(), 
             "is missing asset 'metastack-cli-0.2.0-linux-x64.tar.gz'",
         ));
 
-    assert_eq!(read_meta_version(&install_path)?, "meta 0.1.0");
+    assert_eq!(
+        read_meta_version(&install_path)?,
+        format!("{} 0.1.0", branding::COMMAND_NAME)
+    );
     Ok(())
 }
 
@@ -423,7 +459,10 @@ fn upgrade_fails_when_the_checksum_manifest_is_missing_the_platform_entry()
             "is missing a checksum entry for 'metastack-cli-0.2.0-linux-x64.tar.gz'",
         ));
 
-    assert_eq!(read_meta_version(&install_path)?, "meta 0.1.0");
+    assert_eq!(
+        read_meta_version(&install_path)?,
+        format!("{} 0.1.0", branding::COMMAND_NAME)
+    );
     Ok(())
 }
 
@@ -436,19 +475,11 @@ fn upgrade_rolls_back_when_post_install_verification_fails() -> Result<(), Box<d
     write_meta_stub(&install_path, "0.1.0")?;
 
     let server = httpmock::MockServer::start();
-    let archive = archive_custom_meta_binary(
-        r#"#!/bin/sh
-set -eu
-case "$0" in
-  *metastack-upgrade-*)
-    printf 'meta 0.2.0\n'
-    ;;
-  *)
-    printf 'meta 0.9.9\n'
-    ;;
-esac
-"#,
-    )?;
+    let archive = archive_custom_meta_binary(&format!(
+        "#!/bin/sh\nset -eu\ncase \"$0\" in\n  *metastack-upgrade-*)\n    printf '{} 0.2.0\\n'\n    ;;\n  *)\n    printf '{} 0.9.9\\n'\n    ;;\nesac\n",
+        branding::COMMAND_NAME,
+        branding::COMMAND_NAME,
+    ))?;
     let asset_name = "metastack-cli-0.2.0-linux-x64.tar.gz";
     mock_release(
         &server,
@@ -464,7 +495,10 @@ esac
         .failure()
         .stderr(predicate::str::contains("post-install verification failed"));
 
-    assert_eq!(read_meta_version(&install_path)?, "meta 0.1.0");
+    assert_eq!(
+        read_meta_version(&install_path)?,
+        format!("{} 0.1.0", branding::COMMAND_NAME)
+    );
     Ok(())
 }
 
@@ -527,14 +561,18 @@ exec sh "$script" "$@"
         .env("META_TEST_SUDO_MARKER", &marker_path)
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "upgraded meta from 0.1.0 to 0.2.0",
-        ));
+        .stdout(predicate::str::contains(format!(
+            "upgraded {} from 0.1.0 to 0.2.0",
+            branding::COMMAND_NAME
+        )));
 
     assert!(
         marker_path.is_file(),
         "expected helper marker to be created"
     );
-    assert_eq!(read_meta_version(&install_path)?, "meta 0.2.0");
+    assert_eq!(
+        read_meta_version(&install_path)?,
+        format!("{} 0.2.0", branding::COMMAND_NAME)
+    );
     Ok(())
 }

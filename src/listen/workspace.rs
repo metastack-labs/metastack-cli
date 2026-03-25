@@ -145,7 +145,8 @@ fn refresh_workspace_clone(
     run_git(workspace_path, &["fetch", "origin", "main"])?;
     run_git(workspace_path, &["checkout", "-B", branch, base_ref])?;
     run_git(workspace_path, &["reset", "--hard", base_ref])?;
-    run_git(workspace_path, &["clean", "-fd", "--exclude=.metastack/"])?;
+    let exclude_flag = format!("--exclude={}/", crate::branding::PROJECT_DIR);
+    run_git(workspace_path, &["clean", "-fd", &exclude_flag])?;
     let head_sha = git_stdout(workspace_path, &["rev-parse", "--short", "HEAD"])?;
 
     // Keep the source repo pointed at the latest upstream main as well.

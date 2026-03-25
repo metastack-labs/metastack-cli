@@ -21,6 +21,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use serde::Serialize;
 
+use crate::branding;
 use crate::cli::{ConfigArgs, VimModeArg};
 use crate::config::{
     AgentConfigSource, AgentRouteConfig, AgentRouteScope, AppConfig, ListenAssignmentScope,
@@ -2226,6 +2227,10 @@ fn render_advanced_routing_dashboard(frame: &mut Frame<'_>, app: &AdvancedRoutin
             Constraint::Length(4),
         ])
         .split(area);
+    let advanced_routing_title = format!(
+        "{} runtime config --advanced-routing",
+        branding::COMMAND_NAME
+    );
     let header = Paragraph::new(Text::from(vec![
         Line::from("Advanced Agent Routing"),
         Line::from(
@@ -2236,7 +2241,7 @@ fn render_advanced_routing_dashboard(frame: &mut Frame<'_>, app: &AdvancedRoutin
     .block(
         Block::default()
             .borders(Borders::ALL)
-            .title("meta runtime config --advanced-routing"),
+            .title(advanced_routing_title.as_str()),
     )
     .wrap(Wrap { trim: false });
     frame.render_widget(header, layout[0]);

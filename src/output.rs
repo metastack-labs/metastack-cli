@@ -2,6 +2,7 @@ use anyhow::Error;
 use clap::error::ErrorKind;
 use serde::Serialize;
 
+use crate::branding;
 use crate::linear::IssueSummary;
 
 #[derive(Debug, Serialize)]
@@ -184,8 +185,8 @@ fn classify_error_code(
         "invalid_input"
     } else if combined.contains("configured local agent")
         || combined.contains("default agent")
-        || combined.contains("meta runtime config")
-        || combined.contains(".metastack/meta.json")
+        || combined.contains(&format!("{} runtime config", branding::COMMAND_NAME))
+        || combined.contains(&format!("{}/meta.json", crate::branding::PROJECT_DIR))
     {
         "configuration_error"
     } else {

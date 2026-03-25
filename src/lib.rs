@@ -4,6 +4,7 @@ mod backlog;
 mod backlog_defaults;
 mod backlog_improve;
 mod backlog_spec;
+pub mod branding;
 mod cli;
 mod codebase_context;
 mod config;
@@ -207,7 +208,8 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 None => {
                     if args.no_interactive || args.json {
                         bail!(
-                            "`meta backlog sync` requires a subcommand such as `status`, `link`, `pull`, or `push` when `--no-interactive` or `--json` is used"
+                            "`{cmd} backlog sync` requires a subcommand such as `status`, `link`, `pull`, or `push` when `--no-interactive` or `--json` is used",
+                            cmd = branding::COMMAND_NAME
                         );
                     }
                     run_sync_dashboard_command(
@@ -345,7 +347,8 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 None => {
                     if args.sync.no_interactive || args.sync.json {
                         bail!(
-                            "`meta dashboard ops` requires a subcommand such as `status`, `link`, `pull`, or `push` when `--no-interactive` or `--json` is used"
+                            "`{cmd} dashboard ops` requires a subcommand such as `status`, `link`, `pull`, or `push` when `--no-interactive` or `--json` is used",
+                            cmd = branding::COMMAND_NAME
                         );
                     }
                     run_sync_dashboard_command(
@@ -368,7 +371,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 }
             },
             None => {
-                print_compatibility_hint("meta dashboard", "meta dashboard linear");
+                print_compatibility_hint("dashboard", "dashboard linear");
                 run_dashboard_command(&args.legacy.client, None, args.legacy.dashboard).await?;
             }
         },
@@ -394,13 +397,13 @@ async fn dispatch(cli: Cli) -> Result<()> {
             println!("{}", report.render());
         }
         Command::Cron(args) => {
-            print_compatibility_hint("meta cron", "meta runtime cron");
+            print_compatibility_hint("cron", "runtime cron");
             if let Some(output) = run_cron(&args)? {
                 println!("{output}");
             }
         }
         Command::Scan(args) => {
-            print_compatibility_hint("meta scan", "meta context scan");
+            print_compatibility_hint("scan", "context scan");
             let report = run_scan(&args)?;
             if args.json {
                 println!("{}", report.render_json()?);
@@ -409,11 +412,11 @@ async fn dispatch(cli: Cli) -> Result<()> {
             }
         }
         Command::Workflows(args) => {
-            print_compatibility_hint("meta workflows", "meta agents workflows");
+            print_compatibility_hint("workflows", "agents workflows");
             println!("{}", run_workflows(&args).await?);
         }
         Command::Plan(args) => {
-            print_compatibility_hint("meta plan", "meta backlog plan");
+            print_compatibility_hint("plan", "backlog plan");
             let report = run_plan(&args).await?;
             if args.no_interactive {
                 println!("{}", report.render_json()?);
@@ -422,7 +425,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
             }
         }
         Command::Config(args) => {
-            print_compatibility_hint("meta config", "meta runtime config");
+            print_compatibility_hint("config", "runtime config");
             match run_config(&args).await? {
                 ConfigCommandOutput::Text(output) | ConfigCommandOutput::Json(output) => {
                     println!("{output}");
@@ -430,12 +433,12 @@ async fn dispatch(cli: Cli) -> Result<()> {
             }
         }
         Command::Setup(args) => {
-            print_compatibility_hint("meta setup", "meta runtime setup");
+            print_compatibility_hint("setup", "runtime setup");
             println!("{}", run_setup(&args).await?);
         }
         Command::Listen(args) => match args.command {
             Some(crate::cli::ListenCommands::Sessions(session_args)) => {
-                print_compatibility_hint("meta listen", "meta agents listen");
+                print_compatibility_hint("listen", "agents listen");
                 match session_args.command {
                     crate::cli::ListenSessionCommands::List(list_args) => {
                         println!("{}", run_listen_session_list(&list_args)?);
@@ -452,12 +455,12 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 }
             }
             None => {
-                print_compatibility_hint("meta listen", "meta agents listen");
+                print_compatibility_hint("listen", "agents listen");
                 run_listen(&args.run).await?;
             }
         },
         Command::Technical(args) => {
-            print_compatibility_hint("meta technical", "meta backlog tech");
+            print_compatibility_hint("technical", "backlog tech");
             let report = run_technical(&args).await?;
             if args.no_interactive {
                 println!("{}", report.render_json()?);
@@ -467,7 +470,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
         }
         Command::Sync(args) => match args.command {
             Some(SyncCommands::Link(link_args)) => {
-                print_compatibility_hint("meta sync", "meta backlog sync");
+                print_compatibility_hint("sync", "backlog sync");
                 run_sync_link(
                     &args.client,
                     args.project.as_deref(),
@@ -478,23 +481,24 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 .await?;
             }
             Some(SyncCommands::Status(status_args)) => {
-                print_compatibility_hint("meta sync", "meta backlog sync");
+                print_compatibility_hint("sync", "backlog sync");
                 run_sync_status(&args.client, args.json || args.no_interactive, &status_args)
                     .await?;
             }
             Some(SyncCommands::Pull(issue_args)) => {
-                print_compatibility_hint("meta sync", "meta backlog sync");
+                print_compatibility_hint("sync", "backlog sync");
                 run_sync_pull(&args.client, args.json || args.no_interactive, &issue_args).await?;
             }
             Some(SyncCommands::Push(issue_args)) => {
-                print_compatibility_hint("meta sync", "meta backlog sync");
+                print_compatibility_hint("sync", "backlog sync");
                 run_sync_push(&args.client, args.json || args.no_interactive, &issue_args).await?;
             }
             None => {
-                print_compatibility_hint("meta sync", "meta backlog sync");
+                print_compatibility_hint("sync", "backlog sync");
                 if args.no_interactive || args.json {
                     bail!(
-                        "`meta sync` requires a subcommand such as `status`, `link`, `pull`, or `push` when `--no-interactive` or `--json` is used"
+                        "`{cmd} sync` requires a subcommand such as `status`, `link`, `pull`, or `push` when `--no-interactive` or `--json` is used",
+                        cmd = branding::COMMAND_NAME
                     );
                 }
                 run_sync_dashboard_command(
@@ -522,11 +526,11 @@ async fn dispatch(cli: Cli) -> Result<()> {
             run_listen_worker(&args).await?;
         }
         Command::Projects(args) => {
-            print_compatibility_hint("meta projects", "meta linear projects");
+            print_compatibility_hint("projects", "linear projects");
             run_projects_command(&args.client, None, args.command).await?;
         }
         Command::Issues(args) => {
-            print_compatibility_hint("meta issues", "meta linear issues");
+            print_compatibility_hint("issues", "linear issues");
             run_issues_command(&args.client, None, args.command).await?;
         }
     }
@@ -585,30 +589,31 @@ fn command_bypasses_onboarding(cli: &Cli) -> bool {
 }
 
 fn command_label(cli: &Cli) -> String {
+    let cmd = branding::COMMAND_NAME;
     match &cli.command {
-        Command::Backlog(_) => "meta backlog".to_string(),
-        Command::Agents(_) => "meta agents".to_string(),
-        Command::Linear(_) => "meta linear".to_string(),
-        Command::Context(_) => "meta context".to_string(),
-        Command::Runtime(_) => "meta runtime".to_string(),
-        Command::Dashboard(_) => "meta dashboard".to_string(),
-        Command::Merge(_) => "meta merge".to_string(),
-        Command::Workspace(_) => "meta workspace".to_string(),
-        Command::Plan(_) => "meta plan".to_string(),
-        Command::Technical(_) => "meta technical".to_string(),
-        Command::Listen(_) => "meta listen".to_string(),
-        Command::Issues(_) => "meta issues".to_string(),
-        Command::Projects(_) => "meta projects".to_string(),
-        Command::Cron(_) => "meta cron".to_string(),
-        Command::Scan(_) => "meta scan".to_string(),
-        Command::Workflows(_) => "meta workflows".to_string(),
-        Command::Config(_) => "meta config".to_string(),
-        Command::Setup(_) => "meta setup".to_string(),
-        Command::Sync(_) => "meta sync".to_string(),
-        Command::ListenWorker(_) => "meta listen-worker".to_string(),
-        Command::Scaffold(_) => "meta scaffold".to_string(),
-        Command::Upgrade(_) => "meta upgrade".to_string(),
-        Command::Doctor(_) => "meta doctor".to_string(),
+        Command::Backlog(_) => format!("{cmd} backlog"),
+        Command::Agents(_) => format!("{cmd} agents"),
+        Command::Linear(_) => format!("{cmd} linear"),
+        Command::Context(_) => format!("{cmd} context"),
+        Command::Runtime(_) => format!("{cmd} runtime"),
+        Command::Dashboard(_) => format!("{cmd} dashboard"),
+        Command::Merge(_) => format!("{cmd} merge"),
+        Command::Workspace(_) => format!("{cmd} workspace"),
+        Command::Plan(_) => format!("{cmd} plan"),
+        Command::Technical(_) => format!("{cmd} technical"),
+        Command::Listen(_) => format!("{cmd} listen"),
+        Command::Issues(_) => format!("{cmd} issues"),
+        Command::Projects(_) => format!("{cmd} projects"),
+        Command::Cron(_) => format!("{cmd} cron"),
+        Command::Scan(_) => format!("{cmd} scan"),
+        Command::Workflows(_) => format!("{cmd} workflows"),
+        Command::Config(_) => format!("{cmd} config"),
+        Command::Setup(_) => format!("{cmd} setup"),
+        Command::Sync(_) => format!("{cmd} sync"),
+        Command::ListenWorker(_) => format!("{cmd} listen-worker"),
+        Command::Scaffold(_) => format!("{cmd} scaffold"),
+        Command::Upgrade(_) => format!("{cmd} upgrade"),
+        Command::Doctor(_) => format!("{cmd} doctor"),
     }
 }
 
@@ -645,8 +650,11 @@ fn config_snapshot_height(cli: &Cli) -> u16 {
     }
 }
 
-fn print_compatibility_hint(legacy_command: &str, preferred_command: &str) {
-    eprintln!("hint: `{legacy_command}` is a compatibility alias; prefer `{preferred_command}`.");
+fn print_compatibility_hint(legacy_sub: &str, preferred_sub: &str) {
+    let cmd = branding::COMMAND_NAME;
+    eprintln!(
+        "hint: `{cmd} {legacy_sub}` is a compatibility alias; prefer `{cmd} {preferred_sub}`."
+    );
 }
 
 impl From<DashboardEventArg> for DashboardAction {

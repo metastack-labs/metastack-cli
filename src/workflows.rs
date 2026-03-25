@@ -48,19 +48,31 @@ use crate::tui::scroll::{ScrollState, scrollable_paragraph, wrapped_rows};
 const BUILTIN_WORKFLOWS: [(&str, &str); 4] = [
     (
         "builtin/backlog-planning.md",
-        include_str!("artifacts/workflows/backlog-planning.md"),
+        include_str!(concat!(
+            env!("OUT_DIR"),
+            "/artifacts/workflows/backlog-planning.md"
+        )),
     ),
     (
         "builtin/ticket-implementation.md",
-        include_str!("artifacts/workflows/ticket-implementation.md"),
+        include_str!(concat!(
+            env!("OUT_DIR"),
+            "/artifacts/workflows/ticket-implementation.md"
+        )),
     ),
     (
         "builtin/pr-review.md",
-        include_str!("artifacts/workflows/pr-review.md"),
+        include_str!(concat!(
+            env!("OUT_DIR"),
+            "/artifacts/workflows/pr-review.md"
+        )),
     ),
     (
         "builtin/incident-triage.md",
-        include_str!("artifacts/workflows/incident-triage.md"),
+        include_str!(concat!(
+            env!("OUT_DIR"),
+            "/artifacts/workflows/incident-triage.md"
+        )),
     ),
 ];
 
@@ -680,7 +692,7 @@ fn render_workflow_explanation(root: &Path, workflow: &WorkflowPlaybook) -> Stri
         String::new(),
         "- Review mode shows the generated Markdown plus the resolved input values and validation checklist.".to_string(),
         "- `e` enters multiline edit mode for the generated Markdown.".to_string(),
-        "- `s` opens a one-off save-path prompt with a `.metastack/workflows/generated/` default.".to_string(),
+        format!("- `s` opens a one-off save-path prompt with a `{}/workflows/generated/` default.", crate::branding::PROJECT_DIR),
         "- Existing files require explicit overwrite confirmation in the TUI or `--overwrite` in non-interactive mode.".to_string(),
     ]);
 
@@ -1478,7 +1490,7 @@ fn render_save_prompt(frame: &mut ratatui::Frame<'_>, app: &WorkflowRunApp, area
     frame.render_widget(helper, sections[0]);
 
     let rendered = app.save_path_input.render_with_viewport(
-        ".metastack/workflows/generated/...",
+        &format!("{}/workflows/generated/...", crate::branding::PROJECT_DIR),
         true,
         sections[1].width,
         sections[1].height,
@@ -2026,7 +2038,10 @@ mod tests {
         let values = BTreeMap::from([(String::from("issue"), String::from("MET-50"))]);
         assert_eq!(
             default_output_path(&root, &workflow, &values),
-            root.join(".metastack/workflows/generated/ticket-implementation-met-50.md")
+            root.join(format!(
+                "{}/workflows/generated/ticket-implementation-met-50.md",
+                crate::branding::PROJECT_DIR
+            ))
         );
     }
 
@@ -2061,8 +2076,10 @@ mod tests {
             markdown: "initial".to_string(),
             provider: "codex".to_string(),
             diagnostics: Vec::new(),
-            default_output: root
-                .join(".metastack/workflows/generated/ticket-implementation-met-50.md"),
+            default_output: root.join(format!(
+                "{}/workflows/generated/ticket-implementation-met-50.md",
+                crate::branding::PROJECT_DIR
+            )),
         });
 
         app.screen = WorkflowRunScreen::Edit;
@@ -2161,8 +2178,10 @@ mod tests {
             markdown: "initial".to_string(),
             provider: "codex".to_string(),
             diagnostics: Vec::new(),
-            default_output: root
-                .join(".metastack/workflows/generated/ticket-implementation-met-50.md"),
+            default_output: root.join(format!(
+                "{}/workflows/generated/ticket-implementation-met-50.md",
+                crate::branding::PROJECT_DIR
+            )),
         });
         app.screen = WorkflowRunScreen::SavePath;
         app.save_path_input = InputFieldState::new("../outside.md");

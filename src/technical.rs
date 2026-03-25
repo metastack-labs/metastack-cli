@@ -37,6 +37,7 @@ use crate::backlog_defaults::{
     TechnicalTicketResolutionInput, TicketOptionOverrides, load_remembered_backlog_selection,
     resolve_technical_ticket_defaults, save_remembered_backlog_selection,
 };
+use crate::branding;
 use crate::cli::{RunAgentArgs, TechnicalArgs};
 use crate::codebase_context::{
     CodebaseContextSection, MissingCodebaseContextHint, load_codebase_context_bundle,
@@ -284,7 +285,10 @@ pub async fn run_technical(args: &TechnicalArgs) -> Result<TechnicalReport> {
         }
     } else {
         let issue = args.issue.as_ref().ok_or_else(|| {
-            anyhow!("`meta backlog tech` requires an issue identifier when running without a TTY")
+            anyhow!(
+                "`{} backlog tech` requires an issue identifier when running without a TTY",
+                branding::COMMAND_NAME
+            )
         })?;
         let parent = service.load_issue(issue).await?;
         let selected_acceptance_criteria =
@@ -381,7 +385,8 @@ fn run_interactive_technical_session(
                 stage: TechnicalStage::Loading(LoadingApp {
                     message: "Generating technical backlog".to_string(),
                     detail: format!(
-                        "Building `.metastack/backlog/_TEMPLATE` for {}.",
+                        "Building `{}/backlog/_TEMPLATE` for {}.",
+                        branding::PROJECT_DIR,
                         parent.identifier
                     ),
                     spinner_index: 0,
@@ -803,7 +808,8 @@ fn start_generation(
     app.stage = TechnicalStage::Loading(LoadingApp {
         message: "Generating technical backlog".to_string(),
         detail: format!(
-            "Building `.metastack/backlog/_TEMPLATE` for {}.",
+            "Building `{}/backlog/_TEMPLATE` for {}.",
+            branding::PROJECT_DIR,
             request.parent.identifier
         ),
         spinner_index: 0,
@@ -969,7 +975,7 @@ fn generate_backlog_files(
         attachments: Vec::new(),
     })
     .with_context(|| {
-        "meta backlog tech requires a configured local agent to generate backlog content from `.metastack/backlog/_TEMPLATE`"
+        format!("{} backlog tech requires a configured local agent to generate backlog content from `{}/backlog/_TEMPLATE`", branding::COMMAND_NAME, branding::PROJECT_DIR)
     })?;
     let draft: TechnicalBacklogDraft =
         parse_agent_json(&output.stdout, "technical backlog generation")?;
@@ -2104,7 +2110,10 @@ mod tests {
     fn loading_snapshot_matches_plan_style() {
         let snapshot = render_loading_snapshot(&LoadingApp {
             message: "Generating technical backlog".to_string(),
-            detail: "Building `.metastack/backlog/_TEMPLATE` for MET-35.".to_string(),
+            detail: format!(
+                "Building `{}/backlog/_TEMPLATE` for MET-35.",
+                crate::branding::PROJECT_DIR
+            ),
             spinner_index: 2,
         });
 

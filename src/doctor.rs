@@ -5,6 +5,7 @@ use std::process::Command;
 use anyhow::{Context, Result};
 use serde::Serialize;
 
+use crate::branding;
 use crate::cli::DoctorArgs;
 use crate::config::{
     AppConfig, LinearConfig, LinearConfigOverrides, PlanningMeta, detect_supported_agents,
@@ -302,7 +303,10 @@ fn check_repo_config(checks: &mut Vec<CheckResult>) {
         checks.push(CheckResult {
             name: "repo_config".to_string(),
             status: CheckStatus::Warn,
-            message: "not inside a repo with `.metastack/meta.json`".to_string(),
+            message: format!(
+                "not inside a repo with `{}/meta.json`",
+                branding::PROJECT_DIR
+            ),
         });
         return;
     };
@@ -318,7 +322,8 @@ fn check_repo_config(checks: &mut Vec<CheckResult>) {
                 name: "repo_config".to_string(),
                 status: CheckStatus::Pass,
                 message: format!(
-                    "`.metastack/meta.json` is valid ({})",
+                    "`{}/meta.json` is valid ({})",
+                    branding::PROJECT_DIR,
                     meta_json_path.display()
                 ),
             });
@@ -327,17 +332,20 @@ fn check_repo_config(checks: &mut Vec<CheckResult>) {
             checks.push(CheckResult {
                 name: "repo_config".to_string(),
                 status: CheckStatus::Fail,
-                message: format!("`.metastack/meta.json` failed to parse: {err}"),
+                message: format!(
+                    "`{}/meta.json` failed to parse: {err}",
+                    branding::PROJECT_DIR
+                ),
             });
         }
     }
 }
 
-/// Walk upward from `start` looking for `.metastack/meta.json`.
+/// Walk upward from `start` looking for `<branding::PROJECT_DIR>/meta.json`.
 fn find_metastack_root(start: &Path) -> Option<std::path::PathBuf> {
     let mut current = start.to_path_buf();
     loop {
-        let candidate = current.join(".metastack").join("meta.json");
+        let candidate = current.join(branding::PROJECT_DIR).join("meta.json");
         if candidate.is_file() {
             return Some(candidate);
         }

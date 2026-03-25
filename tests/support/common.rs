@@ -109,7 +109,7 @@ fn listen_project_store_dir(
     project_selector: Option<&str>,
 ) -> Result<PathBuf, Box<dyn Error>> {
     let source_root = listen_source_root(repo_root)?;
-    let metastack_root = source_root.join(".metastack").canonicalize()?;
+    let metastack_root = source_root.join(branding::PROJECT_DIR).canonicalize()?;
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     metastack_root.display().to_string().hash(&mut hasher);
     listen_project_scope_key(project_selector, repo_root)?.hash(&mut hasher);
@@ -151,7 +151,7 @@ fn listen_project_scope_key(
     {
         Some(selector) => Some(selector),
         None => {
-            let meta = fs::read_to_string(repo_root.join(".metastack/meta.json"))?;
+            let meta = fs::read_to_string(repo_root.join(format!("{}/meta.json", branding::PROJECT_DIR)))?;
             serde_json::from_str::<serde_json::Value>(&meta)?
                 .get("linear")
                 .and_then(|value| value.get("project_id"))
@@ -175,7 +175,7 @@ fn listen_source_root(repo_root: &Path) -> Result<PathBuf, Box<dyn Error>> {
     let common_dir = PathBuf::from(common_dir);
     if common_dir.file_name().and_then(|value| value.to_str()) == Some(".git")
         && let Some(source_root) = common_dir.parent()
-        && source_root.join(".metastack").is_dir()
+        && source_root.join(branding::PROJECT_DIR).is_dir()
     {
         return Ok(source_root.canonicalize()?);
     }
@@ -188,8 +188,8 @@ fn write_minimal_planning_context(
     repo_root: &Path,
     planning_meta: &str,
 ) -> Result<(), Box<dyn Error>> {
-    fs::create_dir_all(repo_root.join(".metastack/codebase"))?;
-    fs::write(repo_root.join(".metastack/meta.json"), planning_meta)?;
+    fs::create_dir_all(repo_root.join(format!("{}/codebase", branding::PROJECT_DIR)))?;
+    fs::write(repo_root.join(format!("{}/meta.json", branding::PROJECT_DIR)), planning_meta)?;
     for file in [
         "SCAN.md",
         "ARCHITECTURE.md",
@@ -201,7 +201,7 @@ fn write_minimal_planning_context(
         "TESTING.md",
     ] {
         fs::write(
-            repo_root.join(".metastack/codebase").join(file),
+            repo_root.join(format!("{}/codebase", branding::PROJECT_DIR)).join(file),
             format!("{file}\n"),
         )?;
     }

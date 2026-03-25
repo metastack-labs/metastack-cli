@@ -82,7 +82,8 @@ pub fn render_bootstrap_workpad(
             workspace.workspace_path.display()
         ),
         format!(
-            "- [ ] Local backlog `.metastack/backlog/{}` stays in sync with the work completed for `{}`.",
+            "- [ ] Local backlog `{}/backlog/{}` stays in sync with the work completed for `{}`.",
+            crate::branding::PROJECT_DIR,
             issue.identifier,
             issue.identifier
         ),
@@ -103,8 +104,9 @@ pub fn render_bootstrap_workpad(
             workspace.workspace_path.display()
         ),
         format!(
-            "- {timestamp} Local backlog for `{}` is tracked at `.metastack/backlog/{}`.",
+            "- {timestamp} Local backlog for `{}` is tracked at `{}/backlog/{}`.",
             issue.identifier,
+            crate::branding::PROJECT_DIR,
             issue.identifier
         ),
         format!(

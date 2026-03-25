@@ -1,6 +1,7 @@
 #![allow(dead_code, unused_imports)]
 
 include!("support/common.rs");
+use metastack_cli::branding;
 
 // ---------------------------------------------------------------------------
 // Help text surface
@@ -124,7 +125,7 @@ fn review_one_shot_fails_on_missing_gh_auth() -> Result<(), Box<dyn Error>> {
     let config_path = temp.path().join("meta.toml");
     fs::write(&config_path, "[onboarding]\ncompleted = true\n")?;
 
-    let meta_dir = temp.path().join("repo").join(".metastack");
+    let meta_dir = temp.path().join("repo").join(branding::PROJECT_DIR);
     fs::create_dir_all(&meta_dir)?;
     fs::write(
         meta_dir.join("meta.json"),
@@ -168,7 +169,7 @@ fn review_check_reports_gh_auth_ok_and_origin() -> Result<(), Box<dyn Error>> {
         "[onboarding]\ncompleted = true\n\n[agents]\ndefault_agent = \"codex\"\ndefault_model = \"gpt-5.4\"\n",
     )?;
 
-    let meta_dir = repo.join(".metastack");
+    let meta_dir = repo.join(branding::PROJECT_DIR);
     fs::create_dir_all(&meta_dir)?;
     fs::write(
         meta_dir.join("meta.json"),
@@ -219,7 +220,10 @@ fn review_route_key_appears_in_agents_examples() {
         .args(["agents", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("meta agents review"));
+        .stdout(predicate::str::contains(format!(
+            "{} agents review",
+            branding::COMMAND_NAME
+        )));
 }
 
 // ---------------------------------------------------------------------------
@@ -237,7 +241,7 @@ fn review_dry_run_shows_pr_metadata_and_diagnostics() -> Result<(), Box<dyn Erro
         "[onboarding]\ncompleted = true\n\n[agents]\ndefault_agent = \"codex\"\ndefault_model = \"gpt-5.4\"\n",
     )?;
 
-    let meta_dir = repo.join(".metastack");
+    let meta_dir = repo.join(branding::PROJECT_DIR);
     fs::create_dir_all(&meta_dir)?;
     fs::write(
         meta_dir.join("meta.json"),
@@ -313,7 +317,7 @@ fn review_once_reports_zero_eligible_prs() -> Result<(), Box<dyn Error>> {
         "[onboarding]\ncompleted = true\n\n[agents]\ndefault_agent = \"codex\"\ndefault_model = \"gpt-5.4\"\n",
     )?;
 
-    let meta_dir = repo.join(".metastack");
+    let meta_dir = repo.join(branding::PROJECT_DIR);
     fs::create_dir_all(&meta_dir)?;
     fs::write(
         meta_dir.join("meta.json"),
@@ -367,7 +371,7 @@ fn review_once_json_emits_valid_json() -> Result<(), Box<dyn Error>> {
         "[onboarding]\ncompleted = true\n\n[agents]\ndefault_agent = \"codex\"\ndefault_model = \"gpt-5.4\"\n",
     )?;
 
-    let meta_dir = repo.join(".metastack");
+    let meta_dir = repo.join(branding::PROJECT_DIR);
     fs::create_dir_all(&meta_dir)?;
     fs::write(
         meta_dir.join("meta.json"),
@@ -429,7 +433,7 @@ fn review_render_once_produces_dashboard_snapshot() -> Result<(), Box<dyn Error>
         "[onboarding]\ncompleted = true\n\n[agents]\ndefault_agent = \"codex\"\ndefault_model = \"gpt-5.4\"\n",
     )?;
 
-    let meta_dir = repo.join(".metastack");
+    let meta_dir = repo.join(branding::PROJECT_DIR);
     fs::create_dir_all(&meta_dir)?;
     fs::write(
         meta_dir.join("meta.json"),
@@ -483,7 +487,7 @@ fn review_render_once_tab_switches_view() -> Result<(), Box<dyn Error>> {
         "[onboarding]\ncompleted = true\n\n[agents]\ndefault_agent = \"codex\"\ndefault_model = \"gpt-5.4\"\n",
     )?;
 
-    let meta_dir = repo.join(".metastack");
+    let meta_dir = repo.join(branding::PROJECT_DIR);
     fs::create_dir_all(&meta_dir)?;
     fs::write(
         meta_dir.join("meta.json"),
@@ -539,7 +543,7 @@ fn review_once_discovers_eligible_prs_and_reports_sessions() -> Result<(), Box<d
         "[onboarding]\ncompleted = true\n\n[agents]\ndefault_agent = \"codex\"\ndefault_model = \"gpt-5.4\"\n",
     )?;
 
-    let meta_dir = repo.join(".metastack");
+    let meta_dir = repo.join(branding::PROJECT_DIR);
     fs::create_dir_all(&meta_dir)?;
     fs::write(
         meta_dir.join("meta.json"),
@@ -847,7 +851,7 @@ fn fix_pr_fails_with_no_review_session() -> Result<(), Box<dyn Error>> {
         "[onboarding]\ncompleted = true\n\n[agents]\ndefault_agent = \"codex\"\ndefault_model = \"gpt-5.4\"\n",
     )?;
 
-    let meta_dir = repo.join(".metastack");
+    let meta_dir = repo.join(branding::PROJECT_DIR);
     fs::create_dir_all(&meta_dir)?;
     fs::write(
         meta_dir.join("meta.json"),
@@ -889,7 +893,7 @@ fn fix_pr_fails_with_ineligible_session_phase() -> Result<(), Box<dyn Error>> {
         "[onboarding]\ncompleted = true\n\n[agents]\ndefault_agent = \"codex\"\ndefault_model = \"gpt-5.4\"\n",
     )?;
 
-    let meta_dir = repo.join(".metastack");
+    let meta_dir = repo.join(branding::PROJECT_DIR);
     fs::create_dir_all(&meta_dir)?;
     fs::write(
         meta_dir.join("meta.json"),
@@ -952,7 +956,7 @@ fn skip_pr_transitions_to_skipped_with_json_output() -> Result<(), Box<dyn Error
         "[onboarding]\ncompleted = true\n\n[agents]\ndefault_agent = \"codex\"\ndefault_model = \"gpt-5.4\"\n",
     )?;
 
-    let meta_dir = repo.join(".metastack");
+    let meta_dir = repo.join(branding::PROJECT_DIR);
     fs::create_dir_all(&meta_dir)?;
     fs::write(
         meta_dir.join("meta.json"),
@@ -1030,7 +1034,7 @@ fn skip_pr_fails_with_no_review_session() -> Result<(), Box<dyn Error>> {
         "[onboarding]\ncompleted = true\n\n[agents]\ndefault_agent = \"codex\"\ndefault_model = \"gpt-5.4\"\n",
     )?;
 
-    let meta_dir = repo.join(".metastack");
+    let meta_dir = repo.join(branding::PROJECT_DIR);
     fs::create_dir_all(&meta_dir)?;
     fs::write(
         meta_dir.join("meta.json"),
@@ -1072,7 +1076,7 @@ fn skip_pr_fails_with_already_skipped_session() -> Result<(), Box<dyn Error>> {
         "[onboarding]\ncompleted = true\n\n[agents]\ndefault_agent = \"codex\"\ndefault_model = \"gpt-5.4\"\n",
     )?;
 
-    let meta_dir = repo.join(".metastack");
+    let meta_dir = repo.join(branding::PROJECT_DIR);
     fs::create_dir_all(&meta_dir)?;
     fs::write(
         meta_dir.join("meta.json"),

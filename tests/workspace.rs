@@ -1,6 +1,7 @@
 #![allow(dead_code, unused_imports)]
 
 include!("support/common.rs");
+use metastack_cli::branding;
 
 #[cfg(unix)]
 fn prepend_path(bin_dir: &std::path::Path) -> Result<String, Box<dyn Error>> {
@@ -191,7 +192,7 @@ fn seed_ticket_store_state(
                 "brief_path": null,
                 "backlog_issue_identifier": ticket,
                 "backlog_issue_title": format!("Backlog for {ticket}"),
-                "backlog_path": format!(".metastack/backlog/{ticket}"),
+                "backlog_path": format!("{}/backlog/{ticket}", branding::PROJECT_DIR),
                 "workspace_path": null,
                 "branch": null,
                 "workpad_comment_id": format!("comment-{ticket}"),
@@ -203,7 +204,7 @@ fn seed_ticket_store_state(
                     "input": null,
                     "output": null
                 },
-                "log_path": format!(".metastack/agents/sessions/{ticket}.log")
+                "log_path": format!("{}/agents/sessions/{ticket}.log", branding::PROJECT_DIR)
             })
         })
         .collect::<Vec<_>>();

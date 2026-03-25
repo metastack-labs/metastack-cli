@@ -16,6 +16,7 @@ use crate::agents::{
     command_args_for_invocation, render_invocation_diagnostics,
     resolve_agent_invocation_for_planning, validate_invocation_command_surface,
 };
+use crate::branding;
 use crate::cli::{RunAgentArgs, ScanArgs};
 use crate::config::{
     AGENT_ROUTE_CONTEXT_SCAN, AppConfig, PlanningMeta, detect_supported_agents, resolve_agent_route,
@@ -30,7 +31,7 @@ use crate::scaffold::ensure_planning_layout;
 use crate::scan_dashboard::{ScanDashboard, ScanDashboardData, ScanDashboardRow, ScanItemState};
 use crate::scan_prompts::{build_scan_agent_prompt, scan_document_file_names};
 
-const EXCLUDED_DIRS: &[&str] = &[".git", ".metastack", "node_modules", "target"];
+const EXCLUDED_DIRS: &[&str] = &[".git", branding::PROJECT_DIR, "node_modules", "target"];
 const MAX_KEY_FILES: usize = 12;
 const SCAN_PROGRESS_POLL_INTERVAL: Duration = Duration::from_millis(80);
 const STEP_COLLECT_FACTS: usize = 0;
@@ -276,14 +277,22 @@ impl ScanReport {
     pub fn render(&self) -> String {
         let mut lines = vec![format!(
             "Codebase scan completed in {} with agent `{}`.",
-            display_path(&self.root.join(".metastack/codebase"), &self.root),
+            display_path(
+                &self
+                    .root
+                    .join(format!("{}/codebase", branding::PROJECT_DIR)),
+                &self.root
+            ),
             self.agent,
         )];
 
         lines.push(String::new());
         lines.push("Steps:".to_string());
         lines.push("  [done] Collect repository facts".to_string());
-        lines.push("  [done] Write `.metastack/codebase/SCAN.md`".to_string());
+        lines.push(format!(
+            "  [done] Write `{}/codebase/SCAN.md`",
+            branding::PROJECT_DIR
+        ));
         lines.push(format!(
             "  [done] Refresh reusable codebase docs with agent `{}`",
             self.agent
@@ -329,7 +338,7 @@ impl ScanProgress {
                     state: ScanItemState::Running,
                 },
                 ScanProgressEntry {
-                    label: "Write `.metastack/codebase/SCAN.md`".to_string(),
+                    label: format!("Write `{}/codebase/SCAN.md`", branding::PROJECT_DIR),
                     detail: "Preparing the deterministic scan snapshot".to_string(),
                     state: ScanItemState::Pending,
                 },

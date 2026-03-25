@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 
+use crate::branding;
+
 #[derive(Debug, Clone)]
 pub struct PlanningPaths {
     pub metastack_dir: PathBuf,
@@ -26,7 +28,7 @@ pub struct PlanningPaths {
 
 impl PlanningPaths {
     pub fn new(root: &Path) -> Self {
-        let metastack_dir = root.join(".metastack");
+        let metastack_dir = root.join(branding::PROJECT_DIR);
         let agent_dir = metastack_dir.join("agents");
         let backlog_dir = metastack_dir.join("backlog");
         let merge_runs_dir = metastack_dir.join("merge-runs");

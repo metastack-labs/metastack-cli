@@ -1,6 +1,7 @@
 #![allow(dead_code, unused_imports)]
 
 include!("support/common.rs");
+use metastack_cli::branding;
 
 #[cfg(unix)]
 fn write_onboarded_config(
@@ -67,9 +68,10 @@ fn plan_help_lists_non_interactive_inputs() {
         .args(["plan", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "Compatibility alias for `meta backlog plan`",
-        ))
+        .stdout(predicate::str::contains(format!(
+            "Compatibility alias for `{} backlog plan`",
+            branding::COMMAND_NAME
+        )))
         .stdout(predicate::str::contains("[IDENTIFIER]"))
         .stdout(predicate::str::contains("--request <REQUEST>"))
         .stdout(predicate::str::contains("--answer <ANSWERS>"))
@@ -105,7 +107,10 @@ fn plan_fast_no_interactive_skips_questions_and_addendum_but_uses_backlog_templa
 }
 "#,
     )?;
-    fs::remove_file(repo_root.join(".metastack/codebase/ARCHITECTURE.md"))?;
+    fs::remove_file(repo_root.join(format!(
+        "{}/codebase/ARCHITECTURE.md",
+        branding::PROJECT_DIR
+    )))?;
     write_onboarded_config(
         &config_path,
         format!(
@@ -272,11 +277,16 @@ printf '%s' '{"summary":"Create one fast ticket.","issues":[{"title":"Fast plan 
     assert!(payload.contains("## TESTING.md"));
     assert!(!payload.contains("## CONCERNS.md"));
     assert!(!payload.contains("## INTEGRATIONS.md"));
-    assert!(payload.contains("_Missing `ARCHITECTURE.md`. Run `meta scan` to generate it._"));
-    assert!(!payload.contains("meta context reload"));
+    assert!(payload.contains(&format!(
+        "_Missing `ARCHITECTURE.md`. Run `{} scan` to generate it._",
+        branding::COMMAND_NAME
+    )));
+    assert!(!payload.contains(&format!("{} context reload", branding::COMMAND_NAME)));
     assert!(!payload.contains("Ask at most"));
 
-    let backlog_index = fs::read_to_string(repo_root.join(".metastack/backlog/MET-91/index.md"))?;
+    let backlog_index = fs::read_to_string(
+        repo_root.join(format!("{}/backlog/MET-91/index.md", branding::PROJECT_DIR)),
+    )?;
     assert!(backlog_index.contains("# Fast plan ticket"));
     assert!(backlog_index.contains("## Acceptance Criteria"));
     assert!(backlog_index.contains("fast mode still writes the standard backlog files"));
@@ -616,7 +626,10 @@ fn plan_reshape_velocity_updates_existing_issue_and_workpad() -> Result<(), Box<
     write_reshape_agent_stub(
         &bin_dir,
         &stub_dir,
-        r#"{"summary":"Rewrite the ticket in place with clearer scope and acceptance criteria.","title":"Plan reshape existing Linear tickets in place","description":"Improve the current planning ticket by preserving its intent, tightening the scope, and making the acceptance criteria explicit.","acceptance_criteria":["`meta backlog plan ENG-10144` updates the existing issue instead of creating a new one","Interactive runs preview the diff and `--velocity` auto-applies the reshape"]}"#,
+        &format!(
+            r#"{{"summary":"Rewrite the ticket in place with clearer scope and acceptance criteria.","title":"Plan reshape existing Linear tickets in place","description":"Improve the current planning ticket by preserving its intent, tightening the scope, and making the acceptance criteria explicit.","acceptance_criteria":["`{cmd} backlog plan ENG-10144` updates the existing issue instead of creating a new one","Interactive runs preview the diff and `--velocity` auto-applies the reshape"]}}"#,
+            cmd = branding::COMMAND_NAME,
+        ),
     )?;
 
     let issues_mock = server.mock(|when, then| {
@@ -664,7 +677,7 @@ fn plan_reshape_velocity_updates_existing_issue_and_workpad() -> Result<(), Box<
                         "id": "issue-reshape",
                         "identifier": "ENG-10144",
                         "title": "Plan reshape existing Linear tickets in place",
-                        "description": "# Plan reshape existing Linear tickets in place\n\nImprove the current planning ticket by preserving its intent, tightening the scope, and making the acceptance criteria explicit.\n\n## Acceptance Criteria\n\n- `meta backlog plan ENG-10144` updates the existing issue instead of creating a new one\n- Interactive runs preview the diff and `--velocity` auto-applies the reshape",
+                        "description": format!("# Plan reshape existing Linear tickets in place\n\nImprove the current planning ticket by preserving its intent, tightening the scope, and making the acceptance criteria explicit.\n\n## Acceptance Criteria\n\n- `{} backlog plan ENG-10144` updates the existing issue instead of creating a new one\n- Interactive runs preview the diff and `--velocity` auto-applies the reshape", branding::COMMAND_NAME),
                         "url": "https://linear.app/issues/ENG-10144",
                         "priority": 2,
                         "updatedAt": "2026-03-19T13:00:00Z",
@@ -695,7 +708,10 @@ fn plan_reshape_velocity_updates_existing_issue_and_workpad() -> Result<(), Box<
             .body_includes(
                 "Rewrite the ticket in place with clearer scope and acceptance criteria.",
             )
-            .body_includes("Local `.metastack/backlog/` files were not modified");
+            .body_includes(format!(
+                "Local `{}/backlog/` files were not modified",
+                branding::PROJECT_DIR
+            ));
         then.status(200).json_body(json!({
             "data": {
                 "commentUpdate": {
@@ -773,7 +789,11 @@ fn plan_reshape_velocity_updates_existing_issue_and_workpad() -> Result<(), Box<
     assert!(payload.contains("current-screenshot.png"));
     assert!(payload.contains("Need to preserve project and labels."));
     assert!(payload.contains("Preserve the issue's intent"));
-    assert!(!repo_root.join(".metastack/backlog/ENG-10144").exists());
+    assert!(
+        !repo_root
+            .join(format!("{}/backlog/ENG-10144", branding::PROJECT_DIR))
+            .exists()
+    );
 
     Ok(())
 }
@@ -1043,21 +1063,18 @@ transport = "stdin"
     let stub_path = bin_dir.join("plan-agent-stub");
     fs::write(
         &stub_path,
-        r#"#!/bin/sh
-count_file="$TEST_OUTPUT_DIR/count.txt"
-count=0
-if [ -f "$count_file" ]; then
-  count=$(cat "$count_file")
-fi
-count=$((count + 1))
-printf '%s' "$count" > "$count_file"
-cat > "$TEST_OUTPUT_DIR/payload-$count.txt"
-if [ "$count" -eq 1 ]; then
-  printf '%s' '{"questions":["Which repo areas are in scope?","Should this ship as one ticket or multiple?"]}'
-else
-  printf '%s' '{"summary":"Split the work into command wiring and dashboard flow.","issues":[{"title":"Add the meta plan command","description":"Introduce the top-level command and the deterministic non-interactive planning path.","acceptance_criteria":["`meta plan --help` works","Non-interactive planning can create backlog issues"],"priority":2},{"title":"Build the planning dashboard","description":"Capture the request, follow-up answers, and ticket review in ratatui.","acceptance_criteria":["TTY planning runs show request, questions, and review states","The dashboard confirms multi-issue creation before writing to Linear"],"priority":3}]}'
-fi
-"#,
+        format!(
+            "#!/bin/sh\ncount_file=\"$TEST_OUTPUT_DIR/count.txt\"\ncount=0\n\
+if [ -f \"$count_file\" ]; then\n  count=$(cat \"$count_file\")\nfi\n\
+count=$((count + 1))\nprintf '%s' \"$count\" > \"$count_file\"\n\
+cat > \"$TEST_OUTPUT_DIR/payload-$count.txt\"\n\
+if [ \"$count\" -eq 1 ]; then\n\
+  printf '%s' '{{\"questions\":[\"Which repo areas are in scope?\",\"Should this ship as one ticket or multiple?\"]}}'\n\
+else\n\
+  printf '%s' '{{\"summary\":\"Split the work into command wiring and dashboard flow.\",\"issues\":[{{\"title\":\"Add the {cmd} plan command\",\"description\":\"Introduce the top-level command and the deterministic non-interactive planning path.\",\"acceptance_criteria\":[\"`{cmd} plan --help` works\",\"Non-interactive planning can create backlog issues\"],\"priority\":2}},{{\"title\":\"Build the planning dashboard\",\"description\":\"Capture the request, follow-up answers, and ticket review in ratatui.\",\"acceptance_criteria\":[\"TTY planning runs show request, questions, and review states\",\"The dashboard confirms multi-issue creation before writing to Linear\"],\"priority\":3}}]}}'\n\
+fi\n",
+            cmd = branding::COMMAND_NAME,
+        ),
     )?;
     let mut permissions = fs::metadata(&stub_path)?.permissions();
     permissions.set_mode(0o755);
@@ -1275,7 +1292,7 @@ fi
     assert!(second_payload.contains("Linear backlog issues for this repository directory only"));
     assert!(!second_payload.contains("revising a backlog ticket plan for the MetaStack CLI"));
 
-    let first_issue_dir = repo_root.join(".metastack/backlog/MET-41");
+    let first_issue_dir = repo_root.join(format!("{}/backlog/MET-41", branding::PROJECT_DIR));
     let first_index = fs::read_to_string(first_issue_dir.join("index.md"))?;
     let first_readme = fs::read_to_string(first_issue_dir.join("README.md"))?;
     let first_checklist = fs::read_to_string(first_issue_dir.join("checklist.md"))?;
@@ -1316,7 +1333,10 @@ fi
     assert!(!first_index.contains("## Parent Issue"));
     assert!(!first_index.contains("Standalone backlog item"));
     assert!(!first_index.contains("## Context"));
-    assert!(!first_index.contains("_Generated by `meta plan`._"));
+    assert!(!first_index.contains(&format!(
+        "_Generated by `{} plan`._",
+        branding::COMMAND_NAME
+    )));
     assert!(first_readme.contains("Add the meta plan command"));
     assert!(!first_readme.contains("{{BACKLOG_TITLE}}"));
     assert!(first_checklist.contains("Last updated: "));
@@ -1324,7 +1344,7 @@ fi
     assert!(first_proposed_prs.contains("add-the-meta-plan-command-01"));
     assert!(!first_proposed_prs.contains("{{BACKLOG_SLUG}}"));
 
-    let second_issue_dir = repo_root.join(".metastack/backlog/MET-42");
+    let second_issue_dir = repo_root.join(format!("{}/backlog/MET-42", branding::PROJECT_DIR));
     let second_index = fs::read_to_string(second_issue_dir.join("index.md"))?;
     assert!(second_issue_dir.is_dir());
     assert!(second_issue_dir.join(".linear.json").is_file());
@@ -2022,21 +2042,15 @@ transport = "stdin"
     let stub_path = bin_dir.join("plan-agent-stub");
     fs::write(
         &stub_path,
-        r#"#!/bin/sh
-count_file="$TEST_OUTPUT_DIR/count.txt"
-count=0
-if [ -f "$count_file" ]; then
-  count=$(cat "$count_file")
-fi
-count=$((count + 1))
-printf '%s' "$count" > "$count_file"
-cat > "$TEST_OUTPUT_DIR/payload-$count.txt"
-if [ "$count" -eq 1 ]; then
-  printf '%s' '{"questions":[]}'
-else
-  printf '%s' '{"summary":"Create one ticket.","issues":[{"title":"Fix the meta plan command","description":"Resolve repo-scoped project defaults before creating backlog issues.","acceptance_criteria":["`meta plan` resolves repo defaults stored as project names"],"priority":2}]}'
-fi
-"#,
+        format!(
+            "#!/bin/sh\ncount_file=\"$TEST_OUTPUT_DIR/count.txt\"\ncount=0\n\
+if [ -f \"$count_file\" ]; then\n  count=$(cat \"$count_file\")\nfi\n\
+count=$((count + 1))\nprintf '%s' \"$count\" > \"$count_file\"\n\
+cat > \"$TEST_OUTPUT_DIR/payload-$count.txt\"\n\
+if [ \"$count\" -eq 1 ]; then\n  printf '%s' '{{\"questions\":[]}}'\n\
+else\n  printf '%s' '{{\"summary\":\"Create one ticket.\",\"issues\":[{{\"title\":\"Fix the {cmd} plan command\",\"description\":\"Resolve repo-scoped project defaults before creating backlog issues.\",\"acceptance_criteria\":[\"`{cmd} plan` resolves repo defaults stored as project names\"],\"priority\":2}}]}}'\nfi\n",
+            cmd = branding::COMMAND_NAME,
+        ),
     )?;
     let mut permissions = fs::metadata(&stub_path)?.permissions();
     permissions.set_mode(0o755);
@@ -2539,21 +2553,15 @@ transport = "stdin"
     let stub_path = bin_dir.join("plan-agent-stub");
     fs::write(
         &stub_path,
-        r#"#!/bin/sh
-count_file="$TEST_OUTPUT_DIR/count.txt"
-count=0
-if [ -f "$count_file" ]; then
-  count=$(cat "$count_file")
-fi
-count=$((count + 1))
-printf '%s' "$count" > "$count_file"
-cat > "$TEST_OUTPUT_DIR/payload-$count.txt"
-if [ "$count" -eq 1 ]; then
-  printf '%s' '{"questions":[]}'
-else
-  printf '%s' '{"summary":"Create one ticket.","issues":[{"title":"Use install defaults","description":"Ensure install-scoped defaults apply when repo defaults are absent.","acceptance_criteria":["`meta plan` resolves install defaults"],"priority":2}]}'
-fi
-"#,
+        format!(
+            "#!/bin/sh\ncount_file=\"$TEST_OUTPUT_DIR/count.txt\"\ncount=0\n\
+if [ -f \"$count_file\" ]; then\n  count=$(cat \"$count_file\")\nfi\n\
+count=$((count + 1))\nprintf '%s' \"$count\" > \"$count_file\"\n\
+cat > \"$TEST_OUTPUT_DIR/payload-$count.txt\"\n\
+if [ \"$count\" -eq 1 ]; then\n  printf '%s' '{{\"questions\":[]}}'\n\
+else\n  printf '%s' '{{\"summary\":\"Create one ticket.\",\"issues\":[{{\"title\":\"Use install defaults\",\"description\":\"Ensure install-scoped defaults apply when repo defaults are absent.\",\"acceptance_criteria\":[\"`{cmd} plan` resolves install defaults\"],\"priority\":2}}]}}'\nfi\n",
+            cmd = branding::COMMAND_NAME,
+        ),
     )?;
     let mut permissions = fs::metadata(&stub_path)?.permissions();
     permissions.set_mode(0o755);
@@ -2753,24 +2761,18 @@ transport = "stdin"
     let stub_path = bin_dir.join("plan-agent-stub");
     fs::write(
         &stub_path,
-        r#"#!/bin/sh
-count_file="$TEST_OUTPUT_DIR/count.txt"
-count=0
-if [ -f "$count_file" ]; then
-  count=$(cat "$count_file")
-fi
-count=$((count + 1))
-printf '%s' "$count" > "$count_file"
-printf '%s' "$METASTACK_AGENT_NAME" > "$TEST_OUTPUT_DIR/agent-$count.txt"
-printf '%s' "$METASTACK_AGENT_MODEL" > "$TEST_OUTPUT_DIR/model-$count.txt"
-printf '%s' "$METASTACK_AGENT_REASONING" > "$TEST_OUTPUT_DIR/reasoning-$count.txt"
-cat > "$TEST_OUTPUT_DIR/payload-$count.txt"
-if [ "$count" -eq 1 ]; then
-  printf '%s' '{"questions":[]}'
-else
-  printf '%s' '{"summary":"Create one ticket.","issues":[{"title":"Use repo agent defaults","description":"Ensure repo-scoped agent defaults are applied.","acceptance_criteria":["`meta plan` resolves repo-scoped provider defaults"],"priority":2}]}'
-fi
-"#,
+        format!(
+            "#!/bin/sh\ncount_file=\"$TEST_OUTPUT_DIR/count.txt\"\ncount=0\n\
+if [ -f \"$count_file\" ]; then\n  count=$(cat \"$count_file\")\nfi\n\
+count=$((count + 1))\nprintf '%s' \"$count\" > \"$count_file\"\n\
+printf '%s' \"$METASTACK_AGENT_NAME\" > \"$TEST_OUTPUT_DIR/agent-$count.txt\"\n\
+printf '%s' \"$METASTACK_AGENT_MODEL\" > \"$TEST_OUTPUT_DIR/model-$count.txt\"\n\
+printf '%s' \"$METASTACK_AGENT_REASONING\" > \"$TEST_OUTPUT_DIR/reasoning-$count.txt\"\n\
+cat > \"$TEST_OUTPUT_DIR/payload-$count.txt\"\n\
+if [ \"$count\" -eq 1 ]; then\n  printf '%s' '{{\"questions\":[]}}'\n\
+else\n  printf '%s' '{{\"summary\":\"Create one ticket.\",\"issues\":[{{\"title\":\"Use repo agent defaults\",\"description\":\"Ensure repo-scoped agent defaults are applied.\",\"acceptance_criteria\":[\"`{cmd} plan` resolves repo-scoped provider defaults\"],\"priority\":2}}]}}'\nfi\n",
+            cmd = branding::COMMAND_NAME,
+        ),
     )?;
     let mut permissions = fs::metadata(&stub_path)?.permissions();
     permissions.set_mode(0o755);
@@ -3008,10 +3010,11 @@ printf '%s' "$METASTACK_AGENT_PROVIDER_SOURCE" > "$TEST_OUTPUT_DIR/provider-sour
 if [ "$count" -eq 1 ]; then
   printf '%s' '{"type":"result","subtype":"success","result":"{\"questions\":[]}","session_id":"session-1"}'
 else
-  printf '%s' '{"type":"result","subtype":"success","result":"{\"summary\":\"Create one ticket.\",\"issues\":[{\"title\":\"Builtin repo defaults win\",\"description\":\"Ensure repo-scoped builtin provider defaults beat global builtin defaults.\",\"acceptance_criteria\":[\"`meta plan` resolves repo-scoped builtin provider defaults\"],\"priority\":2}]}","session_id":"session-1"}'
+  printf '%s' '{"type":"result","subtype":"success","result":"{\"summary\":\"Create one ticket.\",\"issues\":[{\"title\":\"Builtin repo defaults win\",\"description\":\"Ensure repo-scoped builtin provider defaults beat global builtin defaults.\",\"acceptance_criteria\":[\"`__CMD__ plan` resolves repo-scoped builtin provider defaults\"],\"priority\":2}]}","session_id":"session-1"}'
 fi
 "##
-            .replace("__NAME__", name),
+            .replace("__NAME__", name)
+            .replace("__CMD__", branding::COMMAND_NAME),
         )?;
         let mut permissions = fs::metadata(&stub_path)?.permissions();
         permissions.set_mode(0o755);

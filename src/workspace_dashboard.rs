@@ -15,6 +15,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, ListItem, ListState, Wrap};
 use ratatui::{Frame, Terminal};
 
+use crate::branding;
 use crate::tui::fields::InputFieldState;
 use crate::tui::scroll::{ScrollState, plain_text, scrollable_content_paragraph, wrapped_rows};
 use crate::tui::spaced_list::{spaced_list, spaced_list_item};
@@ -278,7 +279,7 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &WorkspaceDashboardApp) {
                 ("q", "exit"),
             ]),
         ]),
-        panel_title("meta workspace", false),
+        panel_title(format!("{} workspace", branding::COMMAND_NAME), false),
     );
     frame.render_widget(header, outer[0]);
 
