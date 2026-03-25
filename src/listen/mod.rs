@@ -17,7 +17,8 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
+use futures::StreamExt;
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -68,7 +69,6 @@ const ISSUE_ATTACHMENT_CONTEXT_FILES_DIR: &str = "files";
 const DEFAULT_LISTEN_MAX_TURNS: u32 = 20;
 const MAX_STALLED_TURNS: u32 = 2;
 const TERMINAL_REFRESH_INTERVAL_SECONDS: u64 = 1;
-const INPUT_POLL_INTERVAL_MILLIS: u64 = 100;
 const DEMO_NOW_EPOCH_SECONDS: u64 = 1_773_575_600;
 const DEMO_START_EPOCH_SECONDS: u64 = DEMO_NOW_EPOCH_SECONDS - 7_351;
 const REVIEW_STATE_CANDIDATES: &[&str] =
@@ -3378,6 +3378,7 @@ where
     };
     let mut next_terminal_refresh_at = Instant::now() + terminal_refresh_interval;
     let mut pending_cycle_refresh: Option<Pin<Box<Fut>>> = None;
+    let mut event_stream = EventStream::new();
 
     loop {
         let now = now_epoch_seconds();
@@ -3402,73 +3403,80 @@ where
         browser_state.normalize(&data);
         terminal.draw(|frame| dashboard::render(frame, &data, &browser_state))?;
 
-        let wait_for_input = next_linear_refresh_at
-            .saturating_duration_since(Instant::now())
-            .min(
-                next_terminal_refresh_at
-                    .saturating_duration_since(Instant::now())
-                    .min(Duration::from_millis(250)),
-            );
-
-        if event::poll(wait_for_input)?
-            && let Event::Key(key) = event::read()?
-            && key.kind == KeyEventKind::Press
-        {
-            let ctrl_c =
-                key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
-            if ctrl_c || matches!(key.code, KeyCode::Char('q')) {
-                break;
-            } else if matches!(key.code, KeyCode::Char('r' | 'R')) {
-                if let Some(session) = browser_state.selected_session(&data) {
-                    let handled = if session.phase == SessionPhase::Paused {
-                        resume_paused(&session.issue_identifier)?
-                    } else if session.phase == SessionPhase::Blocked {
-                        retry_blocked(&session.issue_identifier)?
-                    } else {
-                        false
-                    };
-                    if handled {
-                        refresh_dashboard_state(&mut cycle)?;
-                        next_terminal_refresh_at = Instant::now();
-                    }
-                }
-            } else if matches!(key.code, KeyCode::Char('p' | 'P')) {
-                if let Some(session) = browser_state.selected_session(&data) {
-                    if session.phase == SessionPhase::Running
-                        && pause_running(&session.issue_identifier)?
-                    {
-                        refresh_dashboard_state(&mut cycle)?;
-                        next_terminal_refresh_at = Instant::now();
-                    }
-                }
-            } else if let Some(action) = listen_browser_action(key.code, loop_config.vim_mode) {
-                browser_state.apply_action(&data, action);
-            }
-        }
-
-        let now = Instant::now();
-        if pending_cycle_refresh.is_none() && now >= next_linear_refresh_at {
+        // Schedule a cycle refresh if it's time and one isn't already pending.
+        if pending_cycle_refresh.is_none() && Instant::now() >= next_linear_refresh_at {
             pending_cycle_refresh = Some(Box::pin(next_cycle()));
         }
-        if now >= next_terminal_refresh_at {
-            refresh_dashboard_state(&mut cycle)?;
-            next_terminal_refresh_at = Instant::now() + terminal_refresh_interval;
-        }
 
-        if let Some(refresh) = pending_cycle_refresh.as_mut() {
-            tokio::select! {
-                result = refresh => {
-                    cycle = result?;
-                    let refreshed_at = Instant::now();
-                    next_linear_refresh_at = refreshed_at + linear_refresh_interval;
-                    pending_cycle_refresh = None;
+        // Compute the next terminal-refresh heartbeat deadline.
+        let heartbeat = next_terminal_refresh_at
+            .saturating_duration_since(Instant::now())
+            .min(Duration::from_millis(250));
+
+        // All arms are async — no blocking calls on the tokio runtime.
+        let mut should_break = false;
+        tokio::select! {
+            maybe_event = event_stream.next() => {
+                match maybe_event {
+                    Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
+                        let ctrl_c = key.code == KeyCode::Char('c')
+                            && key.modifiers.contains(KeyModifiers::CONTROL);
+                        if ctrl_c || matches!(key.code, KeyCode::Char('q')) {
+                            should_break = true;
+                        } else if matches!(key.code, KeyCode::Char('r' | 'R')) {
+                            if let Some(session) = browser_state.selected_session(&data) {
+                                let handled = if session.phase == SessionPhase::Paused {
+                                    resume_paused(&session.issue_identifier)?
+                                } else if session.phase == SessionPhase::Blocked {
+                                    retry_blocked(&session.issue_identifier)?
+                                } else {
+                                    false
+                                };
+                                if handled {
+                                    refresh_dashboard_state(&mut cycle)?;
+                                    next_terminal_refresh_at = Instant::now();
+                                }
+                            }
+                        } else if matches!(key.code, KeyCode::Char('p' | 'P')) {
+                            if let Some(session) = browser_state.selected_session(&data) {
+                                if session.phase == SessionPhase::Running
+                                    && pause_running(&session.issue_identifier)?
+                                {
+                                    refresh_dashboard_state(&mut cycle)?;
+                                    next_terminal_refresh_at = Instant::now();
+                                }
+                            }
+                        } else if let Some(action) =
+                            listen_browser_action(key.code, loop_config.vim_mode)
+                        {
+                            browser_state.apply_action(&data, action);
+                        }
+                    }
+                    Some(Err(e)) => return Err(e.into()),
+                    _ => {}
+                }
+            }
+            result = async {
+                    pending_cycle_refresh.as_mut().unwrap().as_mut().await
+                }, if pending_cycle_refresh.is_some() => {
+                cycle = result?;
+                let refreshed_at = Instant::now();
+                next_linear_refresh_at = refreshed_at + linear_refresh_interval;
+                pending_cycle_refresh = None;
+                refresh_dashboard_state(&mut cycle)?;
+                next_terminal_refresh_at = Instant::now() + terminal_refresh_interval;
+            }
+            _ = tokio::time::sleep(heartbeat) => {
+                // Terminal refresh heartbeat — triggers a redraw.
+                if Instant::now() >= next_terminal_refresh_at {
                     refresh_dashboard_state(&mut cycle)?;
                     next_terminal_refresh_at = Instant::now() + terminal_refresh_interval;
                 }
-                _ = tokio::time::sleep(Duration::from_millis(INPUT_POLL_INTERVAL_MILLIS)) => {}
             }
-        } else {
-            tokio::time::sleep(Duration::from_millis(INPUT_POLL_INTERVAL_MILLIS)).await;
+        }
+
+        if should_break {
+            break;
         }
     }
 
