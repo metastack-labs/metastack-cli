@@ -631,6 +631,131 @@ async fn ensure_issue_labels_exist_ignores_duplicate_create_when_linear_already_
         .expect("duplicate label responses should not fail repo setup");
 }
 
+#[derive(Clone)]
+struct DuplicateThenWorkspaceVisibleLabelClient {
+    teams: Vec<TeamSummary>,
+    issue: IssueSummary,
+}
+
+#[async_trait]
+impl LinearClient for DuplicateThenWorkspaceVisibleLabelClient {
+    async fn list_projects(&self, _limit: usize) -> Result<Vec<ProjectSummary>> {
+        unreachable!("list_projects is not used in these tests")
+    }
+
+    async fn list_users(&self, _limit: usize) -> Result<Vec<UserRef>> {
+        unreachable!("list_users is not used in these tests")
+    }
+
+    async fn list_issues(&self, _limit: usize) -> Result<Vec<IssueSummary>> {
+        unreachable!("list_issues is not used in these tests")
+    }
+
+    async fn list_filtered_issues(&self, _filters: &IssueListFilters) -> Result<Vec<IssueSummary>> {
+        Ok(vec![self.issue.clone()])
+    }
+
+    async fn list_issue_labels(&self, team: Option<&str>) -> Result<Vec<LabelRef>> {
+        Ok(match team {
+            Some(_) => vec![label("label-plan", "plan")],
+            None => vec![
+                label("label-plan", "plan"),
+                label("label-technical", "technical"),
+            ],
+        })
+    }
+
+    async fn get_issue(&self, _issue_id: &str) -> Result<IssueSummary> {
+        Ok(self.issue.clone())
+    }
+
+    async fn list_teams(&self) -> Result<Vec<TeamSummary>> {
+        Ok(self.teams.clone())
+    }
+
+    async fn viewer(&self) -> Result<UserRef> {
+        unreachable!("viewer is not used in these tests")
+    }
+
+    async fn create_issue(&self, _request: IssueCreateRequest) -> Result<IssueSummary> {
+        unreachable!("create_issue is not used in these tests")
+    }
+
+    async fn create_issue_label(&self, _request: IssueLabelCreateRequest) -> Result<LabelRef> {
+        Err(anyhow!("Linear request failed: duplicate label name"))
+    }
+
+    async fn update_issue(
+        &self,
+        _issue_id: &str,
+        request: IssueUpdateRequest,
+    ) -> Result<IssueSummary> {
+        let label_ids = request.label_ids.unwrap_or_default();
+        assert_eq!(
+            label_ids,
+            vec!["label-plan".to_string(), "label-technical".to_string()]
+        );
+        Ok(self.issue.clone())
+    }
+
+    async fn create_comment(&self, _issue_id: &str, _body: String) -> Result<IssueComment> {
+        unreachable!("create_comment is not used in these tests")
+    }
+
+    async fn update_comment(&self, _comment_id: &str, _body: String) -> Result<IssueComment> {
+        unreachable!("update_comment is not used in these tests")
+    }
+
+    async fn upload_file(
+        &self,
+        _filename: &str,
+        _content_type: &str,
+        _contents: Vec<u8>,
+    ) -> Result<String> {
+        unreachable!("upload_file is not used in these tests")
+    }
+
+    async fn create_attachment(
+        &self,
+        _request: AttachmentCreateRequest,
+    ) -> Result<AttachmentSummary> {
+        unreachable!("create_attachment is not used in these tests")
+    }
+
+    async fn delete_attachment(&self, _attachment_id: &str) -> Result<()> {
+        unreachable!("delete_attachment is not used in these tests")
+    }
+
+    async fn download_file(&self, _url: &str) -> Result<Vec<u8>> {
+        unreachable!("download_file is not used in these tests")
+    }
+}
+
+#[tokio::test]
+async fn edit_issue_resolves_duplicate_label_from_workspace_scope() {
+    let issue = issue("MET-11", "Todo", Some("project-1"), "MetaStack CLI");
+    let client = DuplicateThenWorkspaceVisibleLabelClient {
+        teams: vec![team("MET", &[("state-1", "Todo")])],
+        issue: issue.clone(),
+    };
+    let service = LinearService::new(client, Some("MET".to_string()));
+
+    service
+        .edit_issue(IssueEditSpec {
+            identifier: "MET-11".to_string(),
+            title: None,
+            description: None,
+            project: None,
+            state: None,
+            priority: None,
+            estimate: None,
+            labels: Some(vec!["plan".to_string(), "technical".to_string()]),
+            parent_identifier: None,
+        })
+        .await
+        .expect("duplicate workspace label should resolve to a real UUID");
+}
+
 #[tokio::test]
 async fn resolve_project_selector_strict_rejects_ambiguous_matches() {
     let client = FakeLinearClient {

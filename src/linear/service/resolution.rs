@@ -15,7 +15,11 @@ where
         team: Option<String>,
         labels: &[String],
     ) -> Result<()> {
-        self.reconcile_issue_labels(team, labels).await?;
+        match self.reconcile_issue_labels(team, labels).await {
+            Ok(_) => {}
+            Err(error) if is_unresolved_duplicate_label_error(&error) => {}
+            Err(error) => return Err(error),
+        }
         Ok(())
     }
 
@@ -210,16 +214,26 @@ where
                 Err(error) if is_duplicate_label_error(&error) => {
                     let refreshed_labels = self.client.list_issue_labels(Some(&team.key)).await?;
                     if let Some(existing) = refreshed_labels
+                        .iter()
+                        .find(|existing| existing.name.eq_ignore_ascii_case(&label))
+                        .cloned()
+                    {
+                        available_labels.push(existing);
+                        continue;
+                    }
+
+                    let workspace_labels = self.client.list_issue_labels(None).await?;
+                    if let Some(existing) = workspace_labels
                         .into_iter()
                         .find(|existing| existing.name.eq_ignore_ascii_case(&label))
                     {
                         available_labels.push(existing);
-                    } else {
-                        available_labels.push(LabelRef {
-                            id: format!("pending-label-{label}"),
-                            name: label.clone(),
-                        });
+                        continue;
                     }
+
+                    bail!(
+                        "issue label `{label}` already exists in Linear but could not be resolved to a UUID"
+                    );
                 }
                 Err(error) => return Err(error),
             }
@@ -296,6 +310,12 @@ fn is_duplicate_label_error(error: &anyhow::Error) -> bool {
         .to_string()
         .to_ascii_lowercase()
         .contains("duplicate label name")
+}
+
+fn is_unresolved_duplicate_label_error(error: &anyhow::Error) -> bool {
+    error
+        .to_string()
+        .contains("already exists in Linear but could not be resolved to a UUID")
 }
 
 pub(super) fn render_missing_assignee_error(assignee: &str) -> String {

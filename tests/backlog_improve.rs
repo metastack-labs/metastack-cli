@@ -277,6 +277,152 @@ fn backlog_improve_apply_updates_local_packet_and_linear_issue() -> Result<(), B
 
 #[cfg(unix)]
 #[test]
+fn backlog_improve_apply_without_project_override_uses_paged_linear_connections()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let stub_path = temp.path().join("backlog-improve-stub");
+    let output_dir = temp.path().join("agent-output");
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&output_dir)?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+    write_backlog_improve_config(&config_path, &api_url, &stub_path)?;
+    write_backlog_improve_stub(
+        &stub_path,
+        &format!(
+            "#!/bin/sh\nprintf '%s' \
+'{{\"summary\":\"Ready to apply.\",\"needs_improvement\":true,\
+\"findings\":{{\"title_gaps\":[],\"description_gaps\":[],\"acceptance_criteria_gaps\":[],\
+\"metadata_gaps\":[\"Set an estimate before execution.\"],\"structure_opportunities\":[]}},\
+\"proposal\":{{\"title\":\"Regression-proof backlog improvement\",\
+\"description\":\"# Regression-proof backlog improvement\\n\\n## Acceptance Criteria\\n\\n\
+- `{cmd} backlog improve MET-611 --mode advanced --apply` succeeds without `--project`\\n\",\
+\"priority\":2,\"estimate\":3,\
+\"acceptance_criteria\":[\"`{cmd} backlog improve MET-611 --mode advanced --apply` succeeds without `--project`\"]}}}}'\n",
+            cmd = branding::COMMAND_NAME,
+        ),
+    )?;
+
+    let issue_dir = repo_root.join(format!("{}/backlog/MET-611", branding::PROJECT_DIR));
+    fs::create_dir_all(&issue_dir)?;
+    fs::write(issue_dir.join("index.md"), "# Existing local packet\n")?;
+
+    let issue = issue_node(
+        "issue-611",
+        "MET-611",
+        "Regression test ticket",
+        "Remote description before apply",
+        "state-backlog",
+        "Backlog",
+    );
+    let issue_list_mock = server.mock({
+        let issue = issue.clone();
+        move |when, then| {
+            when.method(POST)
+                .path("/graphql")
+                .body_includes("query Issues")
+                .body_includes("labels(first: 50)");
+            then.status(200).json_body(json!({
+                "data": {
+                    "issues": {
+                        "nodes": [issue]
+                    }
+                }
+            }));
+        }
+    });
+    let issue_detail_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issue")
+            .body_includes("\"id\":\"issue-611\"")
+            .body_includes("labels(first: 50)");
+        then.status(200).json_body(json!({
+            "data": {
+                "issue": issue_detail_node(
+                    "issue-611",
+                    "MET-611",
+                    "Regression test ticket",
+                    "Remote description before apply",
+                    Vec::new(),
+                    None,
+                )
+            }
+        }));
+    });
+    let teams_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Teams")
+            .body_includes("states(first: 50)");
+        then.status(200).json_body(team_payload());
+    });
+    let update_issue_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation UpdateIssue")
+            .body_includes("\"id\":\"issue-611\"")
+            .body_includes("labels(first: 50)");
+        then.status(200).json_body(json!({
+            "data": {
+                "issueUpdate": {
+                    "success": true,
+                    "issue": issue_node(
+                        "issue-611",
+                        "MET-611",
+                        "Regression-proof backlog improvement",
+                        "# Regression-proof backlog improvement",
+                        "state-backlog",
+                        "Backlog",
+                    )
+                }
+            }
+        }));
+    });
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &output_dir)
+        .args([
+            "backlog",
+            "improve",
+            "--api-key",
+            "token",
+            "--api-url",
+            &api_url,
+            "MET-611",
+            "--mode",
+            "advanced",
+            "--apply",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("MET-611: advanced applied"));
+
+    issue_list_mock.assert_calls(3);
+    issue_detail_mock.assert_calls(1);
+    teams_mock.assert_calls(1);
+    update_issue_mock.assert_calls(1);
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn backlog_improve_claude_permission_failure_classifies_error() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
