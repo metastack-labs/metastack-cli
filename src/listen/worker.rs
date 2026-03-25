@@ -27,6 +27,7 @@ use crate::config::{
     PromptTransport,
 };
 use crate::config_resolution::{AgentConfigOverrides, normalize_agent_name, resolve_agent_config};
+use crate::fs::sibling_workspace_root;
 use crate::fs::{PlanningPaths, canonicalize_existing_dir, write_text_file};
 use crate::github_pr::{
     GhCli, PullRequestLifecycleAction, PullRequestLifecycleResult, PullRequestPublishMode,
@@ -38,6 +39,7 @@ use crate::linear::{
 };
 use crate::repo_target::RepoTarget;
 use crate::workflow_contract::render_workflow_contract;
+use crate::workspace::{AutoCleanOutcome, try_auto_clean_workspace};
 
 use super::{
     BACKLOG_STATE, CanonicalSessionData, LatestResumeHandle, MAX_STALLED_TURNS, PullRequestStatus,
@@ -193,6 +195,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     &session_context.canonical,
                 ),
             )?;
+            try_listener_auto_clean(&source_root, project_selector, &workspace_path, &args.issue);
             return Ok(());
         }
 
@@ -607,6 +610,12 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                             &session_context.canonical,
                         ),
                     )?;
+                    try_listener_auto_clean(
+                        &source_root,
+                        project_selector,
+                        &workspace_path,
+                        &args.issue,
+                    );
                     return Ok(());
                 }
 
@@ -698,6 +707,55 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     &session_context.canonical,
                 ),
             )?;
+        }
+    }
+}
+
+/// Best-effort auto-clean for a listener workspace after the session completes.
+///
+/// When the workspace is safe (clean git state, within expected sibling root), removes the
+/// workspace clone and its ticket-scoped listen artifacts (session entry, detail, log). When the
+/// workspace has uncommitted changes, unpushed commits, or other safety risks, logs the skip
+/// reason and leaves the workspace in place for manual cleanup via `meta workspace prune`.
+fn try_listener_auto_clean(
+    source_root: &Path,
+    project_selector: Option<&str>,
+    workspace_path: &Path,
+    issue_identifier: &str,
+) {
+    let workspace_root = match sibling_workspace_root(source_root) {
+        Ok(root) => root,
+        Err(error) => {
+            eprintln!(
+                "listen: auto-clean skipped for {issue_identifier}: \
+                 failed to resolve workspace root: {error}"
+            );
+            return;
+        }
+    };
+
+    match try_auto_clean_workspace(
+        source_root,
+        project_selector,
+        &workspace_root,
+        workspace_path,
+        issue_identifier,
+    ) {
+        Ok(AutoCleanOutcome::Removed { bytes_reclaimed }) => {
+            eprintln!(
+                "listen: auto-cleaned workspace for {issue_identifier} \
+                 (freed {} bytes)",
+                bytes_reclaimed
+            );
+        }
+        Ok(AutoCleanOutcome::Skipped { reason }) => {
+            eprintln!(
+                "listen: auto-clean skipped for {issue_identifier}: \
+                 {reason} (manual review needed)"
+            );
+        }
+        Err(error) => {
+            eprintln!("listen: auto-clean failed for {issue_identifier}: {error:#}");
         }
     }
 }

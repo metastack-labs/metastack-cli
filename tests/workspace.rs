@@ -755,3 +755,205 @@ fn workspace_prune_removes_completed_clones_without_github_auth() -> Result<(), 
 
     Ok(())
 }
+
+#[cfg(unix)]
+#[test]
+fn workspace_prune_discovers_and_removes_merged_improve_workspaces() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let server = MockServer::start();
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::write(repo_root.join("README.md"), "# repo\n")?;
+    init_repo_with_origin(&repo_root)?;
+    write_minimal_planning_context(&repo_root, r#"{ "linear": { "team": "ENG" } }"#)?;
+    write_linear_config(&config_path, &server.url("/graphql"))?;
+
+    // Create an improve workspace with a pushed branch (simulating merged PR).
+    let workspace_root = temp.path().join("repo-workspace");
+    let improve_workspace = workspace_root.join("improve-abc123");
+    let improve_clone =
+        create_workspace_clone_checkout(&repo_root, "repo-workspace/improve-abc123")?;
+    git(
+        &improve_clone,
+        &["checkout", "-B", "improve/eng-10175-branch", "origin/main"],
+    )?;
+    commit_workspace_file(&improve_clone, "improve.txt", "improve\n", "Improve work")?;
+    push_workspace_branch(&improve_clone, "improve/eng-10175-branch")?;
+
+    // No ticket-based workspaces; only follow-up.
+    mock_linear_issues(&server, serde_json::json!([]));
+    write_gh_stub(
+        &bin_dir.join("gh"),
+        r#"[{"headRefName":"improve/eng-10175-branch","state":"MERGED"}]"#,
+    )?;
+
+    cli()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("PATH", prepend_path(&bin_dir)?)
+        .args([
+            "workspace",
+            "prune",
+            "--dry-run",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("REMOVE  improve-abc123"))
+        .stdout(predicate::str::contains("associated PR is merged"));
+
+    // The improve workspace should still exist after dry-run.
+    assert!(improve_workspace.exists());
+
+    // Now do the real prune.
+    cli()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("PATH", prepend_path(&bin_dir)?)
+        .args([
+            "workspace",
+            "prune",
+            "--force",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Removed 1 clones, freed"));
+
+    assert!(!improve_workspace.exists());
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn workspace_prune_keeps_dirty_improve_workspace() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let server = MockServer::start();
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::write(repo_root.join("README.md"), "# repo\n")?;
+    init_repo_with_origin(&repo_root)?;
+    write_minimal_planning_context(&repo_root, r#"{ "linear": { "team": "ENG" } }"#)?;
+    write_linear_config(&config_path, &server.url("/graphql"))?;
+
+    // Create an improve workspace with a merged PR but dirty state.
+    let improve_workspace = temp.path().join("repo-workspace").join("improve-dirty1");
+    let improve_clone =
+        create_workspace_clone_checkout(&repo_root, "repo-workspace/improve-dirty1")?;
+    git(
+        &improve_clone,
+        &["checkout", "-B", "improve/dirty-branch", "origin/main"],
+    )?;
+    commit_workspace_file(&improve_clone, "pushed.txt", "pushed\n", "Pushed work")?;
+    push_workspace_branch(&improve_clone, "improve/dirty-branch")?;
+    // Add uncommitted changes.
+    fs::write(improve_clone.join("uncommitted.txt"), "dirty\n")?;
+
+    mock_linear_issues(&server, serde_json::json!([]));
+    write_gh_stub(
+        &bin_dir.join("gh"),
+        r#"[{"headRefName":"improve/dirty-branch","state":"MERGED"}]"#,
+    )?;
+
+    cli()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("PATH", prepend_path(&bin_dir)?)
+        .args([
+            "workspace",
+            "prune",
+            "--dry-run",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("KEEP  improve-dirty1"))
+        .stdout(predicate::str::contains("uncommitted changes detected"));
+
+    assert!(improve_workspace.exists());
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn workspace_prune_discovers_and_removes_merged_review_workspaces() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let server = MockServer::start();
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::write(repo_root.join("README.md"), "# repo\n")?;
+    init_repo_with_origin(&repo_root)?;
+    write_minimal_planning_context(&repo_root, r#"{ "linear": { "team": "ENG" } }"#)?;
+    write_linear_config(&config_path, &server.url("/graphql"))?;
+
+    // Create a review remediation workspace.
+    let review_runs_dir = temp.path().join("repo-workspace").join("review-runs");
+    let review_workspace = review_runs_dir.join("pr-42");
+    fs::create_dir_all(&review_runs_dir)?;
+    let review_clone =
+        create_workspace_clone_checkout(&repo_root, "repo-workspace/review-runs/pr-42")?;
+    git(
+        &review_clone,
+        &["checkout", "-B", "fix/pr-42-remediation", "origin/main"],
+    )?;
+    commit_workspace_file(&review_clone, "fix.txt", "fix\n", "Remediation fix")?;
+    push_workspace_branch(&review_clone, "fix/pr-42-remediation")?;
+
+    mock_linear_issues(&server, serde_json::json!([]));
+    write_gh_stub(
+        &bin_dir.join("gh"),
+        r#"[{"headRefName":"fix/pr-42-remediation","state":"MERGED"}]"#,
+    )?;
+
+    cli()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("PATH", prepend_path(&bin_dir)?)
+        .args([
+            "workspace",
+            "prune",
+            "--dry-run",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("REMOVE  review-runs/pr-42"))
+        .stdout(predicate::str::contains("associated PR is merged"));
+
+    assert!(review_workspace.exists());
+
+    // Do the real prune.
+    cli()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("PATH", prepend_path(&bin_dir)?)
+        .args([
+            "workspace",
+            "prune",
+            "--force",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Removed 1 clones, freed"));
+
+    assert!(!review_workspace.exists());
+
+    Ok(())
+}

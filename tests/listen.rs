@@ -5945,7 +5945,7 @@ printf '%s' "$METASTACK_AGENT_INSTRUCTIONS" > "$TEST_OUTPUT_DIR/instructions-$co
 
     let current_path = std::env::var("PATH")?;
     meta()
-        .current_dir(&workspace)
+        .current_dir(&repo_root)
         .env("METASTACK_CONFIG", &config_path)
         .env("TEST_OUTPUT_DIR", &stub_dir)
         .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
@@ -6372,7 +6372,7 @@ printf 'pub fn turn_one() {}\n' > src/turn-one.rs
 
     let current_path = std::env::var("PATH")?;
     meta()
-        .current_dir(&workspace)
+        .current_dir(&repo_root)
         .env("METASTACK_CONFIG", &config_path)
         .env("TEST_OUTPUT_DIR", &stub_dir)
         .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
@@ -6446,6 +6446,161 @@ transport = "arg"
             api_url = server.url.as_str(),
         ),
     )?;
+    fs::write(repo_root.join(".gitignore"), ".metastack\n")?;
+    fs::write(bin_dir.join("agent-stub"), "#!/bin/sh\n:\n")?;
+    write_listen_github_stub(
+        &bin_dir.join("gh"),
+        "draft",
+        "https://github.com/example/repo/pull/321",
+    )?;
+    let mut permissions = fs::metadata(bin_dir.join("agent-stub"))?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(bin_dir.join("agent-stub"), permissions)?;
+    init_repo_with_origin(&repo_root)?;
+
+    let workspace = create_workspace_clone_checkout(&repo_root, "repo-workspace/MET-32")?;
+    let branch = "met-32-continuation-loop";
+    ProcessCommand::new("git")
+        .args([
+            "-C",
+            workspace.to_str().expect("utf8"),
+            "checkout",
+            "-B",
+            branch,
+            "main",
+        ])
+        .status()?;
+    fs::write(workspace.join("src.rs"), "pub fn ready() {}\n")?;
+    ProcessCommand::new("git")
+        .args(["-C", workspace.to_str().expect("utf8"), "add", "src.rs"])
+        .status()?;
+    ProcessCommand::new("git")
+        .args([
+            "-C",
+            workspace.to_str().expect("utf8"),
+            "commit",
+            "-m",
+            "Prepare ready promotion",
+        ])
+        .status()?;
+    ProcessCommand::new("git")
+        .args([
+            "-C",
+            workspace.to_str().expect("utf8"),
+            "push",
+            "--set-upstream",
+            "origin",
+            branch,
+        ])
+        .status()?;
+    // Keep an uncommitted change so review handoff auto-clean skips and the stored session
+    // remains inspectable for this PR-promotion assertion.
+    fs::write(workspace.join("dirty-skip.txt"), "local review note\n")?;
+    let backlog_dir = workspace.join(".metastack/backlog/MET-32");
+    fs::create_dir_all(&backlog_dir)?;
+    fs::write(
+        backlog_dir.join("index.md"),
+        "# MET-32\n\n## Tasks\n\n- [x] Complete\n",
+    )?;
+
+    let current_path = std::env::var("PATH")?;
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &stub_dir)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "listen-worker",
+            "--source-root",
+            repo_root.to_str().expect("utf8"),
+            "--workspace",
+            workspace.to_str().expect("utf8"),
+            "--issue",
+            "MET-32",
+            "--workpad-comment-id",
+            "comment-32",
+            "--backlog-issue",
+            "MET-32",
+            "--max-turns",
+            "1",
+        ])
+        .assert()
+        .success();
+
+    let gh_log = fs::read_to_string(stub_dir.join("gh.log"))?;
+    assert!(gh_log.contains("pr edit 321 --title MET-32: Continuation loop --body-file"));
+    assert!(gh_log.contains("pr ready 321"));
+    assert!(!gh_log.contains("pr create --base main --head met-32-continuation-loop"));
+    assert!(
+        workspace.is_dir(),
+        "dirty workspace should be kept for manual review"
+    );
+    let state = fs::read_to_string(listen_state_path(&config_path, &repo_root)?)?;
+    assert!(state.contains("\"phase\": \"completed\""));
+    assert!(state.contains("Human Review"));
+    assert!(state.contains("\"status\": \"ready\""));
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "inspect",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ready #321"))
+        .stdout(predicate::str::contains("draft #321").not());
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_worker_auto_cleans_safe_workspace_during_review_handoff() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let stub_dir = temp.path().join("stub-output");
+    let server = DynamicLinearServer::start_with_completion_after_refreshes(1_000_000)?;
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&stub_dir)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+    write_onboarded_config(
+        &config_path,
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+
+[agents]
+default_agent = "stub"
+
+[agents.commands.stub]
+command = "agent-stub"
+args = ["{{{{payload}}}}"]
+transport = "arg"
+"#,
+            api_url = server.url.as_str(),
+        ),
+    )?;
+    fs::write(repo_root.join(".gitignore"), ".metastack\n")?;
     fs::write(bin_dir.join("agent-stub"), "#!/bin/sh\n:\n")?;
     write_listen_github_stub(
         &bin_dir.join("gh"),
@@ -6526,26 +6681,28 @@ transport = "arg"
     let gh_log = fs::read_to_string(stub_dir.join("gh.log"))?;
     assert!(gh_log.contains("pr edit 321 --title MET-32: Continuation loop --body-file"));
     assert!(gh_log.contains("pr ready 321"));
-    assert!(!gh_log.contains("pr create --base main --head met-32-continuation-loop"));
-    let state = fs::read_to_string(listen_state_path(&config_path, &repo_root)?)?;
-    assert!(state.contains("\"phase\": \"completed\""));
-    assert!(state.contains("Human Review"));
-    assert!(state.contains("\"status\": \"ready\""));
+    assert!(
+        !workspace.exists(),
+        "safe workspace should be auto-cleaned after review handoff completion"
+    );
 
-    meta()
-        .current_dir(&repo_root)
-        .env("METASTACK_CONFIG", &config_path)
-        .args([
-            "listen",
-            "sessions",
-            "inspect",
-            "--root",
-            repo_root.to_str().expect("temp path should be utf-8"),
-        ])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("ready #321"))
-        .stdout(predicate::str::contains("draft #321").not());
+    let state_path = listen_state_path(&config_path, &repo_root)?;
+    let state: serde_json::Value = serde_json::from_slice(&fs::read(&state_path)?)?;
+    let sessions = state["sessions"]
+        .as_array()
+        .expect("sessions should remain an array");
+    assert!(
+        sessions.is_empty(),
+        "auto-clean should remove the completed ticket session entry"
+    );
+    assert!(
+        !listen_log_path(&config_path, &repo_root, "MET-32")?.exists(),
+        "ticket log should be removed during auto-clean"
+    );
+    assert!(
+        !listen_detail_path(&config_path, &repo_root, "MET-32")?.exists(),
+        "ticket detail should be removed during auto-clean"
+    );
 
     Ok(())
 }

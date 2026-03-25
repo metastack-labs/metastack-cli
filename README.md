@@ -36,7 +36,7 @@ Most planning tools split work across issue trackers, docs, scripts, and ad hoc 
 - `meta agents improve` inspects open PRs, accepts improvement instructions, and publishes stacked PRs targeting the source PR branch from an isolated workspace.
 - `meta agents execute <ISSUE_ID>` runs a one-off headless agent session for a single Linear issue, persisting session state for later adoption by `meta agents listen`.
 - `meta agents listen` runs unattended ticket execution in dedicated workspace clones instead of your source checkout. Execute-started sessions are visible in the listen dashboard but not auto-claimed.
-- `meta workspace` inventories and cleans those sibling listener workspace clones after the listener finishes.
+- `meta workspace` inventories and cleans sibling workspace clones (listener, improve, and review) with automatic merged-workspace cleanup and batch reconciliation.
 
 ## Install `meta` During Development
 
@@ -193,7 +193,7 @@ The preferred public surface is domain-first. Legacy top-level commands such as 
 | `meta runtime` | Configure install-scoped and repo-scoped defaults and supervise cron jobs |
 | `meta dashboard` | Open Linear, agents, team, or ops-oriented dashboard views |
 | `meta merge` | Discover open GitHub PRs, batch them in a one-shot dashboard, and publish one aggregate PR |
-| `meta workspace` | List, clean, and prune sibling listener workspace clones under the fixed workspace root |
+| `meta workspace` | List, clean, and prune sibling workspace clones (listener, improve, review) under the fixed workspace root |
 | `meta upgrade` | Check and apply verified GitHub Release self-updates for release installs on macOS/Linux |
 
 ## Interactive TUI Scrolling
@@ -1306,11 +1306,27 @@ worker or retries a blocked session from its existing workspace state.
 
 ### `workspace`
 
-Manage the sibling listener workspace clones created by `meta agents listen`. These commands always resolve the workspace root from the repository root with the fixed sibling convention:
+Manage the sibling workspace clones created by `meta agents listen`, `meta agents improve`, and `meta agents review`. These commands always resolve the workspace root from the repository root with the fixed sibling convention:
 
 - `<parent>/<repo>-workspace/`
 
-That root is intentionally not configurable in this backlog, and TTL-based or automatic pruning is intentionally out of scope.
+That root is intentionally not configurable.
+
+#### Automatic cleanup
+
+When a listener session completes (the Linear ticket moves to a non-active state such as Done or Cancelled), the listener worker attempts to auto-clean the corresponding workspace clone immediately. Auto-clean succeeds only when the workspace has no uncommitted changes, no unpushed commits, and HEAD is not detached. When any safety check fails, the workspace is left in place and a manual-review-needed skip is logged. This ensures no local work is ever lost automatically.
+
+The same ticket-scoped listen artifacts (session entry, detail file, log file) that manual `meta workspace clean` removes are also removed during auto-clean.
+
+#### Batch reconciliation
+
+`meta workspace prune` reconciles previously missed merged workspaces across all managed workspace families:
+
+- **Listener clones** (`<TICKET>/`): removed when the Linear ticket is Done or Cancelled and the workspace is safe.
+- **Improve workspaces** (`improve-<session-id>/`): removed when the associated PR is merged or closed and the workspace is safe.
+- **Review remediation workspaces** (`review-runs/pr-<number>/`): removed when the associated PR is merged or closed and the workspace is safe.
+
+Workspaces with uncommitted changes, unpushed commits, or detached HEAD are always kept regardless of PR or ticket state.
 
 Examples:
 
@@ -1330,8 +1346,8 @@ Behavior:
 - GitHub PR enrichment is optional. When `gh` auth is unavailable, `list` and `prune` still succeed and mark PR data as unavailable while continuing from Linear completion state alone.
 - `meta workspace clean <TICKET>` deletes one clone after confirmation unless `--force` is passed, and it always reports dirty or ahead safety signals before removal.
 - `meta workspace clean --target-only` removes `target/` directories across all listener clones by default, or narrows to one ticket when a ticket identifier is also supplied.
-- `meta workspace prune --dry-run` previews every clone, whether it would be removed or kept, why, and the estimated reclaimed space.
-- `meta workspace prune` removes clones whose Linear tickets are Done or Cancelled, keeps clones with open PRs when PR data is available, skips clones with unpushed commits, and prints a final `Removed N clones, freed X GB. Kept M clones.` summary.
+- `meta workspace prune --dry-run` previews every clone, whether it would be removed or kept, why, and the estimated reclaimed space. Includes listener ticket clones, improve workspaces, and review remediation workspaces.
+- `meta workspace prune` removes clones whose Linear tickets are Done or Cancelled (for listener clones) or whose associated PRs are merged or closed (for improve and review workspaces), keeps clones with open PRs when PR data is available, skips clones with unpushed commits, and prints a final `Removed N clones, freed X GB. Kept M clones.` summary.
 - Clone deletion also removes only the matching ticket-scoped MetaListen session entry and per-ticket log artifact from the install-scoped project store, leaving unrelated sessions for the same repository intact.
 
 For built-in `codex` and `claude` listen workers, the install-scoped `session.json` state now keeps

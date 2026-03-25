@@ -28,9 +28,21 @@ The initial implementation delivered in `MET-13` focuses on the smallest end-to-
    appended to `listen/projects/<PROJECT_KEY>/logs/<TICKET>.log`.
    Built-in provider-native manual resume metadata is stored as the same `{ provider, id }`
    record in both persisted artifacts.
-10. Session cleanup is record-only: targeted session records are removed or rewritten inside
-    `session.json` without deleting `project.json`, `active-listener.lock.json`, or unrelated
-    per-issue logs, and live worker PIDs are never cleared automatically.
+10. Session and workspace cleanup is two-tiered:
+    - **Immediate auto-clean**: when a listener worker session completes (the ticket leaves active
+      states), the worker attempts to remove the workspace clone and its ticket-scoped listen
+      artifacts (session entry, detail, log) automatically. Auto-clean succeeds only when the
+      workspace is clean (no uncommitted changes, no unpushed commits, HEAD not detached).
+      When any safety check fails, the workspace is left in place and a manual-review skip is
+      logged.
+    - **Batch reconciliation**: `meta workspace prune` discovers previously missed merged
+      workspaces across listener ticket clones, improve workspaces (`improve-<session-id>/`),
+      and review remediation workspaces (`review-runs/pr-<number>/`), applies the same
+      safety-first removal rules, and never deletes workspaces outside the expected sibling
+      workspace roots.
+    - Session records within `session.json` are removed or rewritten without deleting
+      `project.json`, `active-listener.lock.json`, or unrelated per-issue logs, and live
+      worker PIDs are never cleared automatically.
 11. A full-screen ratatui dashboard renders runtime summary rows, a colorized agent table, the pending queue, daemon notes, and an active/completed session toggle.
 12. The session table keeps a focused row selection, shows compact PR state (`none`, `draft #N`, `ready #N`), and opens a structured selected-session detail pane with `Enter`.
 13. The hidden listen worker keeps refreshing the Linear issue and re-running the agent with first-turn and continuation prompts while the issue remains active.
