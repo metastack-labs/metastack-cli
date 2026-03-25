@@ -1604,12 +1604,15 @@ where
             }
         };
 
-        let workspace = match ensure_ticket_workspace(
-            &self.root,
-            self.listen_settings.refresh_policy(),
-            &detailed_issue.identifier,
-            &detailed_issue.title,
-        ) {
+        let ws_root = self.root.clone();
+        let ws_refresh_policy = self.listen_settings.refresh_policy();
+        let ws_identifier = detailed_issue.identifier.clone();
+        let ws_title = detailed_issue.title.clone();
+        let workspace = match tokio::task::spawn_blocking(move || {
+            ensure_ticket_workspace(&ws_root, ws_refresh_policy, &ws_identifier, &ws_title)
+        })
+        .await?
+        {
             Ok(workspace) => workspace,
             Err(_error) => {
                 return Ok(self.build_session(
@@ -1695,16 +1698,18 @@ where
             }
         };
 
-        let brief_path = write_agent_brief(
-            &workspace.workspace_path,
-            AgentBriefRequest {
-                ticket: detailed_issue.identifier.clone(),
-                title_override: Some(detailed_issue.title.clone()),
-                goal: Some("Picked up automatically by `meta listen`.".to_string()),
-                metadata: brief_metadata,
-                output: None,
-            },
-        )
+        let brief_workspace = workspace.workspace_path.clone();
+        let brief_request = AgentBriefRequest {
+            ticket: detailed_issue.identifier.clone(),
+            title_override: Some(detailed_issue.title.clone()),
+            goal: Some("Picked up automatically by `meta listen`.".to_string()),
+            metadata: brief_metadata,
+            output: None,
+        };
+        let brief_path = tokio::task::spawn_blocking(move || {
+            write_agent_brief(&brief_workspace, brief_request)
+        })
+        .await?
         .map(|path| path.display().to_string())
         .ok();
 
