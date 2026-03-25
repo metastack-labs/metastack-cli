@@ -32,113 +32,113 @@ const CANONICAL_TEMPLATE_FILES: &[(&str, &str)] = &[
     (
         "README.md",
         include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/artifacts/BACKLOG_TEMPLATE/README.md"
+            env!("OUT_DIR"),
+            "/artifacts/BACKLOG_TEMPLATE/README.md"
         )),
     ),
     (
         "index.md",
         include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/artifacts/BACKLOG_TEMPLATE/index.md"
+            env!("OUT_DIR"),
+            "/artifacts/BACKLOG_TEMPLATE/index.md"
         )),
     ),
     (
         "checklist.md",
         include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/artifacts/BACKLOG_TEMPLATE/checklist.md"
+            env!("OUT_DIR"),
+            "/artifacts/BACKLOG_TEMPLATE/checklist.md"
         )),
     ),
     (
         "contacts.md",
         include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/artifacts/BACKLOG_TEMPLATE/contacts.md"
+            env!("OUT_DIR"),
+            "/artifacts/BACKLOG_TEMPLATE/contacts.md"
         )),
     ),
     (
         "proposed-prs.md",
         include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/artifacts/BACKLOG_TEMPLATE/proposed-prs.md"
+            env!("OUT_DIR"),
+            "/artifacts/BACKLOG_TEMPLATE/proposed-prs.md"
         )),
     ),
     (
         "decisions.md",
         include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/artifacts/BACKLOG_TEMPLATE/decisions.md"
+            env!("OUT_DIR"),
+            "/artifacts/BACKLOG_TEMPLATE/decisions.md"
         )),
     ),
     (
         "risks.md",
         include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/artifacts/BACKLOG_TEMPLATE/risks.md"
+            env!("OUT_DIR"),
+            "/artifacts/BACKLOG_TEMPLATE/risks.md"
         )),
     ),
     (
         "specification.md",
         include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/artifacts/BACKLOG_TEMPLATE/specification.md"
+            env!("OUT_DIR"),
+            "/artifacts/BACKLOG_TEMPLATE/specification.md"
         )),
     ),
     (
         "implementation.md",
         include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/artifacts/BACKLOG_TEMPLATE/implementation.md"
+            env!("OUT_DIR"),
+            "/artifacts/BACKLOG_TEMPLATE/implementation.md"
         )),
     ),
     (
         "validation.md",
         include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/artifacts/BACKLOG_TEMPLATE/validation.md"
+            env!("OUT_DIR"),
+            "/artifacts/BACKLOG_TEMPLATE/validation.md"
         )),
     ),
     (
         "context/README.md",
         include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/artifacts/BACKLOG_TEMPLATE/context/README.md"
+            env!("OUT_DIR"),
+            "/artifacts/BACKLOG_TEMPLATE/context/README.md"
         )),
     ),
     (
         "context/context-note-template.md",
         include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/artifacts/BACKLOG_TEMPLATE/context/context-note-template.md"
+            env!("OUT_DIR"),
+            "/artifacts/BACKLOG_TEMPLATE/context/context-note-template.md"
         )),
     ),
     (
         "tasks/README.md",
         include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/artifacts/BACKLOG_TEMPLATE/tasks/README.md"
+            env!("OUT_DIR"),
+            "/artifacts/BACKLOG_TEMPLATE/tasks/README.md"
         )),
     ),
     (
         "tasks/workstream-template.md",
         include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/artifacts/BACKLOG_TEMPLATE/tasks/workstream-template.md"
+            env!("OUT_DIR"),
+            "/artifacts/BACKLOG_TEMPLATE/tasks/workstream-template.md"
         )),
     ),
     (
         "artifacts/README.md",
         include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/artifacts/BACKLOG_TEMPLATE/artifacts/README.md"
+            env!("OUT_DIR"),
+            "/artifacts/BACKLOG_TEMPLATE/artifacts/README.md"
         )),
     ),
     (
         "artifacts/artifact-template.md",
         include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/artifacts/BACKLOG_TEMPLATE/artifacts/artifact-template.md"
+            env!("OUT_DIR"),
+            "/artifacts/BACKLOG_TEMPLATE/artifacts/artifact-template.md"
         )),
     ),
 ];

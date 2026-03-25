@@ -410,62 +410,62 @@ pub fn supported_agent_route_definitions() -> &'static [AgentRouteDefinition] {
         AgentRouteDefinition {
             key: AGENT_ROUTE_BACKLOG_SPEC,
             family: "backlog",
-            label: "meta backlog spec",
+            label: concat!(env!("BRAND_COMMAND_NAME"), " backlog spec"),
         },
         AgentRouteDefinition {
             key: AGENT_ROUTE_BACKLOG_PLAN,
             family: "backlog",
-            label: "meta backlog plan",
+            label: concat!(env!("BRAND_COMMAND_NAME"), " backlog plan"),
         },
         AgentRouteDefinition {
             key: AGENT_ROUTE_BACKLOG_IMPROVE,
             family: "backlog",
-            label: "meta backlog improve",
+            label: concat!(env!("BRAND_COMMAND_NAME"), " backlog improve"),
         },
         AgentRouteDefinition {
             key: AGENT_ROUTE_BACKLOG_SPLIT,
             family: "backlog",
-            label: "meta backlog split",
+            label: concat!(env!("BRAND_COMMAND_NAME"), " backlog split"),
         },
         AgentRouteDefinition {
             key: AGENT_ROUTE_CONTEXT_SCAN,
             family: "context",
-            label: "meta context scan",
+            label: concat!(env!("BRAND_COMMAND_NAME"), " context scan"),
         },
         AgentRouteDefinition {
             key: AGENT_ROUTE_CONTEXT_RELOAD,
             family: "context",
-            label: "meta context reload",
+            label: concat!(env!("BRAND_COMMAND_NAME"), " context reload"),
         },
         AgentRouteDefinition {
             key: AGENT_ROUTE_LINEAR_ISSUES_REFINE,
             family: "linear",
-            label: "meta linear issues refine",
+            label: concat!(env!("BRAND_COMMAND_NAME"), " linear issues refine"),
         },
         AgentRouteDefinition {
             key: AGENT_ROUTE_AGENTS_LISTEN,
             family: "agents",
-            label: "meta agents listen",
+            label: concat!(env!("BRAND_COMMAND_NAME"), " agents listen"),
         },
         AgentRouteDefinition {
             key: AGENT_ROUTE_AGENTS_WORKFLOWS_RUN,
             family: "agents",
-            label: "meta agents workflows run",
+            label: concat!(env!("BRAND_COMMAND_NAME"), " agents workflows run"),
         },
         AgentRouteDefinition {
             key: AGENT_ROUTE_RUNTIME_CRON_PROMPT,
             family: "runtime.cron",
-            label: "meta runtime cron prompt jobs",
+            label: concat!(env!("BRAND_COMMAND_NAME"), " runtime cron prompt jobs"),
         },
         AgentRouteDefinition {
             key: AGENT_ROUTE_AGENTS_REVIEW,
             family: "agents",
-            label: "meta agents review",
+            label: concat!(env!("BRAND_COMMAND_NAME"), " agents review"),
         },
         AgentRouteDefinition {
             key: AGENT_ROUTE_MERGE,
             family: "merge",
-            label: "meta merge",
+            label: concat!(env!("BRAND_COMMAND_NAME"), " merge"),
         },
     ];
     ROUTES

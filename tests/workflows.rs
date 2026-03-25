@@ -2,6 +2,8 @@
 
 include!("support/common.rs");
 
+use metastack_cli::branding;
+
 fn ensure_workflow_test_config(config_path: &Path) -> Result<(), Box<dyn Error>> {
     let onboarding_block = "[onboarding]\ncompleted = true\n";
     let updated = match fs::read_to_string(config_path) {
@@ -160,12 +162,15 @@ fn workflows_run_executes_builtin_codex_provider_adapter() -> Result<(), Box<dyn
     let config_path = temp.path().join("metastack.toml");
     let bin_dir = temp.path().join("bin");
     let stub_dir = temp.path().join("stub-output");
-    fs::create_dir_all(repo_root.join(".metastack/workflows"))?;
+    fs::create_dir_all(repo_root.join(format!("{}/workflows", branding::PROJECT_DIR)))?;
     fs::create_dir_all(&bin_dir)?;
     fs::create_dir_all(&stub_dir)?;
 
     fs::write(
-        repo_root.join(".metastack/workflows/builtin-proof.md"),
+        repo_root.join(format!(
+            "{}/workflows/builtin-proof.md",
+            branding::PROJECT_DIR
+        )),
         r#"---
 name: builtin-proof
 summary: Minimal workflow for builtin provider execution.
@@ -268,12 +273,15 @@ fn workflows_run_executes_builtin_claude_provider_adapter() -> Result<(), Box<dy
     let config_path = temp.path().join("metastack.toml");
     let bin_dir = temp.path().join("bin");
     let stub_dir = temp.path().join("stub-output");
-    fs::create_dir_all(repo_root.join(".metastack/workflows"))?;
+    fs::create_dir_all(repo_root.join(format!("{}/workflows", branding::PROJECT_DIR)))?;
     fs::create_dir_all(&bin_dir)?;
     fs::create_dir_all(&stub_dir)?;
 
     fs::write(
-        repo_root.join(".metastack/workflows/builtin-proof.md"),
+        repo_root.join(format!(
+            "{}/workflows/builtin-proof.md",
+            branding::PROJECT_DIR
+        )),
         r#"---
 name: builtin-proof
 summary: Minimal workflow for builtin provider execution.
@@ -359,11 +367,14 @@ fn workflows_run_fails_fast_when_builtin_codex_help_surface_drift_is_detected()
     let repo_root = temp.path().join("repo");
     let config_path = temp.path().join("metastack.toml");
     let bin_dir = temp.path().join("bin");
-    fs::create_dir_all(repo_root.join(".metastack/workflows"))?;
+    fs::create_dir_all(repo_root.join(format!("{}/workflows", branding::PROJECT_DIR)))?;
     fs::create_dir_all(&bin_dir)?;
 
     fs::write(
-        repo_root.join(".metastack/workflows/builtin-proof.md"),
+        repo_root.join(format!(
+            "{}/workflows/builtin-proof.md",
+            branding::PROJECT_DIR
+        )),
         r#"---
 name: builtin-proof
 summary: Minimal workflow for builtin provider execution.
@@ -447,7 +458,7 @@ fn workflows_run_provider_override_skips_incompatible_route_model_and_reasoning(
     let config_path = temp.path().join("metastack.toml");
     let bin_dir = temp.path().join("bin");
     let stub_dir = temp.path().join("stub-output");
-    fs::create_dir_all(repo_root.join(".metastack/workflows"))?;
+    fs::create_dir_all(repo_root.join(format!("{}/workflows", branding::PROJECT_DIR)))?;
     fs::create_dir_all(&bin_dir)?;
     fs::create_dir_all(&stub_dir)?;
 
@@ -463,7 +474,10 @@ fn workflows_run_provider_override_skips_incompatible_route_model_and_reasoning(
 "#,
     )?;
     fs::write(
-        repo_root.join(".metastack/workflows/provider-override-proof.md"),
+        repo_root.join(format!(
+            "{}/workflows/provider-override-proof.md",
+            branding::PROJECT_DIR
+        )),
         r#"---
 name: provider-override-proof
 summary: Verify provider overrides skip incompatible route defaults.
@@ -868,10 +882,13 @@ fn unsupported_provider_model_combination_returns_actionable_error() -> Result<(
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
     let config_path = temp.path().join("metastack.toml");
-    fs::create_dir_all(repo_root.join(".metastack/workflows"))?;
+    fs::create_dir_all(repo_root.join(format!("{}/workflows", branding::PROJECT_DIR)))?;
     ensure_workflow_test_config(&config_path)?;
     fs::write(
-        repo_root.join(".metastack/workflows/invalid-provider.md"),
+        repo_root.join(format!(
+            "{}/workflows/invalid-provider.md",
+            branding::PROJECT_DIR
+        )),
         r#"---
 name: invalid-provider
 summary: Minimal workflow for model validation.
@@ -947,11 +964,14 @@ fn workflows_run_render_once_without_parameters_skips_empty_wizard() -> Result<(
     let repo_root = temp.path().join("repo");
     let config_path = temp.path().join("metastack.toml");
     let bin_dir = temp.path().join("bin");
-    fs::create_dir_all(repo_root.join(".metastack/workflows"))?;
+    fs::create_dir_all(repo_root.join(format!("{}/workflows", branding::PROJECT_DIR)))?;
     fs::create_dir_all(&bin_dir)?;
 
     fs::write(
-        repo_root.join(".metastack/workflows/no-input-proof.md"),
+        repo_root.join(format!(
+            "{}/workflows/no-input-proof.md",
+            branding::PROJECT_DIR
+        )),
         r#"---
 name: no-input-proof
 summary: Verify parameterless workflow review routing.
@@ -1072,11 +1092,14 @@ fn workflows_run_render_once_save_prompt_uses_repo_relative_default_path()
     let repo_root = temp.path().join("repo");
     let config_path = temp.path().join("metastack.toml");
     let bin_dir = temp.path().join("bin");
-    fs::create_dir_all(repo_root.join(".metastack/workflows"))?;
+    fs::create_dir_all(repo_root.join(format!("{}/workflows", branding::PROJECT_DIR)))?;
     fs::create_dir_all(&bin_dir)?;
 
     fs::write(
-        repo_root.join(".metastack/workflows/render-once-proof.md"),
+        repo_root.join(format!(
+            "{}/workflows/render-once-proof.md",
+            branding::PROJECT_DIR
+        )),
         r#"---
 name: render-once-proof
 summary: Verify scripted workflow snapshots.
@@ -1149,9 +1172,10 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"#
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            ".metastack/workflows/generated/render-once-proof.md",
-        ))
+        .stdout(predicate::str::contains(format!(
+            "{}/workflows/generated/render-once-proof.md",
+            branding::PROJECT_DIR
+        )))
         .stdout(predicate::str::contains("Suggested target:"))
         .stdout(predicate::str::contains(
             "Paths must stay inside the repository root.",
@@ -1168,11 +1192,14 @@ fn workflows_run_render_once_events_can_reach_edit_and_accept_it() -> Result<(),
     let repo_root = temp.path().join("repo");
     let config_path = temp.path().join("metastack.toml");
     let bin_dir = temp.path().join("bin");
-    fs::create_dir_all(repo_root.join(".metastack/workflows"))?;
+    fs::create_dir_all(repo_root.join(format!("{}/workflows", branding::PROJECT_DIR)))?;
     fs::create_dir_all(&bin_dir)?;
 
     fs::write(
-        repo_root.join(".metastack/workflows/render-once-proof.md"),
+        repo_root.join(format!(
+            "{}/workflows/render-once-proof.md",
+            branding::PROJECT_DIR
+        )),
         r#"---
 name: render-once-proof
 summary: Verify scripted workflow snapshots.
@@ -1259,11 +1286,14 @@ fn workflows_run_render_once_events_can_save_accepted_edits() -> Result<(), Box<
     let repo_root = temp.path().join("repo");
     let config_path = temp.path().join("metastack.toml");
     let bin_dir = temp.path().join("bin");
-    fs::create_dir_all(repo_root.join(".metastack/workflows"))?;
+    fs::create_dir_all(repo_root.join(format!("{}/workflows", branding::PROJECT_DIR)))?;
     fs::create_dir_all(&bin_dir)?;
 
     fs::write(
-        repo_root.join(".metastack/workflows/render-once-proof.md"),
+        repo_root.join(format!(
+            "{}/workflows/render-once-proof.md",
+            branding::PROJECT_DIR
+        )),
         r#"---
 name: render-once-proof
 summary: Verify scripted workflow snapshots.
@@ -1357,11 +1387,14 @@ fn workflows_run_render_once_events_can_reach_edit_and_discard_it() -> Result<()
     let repo_root = temp.path().join("repo");
     let config_path = temp.path().join("metastack.toml");
     let bin_dir = temp.path().join("bin");
-    fs::create_dir_all(repo_root.join(".metastack/workflows"))?;
+    fs::create_dir_all(repo_root.join(format!("{}/workflows", branding::PROJECT_DIR)))?;
     fs::create_dir_all(&bin_dir)?;
 
     fs::write(
-        repo_root.join(".metastack/workflows/render-once-proof.md"),
+        repo_root.join(format!(
+            "{}/workflows/render-once-proof.md",
+            branding::PROJECT_DIR
+        )),
         r#"---
 name: render-once-proof
 summary: Verify scripted workflow snapshots.
@@ -1449,11 +1482,14 @@ fn workflows_run_render_once_events_discard_edits_before_save() -> Result<(), Bo
     let repo_root = temp.path().join("repo");
     let config_path = temp.path().join("metastack.toml");
     let bin_dir = temp.path().join("bin");
-    fs::create_dir_all(repo_root.join(".metastack/workflows"))?;
+    fs::create_dir_all(repo_root.join(format!("{}/workflows", branding::PROJECT_DIR)))?;
     fs::create_dir_all(&bin_dir)?;
 
     fs::write(
-        repo_root.join(".metastack/workflows/render-once-proof.md"),
+        repo_root.join(format!(
+            "{}/workflows/render-once-proof.md",
+            branding::PROJECT_DIR
+        )),
         r#"---
 name: render-once-proof
 summary: Verify scripted workflow snapshots.
@@ -1549,11 +1585,14 @@ fn workflows_run_render_once_events_preserve_explicit_output_and_show_overwrite_
     let repo_root = temp.path().join("repo");
     let config_path = temp.path().join("metastack.toml");
     let bin_dir = temp.path().join("bin");
-    fs::create_dir_all(repo_root.join(".metastack/workflows"))?;
+    fs::create_dir_all(repo_root.join(format!("{}/workflows", branding::PROJECT_DIR)))?;
     fs::create_dir_all(&bin_dir)?;
 
     fs::write(
-        repo_root.join(".metastack/workflows/render-once-proof.md"),
+        repo_root.join(format!(
+            "{}/workflows/render-once-proof.md",
+            branding::PROJECT_DIR
+        )),
         r#"---
 name: render-once-proof
 summary: Verify scripted workflow snapshots.
@@ -1645,11 +1684,14 @@ fn workflows_run_render_once_events_can_confirm_overwrite_and_save() -> Result<(
     let repo_root = temp.path().join("repo");
     let config_path = temp.path().join("metastack.toml");
     let bin_dir = temp.path().join("bin");
-    fs::create_dir_all(repo_root.join(".metastack/workflows"))?;
+    fs::create_dir_all(repo_root.join(format!("{}/workflows", branding::PROJECT_DIR)))?;
     fs::create_dir_all(&bin_dir)?;
 
     fs::write(
-        repo_root.join(".metastack/workflows/render-once-proof.md"),
+        repo_root.join(format!(
+            "{}/workflows/render-once-proof.md",
+            branding::PROJECT_DIR
+        )),
         r#"---
 name: render-once-proof
 summary: Verify scripted workflow snapshots.
@@ -1746,12 +1788,12 @@ fn workflows_run_no_interactive_can_save_generated_output() -> Result<(), Box<dy
     let config_path = temp.path().join("metastack.toml");
     let bin_dir = temp.path().join("bin");
     let stub_dir = temp.path().join("stub-output");
-    fs::create_dir_all(repo_root.join(".metastack/workflows"))?;
+    fs::create_dir_all(repo_root.join(format!("{}/workflows", branding::PROJECT_DIR)))?;
     fs::create_dir_all(&bin_dir)?;
     fs::create_dir_all(&stub_dir)?;
 
     fs::write(
-        repo_root.join(".metastack/workflows/save-proof.md"),
+        repo_root.join(format!("{}/workflows/save-proof.md", branding::PROJECT_DIR)),
         r#"---
 name: save-proof
 summary: Verify non-interactive save behavior.
@@ -1805,7 +1847,10 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"#
     permissions.set_mode(0o755);
     fs::set_permissions(&stub_path, permissions)?;
 
-    let output_path = repo_root.join(".metastack/workflows/generated/save-proof.md");
+    let output_path = repo_root.join(format!(
+        "{}/workflows/generated/save-proof.md",
+        branding::PROJECT_DIR
+    ));
     let current_path = std::env::var("PATH")?;
     meta()
         .workflow_repo(&repo_root, &config_path)?
@@ -1826,9 +1871,10 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"#
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "Workflow `save-proof` artifact created at `.metastack/workflows/generated/save-proof.md`.",
-        ));
+        .stdout(predicate::str::contains(format!(
+            "Workflow `save-proof` artifact created at `{}/workflows/generated/save-proof.md`.",
+            branding::PROJECT_DIR
+        )));
 
     assert_eq!(
         fs::read_to_string(output_path)?,
@@ -1844,11 +1890,11 @@ fn workflows_run_without_tty_automatically_uses_headless_fallback() -> Result<()
     let repo_root = temp.path().join("repo");
     let config_path = temp.path().join("metastack.toml");
     let bin_dir = temp.path().join("bin");
-    fs::create_dir_all(repo_root.join(".metastack/workflows"))?;
+    fs::create_dir_all(repo_root.join(format!("{}/workflows", branding::PROJECT_DIR)))?;
     fs::create_dir_all(&bin_dir)?;
 
     fs::write(
-        repo_root.join(".metastack/workflows/save-proof.md"),
+        repo_root.join(format!("{}/workflows/save-proof.md", branding::PROJECT_DIR)),
         r#"---
 name: save-proof
 summary: Verify automatic non-TTY fallback behavior.
@@ -1902,7 +1948,10 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"#
     permissions.set_mode(0o755);
     fs::set_permissions(&stub_path, permissions)?;
 
-    let output_path = repo_root.join(".metastack/workflows/generated/save-proof.md");
+    let output_path = repo_root.join(format!(
+        "{}/workflows/generated/save-proof.md",
+        branding::PROJECT_DIR
+    ));
     let current_path = std::env::var("PATH")?;
     meta()
         .workflow_repo(&repo_root, &config_path)?
@@ -1921,9 +1970,10 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"#
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "Workflow `save-proof` artifact created at `.metastack/workflows/generated/save-proof.md`.",
-        ));
+        .stdout(predicate::str::contains(format!(
+            "Workflow `save-proof` artifact created at `{}/workflows/generated/save-proof.md`.",
+            branding::PROJECT_DIR
+        )));
 
     assert_eq!(
         fs::read_to_string(output_path)?,
@@ -1939,11 +1989,11 @@ fn workflows_run_no_interactive_refuses_overwrite_without_flag() -> Result<(), B
     let repo_root = temp.path().join("repo");
     let config_path = temp.path().join("metastack.toml");
     let bin_dir = temp.path().join("bin");
-    fs::create_dir_all(repo_root.join(".metastack/workflows"))?;
+    fs::create_dir_all(repo_root.join(format!("{}/workflows", branding::PROJECT_DIR)))?;
     fs::create_dir_all(&bin_dir)?;
 
     fs::write(
-        repo_root.join(".metastack/workflows/save-proof.md"),
+        repo_root.join(format!("{}/workflows/save-proof.md", branding::PROJECT_DIR)),
         r#"---
 name: save-proof
 summary: Verify non-interactive save behavior.
@@ -1997,7 +2047,10 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"#
     permissions.set_mode(0o755);
     fs::set_permissions(&stub_path, permissions)?;
 
-    let output_path = repo_root.join(".metastack/workflows/generated/save-proof.md");
+    let output_path = repo_root.join(format!(
+        "{}/workflows/generated/save-proof.md",
+        branding::PROJECT_DIR
+    ));
     fs::create_dir_all(output_path.parent().expect("parent path"))?;
     fs::write(&output_path, "# Existing\n")?;
 
@@ -2021,9 +2074,10 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"#
         .assert()
         .failure()
         .stderr(predicate::str::contains("refusing to overwrite"))
-        .stderr(predicate::str::contains(
-            ".metastack/workflows/generated/save-proof.md",
-        ));
+        .stderr(predicate::str::contains(format!(
+            "{}/workflows/generated/save-proof.md",
+            branding::PROJECT_DIR
+        )));
 
     assert_eq!(fs::read_to_string(output_path)?, "# Existing\n");
     Ok(())
@@ -2038,12 +2092,12 @@ fn workflows_run_no_interactive_rejects_output_outside_repo_before_execution()
     let config_path = temp.path().join("metastack.toml");
     let bin_dir = temp.path().join("bin");
     let stub_dir = temp.path().join("stub-output");
-    fs::create_dir_all(repo_root.join(".metastack/workflows"))?;
+    fs::create_dir_all(repo_root.join(format!("{}/workflows", branding::PROJECT_DIR)))?;
     fs::create_dir_all(&bin_dir)?;
     fs::create_dir_all(&stub_dir)?;
 
     fs::write(
-        repo_root.join(".metastack/workflows/save-proof.md"),
+        repo_root.join(format!("{}/workflows/save-proof.md", branding::PROJECT_DIR)),
         r#"---
 name: save-proof
 summary: Verify non-interactive save behavior.

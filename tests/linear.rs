@@ -1,6 +1,7 @@
 #![allow(dead_code, unused_imports)]
 
 include!("support/common.rs");
+use metastack_cli::branding;
 
 fn write_onboarded_config(
     config_path: &Path,
@@ -70,9 +71,10 @@ fn linear_list_commands_work_against_a_mock_server() {
     let api_url = server.url("/graphql");
     write_onboarded_config(&config_path, "").expect("config file should write");
 
-    fs::create_dir_all(temp.path().join(".metastack")).expect("planning dir should build");
+    fs::create_dir_all(temp.path().join(branding::PROJECT_DIR)).expect("planning dir should build");
     fs::write(
-        temp.path().join(".metastack/meta.json"),
+        temp.path()
+            .join(format!("{}/meta.json", branding::PROJECT_DIR)),
         r#"{
   "linear": {
     "team": "MET",
@@ -275,10 +277,10 @@ fn issues_command_uses_repo_scoped_api_key_over_global_auth() -> Result<(), Box<
     let right_server = MockServer::start();
     let right_api_url = right_server.url("/graphql");
 
-    fs::create_dir_all(repo_root.join(".metastack"))?;
+    fs::create_dir_all(repo_root.join(branding::PROJECT_DIR))?;
     let canonical_repo_root = fs::canonicalize(&repo_root)?;
     fs::write(
-        repo_root.join(".metastack/meta.json"),
+        repo_root.join(format!("{}/meta.json", branding::PROJECT_DIR)),
         r#"{
   "linear": {
     "team": "MET",
@@ -371,9 +373,9 @@ fn projects_command_uses_repo_selected_profile_and_team_over_global_defaults()
     let right_api_url = right_server.url("/graphql");
     let wrong_api_url = wrong_server.url("/graphql");
 
-    fs::create_dir_all(repo_root.join(".metastack"))?;
+    fs::create_dir_all(repo_root.join(branding::PROJECT_DIR))?;
     fs::write(
-        repo_root.join(".metastack/meta.json"),
+        repo_root.join(format!("{}/meta.json", branding::PROJECT_DIR)),
         r#"{
   "linear": {
     "profile": "work",
@@ -477,9 +479,9 @@ fn issues_command_uses_repo_selected_profile_and_project_over_global_defaults()
     let right_api_url = right_server.url("/graphql");
     let wrong_api_url = wrong_server.url("/graphql");
 
-    fs::create_dir_all(repo_root.join(".metastack"))?;
+    fs::create_dir_all(repo_root.join(branding::PROJECT_DIR))?;
     fs::write(
-        repo_root.join(".metastack/meta.json"),
+        repo_root.join(format!("{}/meta.json", branding::PROJECT_DIR)),
         r#"{
   "linear": {
     "profile": "work",
@@ -1315,9 +1317,10 @@ fn linear_issue_create_uses_repo_meta_defaults() -> Result<(), Box<dyn Error>> {
     let api_url = server.url("/graphql");
     let config_path = temp.path().join("metastack.toml");
 
-    fs::create_dir_all(temp.path().join(".metastack"))?;
+    fs::create_dir_all(temp.path().join(branding::PROJECT_DIR))?;
     fs::write(
-        temp.path().join(".metastack/meta.json"),
+        temp.path()
+            .join(format!("{}/meta.json", branding::PROJECT_DIR)),
         r#"{
   "linear": {
     "team": "MET",
@@ -1404,7 +1407,7 @@ api_url = "{api_url}"
                         "id": "issue-1",
                         "identifier": "MET-31",
                         "title": "Use repo defaults",
-                        "description": "Create issues with .metastack/meta.json defaults",
+                        "description": &format!("Create issues with {}/meta.json defaults", branding::PROJECT_DIR),
                         "url": "https://linear.app/issues/31",
                         "priority": 1,
                         "updatedAt": "2026-03-14T17:10:00Z",
@@ -1440,7 +1443,10 @@ api_url = "{api_url}"
             "--title",
             "Use repo defaults",
             "--description",
-            "Create issues with .metastack/meta.json defaults",
+            &format!(
+                "Create issues with {}/meta.json defaults",
+                branding::PROJECT_DIR
+            ),
             "--priority",
             "1",
         ])

@@ -17,7 +17,8 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
+use futures::StreamExt;
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -51,13 +52,11 @@ use crate::listen::workspace::{TicketWorkspace, ensure_ticket_workspace};
 use crate::output::render_json_success;
 use crate::scaffold::ensure_planning_layout;
 pub use state::{
-    ActiveIssue, AgentSession, LatestResumeHandle, PendingIssue, PullRequestStatus,
-    PullRequestSummary, ResumeProvider, SessionOrigin, SessionPhase, TokenUsage,
+    ActiveIssue, AgentSession, CanonicalSessionData, LatestResumeHandle, PendingIssue,
+    PullRequestStatus, PullRequestSummary, ResumeProvider, SessionOrigin, SessionPhase, TokenUsage,
+    TurnPromptMode, TurnTokenSnapshot,
 };
-use state::{
-    COMPLETED_SESSION_TTL_SECONDS, ListenState, explicit_resume_id_label,
-    explicit_resume_provider_label,
-};
+use state::{COMPLETED_SESSION_TTL_SECONDS, ListenState, explicit_resume_id_label};
 use store::{
     ListenProjectStore, ListenSessionDetail, SessionSelector, StoredListenProjectSummary,
     pid_is_running, resolve_source_project_root,
@@ -70,7 +69,6 @@ const ISSUE_ATTACHMENT_CONTEXT_FILES_DIR: &str = "files";
 const DEFAULT_LISTEN_MAX_TURNS: u32 = 20;
 const MAX_STALLED_TURNS: u32 = 2;
 const TERMINAL_REFRESH_INTERVAL_SECONDS: u64 = 1;
-const INPUT_POLL_INTERVAL_MILLIS: u64 = 100;
 const DEMO_NOW_EPOCH_SECONDS: u64 = 1_773_575_600;
 const DEMO_START_EPOCH_SECONDS: u64 = DEMO_NOW_EPOCH_SECONDS - 7_351;
 const REVIEW_STATE_CANDIDATES: &[&str] =
@@ -334,10 +332,10 @@ impl ListenCycleData {
                         .to_string(),
                     phase: SessionPhase::BriefReady,
                     summary: "Brief ready | backlog MET-14 | worker active".to_string(),
-                    brief_path: Some(".metastack/agents/briefs/MET-13.md".to_string()),
+                    brief_path: Some(format!("{}/agents/briefs/MET-13.md", crate::branding::PROJECT_DIR)),
                     backlog_issue_identifier: Some("MET-14".to_string()),
                     backlog_issue_title: Some("Technical: Agent Daemon".to_string()),
-                    backlog_path: Some(".metastack/backlog/MET-14".to_string()),
+                    backlog_path: Some(format!("{}/backlog/MET-14", crate::branding::PROJECT_DIR)),
                     workspace_path: Some("/tmp/metastack-cli-workspace/MET-13".to_string()),
                     branch: Some("met-13-agent-daemon".to_string()),
                     pull_request: PullRequestSummary {
@@ -363,7 +361,18 @@ impl ListenCycleData {
                         input: Some(9_614_112),
                         output: Some(8_120),
                     },
-                    log_path: Some(".metastack/agents/sessions/MET-13.log".to_string()),
+                    turn_history: Vec::new(),
+                    canonical: CanonicalSessionData {
+                        provider: Some("codex".to_string()),
+                        model: Some("gpt-5.4".to_string()),
+                        reasoning: Some("high".to_string()),
+                        tokens: TokenUsage {
+                            input: Some(9_614_112),
+                            output: Some(8_120),
+                        },
+                        repair: None,
+                    },
+                    log_path: Some(format!("{}/agents/sessions/MET-13.log", crate::branding::PROJECT_DIR)),
                     origin: SessionOrigin::Listen,
                 },
                 AgentSession {
@@ -399,7 +408,18 @@ impl ListenCycleData {
                         input: Some(8_380_959),
                         output: Some(49_960),
                     },
-                    log_path: Some(".metastack/agents/sessions/MET-17.log".to_string()),
+                    turn_history: Vec::new(),
+                    canonical: CanonicalSessionData {
+                        provider: Some("claude".to_string()),
+                        model: Some("sonnet".to_string()),
+                        reasoning: Some("high".to_string()),
+                        tokens: TokenUsage {
+                            input: Some(8_380_959),
+                            output: Some(49_960),
+                        },
+                        repair: None,
+                    },
+                    log_path: Some(format!("{}/agents/sessions/MET-17.log", crate::branding::PROJECT_DIR)),
                     origin: state::SessionOrigin::Execute,
                 },
             ],
@@ -443,6 +463,25 @@ fn demo_session_details(reference_now: u64) -> HashMap<String, ListenSessionDeta
                     input: Some(9_614_112),
                     output: Some(8_120),
                 },
+                turn_history: vec![TurnTokenSnapshot {
+                    turn: 1,
+                    prompt_mode: TurnPromptMode::FullPrompt,
+                    tokens: TokenUsage {
+                        input: Some(9_614_112),
+                        output: Some(8_120),
+                    },
+                    captured_at_epoch_seconds: reference_now - 1_180,
+                }],
+                canonical: CanonicalSessionData {
+                    provider: Some("codex".to_string()),
+                    model: Some("gpt-5.4".to_string()),
+                    reasoning: Some("high".to_string()),
+                    tokens: TokenUsage {
+                        input: Some(9_614_112),
+                        output: Some(8_120),
+                    },
+                    repair: None,
+                },
                 pull_request: PullRequestSummary {
                     number: Some(321),
                     url: Some("https://github.com/metastack-labs/metastack-cli/pull/321".to_string()),
@@ -455,24 +494,24 @@ fn demo_session_details(reference_now: u64) -> HashMap<String, ListenSessionDeta
                 }),
                 references: store::SessionDetailReferences {
                     workspace_path: Some("/tmp/metastack-cli-workspace/MET-13".to_string()),
-                    backlog_path: Some(".metastack/backlog/MET-14".to_string()),
-                    brief_path: Some(".metastack/agents/briefs/MET-13.md".to_string()),
+                    backlog_path: Some(format!("{}/backlog/MET-14", crate::branding::PROJECT_DIR)),
+                    brief_path: Some(format!("{}/agents/briefs/MET-13.md", crate::branding::PROJECT_DIR)),
                     workpad_comment_id: Some("comment-met-13".to_string()),
-                    log_path: Some(".metastack/agents/sessions/MET-13.log".to_string()),
+                    log_path: Some(format!("{}/agents/sessions/MET-13.log", crate::branding::PROJECT_DIR)),
                     branch: Some("met-13-agent-daemon".to_string()),
                 },
                 prompt_context: vec![
                     store::SessionContextReference {
                         label: "Brief".to_string(),
-                        value: ".metastack/agents/briefs/MET-13.md".to_string(),
+                        value: format!("{}/agents/briefs/MET-13.md", crate::branding::PROJECT_DIR),
                     },
                     store::SessionContextReference {
                         label: "Backlog index".to_string(),
-                        value: ".metastack/backlog/MET-14/index.md".to_string(),
+                        value: format!("{}/backlog/MET-14/index.md", crate::branding::PROJECT_DIR),
                     },
                     store::SessionContextReference {
                         label: "Attachment context manifest".to_string(),
-                        value: ".metastack/agents/issue-context/MET-13/README.md".to_string(),
+                        value: format!("{}/agents/issue-context/MET-13/README.md", crate::branding::PROJECT_DIR),
                     },
                 ],
                 milestones: vec![
@@ -524,6 +563,25 @@ fn demo_session_details(reference_now: u64) -> HashMap<String, ListenSessionDeta
                     input: Some(8_380_959),
                     output: Some(49_960),
                 },
+                turn_history: vec![TurnTokenSnapshot {
+                    turn: 1,
+                    prompt_mode: TurnPromptMode::FullPrompt,
+                    tokens: TokenUsage {
+                        input: Some(8_380_959),
+                        output: Some(49_960),
+                    },
+                    captured_at_epoch_seconds: reference_now - 2_940,
+                }],
+                canonical: CanonicalSessionData {
+                    provider: Some("claude".to_string()),
+                    model: Some("sonnet".to_string()),
+                    reasoning: Some("high".to_string()),
+                    tokens: TokenUsage {
+                        input: Some(8_380_959),
+                        output: Some(49_960),
+                    },
+                    repair: None,
+                },
                 pull_request: PullRequestSummary::default(),
                 latest_resume_handle: Some(LatestResumeHandle {
                     provider: ResumeProvider::Claude,
@@ -535,12 +593,12 @@ fn demo_session_details(reference_now: u64) -> HashMap<String, ListenSessionDeta
                     backlog_path: None,
                     brief_path: None,
                     workpad_comment_id: None,
-                    log_path: Some(".metastack/agents/sessions/MET-17.log".to_string()),
+                    log_path: Some(format!("{}/agents/sessions/MET-17.log", crate::branding::PROJECT_DIR)),
                     branch: Some("met-17-branch-pr-reconciliation".to_string()),
                 },
                 prompt_context: vec![store::SessionContextReference {
                     label: "Attachment context manifest".to_string(),
-                    value: ".metastack/agents/issue-context/MET-17/README.md".to_string(),
+                    value: format!("{}/agents/issue-context/MET-17/README.md", crate::branding::PROJECT_DIR),
                 }],
                 milestones: vec![store::SessionMilestone {
                     at_epoch_seconds: reference_now - 2_940,
@@ -1546,12 +1604,15 @@ where
             }
         };
 
-        let workspace = match ensure_ticket_workspace(
-            &self.root,
-            self.listen_settings.refresh_policy(),
-            &detailed_issue.identifier,
-            &detailed_issue.title,
-        ) {
+        let ws_root = self.root.clone();
+        let ws_refresh_policy = self.listen_settings.refresh_policy();
+        let ws_identifier = detailed_issue.identifier.clone();
+        let ws_title = detailed_issue.title.clone();
+        let workspace = match tokio::task::spawn_blocking(move || {
+            ensure_ticket_workspace(&ws_root, ws_refresh_policy, &ws_identifier, &ws_title)
+        })
+        .await?
+        {
             Ok(workspace) => workspace,
             Err(_error) => {
                 return Ok(self.build_session(
@@ -1637,16 +1698,18 @@ where
             }
         };
 
-        let brief_path = write_agent_brief(
-            &workspace.workspace_path,
-            AgentBriefRequest {
-                ticket: detailed_issue.identifier.clone(),
-                title_override: Some(detailed_issue.title.clone()),
-                goal: Some("Picked up automatically by `meta listen`.".to_string()),
-                metadata: brief_metadata,
-                output: None,
-            },
-        )
+        let brief_workspace = workspace.workspace_path.clone();
+        let brief_request = AgentBriefRequest {
+            ticket: detailed_issue.identifier.clone(),
+            title_override: Some(detailed_issue.title.clone()),
+            goal: Some("Picked up automatically by `meta listen`.".to_string()),
+            metadata: brief_metadata,
+            output: None,
+        };
+        let brief_path = tokio::task::spawn_blocking(move || {
+            write_agent_brief(&brief_workspace, brief_request)
+        })
+        .await?
         .map(|path| path.display().to_string())
         .ok();
 
@@ -1826,6 +1889,8 @@ where
             latest_resume_handle: None,
             turns: artifacts.turns.or(Some(0)),
             tokens: TokenUsage::default(),
+            turn_history: Vec::new(),
+            canonical: CanonicalSessionData::default(),
             log_path: artifacts.log_path,
             origin: SessionOrigin::Listen,
         }
@@ -2050,7 +2115,7 @@ fn workspace_entry_is_planning_artifact(entry: &str) -> bool {
         entry.trim()
     };
     let path = path.rsplit(" -> ").next().unwrap_or(path).trim();
-    path.starts_with(".metastack/")
+    path.starts_with(&format!("{}/", crate::branding::PROJECT_DIR))
 }
 
 fn workspace_has_meaningful_progress(workspace_path: &Path) -> Result<bool> {
@@ -2286,7 +2351,7 @@ pub fn run_listen_session_list(_: &ListenSessionListArgs) -> Result<String> {
             .map(|session| session.issue_identifier.clone())
             .unwrap_or_else(|| "-".to_string());
         let provider = latest
-            .map(|session| explicit_resume_provider_label(session.latest_resume_handle.as_ref()))
+            .map(|session| session.provider_label())
             .unwrap_or_else(|| "-".to_string());
         let resume_id = latest
             .map(|session| explicit_resume_id_label(session.latest_resume_handle.as_ref()))
@@ -2345,15 +2410,22 @@ pub fn run_listen_session_inspect(args: &ListenSessionInspectArgs) -> Result<Str
         lines.push(format!("  - Origin: {}", session.origin_label()));
         lines.push(format!("  - Summary: {}", session.summary));
         lines.push(format!("  - PR: {}", session.pull_request_label()));
-        lines.push(format!("  - Tokens: {}", session.tokens.display_compact()));
+        lines.push(format!(
+            "  - Tokens: {}",
+            session.canonical_tokens().display_compact()
+        ));
         lines.push(format!(
             "  - Updated: {}",
             now_timestamp_for_epoch(session.updated_at_epoch_seconds)
         ));
-        lines.push(format!(
-            "  - Resume provider: {}",
-            explicit_resume_provider_label(session.latest_resume_handle.as_ref())
-        ));
+        lines.push(format!("  - Provider: {}", session.provider_label()));
+        if let Some(model) = session.canonical.model.as_deref() {
+            lines.push(format!("  - Model: {model}"));
+        }
+        if let Some(reasoning) = session.canonical.reasoning.as_deref() {
+            lines.push(format!("  - Reasoning: {reasoning}"));
+        }
+        lines.push(format!("  - Resume provider: {}", session.provider_label()));
         lines.push(format!(
             "  - Resume ID: {}",
             explicit_resume_id_label(session.latest_resume_handle.as_ref())
@@ -2366,7 +2438,7 @@ pub fn run_listen_session_inspect(args: &ListenSessionInspectArgs) -> Result<Str
         }
         lines.push(format!("  - Detail file: {}", detail_path.display()));
         if let Some(detail) = detail {
-            append_session_inspect_detail_lines(&mut lines, &detail);
+            append_session_inspect_detail_lines(&mut lines, &detail, args.turns);
         } else {
             lines.push("  - Detail status: unavailable".to_string());
         }
@@ -2382,7 +2454,7 @@ pub fn run_listen_session_inspect(args: &ListenSessionInspectArgs) -> Result<Str
                 session.issue_identifier,
                 session.phase.display_label(),
                 session.summary,
-                session.tokens.display_compact()
+                session.canonical_tokens().display_compact()
             ));
         }
     }
@@ -2390,7 +2462,11 @@ pub fn run_listen_session_inspect(args: &ListenSessionInspectArgs) -> Result<Str
     Ok(lines.join("\n"))
 }
 
-fn append_session_inspect_detail_lines(lines: &mut Vec<String>, detail: &ListenSessionDetail) {
+fn append_session_inspect_detail_lines(
+    lines: &mut Vec<String>,
+    detail: &ListenSessionDetail,
+    show_turns: bool,
+) {
     lines.push("  - Detail status: available".to_string());
     lines.push(format!(
         "  - Detail milestones: {}",
@@ -2405,8 +2481,18 @@ fn append_session_inspect_detail_lines(lines: &mut Vec<String>, detail: &ListenS
         detail.pull_request.compact_label()
     ));
     lines.push(format!(
-        "  - Detail resume provider: {}",
-        explicit_resume_provider_label(detail.latest_resume_handle.as_ref())
+        "  - Detail provider: {}",
+        detail_provider_label(detail)
+    ));
+    if let Some(model) = detail.canonical.model.as_deref() {
+        lines.push(format!("  - Detail model: {model}"));
+    }
+    if let Some(reasoning) = detail.canonical.reasoning.as_deref() {
+        lines.push(format!("  - Detail reasoning: {reasoning}"));
+    }
+    lines.push(format!(
+        "  - Detail tokens: {}",
+        detail_tokens(detail).display_compact()
     ));
     lines.push(format!(
         "  - Detail resume ID: {}",
@@ -2468,6 +2554,17 @@ fn append_session_inspect_detail_lines(lines: &mut Vec<String>, detail: &ListenS
         }
     }
 
+    if show_turns {
+        if detail.turn_history.is_empty() {
+            lines.push("  - Turn history: unavailable".to_string());
+        } else {
+            lines.push("  - Turn history:".to_string());
+            for snapshot in &detail.turn_history {
+                lines.push(format!("    - {}", snapshot.display_compact()));
+            }
+        }
+    }
+
     if !detail.log_excerpts.is_empty() {
         lines.push("  - Recent log excerpts:".to_string());
         for excerpt in detail.log_excerpts.iter().take(3) {
@@ -2477,6 +2574,28 @@ fn append_session_inspect_detail_lines(lines: &mut Vec<String>, detail: &ListenS
                 truncate_summary(&excerpt.text, 120)
             ));
         }
+    }
+}
+
+fn detail_provider_label(detail: &ListenSessionDetail) -> String {
+    detail
+        .canonical
+        .provider
+        .clone()
+        .or_else(|| {
+            detail
+                .latest_resume_handle
+                .as_ref()
+                .map(|resume| resume.provider.label().to_string())
+        })
+        .unwrap_or_else(|| "unavailable".to_string())
+}
+
+fn detail_tokens(detail: &ListenSessionDetail) -> &TokenUsage {
+    if detail.canonical.tokens.is_known() {
+        &detail.canonical.tokens
+    } else {
+        &detail.tokens
     }
 }
 
@@ -2724,6 +2843,8 @@ pub async fn run_execute(args: &crate::cli::ExecuteArgs) -> Result<()> {
         latest_resume_handle: None,
         turns: Some(0),
         tokens: TokenUsage::default(),
+        turn_history: Vec::new(),
+        canonical: CanonicalSessionData::default(),
         log_path: Some(log_path.display().to_string()),
         origin: state::SessionOrigin::Execute,
     };
@@ -3262,6 +3383,7 @@ where
     };
     let mut next_terminal_refresh_at = Instant::now() + terminal_refresh_interval;
     let mut pending_cycle_refresh: Option<Pin<Box<Fut>>> = None;
+    let mut event_stream = EventStream::new();
 
     loop {
         let now = now_epoch_seconds();
@@ -3286,73 +3408,80 @@ where
         browser_state.normalize(&data);
         terminal.draw(|frame| dashboard::render(frame, &data, &browser_state))?;
 
-        let wait_for_input = next_linear_refresh_at
-            .saturating_duration_since(Instant::now())
-            .min(
-                next_terminal_refresh_at
-                    .saturating_duration_since(Instant::now())
-                    .min(Duration::from_millis(250)),
-            );
-
-        if event::poll(wait_for_input)?
-            && let Event::Key(key) = event::read()?
-            && key.kind == KeyEventKind::Press
-        {
-            let ctrl_c =
-                key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
-            if ctrl_c || matches!(key.code, KeyCode::Char('q')) {
-                break;
-            } else if matches!(key.code, KeyCode::Char('r' | 'R')) {
-                if let Some(session) = browser_state.selected_session(&data) {
-                    let handled = if session.phase == SessionPhase::Paused {
-                        resume_paused(&session.issue_identifier)?
-                    } else if session.phase == SessionPhase::Blocked {
-                        retry_blocked(&session.issue_identifier)?
-                    } else {
-                        false
-                    };
-                    if handled {
-                        refresh_dashboard_state(&mut cycle)?;
-                        next_terminal_refresh_at = Instant::now();
-                    }
-                }
-            } else if matches!(key.code, KeyCode::Char('p' | 'P')) {
-                if let Some(session) = browser_state.selected_session(&data) {
-                    if session.phase == SessionPhase::Running
-                        && pause_running(&session.issue_identifier)?
-                    {
-                        refresh_dashboard_state(&mut cycle)?;
-                        next_terminal_refresh_at = Instant::now();
-                    }
-                }
-            } else if let Some(action) = listen_browser_action(key.code, loop_config.vim_mode) {
-                browser_state.apply_action(&data, action);
-            }
-        }
-
-        let now = Instant::now();
-        if pending_cycle_refresh.is_none() && now >= next_linear_refresh_at {
+        // Schedule a cycle refresh if it's time and one isn't already pending.
+        if pending_cycle_refresh.is_none() && Instant::now() >= next_linear_refresh_at {
             pending_cycle_refresh = Some(Box::pin(next_cycle()));
         }
-        if now >= next_terminal_refresh_at {
-            refresh_dashboard_state(&mut cycle)?;
-            next_terminal_refresh_at = Instant::now() + terminal_refresh_interval;
-        }
 
-        if let Some(refresh) = pending_cycle_refresh.as_mut() {
-            tokio::select! {
-                result = refresh => {
-                    cycle = result?;
-                    let refreshed_at = Instant::now();
-                    next_linear_refresh_at = refreshed_at + linear_refresh_interval;
-                    pending_cycle_refresh = None;
+        // Compute the next terminal-refresh heartbeat deadline.
+        let heartbeat = next_terminal_refresh_at
+            .saturating_duration_since(Instant::now())
+            .min(Duration::from_millis(250));
+
+        // All arms are async — no blocking calls on the tokio runtime.
+        let mut should_break = false;
+        tokio::select! {
+            maybe_event = event_stream.next() => {
+                match maybe_event {
+                    Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
+                        let ctrl_c = key.code == KeyCode::Char('c')
+                            && key.modifiers.contains(KeyModifiers::CONTROL);
+                        if ctrl_c || matches!(key.code, KeyCode::Char('q')) {
+                            should_break = true;
+                        } else if matches!(key.code, KeyCode::Char('r' | 'R')) {
+                            if let Some(session) = browser_state.selected_session(&data) {
+                                let handled = if session.phase == SessionPhase::Paused {
+                                    resume_paused(&session.issue_identifier)?
+                                } else if session.phase == SessionPhase::Blocked {
+                                    retry_blocked(&session.issue_identifier)?
+                                } else {
+                                    false
+                                };
+                                if handled {
+                                    refresh_dashboard_state(&mut cycle)?;
+                                    next_terminal_refresh_at = Instant::now();
+                                }
+                            }
+                        } else if matches!(key.code, KeyCode::Char('p' | 'P')) {
+                            if let Some(session) = browser_state.selected_session(&data) {
+                                if session.phase == SessionPhase::Running
+                                    && pause_running(&session.issue_identifier)?
+                                {
+                                    refresh_dashboard_state(&mut cycle)?;
+                                    next_terminal_refresh_at = Instant::now();
+                                }
+                            }
+                        } else if let Some(action) =
+                            listen_browser_action(key.code, loop_config.vim_mode)
+                        {
+                            browser_state.apply_action(&data, action);
+                        }
+                    }
+                    Some(Err(e)) => return Err(e.into()),
+                    _ => {}
+                }
+            }
+            result = async {
+                    pending_cycle_refresh.as_mut().unwrap().as_mut().await
+                }, if pending_cycle_refresh.is_some() => {
+                cycle = result?;
+                let refreshed_at = Instant::now();
+                next_linear_refresh_at = refreshed_at + linear_refresh_interval;
+                pending_cycle_refresh = None;
+                refresh_dashboard_state(&mut cycle)?;
+                next_terminal_refresh_at = Instant::now() + terminal_refresh_interval;
+            }
+            _ = tokio::time::sleep(heartbeat) => {
+                // Terminal refresh heartbeat — triggers a redraw.
+                if Instant::now() >= next_terminal_refresh_at {
                     refresh_dashboard_state(&mut cycle)?;
                     next_terminal_refresh_at = Instant::now() + terminal_refresh_interval;
                 }
-                _ = tokio::time::sleep(Duration::from_millis(INPUT_POLL_INTERVAL_MILLIS)) => {}
             }
-        } else {
-            tokio::time::sleep(Duration::from_millis(INPUT_POLL_INTERVAL_MILLIS)).await;
+        }
+
+        if should_break {
+            break;
         }
     }
 
@@ -3391,7 +3520,7 @@ fn build_dashboard_data(
         })
         .unwrap_or_else(|| "n/a".to_string());
     ListenDashboardData {
-        title: "meta listen".to_string(),
+        title: format!("{} listen", crate::branding::COMMAND_NAME),
         scope: cycle.scope.clone(),
         watch_scope: cycle.watch_scope.clone(),
         cycle_summary: format!(
@@ -3445,10 +3574,10 @@ fn aggregate_token_usage(sessions: &[AgentSession]) -> Option<TokenTotals> {
     let mut output = None;
 
     for session in sessions {
-        if let Some(value) = session.tokens.input {
+        if let Some(value) = session.canonical_tokens().input {
             input = Some(input.unwrap_or(0) + value);
         }
-        if let Some(value) = session.tokens.output {
+        if let Some(value) = session.canonical_tokens().output {
             output = Some(output.unwrap_or(0) + value);
         }
     }
@@ -3553,6 +3682,19 @@ fn render_agent_prompt(
         discussion_context = discussion_context,
         description = description,
         continuation = continuation,
+    )
+}
+
+fn render_continuation_prompt(issue: &IssueSummary, turn_number: u32, max_turns: u32) -> String {
+    format!(
+        "Continuation guidance for `{identifier}`:\n\n\
+         - The previous turn completed normally, but the Linear issue is still in an active state.\n\
+         - This is continuation turn #{turn_number} of {max_turns} for the current agent run.\n\
+         - Resume from the current workspace and workpad state instead of restarting from scratch.\n\
+         - The original task instructions and prior turn context are already present in this session.\n\
+         - Focus on the remaining ticket work and do not restart completed steps.\n\
+         - Do not end the turn while the issue remains active unless you are blocked by missing required auth, permissions, or secrets.",
+        identifier = issue.identifier,
     )
 }
 
@@ -3866,11 +4008,11 @@ impl Drop for TerminalCleanup {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentDaemon, AgentSession, DashboardRuntimeContext, ListenCycleData, ListenState,
-        PullRequestSummary, SessionOrigin, SessionPhase, TODO_STATE, TokenUsage,
+        AgentDaemon, AgentSession, CanonicalSessionData, DashboardRuntimeContext, ListenCycleData,
+        ListenState, PullRequestSummary, SessionOrigin, SessionPhase, TODO_STATE, TokenUsage,
         capture_workspace_snapshot, compact_identifier, format_duration, format_number,
         listen_browser_action, listen_scope_label, mark_running_session_stale, render_agent_prompt,
-        required_label_skip_reason,
+        render_continuation_prompt, required_label_skip_reason,
     };
     use crate::config::{
         AppConfig, LinearConfig, ListenAssignmentScope, ListenRefreshPolicy,
@@ -3983,6 +4125,8 @@ mod tests {
                     input: Some(100),
                     output: None,
                 },
+                turn_history: Vec::new(),
+                canonical: CanonicalSessionData::default(),
                 log_path: None,
                 origin: SessionOrigin::Listen,
             },
@@ -4012,6 +4156,8 @@ mod tests {
                     input: None,
                     output: Some(25),
                 },
+                turn_history: Vec::new(),
+                canonical: CanonicalSessionData::default(),
                 log_path: None,
                 origin: SessionOrigin::Listen,
             },
@@ -4051,6 +4197,8 @@ mod tests {
                 input: Some(100),
                 output: None,
             },
+            turn_history: Vec::new(),
+            canonical: CanonicalSessionData::default(),
             log_path: None,
             origin: SessionOrigin::Listen,
         }];
@@ -4059,6 +4207,140 @@ mod tests {
         assert_eq!(totals.input, Some(100));
         assert_eq!(totals.output, None);
         assert_eq!(totals.total, 100);
+    }
+
+    #[test]
+    fn dashboard_runtime_tokens_use_canonical_mixed_provider_totals() {
+        let cycle = ListenCycleData {
+            scope: "MET".to_string(),
+            watch_scope: "all assignees".to_string(),
+            pending_issues: Vec::new(),
+            active_issues: Vec::new(),
+            session_details: HashMap::new(),
+            sessions: vec![
+                AgentSession {
+                    issue_id: Some("issue-1".to_string()),
+                    issue_identifier: "ENG-1".to_string(),
+                    issue_title: "Codex".to_string(),
+                    project_name: None,
+                    team_key: "ENG".to_string(),
+                    issue_url: "https://linear.app/issues/ENG-1".to_string(),
+                    phase: SessionPhase::Running,
+                    summary: "running".to_string(),
+                    brief_path: None,
+                    backlog_issue_identifier: None,
+                    backlog_issue_title: None,
+                    backlog_path: None,
+                    workspace_path: None,
+                    branch: None,
+                    pull_request: PullRequestSummary::default(),
+                    workpad_comment_id: None,
+                    updated_at_epoch_seconds: 1,
+                    pid: None,
+                    session_id: None,
+                    latest_resume_handle: None,
+                    turns: None,
+                    tokens: TokenUsage::default(),
+                    turn_history: Vec::new(),
+                    canonical: CanonicalSessionData {
+                        provider: Some("codex".to_string()),
+                        model: Some("gpt-5.4".to_string()),
+                        reasoning: Some("high".to_string()),
+                        tokens: TokenUsage {
+                            input: Some(100),
+                            output: Some(10),
+                        },
+                        repair: None,
+                    },
+                    log_path: None,
+                    origin: SessionOrigin::Listen,
+                },
+                AgentSession {
+                    issue_id: Some("issue-2".to_string()),
+                    issue_identifier: "ENG-2".to_string(),
+                    issue_title: "Claude".to_string(),
+                    project_name: None,
+                    team_key: "ENG".to_string(),
+                    issue_url: "https://linear.app/issues/ENG-2".to_string(),
+                    phase: SessionPhase::Completed,
+                    summary: "done".to_string(),
+                    brief_path: None,
+                    backlog_issue_identifier: None,
+                    backlog_issue_title: None,
+                    backlog_path: None,
+                    workspace_path: None,
+                    branch: None,
+                    pull_request: PullRequestSummary::default(),
+                    workpad_comment_id: None,
+                    updated_at_epoch_seconds: 2,
+                    pid: None,
+                    session_id: None,
+                    latest_resume_handle: None,
+                    turns: None,
+                    tokens: TokenUsage::default(),
+                    turn_history: Vec::new(),
+                    canonical: CanonicalSessionData {
+                        provider: Some("claude".to_string()),
+                        model: Some("sonnet".to_string()),
+                        reasoning: Some("high".to_string()),
+                        tokens: TokenUsage {
+                            input: Some(20),
+                            output: Some(5),
+                        },
+                        repair: None,
+                    },
+                    log_path: None,
+                    origin: SessionOrigin::Listen,
+                },
+                AgentSession {
+                    issue_id: Some("issue-3".to_string()),
+                    issue_identifier: "ENG-3".to_string(),
+                    issue_title: "Unknown".to_string(),
+                    project_name: None,
+                    team_key: "ENG".to_string(),
+                    issue_url: "https://linear.app/issues/ENG-3".to_string(),
+                    phase: SessionPhase::Blocked,
+                    summary: "blocked".to_string(),
+                    brief_path: None,
+                    backlog_issue_identifier: None,
+                    backlog_issue_title: None,
+                    backlog_path: None,
+                    workspace_path: None,
+                    branch: None,
+                    pull_request: PullRequestSummary::default(),
+                    workpad_comment_id: None,
+                    updated_at_epoch_seconds: 3,
+                    pid: None,
+                    session_id: None,
+                    latest_resume_handle: None,
+                    turns: None,
+                    tokens: TokenUsage::default(),
+                    turn_history: Vec::new(),
+                    canonical: CanonicalSessionData::default(),
+                    log_path: None,
+                    origin: SessionOrigin::Listen,
+                },
+            ],
+            notes: Vec::new(),
+            state_file: "/tmp/session.json".to_string(),
+            rate_limits: None,
+            claimed_this_cycle: 0,
+        };
+        let runtime = DashboardRuntimeContext {
+            started_at_epoch_seconds: 1,
+            now_epoch_seconds: 11,
+            poll_interval_seconds: 5,
+            dashboard_label: "terminal snapshot",
+            dashboard_refresh_seconds: 1,
+            linear_refresh_seconds: 5,
+            vim_mode: false,
+            show_active_issues: true,
+            show_preview: true,
+            resolved_agent: Some("codex".to_string()),
+        };
+
+        let dashboard = super::build_dashboard_data(&cycle, &runtime);
+        assert_eq!(dashboard.runtime.tokens, "in 120 | out 15 | total 135");
     }
 
     #[test]
@@ -4095,6 +4377,8 @@ mod tests {
                     input: Some(100),
                     output: None,
                 },
+                turn_history: Vec::new(),
+                canonical: CanonicalSessionData::default(),
                 log_path: None,
                 origin: SessionOrigin::Listen,
             }],
@@ -4124,7 +4408,10 @@ mod tests {
     fn render_summary_includes_resolved_execution_agent() {
         let cycle = ListenCycleData::demo(
             Path::new("."),
-            ".metastack/agents/sessions/listen-state.json".to_string(),
+            format!(
+                "{}/agents/sessions/listen-state.json",
+                crate::branding::PROJECT_DIR
+            ),
         );
         let runtime = DashboardRuntimeContext {
             started_at_epoch_seconds: 1_773_568_249,
@@ -4201,6 +4488,8 @@ mod tests {
             latest_resume_handle: None,
             turns: None,
             tokens: TokenUsage::default(),
+            turn_history: Vec::new(),
+            canonical: CanonicalSessionData::default(),
             log_path: None,
             origin: SessionOrigin::default(),
         };
@@ -4251,6 +4540,8 @@ mod tests {
             latest_resume_handle: None,
             turns: None,
             tokens: TokenUsage::default(),
+            turn_history: Vec::new(),
+            canonical: CanonicalSessionData::default(),
             log_path: Some(log_path.display().to_string()),
             origin: SessionOrigin::default(),
         };
@@ -4396,10 +4687,13 @@ mod tests {
             issue_url: "https://linear.app/issues/eng-10163".to_string(),
             phase: SessionPhase::Running,
             summary: "Running".to_string(),
-            brief_path: Some(".metastack/agents/briefs/ENG-10163.md".to_string()),
+            brief_path: Some(format!(
+                "{}/agents/briefs/ENG-10163.md",
+                crate::branding::PROJECT_DIR
+            )),
             backlog_issue_identifier: Some("TECH-1".to_string()),
             backlog_issue_title: Some("Backlog".to_string()),
-            backlog_path: Some(".metastack/backlog/TECH-1".to_string()),
+            backlog_path: Some(format!("{}/backlog/TECH-1", crate::branding::PROJECT_DIR)),
             workspace_path: Some("/tmp/ENG-10163".to_string()),
             branch: Some("eng-10163".to_string()),
             pull_request: PullRequestSummary::default(),
@@ -4410,6 +4704,8 @@ mod tests {
             latest_resume_handle: None,
             turns: Some(2),
             tokens: TokenUsage::default(),
+            turn_history: Vec::new(),
+            canonical: CanonicalSessionData::default(),
             log_path: Some("logs/ENG-10163.log".to_string()),
             origin: SessionOrigin::Listen,
         };
@@ -4437,7 +4733,10 @@ mod tests {
         let cycle = ListenCycleData::loading(
             "MET / MetaStack CLI".to_string(),
             "all assignees".to_string(),
-            ".metastack/agents/sessions/listen-state.json".to_string(),
+            format!(
+                "{}/agents/sessions/listen-state.json",
+                crate::branding::PROJECT_DIR
+            ),
         );
 
         assert_eq!(cycle.scope, "MET / MetaStack CLI");
@@ -4455,7 +4754,10 @@ mod tests {
         );
         assert_eq!(
             cycle.state_file,
-            ".metastack/agents/sessions/listen-state.json"
+            format!(
+                "{}/agents/sessions/listen-state.json",
+                crate::branding::PROJECT_DIR
+            )
         );
         assert_eq!(cycle.rate_limits, None);
     }
@@ -4464,7 +4766,10 @@ mod tests {
     fn cycle_state_snapshot_refreshes_sessions_without_resetting_linear_data() {
         let mut cycle = ListenCycleData::demo(
             Path::new("."),
-            ".metastack/agents/sessions/listen-state.json".to_string(),
+            format!(
+                "{}/agents/sessions/listen-state.json",
+                crate::branding::PROJECT_DIR
+            ),
         );
         let existing_pending_count = cycle.pending_issues.len();
         let existing_pending_identifier = cycle
@@ -4523,7 +4828,10 @@ mod tests {
         run_git(repo, &["add", "README.md"]).expect("git add should succeed");
         run_git(repo, &["commit", "-m", "init"]).expect("git commit should succeed");
 
-        let brief_path = repo.join(".metastack/agents/briefs/MET-36.md");
+        let brief_path = repo.join(format!(
+            "{}/agents/briefs/MET-36.md",
+            crate::branding::PROJECT_DIR
+        ));
         fs::create_dir_all(
             brief_path
                 .parent()
@@ -4572,11 +4880,15 @@ mod tests {
     fn render_agent_prompt_includes_truncated_ticket_discussion_excerpt() {
         let temp = tempdir().expect("temp dir should build");
         let workspace = temp.path();
-        fs::create_dir_all(workspace.join(".metastack/backlog/MET-24/context"))
-            .expect("discussion dir should build");
-        fs::create_dir_all(workspace.join(".metastack")).expect("metastack dir should build");
+        fs::create_dir_all(workspace.join(format!(
+            "{}/backlog/MET-24/context",
+            crate::branding::PROJECT_DIR
+        )))
+        .expect("discussion dir should build");
+        fs::create_dir_all(workspace.join(crate::branding::PROJECT_DIR))
+            .expect("metastack dir should build");
         fs::write(
-            workspace.join(".metastack/meta.json"),
+            workspace.join(format!("{}/meta.json", crate::branding::PROJECT_DIR)),
             r#"{
   "sync": {
     "discussion_prompt_char_limit": 80
@@ -4586,7 +4898,7 @@ mod tests {
         )
         .expect("meta should write");
         fs::write(
-            workspace.join(".metastack/backlog/MET-24/context/ticket-discussion.md"),
+            workspace.join(format!("{}/backlog/MET-24/context/ticket-discussion.md", crate::branding::PROJECT_DIR)),
             "# Ticket Discussion\n\nOld details that should be truncated away.\n\nNewest discussion tail.",
         )
         .expect("discussion should write");
@@ -4598,6 +4910,55 @@ mod tests {
         assert!(prompt.contains("[truncated to most recent excerpt]"));
         assert!(prompt.contains("Newest discussion tail."));
         assert!(!prompt.contains("Old details that should be truncated away."));
+    }
+
+    #[test]
+    fn render_continuation_prompt_includes_identifier_and_turn() {
+        let issue = test_issue("MET-57");
+        let prompt = render_continuation_prompt(&issue, 3, 20);
+
+        assert!(prompt.contains("MET-57"));
+        assert!(prompt.contains("continuation turn #3 of 20"));
+        assert!(prompt.contains("Resume from the current workspace"));
+        assert!(prompt.contains("already present in this session"));
+    }
+
+    #[test]
+    fn render_continuation_prompt_is_compact() {
+        let issue = test_issue("MET-57");
+        let prompt = render_continuation_prompt(&issue, 2, 20);
+
+        // Continuation prompt should be much smaller than the full prompt.
+        assert!(
+            prompt.len() < 600,
+            "continuation prompt too large: {} bytes",
+            prompt.len()
+        );
+        // Must not include fields from the full prompt.
+        assert!(!prompt.contains("Description:"));
+        assert!(!prompt.contains("Workspace:"));
+        assert!(!prompt.contains("Labels:"));
+    }
+
+    #[test]
+    fn full_prompt_is_larger_than_continuation() {
+        let temp = tempdir().expect("temp dir should build");
+        let workspace = temp.path();
+        fs::create_dir_all(workspace.join(".metastack")).expect("metastack dir should build");
+
+        let issue = test_issue("MET-57");
+        let full = render_agent_prompt(&issue, workspace, "comment-1", None, 2, 20);
+        let cont = render_continuation_prompt(&issue, 2, 20);
+
+        // With a minimal test issue, the full prompt is modest. In production, issue
+        // descriptions, backlog context, and discussion excerpts push it to 2-10KB
+        // while the continuation prompt stays ~500 bytes.
+        assert!(
+            full.len() > cont.len(),
+            "full prompt ({} bytes) should be larger than continuation prompt ({} bytes)",
+            full.len(),
+            cont.len(),
+        );
     }
 
     fn test_issue(identifier: &str) -> IssueSummary {
@@ -4642,7 +5003,7 @@ mod tests {
     ) -> Result<(tempfile::TempDir, AgentDaemon<ReassignmentClient>)> {
         let temp = tempdir()?;
         let repo = temp.path();
-        fs::create_dir_all(repo.join(".metastack"))?;
+        fs::create_dir_all(repo.join(crate::branding::PROJECT_DIR))?;
         let store = ListenProjectStore::resolve(repo, None)?;
         let service = LinearService::new(ReassignmentClient { issue }, Some("MET".to_string()));
         let daemon = AgentDaemon {
@@ -4808,7 +5169,7 @@ mod tests {
     async fn reconcile_sessions_marks_reassigned_issue_completed_after_turn_ends() -> Result<()> {
         let temp = tempdir()?;
         let repo = temp.path();
-        fs::create_dir_all(repo.join(".metastack"))?;
+        fs::create_dir_all(repo.join(crate::branding::PROJECT_DIR))?;
         run_git(repo, &["init"])?;
         run_git(repo, &["config", "user.email", "listen@example.com"])?;
         run_git(repo, &["config", "user.name", "Listen Tests"])?;
@@ -4881,6 +5242,8 @@ mod tests {
             session_id: Some(issue.id.clone()),
             turns: Some(1),
             tokens: TokenUsage::default(),
+            turn_history: Vec::new(),
+            canonical: CanonicalSessionData::default(),
             log_path: None,
             latest_resume_handle: None,
             origin: SessionOrigin::Listen,

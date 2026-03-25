@@ -23,8 +23,11 @@ use crate::agents::{
 use crate::backlog::load_issue_metadata;
 use crate::cli::{ListenWorkerArgs, RunAgentArgs};
 use crate::config::{
-    AGENT_ROUTE_AGENTS_LISTEN, AppConfig, LinearConfig, LinearConfigOverrides, PromptTransport,
+    AGENT_ROUTE_AGENTS_LISTEN, AppConfig, LinearConfig, LinearConfigOverrides, PlanningMeta,
+    PromptTransport,
 };
+use crate::config_resolution::{AgentConfigOverrides, normalize_agent_name, resolve_agent_config};
+use crate::fs::sibling_workspace_root;
 use crate::fs::{PlanningPaths, canonicalize_existing_dir, write_text_file};
 use crate::github_pr::{
     GhCli, PullRequestLifecycleAction, PullRequestLifecycleResult, PullRequestPublishMode,
@@ -36,14 +39,16 @@ use crate::linear::{
 };
 use crate::repo_target::RepoTarget;
 use crate::workflow_contract::render_workflow_contract;
+use crate::workspace::{AutoCleanOutcome, try_auto_clean_workspace};
 
 use super::{
-    BACKLOG_STATE, LatestResumeHandle, MAX_STALLED_TURNS, PullRequestStatus, PullRequestSummary,
-    ResumeProvider, SessionPhase, TokenUsage, agent_log_path, backlog_progress_for_issue_dir,
-    capture_workspace_snapshot, compact_blocked_summary, compact_completed_summary,
-    compact_running_summary, compare_workspace_snapshots, current_workspace_branch,
-    issue_state_label, issue_team_key, listen_issue_is_active, now_epoch_seconds, now_timestamp,
-    preflight, render_agent_prompt, try_transition_issue_to_review_state,
+    BACKLOG_STATE, CanonicalSessionData, LatestResumeHandle, MAX_STALLED_TURNS, PullRequestStatus,
+    PullRequestSummary, ResumeProvider, SessionPhase, TokenUsage, TurnPromptMode,
+    TurnTokenSnapshot, agent_log_path, backlog_progress_for_issue_dir, capture_workspace_snapshot,
+    compact_blocked_summary, compact_completed_summary, compact_running_summary,
+    compare_workspace_snapshots, current_workspace_branch, issue_state_label, issue_team_key,
+    listen_issue_is_active, now_epoch_seconds, now_timestamp, preflight, render_agent_prompt,
+    render_continuation_prompt, try_transition_issue_to_review_state,
     workspace_has_meaningful_progress, write_listen_session,
 };
 
@@ -76,6 +81,16 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
         ReqwestLinearClient::new(linear_config.clone())?,
         linear_config.default_team.clone(),
     );
+    let log_path = agent_log_path(&source_root, args.project.as_deref(), &args.issue);
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create `{}`", parent.display()))?;
+    }
+    fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .with_context(|| format!("failed to open `{}`", log_path.display()))?;
     let branch = current_workspace_branch(&workspace_path).ok();
     let worker_pid = std::process::id();
     let mut turns_completed = 0u32;
@@ -113,6 +128,8 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
             project_selector,
             &args.issue,
         )?,
+        turn_history: load_existing_turn_history(&source_root, project_selector, &args.issue)?,
+        canonical: load_existing_session_canonical(&source_root, project_selector, &args.issue)?,
         pull_request: load_existing_pull_request(&source_root, project_selector, &args.issue)?,
         origin: session_origin,
     };
@@ -122,7 +139,6 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
         load_existing_provider_session_id(&source_root, project_selector, &args.issue)?;
     let mut saw_implementation_progress = workspace_has_meaningful_progress(&workspace_path)?;
     let mut stalled_turns = 0u32;
-    let log_path = agent_log_path(&source_root, args.project.as_deref(), &args.issue);
     if let Err(error) = preflight::run_listen_preflight(
         &service,
         &linear_config,
@@ -159,7 +175,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                 &session_context,
                 turns_completed,
                 provider_session_id.as_deref(),
-                &session_tokens,
+                &session_context.canonical,
             ),
         )?;
         return Err(error);
@@ -176,9 +192,10 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     &session_context,
                     turns_completed,
                     provider_session_id.as_deref(),
-                    &session_tokens,
+                    &session_context.canonical,
                 ),
             )?;
+            try_listener_auto_clean(&source_root, project_selector, &workspace_path, &args.issue);
             return Ok(());
         }
 
@@ -203,7 +220,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     &session_context,
                     turns_completed,
                     provider_session_id.as_deref(),
-                    &session_tokens,
+                    &session_context.canonical,
                 ),
             )?;
             return Ok(());
@@ -232,9 +249,25 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                 &session_context,
                 turns_completed,
                 provider_session_id.as_deref(),
-                &session_tokens,
+                &session_context.canonical,
             ),
         )?;
+
+        // Determine whether this turn will actually attempt a resumed invocation.
+        // Only retry on failure when resume was genuinely attempted (not just "handle exists").
+        let attempted_resume = turn_number > 1
+            && session_context
+                .latest_resume_handle
+                .as_ref()
+                .is_some_and(|h| {
+                    resolve_effective_listen_agent(
+                        &app_config,
+                        &planning_meta,
+                        args.agent.as_deref(),
+                    )
+                    .as_deref()
+                    .is_some_and(|a| h.matches_agent(a))
+                });
 
         // Keep provider-native manual resume handles separate from provider session bookkeeping.
         let provider_session_id_state = RefCell::new(provider_session_id.clone());
@@ -263,16 +296,18 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                         &session_context,
                         turns_completed,
                         provider_session_id_state.borrow().as_deref(),
-                        &session_tokens,
+                        &session_context.canonical,
                     ),
                 )
             },
             |usage| {
                 let mut displayed_tokens = session_tokens.clone();
+                let mut displayed_canonical = session_context.canonical.clone();
                 displayed_tokens.accumulate(&TokenUsage {
                     input: usage.input,
                     output: usage.output,
                 });
+                displayed_canonical.tokens = displayed_tokens.clone();
                 write_listen_session(
                     &source_root,
                     project_selector,
@@ -288,12 +323,120 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                         &session_context,
                         turns_completed,
                         provider_session_id_state.borrow().as_deref(),
-                        &displayed_tokens,
+                        &displayed_canonical,
                     ),
                 )
             },
         ) {
             Ok(result) => result,
+            Err(error)
+                if attempted_resume
+                    && resolve_effective_listen_agent(
+                        &app_config,
+                        &planning_meta,
+                        args.agent.as_deref(),
+                    )
+                    .and_then(|agent| crate::agent_provider::builtin_provider_adapter(&agent))
+                    .is_some_and(|provider| {
+                        provider.is_invalid_resume_error(&error.to_string())
+                    }) =>
+            {
+                eprintln!(
+                    "listen: invalid resume for {} turn {turn_number}, retrying as cold start: {error}",
+                    issue.identifier,
+                );
+                session_context.latest_resume_handle = None;
+                let provider_session_id_retry = RefCell::new(provider_session_id.clone());
+                match execute_agent_turn(
+                    &issue,
+                    turn_number,
+                    &turn_context,
+                    None,
+                    |current_session_id| {
+                        if provider_session_id_retry.borrow().as_deref() == Some(current_session_id)
+                        {
+                            return Ok(());
+                        }
+                        *provider_session_id_retry.borrow_mut() =
+                            Some(current_session_id.to_string());
+                        write_listen_session(
+                            &source_root,
+                            project_selector,
+                            build_worker_session(
+                                &issue,
+                                SessionPhase::Running,
+                                compact_running_summary(
+                                    backlog_progress_before.as_ref(),
+                                    turn_number,
+                                    args.max_turns,
+                                    0,
+                                ),
+                                &session_context,
+                                turns_completed,
+                                provider_session_id_retry.borrow().as_deref(),
+                                &session_context.canonical,
+                            ),
+                        )
+                    },
+                    |usage| {
+                        let mut displayed_tokens = session_tokens.clone();
+                        let mut displayed_canonical = session_context.canonical.clone();
+                        displayed_tokens.accumulate(&TokenUsage {
+                            input: usage.input,
+                            output: usage.output,
+                        });
+                        displayed_canonical.tokens = displayed_tokens.clone();
+                        write_listen_session(
+                            &source_root,
+                            project_selector,
+                            build_worker_session(
+                                &issue,
+                                SessionPhase::Running,
+                                compact_running_summary(
+                                    backlog_progress_before.as_ref(),
+                                    turn_number,
+                                    args.max_turns,
+                                    0,
+                                ),
+                                &session_context,
+                                turns_completed,
+                                provider_session_id_retry.borrow().as_deref(),
+                                &displayed_canonical,
+                            ),
+                        )
+                    },
+                ) {
+                    Ok(result) => {
+                        // Sync the retry provider session ID back so the outer into_inner picks it up.
+                        *provider_session_id_state.borrow_mut() =
+                            provider_session_id_retry.into_inner();
+                        result
+                    }
+                    Err(retry_error) => {
+                        write_listen_session(
+                            &source_root,
+                            project_selector,
+                            build_worker_session(
+                                &issue,
+                                SessionPhase::Blocked,
+                                compact_blocked_summary(
+                                    &format!(
+                                        "Blocked | turn {turn_number}/{} failed (resume retry)",
+                                        args.max_turns
+                                    ),
+                                    backlog_progress_before.as_ref(),
+                                    &log_path,
+                                ),
+                                &session_context,
+                                turns_completed,
+                                provider_session_id.as_deref(),
+                                &session_context.canonical,
+                            ),
+                        )?;
+                        return Err(retry_error);
+                    }
+                }
+            }
             Err(error) => {
                 write_listen_session(
                     &source_root,
@@ -309,7 +452,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                         &session_context,
                         turns_completed,
                         provider_session_id.as_deref(),
-                        &session_tokens,
+                        &session_context.canonical,
                     ),
                 )?;
                 return Err(error);
@@ -318,15 +461,55 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
         session_context.latest_resume_handle = turn_result
             .latest_resume_handle
             .or(session_context.latest_resume_handle);
+        if session_context.latest_resume_handle.is_some() {
+            eprintln!(
+                "listen: captured resume handle for {} on turn {turn_number}",
+                issue.identifier,
+            );
+        } else {
+            eprintln!(
+                "listen: no resume handle captured for {} on turn {turn_number}",
+                issue.identifier,
+            );
+        }
         provider_session_id = turn_result
             .session_id
             .or_else(|| provider_session_id_state.into_inner());
+        if let Some(provider) = turn_result.provider {
+            session_context.canonical.provider = Some(provider);
+            session_context.canonical.model = turn_result.model;
+            session_context.canonical.reasoning = turn_result.reasoning;
+        }
+        let turn_snapshot = TurnTokenSnapshot {
+            turn: turn_number,
+            prompt_mode: turn_result.prompt_mode,
+            tokens: turn_result
+                .usage
+                .as_ref()
+                .map(|usage| TokenUsage {
+                    input: usage.input,
+                    output: usage.output,
+                })
+                .unwrap_or_default(),
+            captured_at_epoch_seconds: now_epoch_seconds(),
+        };
+        append_turn_token_summary(&log_path, &turn_snapshot)?;
+        if let Some(existing) = session_context
+            .turn_history
+            .iter_mut()
+            .find(|snapshot| snapshot.turn == turn_snapshot.turn)
+        {
+            *existing = turn_snapshot.clone();
+        } else {
+            session_context.turn_history.push(turn_snapshot);
+        }
         if let Some(usage) = turn_result.usage {
             session_tokens.accumulate(&TokenUsage {
                 input: usage.input,
                 output: usage.output,
             });
         }
+        session_context.canonical.tokens = session_tokens.clone();
 
         turns_completed = turn_number;
         let snapshot_after = capture_workspace_snapshot(&workspace_path, &args.issue)?;
@@ -368,7 +551,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                             &session_context,
                             turns_completed,
                             provider_session_id.as_deref(),
-                            &session_tokens,
+                            &session_context.canonical,
                         ),
                     )?;
                     return Ok(());
@@ -424,9 +607,15 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                             &session_context,
                             turns_completed,
                             provider_session_id.as_deref(),
-                            &session_tokens,
+                            &session_context.canonical,
                         ),
                     )?;
+                    try_listener_auto_clean(
+                        &source_root,
+                        project_selector,
+                        &workspace_path,
+                        &args.issue,
+                    );
                     return Ok(());
                 }
 
@@ -444,7 +633,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                         &session_context,
                         turns_completed,
                         provider_session_id.as_deref(),
-                        &session_tokens,
+                        &session_context.canonical,
                     ),
                 )?;
                 return Ok(());
@@ -480,7 +669,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                         &session_context,
                         turns_completed,
                         provider_session_id.as_deref(),
-                        &session_tokens,
+                        &session_context.canonical,
                     ),
                 )?;
                 return Ok(());
@@ -501,7 +690,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     &session_context,
                     turns_completed,
                     provider_session_id.as_deref(),
-                    &session_tokens,
+                    &session_context.canonical,
                 ),
             )?;
         } else {
@@ -515,9 +704,58 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     &session_context,
                     turns_completed,
                     provider_session_id.as_deref(),
-                    &session_tokens,
+                    &session_context.canonical,
                 ),
             )?;
+        }
+    }
+}
+
+/// Best-effort auto-clean for a listener workspace after the session completes.
+///
+/// When the workspace is safe (clean git state, within expected sibling root), removes the
+/// workspace clone and its ticket-scoped listen artifacts (session entry, detail, log). When the
+/// workspace has uncommitted changes, unpushed commits, or other safety risks, logs the skip
+/// reason and leaves the workspace in place for manual cleanup via `meta workspace prune`.
+fn try_listener_auto_clean(
+    source_root: &Path,
+    project_selector: Option<&str>,
+    workspace_path: &Path,
+    issue_identifier: &str,
+) {
+    let workspace_root = match sibling_workspace_root(source_root) {
+        Ok(root) => root,
+        Err(error) => {
+            eprintln!(
+                "listen: auto-clean skipped for {issue_identifier}: \
+                 failed to resolve workspace root: {error}"
+            );
+            return;
+        }
+    };
+
+    match try_auto_clean_workspace(
+        source_root,
+        project_selector,
+        &workspace_root,
+        workspace_path,
+        issue_identifier,
+    ) {
+        Ok(AutoCleanOutcome::Removed { bytes_reclaimed }) => {
+            eprintln!(
+                "listen: auto-cleaned workspace for {issue_identifier} \
+                 (freed {} bytes)",
+                bytes_reclaimed
+            );
+        }
+        Ok(AutoCleanOutcome::Skipped { reason }) => {
+            eprintln!(
+                "listen: auto-clean skipped for {issue_identifier}: \
+                 {reason} (manual review needed)"
+            );
+        }
+        Err(error) => {
+            eprintln!("listen: auto-clean failed for {issue_identifier}: {error:#}");
         }
     }
 }
@@ -543,6 +781,8 @@ struct WorkerSessionContext<'a> {
     backlog_issue: Option<&'a IssueSummary>,
     pid: Option<u32>,
     latest_resume_handle: Option<LatestResumeHandle>,
+    turn_history: Vec<TurnTokenSnapshot>,
+    canonical: CanonicalSessionData,
     pull_request: PullRequestSummary,
     origin: super::state::SessionOrigin,
 }
@@ -552,6 +792,10 @@ struct TurnExecutionResult {
     session_id: Option<String>,
     usage: Option<AgentTokenUsage>,
     latest_resume_handle: Option<LatestResumeHandle>,
+    prompt_mode: TurnPromptMode,
+    provider: Option<String>,
+    model: Option<String>,
+    reasoning: Option<String>,
 }
 
 impl From<PullRequestLifecycleResult> for PullRequestSummary {
@@ -861,21 +1105,35 @@ fn build_listen_run_args(
     issue: &IssueSummary,
     turn_number: u32,
     context: &ListenTurnContext<'_>,
+    has_resume_handle: bool,
 ) -> Result<RunAgentArgs> {
-    let instructions = build_agent_instructions(issue, turn_number, context)?;
-    Ok(RunAgentArgs {
-        root: Some(context.source_root.to_path_buf()),
-        route_key: Some(AGENT_ROUTE_AGENTS_LISTEN.to_string()),
-        agent: context.args.agent.clone(),
-        prompt: render_agent_prompt(
+    let use_continuation = has_resume_handle && turn_number > 1;
+
+    let prompt = if use_continuation {
+        render_continuation_prompt(issue, turn_number, context.max_turns)
+    } else {
+        render_agent_prompt(
             issue,
             context.workspace_path,
             context.workpad_comment_id,
             context.backlog_issue,
             turn_number,
             context.max_turns,
-        ),
-        instructions: Some(instructions),
+        )
+    };
+
+    let instructions = if use_continuation {
+        None
+    } else {
+        Some(build_agent_instructions(issue, turn_number, context)?)
+    };
+
+    Ok(RunAgentArgs {
+        root: Some(context.source_root.to_path_buf()),
+        route_key: Some(AGENT_ROUTE_AGENTS_LISTEN.to_string()),
+        agent: context.args.agent.clone(),
+        prompt,
+        instructions,
         model: context.args.model.clone(),
         reasoning: context.args.reasoning.clone(),
         transport: None,
@@ -910,7 +1168,31 @@ fn execute_agent_turn(
     mut on_session_started: impl FnMut(&str) -> Result<()>,
     mut on_usage: impl FnMut(&AgentTokenUsage) -> Result<()>,
 ) -> Result<TurnExecutionResult> {
-    let run_args = build_listen_run_args(issue, turn_number, context)?;
+    let effective_agent = resolve_effective_listen_agent(
+        context.app_config,
+        context.planning_meta,
+        context.args.agent.as_deref(),
+    );
+    let has_resume_handle = continuation_handle
+        .filter(|h| {
+            effective_agent
+                .as_deref()
+                .is_some_and(|a| h.matches_agent(a))
+        })
+        .is_some();
+    let use_continuation = has_resume_handle && turn_number > 1;
+    let prompt_mode = if use_continuation {
+        TurnPromptMode::Continuation
+    } else {
+        TurnPromptMode::FullPrompt
+    };
+    eprintln!(
+        "listen: turn {turn_number}/{} for {} | resume={has_resume_handle} | prompt_mode={}",
+        context.max_turns,
+        issue.identifier,
+        prompt_mode.label(),
+    );
+    let run_args = build_listen_run_args(issue, turn_number, context, has_resume_handle)?;
     let invocation = resolve_agent_invocation_for_planning(
         context.app_config,
         context.planning_meta,
@@ -918,7 +1200,12 @@ fn execute_agent_turn(
     )?;
     let capture_output = invocation.builtin_provider;
     let command_args = if capture_output {
-        let continuation = continuation_id_for_invocation(&invocation.agent, continuation_handle);
+        // Only pass --resume on turn 2+; turn 1 must always cold-start even with a stale handle.
+        let continuation = if use_continuation {
+            continuation_id_for_invocation(&invocation.agent, continuation_handle)
+        } else {
+            None
+        };
         command_args_for_invocation_with_options(
             &invocation,
             AgentExecutionOptions {
@@ -1076,20 +1363,23 @@ fn execute_agent_turn(
             .take()
             .ok_or_else(|| anyhow!("failed to capture stderr for listen turn {turn_number}"))?;
         let stderr_log_path = log_path.clone();
-        let stderr_handle = thread::spawn(move || -> Result<()> {
+        let stderr_handle = thread::spawn(move || -> Result<String> {
             let mut stderr_log = fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(&stderr_log_path)
                 .with_context(|| format!("failed to open `{}`", stderr_log_path.display()))?;
+            let mut collected = String::new();
             for line in BufReader::new(stderr).lines() {
                 let line = line.with_context(|| {
                     format!("failed to read stderr for `{}`", stderr_log_path.display())
                 })?;
                 writeln!(stderr_log, "{line}")
                     .with_context(|| format!("failed to write `{}`", stderr_log_path.display()))?;
+                collected.push_str(&line);
+                collected.push('\n');
             }
-            Ok(())
+            Ok(collected)
         });
 
         let mut stdout_log = fs::OpenOptions::new()
@@ -1129,7 +1419,7 @@ fn execute_agent_turn(
         let status = child
             .wait()
             .with_context(|| format!("failed to wait for agent turn {turn_number}"))?;
-        stderr_handle
+        let stderr_output = stderr_handle
             .join()
             .map_err(|_| anyhow!("stderr drain thread panicked for listen turn {turn_number}"))??;
         if !status.success() {
@@ -1138,8 +1428,9 @@ fn execute_agent_turn(
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "terminated by signal".to_string());
             bail!(
-                "agent `{}` exited unsuccessfully during listen turn {turn_number} ({code})",
-                invocation.agent
+                "agent `{}` exited unsuccessfully during listen turn {turn_number} ({code}): {}",
+                invocation.agent,
+                stderr_output.trim()
             );
         }
         let parsed = provider.parse_capture_output(&raw_stdout)?;
@@ -1159,6 +1450,10 @@ fn execute_agent_turn(
                     None
                 }
             }),
+            prompt_mode,
+            provider: Some(invocation.agent.clone()),
+            model: invocation.model.clone(),
+            reasoning: invocation.reasoning.clone(),
         });
     }
 
@@ -1176,7 +1471,38 @@ fn execute_agent_turn(
         );
     }
 
-    Ok(TurnExecutionResult::default())
+    Ok(TurnExecutionResult {
+        prompt_mode,
+        ..TurnExecutionResult::default()
+    })
+}
+
+fn append_turn_token_summary(log_path: &Path, snapshot: &TurnTokenSnapshot) -> Result<()> {
+    let mut log = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .with_context(|| format!("failed to open `{}`", log_path.display()))?;
+    writeln!(log, "{}", snapshot.display_compact())
+        .with_context(|| format!("failed to write `{}`", log_path.display()))
+}
+
+fn resolve_effective_listen_agent(
+    app_config: &AppConfig,
+    planning_meta: &PlanningMeta,
+    agent_override: Option<&str>,
+) -> Option<String> {
+    resolve_agent_config(
+        app_config,
+        planning_meta,
+        Some(AGENT_ROUTE_AGENTS_LISTEN),
+        AgentConfigOverrides {
+            provider: agent_override.map(String::from),
+            ..Default::default()
+        },
+    )
+    .ok()
+    .map(|resolved| normalize_agent_name(&resolved.provider))
 }
 
 fn continuation_id_for_invocation(
@@ -1202,9 +1528,14 @@ fn parse_resume_handle_line(agent: &str, line: &[u8]) -> Option<LatestResumeHand
 }
 
 fn parse_claude_resume_handle(value: &Value) -> Option<LatestResumeHandle> {
+    // Claude stream-json wraps each event in an array: [{"type":"system","session_id":"..."}]
+    let obj = value
+        .as_array()
+        .and_then(|arr| arr.first())
+        .unwrap_or(value);
     Some(LatestResumeHandle {
         provider: ResumeProvider::Claude,
-        id: value.get("session_id")?.as_str()?.to_string(),
+        id: obj.get("session_id")?.as_str()?.to_string(),
     })
 }
 
@@ -1398,7 +1729,7 @@ fn build_agent_instructions(
         ),
         "Never overwrite the primary Linear issue description during `meta listen`. Put planning, progress, validation, and status updates in the workpad comment instead.".to_string(),
         "Reproduce the issue before changing code, refine the workpad plan and acceptance criteria, then implement and validate the fix.".to_string(),
-        "Each turn must either leave meaningful non-`.metastack/` workspace updates or stop with a concrete blocker. Merely rewriting backlog files, briefs, or workpad notes is not enough.".to_string(),
+        format!("Each turn must either leave meaningful non-`{}/` workspace updates or stop with a concrete blocker. Merely rewriting backlog files, briefs, or workpad notes is not enough.", crate::branding::PROJECT_DIR),
         "If the Linear ticket contains `Validation`, `Test Plan`, or `Testing` sections, mirror them into the workpad and execute them as required checks.".to_string(),
         "Do not consider the task complete until the code is committed and pushed. Shared automation will create or update the branch PR as a draft, attach it to Linear, and promote it to ready during the review handoff.".to_string(),
         format!(
@@ -1455,7 +1786,7 @@ fn build_worker_session(
     context: &WorkerSessionContext<'_>,
     turns: u32,
     session_id: Option<&str>,
-    tokens: &TokenUsage,
+    canonical: &CanonicalSessionData,
 ) -> super::AgentSession {
     super::AgentSession {
         issue_id: Some(issue.id.clone()),
@@ -1494,7 +1825,9 @@ fn build_worker_session(
         session_id: session_id.map(str::to_string),
         latest_resume_handle: context.latest_resume_handle.clone(),
         turns: Some(turns),
-        tokens: tokens.clone(),
+        tokens: canonical.tokens.clone(),
+        turn_history: context.turn_history.clone(),
+        canonical: canonical.clone(),
         log_path: Some(
             agent_log_path(
                 context.source_root,
@@ -1520,6 +1853,36 @@ fn load_existing_session_tokens(
         .into_iter()
         .find(|session| session.issue_matches(issue_identifier))
         .map(|session| session.tokens)
+        .unwrap_or_default())
+}
+
+fn load_existing_turn_history(
+    root: &Path,
+    project_selector: Option<&str>,
+    issue_identifier: &str,
+) -> Result<Vec<TurnTokenSnapshot>> {
+    let store = super::store::ListenProjectStore::resolve(root, project_selector)?;
+    let state = store.load_state()?;
+    Ok(state
+        .sessions
+        .into_iter()
+        .find(|session| session.issue_matches(issue_identifier))
+        .map(|session| session.turn_history)
+        .unwrap_or_default())
+}
+
+fn load_existing_session_canonical(
+    root: &Path,
+    project_selector: Option<&str>,
+    issue_identifier: &str,
+) -> Result<CanonicalSessionData> {
+    let store = super::store::ListenProjectStore::resolve(root, project_selector)?;
+    let state = store.load_state()?;
+    Ok(state
+        .sessions
+        .into_iter()
+        .find(|session| session.issue_matches(issue_identifier))
+        .map(|session| session.canonical)
         .unwrap_or_default())
 }
 
@@ -1589,7 +1952,9 @@ mod tests {
         parse_codex_resume_handle, query_codex_threads, read_codex_session_index,
     };
     use crate::linear::{IssueSummary, TeamRef};
-    use crate::listen::{PullRequestSummary, SessionOrigin, SessionPhase, TokenUsage};
+    use crate::listen::{
+        CanonicalSessionData, PullRequestSummary, SessionOrigin, SessionPhase, TokenUsage,
+    };
     use std::fs;
     use std::sync::{Mutex, OnceLock};
     use tempfile::tempdir;
@@ -1678,6 +2043,8 @@ mod tests {
             backlog_issue: None,
             pid: Some(1234),
             latest_resume_handle: None,
+            turn_history: Vec::new(),
+            canonical: CanonicalSessionData::default(),
             pull_request: PullRequestSummary::default(),
             origin: SessionOrigin::Listen,
         };
@@ -1690,7 +2057,7 @@ mod tests {
             &context,
             0,
             Some("thread-1"),
-            &tokens,
+            &CanonicalSessionData::default(),
         );
         assert_eq!(first.tokens.input, None);
         assert_eq!(first.tokens.output, None);
@@ -1706,10 +2073,15 @@ mod tests {
             &context,
             1,
             Some("thread-1"),
-            &tokens,
+            &CanonicalSessionData {
+                tokens: tokens.clone(),
+                ..CanonicalSessionData::default()
+            },
         );
         assert_eq!(second.tokens.input, Some(120));
         assert_eq!(second.tokens.output, None);
+        assert_eq!(second.canonical.tokens.input, Some(120));
+        assert_eq!(second.canonical.tokens.output, None);
 
         tokens.accumulate(&TokenUsage {
             input: None,
@@ -1722,11 +2094,17 @@ mod tests {
             &context,
             2,
             Some("thread-1"),
-            &tokens,
+            &CanonicalSessionData {
+                tokens: tokens.clone(),
+                ..CanonicalSessionData::default()
+            },
         );
         assert_eq!(third.tokens.input, Some(120));
         assert_eq!(third.tokens.output, Some(45));
         assert_eq!(third.tokens.total(), Some(165));
+        assert_eq!(third.canonical.tokens.input, Some(120));
+        assert_eq!(third.canonical.tokens.output, Some(45));
+        assert_eq!(third.canonical.tokens.total(), Some(165));
     }
 
     #[test]
@@ -1925,5 +2303,145 @@ mod tests {
         restore_env_var("SQLITE3_ROWS", None);
 
         assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn build_listen_run_args_uses_continuation_prompt_on_resume() {
+        let temp = tempdir().expect("tempdir should build");
+        let workspace = temp.path();
+        fs::create_dir_all(workspace.join(".metastack")).expect("metastack dir should build");
+        let source_root = temp.path();
+
+        let issue = test_issue("MET-57");
+        let app_config = crate::config::AppConfig::default();
+        let planning_meta = crate::config::PlanningMeta::default();
+        let args = crate::cli::ListenWorkerArgs {
+            source_root: source_root.to_path_buf(),
+            project: None,
+            workspace: workspace.to_path_buf(),
+            issue: "MET-57".to_string(),
+            workpad_comment_id: "comment-1".to_string(),
+            backlog_issue: None,
+            max_turns: 20,
+            api_key: None,
+            api_url: None,
+            profile: None,
+            team: None,
+            agent: None,
+            model: None,
+            reasoning: None,
+        };
+        let context = super::ListenTurnContext {
+            app_config: &app_config,
+            planning_meta: &planning_meta,
+            args: &args,
+            source_root,
+            project_selector: None,
+            workspace_path: workspace,
+            workpad_comment_id: "comment-1",
+            backlog_issue: None,
+            max_turns: 20,
+        };
+
+        // Turn 2 with resume handle → continuation prompt, no instructions.
+        let resumed = super::build_listen_run_args(&issue, 2, &context, true)
+            .expect("build_listen_run_args should succeed");
+        assert!(
+            resumed.prompt.contains("Continuation guidance"),
+            "resume turn 2 should use continuation prompt"
+        );
+        assert!(
+            resumed.instructions.is_none(),
+            "resume turn 2 should omit instructions"
+        );
+
+        // Turn 2 without resume handle → full prompt with instructions.
+        let cold = super::build_listen_run_args(&issue, 2, &context, false)
+            .expect("build_listen_run_args should succeed");
+        assert!(
+            cold.prompt.contains("You are working on Linear ticket"),
+            "cold turn 2 should use full prompt"
+        );
+        assert!(
+            cold.instructions.is_some(),
+            "cold turn 2 should include instructions"
+        );
+    }
+
+    #[test]
+    fn build_listen_run_args_uses_full_prompt_on_turn_one_even_with_resume() {
+        let temp = tempdir().expect("tempdir should build");
+        let workspace = temp.path();
+        fs::create_dir_all(workspace.join(".metastack")).expect("metastack dir should build");
+        let source_root = temp.path();
+
+        let issue = test_issue("MET-57");
+        let app_config = crate::config::AppConfig::default();
+        let planning_meta = crate::config::PlanningMeta::default();
+        let args = crate::cli::ListenWorkerArgs {
+            source_root: source_root.to_path_buf(),
+            project: None,
+            workspace: workspace.to_path_buf(),
+            issue: "MET-57".to_string(),
+            workpad_comment_id: "comment-1".to_string(),
+            backlog_issue: None,
+            max_turns: 20,
+            api_key: None,
+            api_url: None,
+            profile: None,
+            team: None,
+            agent: None,
+            model: None,
+            reasoning: None,
+        };
+        let context = super::ListenTurnContext {
+            app_config: &app_config,
+            planning_meta: &planning_meta,
+            args: &args,
+            source_root,
+            project_selector: None,
+            workspace_path: workspace,
+            workpad_comment_id: "comment-1",
+            backlog_issue: None,
+            max_turns: 20,
+        };
+
+        // Turn 1 with resume handle should still use full prompt (initial context load).
+        let result = super::build_listen_run_args(&issue, 1, &context, true)
+            .expect("build_listen_run_args should succeed");
+        assert!(
+            result.prompt.contains("You are working on Linear ticket"),
+            "turn 1 should always use full prompt"
+        );
+        assert!(
+            result.instructions.is_some(),
+            "turn 1 should always include instructions"
+        );
+    }
+
+    #[test]
+    fn parse_claude_resume_handle_from_array_wrapped_stream_json() {
+        // Claude --output-format=stream-json wraps each event in an array
+        let line = r#"[{"type":"system","subtype":"init","session_id":"22ca497e-d7da-4118-9433-1902769c6737","tools":["Bash"]}]"#;
+        let handle = super::parse_resume_handle_line("claude", line.as_bytes());
+        assert!(
+            handle.is_some(),
+            "should parse session_id from array-wrapped JSON"
+        );
+        let handle = handle.unwrap();
+        assert_eq!(handle.id, "22ca497e-d7da-4118-9433-1902769c6737");
+        assert_eq!(handle.provider, super::super::state::ResumeProvider::Claude);
+    }
+
+    #[test]
+    fn parse_claude_resume_handle_from_plain_object() {
+        // Also works with unwrapped objects (e.g. --output-format=json)
+        let line = r#"{"type":"result","session_id":"abc-123"}"#;
+        let handle = super::parse_resume_handle_line("claude", line.as_bytes());
+        assert!(
+            handle.is_some(),
+            "should parse session_id from plain JSON object"
+        );
+        assert_eq!(handle.unwrap().id, "abc-123");
     }
 }

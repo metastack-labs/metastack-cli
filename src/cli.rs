@@ -6,194 +6,15 @@ use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 
 use crate::tui::prompt_images::PromptImageAttachment;
 
-const ROOT_HELP_EXAMPLES: &str = "\
-Example flows:
-  engineer:
-    meta runtime setup --root . --team MET --project \"MetaStack CLI\"
-    meta context scan --root .
-    meta backlog plan --root . --request \"Break the next release into tickets\"
-
-  team lead:
-    meta linear issues list --team MET --state \"In Progress\"
-    meta dashboard team --team MET --project \"MetaStack CLI\"
-
-  ops operator:
-    meta agents listen --team MET --project \"MetaStack CLI\"
-    meta dashboard ops --root .";
-
-const BACKLOG_HELP_EXAMPLES: &str = "\
-Examples:
-  meta backlog spec --root .
-  meta backlog spec --root . --no-interactive --request \"Add a repo-local SPEC workflow\"
-  meta backlog spec --root . --no-interactive --request \"Improve the current SPEC\" --answer \"Clarify the non-goals\"
-  meta backlog plan --root . --request \"Split the onboarding work into tickets\"
-  meta backlog plan --root . ENG-10144
-  meta backlog plan --root . ENG-10144 --velocity
-  meta backlog improve --root . --mode basic
-  meta backlog improve --root . ENG-10144 --mode advanced --apply
-  meta backlog tech MET-35
-  meta backlog split MET-35
-  meta backlog sync status
-  meta backlog sync link MET-35 --entry manual-notes --pull
-  meta backlog sync pull --all
-  meta backlog sync push MET-35 --update-description";
-
-const BACKLOG_IMPROVE_HELP: &str = "\
-Use `meta backlog improve` for a repo-scoped backlog sweep across existing issues in one state.
-Choose `--mode basic` for conservative metadata hygiene and `--mode advanced` for deeper
-rewrites or parent-child structure proposals.
-
-Use `meta linear issues refine` when you already know which issue needs a critique/rewrite and
-the primary goal is improving that issue's description rather than scanning the backlog.";
-
-const ISSUES_REFINE_HELP: &str = "\
-Use `meta linear issues refine` when you already know which issue needs a critique/rewrite and
-want a focused description-quality pass with auditable refinement artifacts.
-
-Use `meta backlog improve` when you want a repo-scoped backlog sweep for missing labels,
-acceptance criteria, priority/estimate, and parent-child structure opportunities.";
-
-const AGENTS_HELP_EXAMPLES: &str = "\
-Examples:
-  meta agents listen --team MET --project \"MetaStack CLI\"
-  meta agents execute MET-45 --team MET --project \"MetaStack CLI\"
-  meta agents execute MET-45 --root . --max-turns 10
-  meta agents review 42 --root .
-  meta agents review 42 --root . --dry-run
-  meta agents review --root .
-  meta agents review --root . --check
-  meta agents review --root . --once
-  meta agents retro 42 --root .
-  meta agents retro --root .
-  meta agents improve --root .
-  meta agents improve --root . --render-once
-  meta agents workflows list --root .
-  meta agents workflows run ticket-implementation --root .
-  meta agents workflows run ticket-implementation --root . --no-interactive --param issue=MET-93
-  meta agents workflows run ticket-implementation --root . --render-once --param issue=MET-93";
-
-const WORKFLOW_RUN_HELP: &str = "\
-Interactive mode:
-  TTY runs open a guided wizard, then land on a review/export dashboard.
-  Use --render-once for deterministic wizard snapshots in tests.
-  Use --events to script render-once snapshots through review, edit, and save states.
-  Use accept-edit/discard-edit to prove edit outcomes, and paste=TEXT to inject scripted input.
-
-Non-interactive mode:
-  Use --no-interactive with explicit --param key=value pairs for scripts and CI.
-  Runs without a TTY use the same fallback automatically unless --render-once is set.
-  Use --output and --overwrite to save the reviewed Markdown artifact headlessly.";
-
-const LISTEN_HELP_EXAMPLES: &str = "\
-Interactive dashboard:
-  - The dashboard has two primary panes: Agent Sessions and In Progress Issues - All Users (from Linear)
-  - Tab switches focus between panes; Left/Right switches Active/Completed views within Agent Sessions
-  - In Progress Issues rows show short title, assignee, and open-PR indicator for each In Progress issue
-  - Press Enter on a selected item to open its detail pane; Esc or Backspace closes it
-  - Session detail includes milestones, references, prompt context, log excerpts, and PR info
-  - In Progress Issue detail shows the issue description, assignee, PR URL, and Linear link
-  - Use Up/Down (or j/k in vim mode) to navigate, PgUp/PgDn to scroll detail content
-  - Press P to pause a running session, R to resume a paused session or retry a blocked one
-  - Use --hide-active-issues or --hide-preview to simplify the dashboard layout
-  - Configure defaults in .metastack/meta.json under listen.dashboard_active_issues and listen.dashboard_preview
-
-Terminal-only examples:
-  meta agents listen --check --root .
-  meta agents listen --team MET --once
-  meta listen sessions list
-
-Concurrent project-scoped examples from one checkout:
-  meta agents listen --team MET --project \"MetaStack CLI\"
-  meta agents listen --team MET --project \"MetaStack API\"
-  meta listen sessions inspect --root . --project \"MetaStack API\"
-  meta listen sessions clear --root . --project \"MetaStack API\"
-  meta listen sessions resume --root . --project \"MetaStack API\" --once
-
-Default-project example:
-  meta runtime setup --root . --team MET --project \"MetaStack CLI\"
-  meta agents listen --team MET";
-
-const CONTEXT_HELP_EXAMPLES: &str = "\
-Examples:
-  meta context show --root .
-  meta context scan --root .
-  meta context doctor --root .";
-
-const RUNTIME_HELP_EXAMPLES: &str = "\
-Examples:
-  meta runtime config --json
-  meta runtime setup --root . --team MET --project \"MetaStack CLI\"
-  meta runtime cron status --root .";
-
-const RUNTIME_CONFIG_HELP: &str = "\
-Resolution precedence for built-in provider/model/reasoning:
-  1. explicit CLI overrides such as --agent/--provider, --model, and --reasoning
-  2. command route override
-  3. family route override
-  4. repo defaults from `meta runtime setup`
-  5. install defaults from `meta runtime config`
-
-Built-in provider catalog:
-  codex: gpt-5.4, gpt-5.3-codex, gpt-5.2-codex, gpt-5.1-codex-max, gpt-5.1-codex,
-         gpt-5.1-codex-mini, gpt-5-codex, gpt-5-codex-mini
-         reasoning: low, medium, high
-  claude: sonnet, opus, haiku, sonnet[1m], opusplan
-          reasoning: low, medium, high, max
-
-Confirm the effective selection before launch:
-  meta agents workflows run ticket-implementation --root . --dry-run";
-
-const RUNTIME_SETUP_HELP: &str = "\
-Repo defaults written by `meta runtime setup` participate in the built-in resolution order:
-  explicit CLI override -> command route -> family route -> repo default -> install default
-
-Built-in provider/model/reasoning combinations are validated before they are saved.
-Use `meta agents workflows run ... --dry-run` or `meta context scan --root .` to confirm the
-resolved provider, model, reasoning, route key, and config source before or during execution.
-
-Listen prerequisites:
-  codex: `~/.codex/config.toml` must set `approval_policy = \"never\"`
-         and `sandbox_mode = \"danger-full-access\"`, and Linear MCP should be removed or
-         disabled with `-c mcp_servers.linear.enabled=false`
-  claude: `claude` must be on PATH and `ANTHROPIC_API_KEY` should be unset
-  verify: `meta agents listen --check --root .`";
-
-const DASHBOARD_HELP_EXAMPLES: &str = "\
-Examples:
-  meta dashboard linear --team MET --project \"MetaStack CLI\"
-  meta dashboard agents --team MET --project \"MetaStack CLI\" --render-once
-  meta dashboard team --team MET
-  meta dashboard ops --root .";
-
-const MERGE_HELP_EXAMPLES: &str = "\
-Examples:
-  meta merge --json
-  meta merge
-  meta merge --render-once --events space,down,space,enter
-  meta merge --no-interactive --pull-request 101 --pull-request 102 --validate \"make quality\"";
-
-const WORKSPACE_HELP_EXAMPLES: &str = "\
-Examples:
-  meta workspace list --root .
-  meta workspace clean ENG-10175 --root .
-  meta workspace clean --target-only --root .
-  meta workspace prune --dry-run --root .";
-
-const UPGRADE_HELP_EXAMPLES: &str = "\
-Default latest-stable path:
-  meta upgrade --check
-  meta upgrade --dry-run
-  meta upgrade
-
-Advanced version-management path:
-  meta upgrade --version 0.2.0 --dry-run
-  meta upgrade --version 0.3.0-rc.1 --prerelease
-  meta upgrade --version 0.1.0 --allow-downgrade";
+mod cli_help {
+    include!(concat!(env!("OUT_DIR"), "/cli_help.rs"));
+}
+use cli_help::*;
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "meta",
-    bin_name = "meta",
+    name = env!("BRAND_COMMAND_NAME"),
+    bin_name = env!("BRAND_COMMAND_NAME"),
     version,
     about = "CLI scaffolding for backlog management, Linear workflows, agent-backed automation, and codebase scanning.",
     after_help = ROOT_HELP_EXAMPLES
@@ -221,7 +42,7 @@ pub enum Command {
     Merge(MergeArgs),
     /// List and clean sibling listener workspace clones under the fixed `<repo>-workspace/` root.
     Workspace(WorkspaceArgs),
-    /// Securely self-update a GitHub Release install of `meta` on macOS/Linux.
+    /// Securely self-update a GitHub Release install on macOS/Linux.
     Upgrade(UpgradeArgs),
     /// Compatibility alias for `meta backlog plan`.
     #[command(hide = true)]
@@ -1288,6 +1109,9 @@ pub struct ListenSessionListArgs {}
 pub struct ListenSessionInspectArgs {
     #[command(flatten)]
     pub target: ListenSessionTargetArgs,
+    /// Show persisted per-turn token history when detail artifacts include it.
+    #[arg(long)]
+    pub turns: bool,
 }
 
 #[derive(Debug, Clone, Args)]

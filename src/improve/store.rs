@@ -8,7 +8,7 @@ use crate::fs::{PlanningPaths, ensure_dir};
 
 use super::state::ImproveState;
 
-/// Load persisted improve state from `.metastack/agents/improve/`.
+/// Load persisted improve state from `<PROJECT_DIR>/agents/improve/`.
 ///
 /// Returns the default empty state when no state file exists.
 pub fn load_improve_state(paths: &PlanningPaths) -> Result<ImproveState> {
@@ -26,7 +26,7 @@ pub fn load_improve_state(paths: &PlanningPaths) -> Result<ImproveState> {
     }
 }
 
-/// Save improve state to `.metastack/agents/improve/`.
+/// Save improve state to `<PROJECT_DIR>/agents/improve/`.
 ///
 /// Creates the directory structure if it does not exist.
 #[allow(dead_code)]

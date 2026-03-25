@@ -17,6 +17,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tar::Archive;
 
+use crate::branding;
 use crate::cli::UpgradeArgs;
 
 const INSTALLER_URL: &str = "https://raw.githubusercontent.com/metastack-systems/metastack-cli/main/scripts/install-meta.sh";
@@ -87,7 +88,8 @@ pub(crate) async fn run_upgrade(args: &UpgradeArgs) -> Result<()> {
 
     if install.version == target_version {
         println!(
-            "meta {} at {} is already up to date",
+            "{} {} at {} is already up to date",
+            branding::COMMAND_NAME,
             install.version,
             executable_path.display()
         );
@@ -750,8 +752,9 @@ fn install_with_elevation(
     )
 }
 
-fn elevation_script() -> &'static str {
-    r#"#!/bin/sh
+fn elevation_script() -> String {
+    format!(
+        r#"#!/bin/sh
 set -eu
 
 staged=$1
@@ -760,9 +763,9 @@ pending=$3
 backup=$4
 expected=$5
 
-cleanup() {
+cleanup() {{
   rm -f "$pending"
-}
+}}
 trap cleanup EXIT INT TERM
 
 cp "$staged" "$pending"
@@ -774,7 +777,7 @@ if ! mv "$pending" "$target"; then
   exit 1
 fi
 
-if "$target" --version | grep -F "meta $expected" >/dev/null 2>&1; then
+if "$target" --version | grep -F "{} $expected" >/dev/null 2>&1; then
   rm -f "$backup"
   exit 0
 fi
@@ -783,7 +786,9 @@ rm -f "$target"
 mv "$backup" "$target"
 printf '%s\n' "post-install verification failed for '$target'" >&2
 exit 1
-"#
+"#,
+        branding::COMMAND_NAME
+    )
 }
 
 fn rollback_after_failed_verification(executable_path: &Path, backup_path: &Path) -> Result<()> {

@@ -39,6 +39,7 @@ use crate::backlog_defaults::{
     PlanTicketResolutionInput, TicketOptionOverrides, load_remembered_backlog_selection,
     resolve_plan_ticket_defaults, save_remembered_backlog_selection,
 };
+use crate::branding;
 use crate::cli::{PlanArgs, RunAgentArgs};
 use crate::codebase_context::{
     CodebaseContextSection, MissingCodebaseContextHint, load_codebase_context_bundle,
@@ -1218,8 +1219,11 @@ fn render_reshape_preview(
     );
 
     format!(
-        "`meta backlog plan {}` prepared an in-place reshape preview:\n\nTitle:\n{}\n\nDescription diff:\n{}\n\nMetadata preserved on apply: assignee, labels, project, state, priority, and cycle.\nLocal `.metastack/backlog/` files are unchanged in reshape mode.",
-        issue.identifier, title_status, description_diff
+        "`meta backlog plan {}` prepared an in-place reshape preview:\n\nTitle:\n{}\n\nDescription diff:\n{}\n\nMetadata preserved on apply: assignee, labels, project, state, priority, and cycle.\nLocal `{}/backlog/` files are unchanged in reshape mode.",
+        issue.identifier,
+        title_status,
+        description_diff,
+        branding::PROJECT_DIR
     )
 }
 
@@ -1289,9 +1293,10 @@ fn render_reshape_workpad_comment(
         "- Metadata preserved: assignee, labels, project, state, priority, and cycle were left unchanged."
             .to_string(),
     );
-    lines.push(
-        "- Local `.metastack/backlog/` files were not modified by this reshape flow.".to_string(),
-    );
+    lines.push(format!(
+        "- Local `{}/backlog/` files were not modified by this reshape flow.",
+        branding::PROJECT_DIR
+    ));
 
     lines.join("\n")
 }
@@ -4954,7 +4959,7 @@ mod tests {
     fn merge_prompt_includes_grouped_ticket_subset() {
         let temp = tempdir().expect("tempdir should create");
         let root = temp.path();
-        let metastack_dir = root.join(".metastack");
+        let metastack_dir = root.join(crate::branding::PROJECT_DIR);
         std::fs::create_dir_all(&metastack_dir).expect("planning dir should exist");
         for file in [
             "SCAN.md",
@@ -5012,7 +5017,7 @@ mod tests {
     fn merge_prompt_mentions_selected_standalone_tickets_and_skipped_scope() {
         let temp = tempdir().expect("tempdir should create");
         let root = temp.path();
-        let metastack_dir = root.join(".metastack");
+        let metastack_dir = root.join(crate::branding::PROJECT_DIR);
         std::fs::create_dir_all(&metastack_dir).expect("planning dir should exist");
         for file in [
             "SCAN.md",
@@ -5088,7 +5093,7 @@ mod tests {
     fn question_prompt_uses_the_default_interactive_follow_up_limit() {
         let temp = tempdir().expect("tempdir should create");
         let root = temp.path();
-        let metastack_dir = root.join(".metastack");
+        let metastack_dir = root.join(crate::branding::PROJECT_DIR);
         std::fs::create_dir_all(&metastack_dir).expect("planning dir should exist");
         for file in [
             "SCAN.md",
@@ -5119,7 +5124,7 @@ mod tests {
     fn question_prompt_uses_a_custom_interactive_follow_up_limit() {
         let temp = tempdir().expect("tempdir should create");
         let root = temp.path();
-        let metastack_dir = root.join(".metastack");
+        let metastack_dir = root.join(crate::branding::PROJECT_DIR);
         std::fs::create_dir_all(&metastack_dir).expect("planning dir should exist");
         for file in [
             "SCAN.md",

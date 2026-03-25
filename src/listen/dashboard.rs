@@ -1250,7 +1250,10 @@ mod tests {
     fn demo_cycle() -> ListenCycleData {
         ListenCycleData::demo(
             Path::new("."),
-            ".metastack/agents/sessions/listen-state.json".to_string(),
+            format!(
+                "{}/agents/sessions/listen-state.json",
+                crate::branding::PROJECT_DIR
+            ),
         )
     }
 

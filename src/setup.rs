@@ -21,6 +21,7 @@ use ratatui::{Frame, Terminal};
 use serde::Serialize;
 
 use crate::backlog::template_seed_conflicts;
+use crate::branding;
 use crate::cli::{ConfigEventArg, SetupArgs};
 use crate::config::{
     AppConfig, DEFAULT_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT,
@@ -353,7 +354,7 @@ fn resolve_backlog_template_conflicts(
 rerun `meta setup --root {}` in an interactive terminal to choose overwrite, skip, or cancel.",
         conflicts
             .iter()
-            .map(|path| format!("- .metastack/backlog/_TEMPLATE/{path}"))
+            .map(|path| format!("- {}/backlog/_TEMPLATE/{path}", branding::PROJECT_DIR))
             .collect::<Vec<_>>()
             .join("\n"),
         root.display()
@@ -389,7 +390,11 @@ fn prompt_backlog_template_conflicts_with_io(
         "Canonical backlog template files already exist with local changes:"
     )?;
     for path in conflicts {
-        writeln!(writer, "  - .metastack/backlog/_TEMPLATE/{path}")?;
+        writeln!(
+            writer,
+            "  - {}/backlog/_TEMPLATE/{path}",
+            branding::PROJECT_DIR
+        )?;
     }
     writeln!(writer, "Choose [o]verwrite, [s]kip, or [c]ancel:")?;
     writer.flush()?;
@@ -1573,7 +1578,7 @@ fn render_setup_dashboard(frame: &mut Frame<'_>, app: &SetupApp) {
     let header = Paragraph::new(Text::from(vec![
         Line::from("Meta Setup"),
         Line::from(
-            "Configure repo-scoped defaults stored in `.metastack/meta.json` after install onboarding is complete.",
+            format!("Configure repo-scoped defaults stored in `{}/meta.json` after install onboarding is complete.", branding::PROJECT_DIR),
         ),
         Line::from(format!(
             "Detected supported agents on PATH: {}",
@@ -1886,7 +1891,10 @@ fn render_select_panel(frame: &mut Frame<'_>, area: Rect, title: &str, field: &S
 
 fn render_save_panel(frame: &mut Frame<'_>, area: Rect) {
     let paragraph = Paragraph::new(Text::from(vec![
-        Line::from("Press Enter to save repo-scoped defaults to `.metastack/meta.json`."),
+        Line::from(format!(
+            "Press Enter to save repo-scoped defaults to `{}/meta.json`.",
+            branding::PROJECT_DIR
+        )),
         Line::from("Project names are resolved before setup is persisted."),
     ]))
     .block(Block::default().borders(Borders::ALL).title("Save"))
@@ -2251,6 +2259,7 @@ mod tests {
         parse_backlog_template_conflict_action, parse_optional_listen_labels_input,
         prompt_backlog_template_conflicts_with_io, render_summary, summary_viewport,
     };
+    use crate::branding;
     use crate::config::{
         AgentSettings, AppConfig, ListenAssignmentScope, PlanningAgentSettings,
         PlanningListenSettings, PlanningMeta,
@@ -2265,7 +2274,10 @@ mod tests {
         let view = SetupViewData {
             root: PathBuf::from("/tmp/repo"),
             config_path: PathBuf::from("/tmp/metastack-config.toml"),
-            metastack_meta_path: PathBuf::from("/tmp/repo/.metastack/meta.json"),
+            metastack_meta_path: PathBuf::from(format!(
+                "/tmp/repo/{}/meta.json",
+                branding::PROJECT_DIR
+            )),
             app_config: AppConfig {
                 agents: AgentSettings {
                     default_agent: Some("codex".to_string()),
@@ -2326,7 +2338,10 @@ mod tests {
         let mut view = SetupViewData {
             root: PathBuf::from("/tmp/repo"),
             config_path: PathBuf::from("/tmp/metastack-config.toml"),
-            metastack_meta_path: PathBuf::from("/tmp/repo/.metastack/meta.json"),
+            metastack_meta_path: PathBuf::from(format!(
+                "/tmp/repo/{}/meta.json",
+                branding::PROJECT_DIR
+            )),
             app_config: AppConfig::default(),
             app_config_changed: false,
             planning_meta: PlanningMeta::default(),
@@ -2348,7 +2363,10 @@ mod tests {
         let mut view = SetupViewData {
             root: PathBuf::from("/tmp/repo"),
             config_path: PathBuf::from("/tmp/metastack-config.toml"),
-            metastack_meta_path: PathBuf::from("/tmp/repo/.metastack/meta.json"),
+            metastack_meta_path: PathBuf::from(format!(
+                "/tmp/repo/{}/meta.json",
+                branding::PROJECT_DIR
+            )),
             app_config: AppConfig::default(),
             app_config_changed: false,
             planning_meta: PlanningMeta::default(),
@@ -2388,7 +2406,10 @@ mod tests {
         let view = SetupViewData {
             root: PathBuf::from("/tmp/repo"),
             config_path: PathBuf::from("/tmp/metastack-config.toml"),
-            metastack_meta_path: PathBuf::from("/tmp/repo/.metastack/meta.json"),
+            metastack_meta_path: PathBuf::from(format!(
+                "/tmp/repo/{}/meta.json",
+                branding::PROJECT_DIR
+            )),
             app_config: AppConfig::default(),
             app_config_changed: false,
             planning_meta: PlanningMeta {
@@ -2433,8 +2454,14 @@ mod tests {
 
         assert_eq!(action, BacklogTemplateConflictAction::Overwrite);
         let output = String::from_utf8(writer)?;
-        assert!(output.contains(".metastack/backlog/_TEMPLATE/index.md"));
-        assert!(output.contains(".metastack/backlog/_TEMPLATE/validation.md"));
+        assert!(output.contains(&format!(
+            "{}/backlog/_TEMPLATE/index.md",
+            branding::PROJECT_DIR
+        )));
+        assert!(output.contains(&format!(
+            "{}/backlog/_TEMPLATE/validation.md",
+            branding::PROJECT_DIR
+        )));
         assert!(output.contains("Enter `o`, `s`, or `c`"));
 
         Ok(())

@@ -1,6 +1,7 @@
 #![allow(dead_code, unused_imports)]
 
 include!("support/common.rs");
+use metastack_cli::branding;
 
 fn sync_test_command(mut command: Command, repo_root: &Path) -> Result<Command, Box<dyn Error>> {
     let config_path = repo_root.join("metastack.toml");
@@ -195,10 +196,12 @@ fn sync_pull_restores_issue_description_and_managed_attachment_files() -> Result
     assert_eq!(payload["result"]["issue"]["identifier"], "MET-35");
     assert_eq!(
         payload["result"]["backlog_path"],
-        ".metastack/backlog/MET-35"
+        format!("{}/backlog/MET-35", branding::PROJECT_DIR)
     );
 
-    let issue_dir = temp.path().join(".metastack/backlog/MET-35");
+    let issue_dir = temp
+        .path()
+        .join(format!("{}/backlog/MET-35", branding::PROJECT_DIR));
     let index = fs::read_to_string(issue_dir.join("index.md"))?;
     assert!(index.contains("Pulled description"));
     assert!(index.contains("![diagram](artifacts/design.png)"));
@@ -339,7 +342,9 @@ fn sync_pull_rebuilds_discussion_context_downloads_images_with_auth_and_reuses_k
 
     image_mock.assert_calls(1);
 
-    let issue_dir = temp.path().join(".metastack/backlog/MET-35");
+    let issue_dir = temp
+        .path()
+        .join(format!("{}/backlog/MET-35", branding::PROJECT_DIR));
     let discussion = fs::read_to_string(issue_dir.join("context/ticket-discussion.md"))?;
     assert!(discussion.contains("### **Taylor** (2026-03-18)"));
     assert!(discussion.contains("### **Morgan** (2026-03-18)"));
@@ -474,10 +479,10 @@ fn sync_pull_fetches_paginated_issue_comments() -> Result<(), Box<dyn Error>> {
         .assert()
         .success();
 
-    let discussion = fs::read_to_string(
-        temp.path()
-            .join(".metastack/backlog/MET-35/context/ticket-discussion.md"),
-    )?;
+    let discussion = fs::read_to_string(temp.path().join(format!(
+        "{}/backlog/MET-35/context/ticket-discussion.md",
+        branding::PROJECT_DIR
+    )))?;
     assert!(discussion.contains("Comment 1"));
     assert!(discussion.contains("Comment 50"));
     assert!(discussion.contains("Comment 51"));
@@ -491,7 +496,9 @@ fn sync_push_updates_a_single_harness_sync_comment_and_skips_generated_discussio
     let temp = tempdir()?;
     let server = MockServer::start();
     let api_url = server.url("/graphql");
-    let issue_dir = temp.path().join(".metastack/backlog/MET-35");
+    let issue_dir = temp
+        .path()
+        .join(format!("{}/backlog/MET-35", branding::PROJECT_DIR));
     write_minimal_planning_context(
         temp.path(),
         r#"{
@@ -770,7 +777,9 @@ fn sync_push_groups_checklist_progress_by_nested_markdown_headings() -> Result<(
     let temp = tempdir()?;
     let server = MockServer::start();
     let api_url = server.url("/graphql");
-    let issue_dir = temp.path().join(".metastack/backlog/MET-35");
+    let issue_dir = temp
+        .path()
+        .join(format!("{}/backlog/MET-35", branding::PROJECT_DIR));
     write_minimal_planning_context(
         temp.path(),
         r#"{
@@ -1099,7 +1108,9 @@ fn sync_pull_logs_nonfatal_ticket_image_download_failures() -> Result<(), Box<dy
             "warning: failed to localize ticket image for MET-35",
         ));
 
-    let issue_dir = temp.path().join(".metastack/backlog/MET-35");
+    let issue_dir = temp
+        .path()
+        .join(format!("{}/backlog/MET-35", branding::PROJECT_DIR));
     assert!(
         fs::read_to_string(issue_dir.join("artifacts/ticket-images.md"))?
             .contains("| `missing.png` | issue-shot | Issue description |")
@@ -1113,7 +1124,9 @@ fn sync_push_leaves_issue_description_unchanged_by_default_and_replaces_managed_
     let temp = tempdir()?;
     let server = MockServer::start();
     let api_url = server.url("/graphql");
-    let issue_dir = temp.path().join(".metastack/backlog/MET-35");
+    let issue_dir = temp
+        .path()
+        .join(format!("{}/backlog/MET-35", branding::PROJECT_DIR));
     write_minimal_planning_context(
         temp.path(),
         r#"{
@@ -1300,7 +1313,7 @@ fn sync_push_leaves_issue_description_unchanged_by_default_and_replaces_managed_
     assert_eq!(payload["result"]["issue"]["identifier"], "MET-35");
     assert_eq!(
         payload["result"]["backlog_path"],
-        ".metastack/backlog/MET-35"
+        format!("{}/backlog/MET-35", branding::PROJECT_DIR)
     );
 
     let metadata = fs::read_to_string(issue_dir.join(".linear.json"))?;
@@ -1317,7 +1330,9 @@ fn sync_push_updates_the_issue_description_only_with_opt_in_flag() -> Result<(),
     let temp = tempdir()?;
     let server = MockServer::start();
     let api_url = server.url("/graphql");
-    let issue_dir = temp.path().join(".metastack/backlog/MET-35");
+    let issue_dir = temp
+        .path()
+        .join(format!("{}/backlog/MET-35", branding::PROJECT_DIR));
     write_minimal_planning_context(
         temp.path(),
         r#"{
@@ -1509,7 +1524,9 @@ fn sync_push_identifier_stays_linked_entry_driven_outside_dashboard() -> Result<
     let temp = tempdir()?;
     let server = MockServer::start();
     let api_url = server.url("/graphql");
-    let issue_dir = temp.path().join(".metastack/backlog/generated-child");
+    let issue_dir = temp
+        .path()
+        .join(format!("{}/backlog/generated-child", branding::PROJECT_DIR));
     write_minimal_planning_context(
         temp.path(),
         r#"{
@@ -1583,14 +1600,20 @@ fn sync_push_identifier_stays_linked_entry_driven_outside_dashboard() -> Result<
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "Pushed MET-77 from .metastack/backlog/generated-child",
-        ))
+        .stdout(predicate::str::contains(format!(
+            "Pushed MET-77 from {}/backlog/generated-child",
+            branding::PROJECT_DIR
+        )))
         .stdout(predicate::str::contains(
             "synced 0 managed attachment files",
         ));
 
-    assert!(!temp.path().join(".metastack/backlog/MET-77").exists());
+    assert!(
+        !temp
+            .path()
+            .join(format!("{}/backlog/MET-77", branding::PROJECT_DIR))
+            .exists()
+    );
     let metadata = fs::read_to_string(issue_dir.join(".linear.json"))?;
     assert!(metadata.contains("\"identifier\": \"MET-77\""));
     assert!(metadata.contains("\"issue_id\": \"issue-77\""));
@@ -1604,7 +1627,9 @@ fn sync_push_identifier_stays_linked_entry_driven_outside_dashboard() -> Result<
 fn sync_push_description_update_is_blocked_for_the_active_listen_issue()
 -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
-    let issue_dir = temp.path().join(".metastack/backlog/MET-99");
+    let issue_dir = temp
+        .path()
+        .join(format!("{}/backlog/MET-99", branding::PROJECT_DIR));
     write_minimal_planning_context(
         temp.path(),
         r#"{
@@ -1635,7 +1660,7 @@ fn sync_push_description_update_is_blocked_for_the_active_listen_issue()
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "is disabled during `meta agents listen` because it would overwrite the primary Linear issue description",
+            format!("is disabled during `{} agents listen` because it would overwrite the primary Linear issue description", branding::COMMAND_NAME),
         ));
 
     Ok(())
@@ -1710,7 +1735,9 @@ fn sync_pull_refuses_remote_ahead_overwrite_without_a_tty() -> Result<(), Box<dy
         .assert()
         .success();
 
-    let issue_dir = temp.path().join(".metastack/backlog/MET-35");
+    let issue_dir = temp
+        .path()
+        .join(format!("{}/backlog/MET-35", branding::PROJECT_DIR));
     let metadata_before = fs::read_to_string(issue_dir.join(".linear.json"))?;
 
     let remote_server = MockServer::start();
@@ -1850,7 +1877,9 @@ fn sync_pull_refuses_diverged_overwrite_without_a_tty() -> Result<(), Box<dyn Er
         .assert()
         .success();
 
-    let issue_dir = temp.path().join(".metastack/backlog/MET-35");
+    let issue_dir = temp
+        .path()
+        .join(format!("{}/backlog/MET-35", branding::PROJECT_DIR));
     fs::write(issue_dir.join("index.md"), "# Local changed description\n")?;
     let metadata_before = fs::read_to_string(issue_dir.join(".linear.json"))?;
 
@@ -2145,7 +2174,9 @@ fn sync_push_with_update_description_refuses_diverged_description_overwrite()
         .assert()
         .success();
 
-    let issue_dir = temp.path().join(".metastack/backlog/MET-35");
+    let issue_dir = temp
+        .path()
+        .join(format!("{}/backlog/MET-35", branding::PROJECT_DIR));
     fs::write(issue_dir.join("index.md"), "# Local changed description\n")?;
 
     let remote_server = MockServer::start();
@@ -2247,7 +2278,9 @@ fn sync_render_once_uses_local_backlog_entries_and_only_hydrates_linked_rows()
 }
 "#,
     )?;
-    let linked_dir = temp.path().join(".metastack/backlog/linked-entry");
+    let linked_dir = temp
+        .path()
+        .join(format!("{}/backlog/linked-entry", branding::PROJECT_DIR));
     fs::create_dir_all(&linked_dir)?;
     fs::write(linked_dir.join("index.md"), "# Linked entry\n")?;
     fs::write(
@@ -2262,7 +2295,9 @@ fn sync_render_once_uses_local_backlog_entries_and_only_hydrates_linked_rows()
 }
 "#,
     )?;
-    let unlinked_dir = temp.path().join(".metastack/backlog/manual-entry");
+    let unlinked_dir = temp
+        .path()
+        .join(format!("{}/backlog/manual-entry", branding::PROJECT_DIR));
     fs::create_dir_all(&unlinked_dir)?;
     fs::write(unlinked_dir.join("index.md"), "# Manual entry\n")?;
 
@@ -2325,10 +2360,14 @@ fn sync_render_once_uses_local_backlog_entries_and_only_hydrates_linked_rows()
         ])
         .assert()
         .success()
-        .stderr(predicate::str::contains(
-            "hint: `meta sync` is a compatibility alias; prefer `meta backlog sync`.",
-        ))
-        .stdout(predicate::str::contains("meta backlog sync"))
+        .stderr(predicate::str::contains(format!(
+            "hint: `{0} sync` is a compatibility alias; prefer `{0} backlog sync`.",
+            branding::COMMAND_NAME
+        )))
+        .stdout(predicate::str::contains(format!(
+            "{} backlog sync",
+            branding::COMMAND_NAME
+        )))
         .stdout(predicate::str::contains("Ready to push MET-13"))
         .stdout(predicate::str::contains("Backlog Search"))
         .stdout(predicate::str::contains("Third issue"))
@@ -2352,9 +2391,9 @@ fn sync_uses_repo_selected_profile_and_project_over_conflicting_global_defaults(
     let right_api_url = right_server.url("/graphql");
     let wrong_api_url = wrong_server.url("/graphql");
 
-    fs::create_dir_all(repo_root.join(".metastack"))?;
+    fs::create_dir_all(repo_root.join(branding::PROJECT_DIR))?;
     fs::write(
-        repo_root.join(".metastack/meta.json"),
+        repo_root.join(format!("{}/meta.json", branding::PROJECT_DIR)),
         r#"{
   "linear": {
     "profile": "work",
@@ -2364,7 +2403,7 @@ fn sync_uses_repo_selected_profile_and_project_over_conflicting_global_defaults(
 }
 "#,
     )?;
-    let linked_dir = repo_root.join(".metastack/backlog/MET-210");
+    let linked_dir = repo_root.join(format!("{}/backlog/MET-210", branding::PROJECT_DIR));
     fs::create_dir_all(&linked_dir)?;
     write_linked_metadata(
         &linked_dir,
@@ -2398,7 +2437,7 @@ team = "PER"
 "#
         ),
     )?;
-    let issue_dir = repo_root.join(".metastack/backlog/MET-210");
+    let issue_dir = repo_root.join(format!("{}/backlog/MET-210", branding::PROJECT_DIR));
     fs::create_dir_all(&issue_dir)?;
     fs::write(issue_dir.join("index.md"), "# Repo default sync issue\n")?;
     write_linked_metadata(
@@ -2463,10 +2502,14 @@ team = "PER"
         ])
         .assert()
         .success()
-        .stderr(predicate::str::contains(
-            "hint: `meta sync` is a compatibility alias; prefer `meta backlog sync`.",
-        ))
-        .stdout(predicate::str::contains("meta backlog sync (project-1)"))
+        .stderr(predicate::str::contains(format!(
+            "hint: `{0} sync` is a compatibility alias; prefer `{0} backlog sync`.",
+            branding::COMMAND_NAME
+        )))
+        .stdout(predicate::str::contains(format!(
+            "{} backlog sync (project-1)",
+            branding::COMMAND_NAME
+        )))
         .stdout(predicate::str::contains("Repo default sync issue"))
         .stdout(predicate::str::contains("Backlog Search"));
 
@@ -2492,7 +2535,9 @@ fn sync_render_once_prefers_linked_backlog_children_over_project_rows() -> Resul
 "#,
     )?;
 
-    let issue_dir = temp.path().join(".metastack/backlog/MET-36");
+    let issue_dir = temp
+        .path()
+        .join(format!("{}/backlog/MET-36", branding::PROJECT_DIR));
     fs::create_dir_all(&issue_dir)?;
     fs::write(issue_dir.join("index.md"), "# Child backlog docs\n")?;
     write_linked_metadata(
@@ -2571,9 +2616,10 @@ fn sync_render_once_prefers_linked_backlog_children_over_project_rows() -> Resul
         ])
         .assert()
         .success()
-        .stderr(predicate::str::contains(
-            "hint: `meta sync` is a compatibility alias; prefer `meta backlog sync`.",
-        ))
+        .stderr(predicate::str::contains(format!(
+            "hint: `{0} sync` is a compatibility alias; prefer `{0} backlog sync`.",
+            branding::COMMAND_NAME
+        )))
         .stdout(predicate::str::contains("Ready to push MET-36"))
         .stdout(predicate::str::contains("Backlog Entries (1/1)"))
         .stdout(predicate::str::contains("Parent issue").not());
@@ -2597,7 +2643,9 @@ fn sync_without_subcommand_renders_local_backlog_without_default_project_configu
 "#,
     )
     .expect("planning context should write");
-    let issue_dir = temp.path().join(".metastack/backlog/manual-entry");
+    let issue_dir = temp
+        .path()
+        .join(format!("{}/backlog/manual-entry", branding::PROJECT_DIR));
     fs::create_dir_all(&issue_dir)?;
     fs::write(issue_dir.join("index.md"), "# Manual entry\n")?;
 
@@ -2613,13 +2661,17 @@ fn sync_without_subcommand_renders_local_backlog_without_default_project_configu
         ])
         .assert()
         .success()
-        .stderr(predicate::str::contains(
-            "hint: `meta sync` is a compatibility alias; prefer `meta backlog sync`.",
-        ))
+        .stderr(predicate::str::contains(format!(
+            "hint: `{0} sync` is a compatibility alias; prefer `{0} backlog sync`.",
+            branding::COMMAND_NAME
+        )))
         .stdout(predicate::str::contains("manual-entry"))
         .stdout(predicate::str::contains("state: Unlinked"))
         .stdout(predicate::str::contains("link required"))
-        .stdout(predicate::str::contains("meta backlog sync link"))
+        .stdout(predicate::str::contains(format!(
+            "{} backlog sync link",
+            branding::COMMAND_NAME
+        )))
         .stdout(predicate::str::contains("--entry manual-entry"))
         .stdout(predicate::str::contains("Ready to push").not());
 
@@ -2672,7 +2724,9 @@ fn sync_link_in_no_interactive_mode_creates_metadata_without_hashes() -> Result<
 "#,
     )?;
 
-    let issue_dir = temp.path().join(".metastack/backlog/manual-entry");
+    let issue_dir = temp
+        .path()
+        .join(format!("{}/backlog/manual-entry", branding::PROJECT_DIR));
     fs::create_dir_all(&issue_dir)?;
     fs::write(issue_dir.join("index.md"), "# Manual notes\n")?;
 
@@ -2738,7 +2792,7 @@ fn sync_link_in_no_interactive_mode_creates_metadata_without_hashes() -> Result<
     assert_eq!(payload["result"]["issue"]["identifier"], "MET-35");
     assert_eq!(
         payload["result"]["backlog_path"],
-        ".metastack/backlog/manual-entry"
+        format!("{}/backlog/manual-entry", branding::PROJECT_DIR)
     );
     assert_eq!(payload["result"]["pulled"], false);
     assert_eq!(payload["result"]["already_linked"], false);
@@ -2772,7 +2826,9 @@ fn sync_link_with_pull_hydrates_the_selected_backlog_entry() -> Result<(), Box<d
 "#,
     )?;
 
-    let issue_dir = temp.path().join(".metastack/backlog/manual-entry");
+    let issue_dir = temp
+        .path()
+        .join(format!("{}/backlog/manual-entry", branding::PROJECT_DIR));
     fs::create_dir_all(&issue_dir)?;
     fs::write(issue_dir.join("index.md"), "# Manual notes\n")?;
 
@@ -2839,7 +2895,7 @@ fn sync_link_with_pull_hydrates_the_selected_backlog_entry() -> Result<(), Box<d
     assert_eq!(payload["result"]["issue"]["identifier"], "MET-35");
     assert_eq!(
         payload["result"]["backlog_path"],
-        ".metastack/backlog/manual-entry"
+        format!("{}/backlog/manual-entry", branding::PROJECT_DIR)
     );
     assert_eq!(payload["result"]["pulled"], true);
     assert_eq!(payload["result"]["already_linked"], false);
@@ -2873,7 +2929,9 @@ fn sync_link_does_not_write_metadata_when_the_issue_is_missing() -> Result<(), B
 "#,
     )?;
 
-    let issue_dir = temp.path().join(".metastack/backlog/manual-entry");
+    let issue_dir = temp
+        .path()
+        .join(format!("{}/backlog/manual-entry", branding::PROJECT_DIR));
     fs::create_dir_all(&issue_dir)?;
     fs::write(issue_dir.join("index.md"), "# Manual notes\n")?;
 
@@ -2940,11 +2998,15 @@ fn sync_status_reports_local_ahead_and_unlinked_entries_without_fetch() -> Resul
 "#,
     )?;
 
-    let unlinked_dir = temp.path().join(".metastack/backlog/manual-entry");
+    let unlinked_dir = temp
+        .path()
+        .join(format!("{}/backlog/manual-entry", branding::PROJECT_DIR));
     fs::create_dir_all(&unlinked_dir)?;
     fs::write(unlinked_dir.join("index.md"), "# Unlinked manual entry\n")?;
 
-    let linked_dir = temp.path().join(".metastack/backlog/MET-35");
+    let linked_dir = temp
+        .path()
+        .join(format!("{}/backlog/MET-35", branding::PROJECT_DIR));
     fs::create_dir_all(&linked_dir)?;
     fs::write(linked_dir.join("index.md"), "# Local changes\n")?;
     write_linked_metadata(
@@ -3200,7 +3262,9 @@ fn sync_pull_all_reports_synced_and_skipped_summary() -> Result<(), Box<dyn Erro
         .assert()
         .success();
 
-    let manual_dir = temp.path().join(".metastack/backlog/manual-36");
+    let manual_dir = temp
+        .path()
+        .join(format!("{}/backlog/manual-36", branding::PROJECT_DIR));
     fs::create_dir_all(&manual_dir)?;
     write_linked_metadata(
         &manual_dir,
@@ -3334,7 +3398,9 @@ fn sync_push_all_exits_non_zero_when_any_entry_errors() -> Result<(), Box<dyn Er
         .assert()
         .success();
 
-    let broken_dir = temp.path().join(".metastack/backlog/manual-36");
+    let broken_dir = temp
+        .path()
+        .join(format!("{}/backlog/manual-36", branding::PROJECT_DIR));
     fs::create_dir_all(&broken_dir)?;
     write_linked_metadata(&broken_dir, "MET-36", "Broken push entry", None, None, None)?;
 
@@ -3354,9 +3420,10 @@ fn sync_push_all_exits_non_zero_when_any_entry_errors() -> Result<(), Box<dyn Er
         .stdout(predicate::str::contains(
             "push summary: 0 synced, 1 skipped, 1 errors.",
         ))
-        .stderr(predicate::str::contains(
-            "`meta backlog sync push --all` completed with 1 error",
-        ));
+        .stderr(predicate::str::contains(format!(
+            "`{} backlog sync push --all` completed with 1 error",
+            branding::COMMAND_NAME
+        )));
 
     Ok(())
 }

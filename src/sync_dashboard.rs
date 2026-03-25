@@ -19,6 +19,7 @@ use ratatui::widgets::{Block, Borders, ListItem, ListState, Wrap};
 use ratatui::{Frame, Terminal};
 
 use crate::backlog::BacklogSyncStatus;
+use crate::branding;
 use crate::linear::IssueSummary;
 use crate::linear::browser::{
     IssueSearchResult, empty_search_result, render_issue_preview as render_linear_issue_preview,
@@ -327,7 +328,7 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &SyncDashboardApp) {
             Line::from(app.summary_line()),
             Line::from(app.filter_hint_line()),
         ]),
-        panel_title("meta sync", false),
+        panel_title(format!("{} sync", branding::COMMAND_NAME), false),
     );
     frame.render_widget(header, outer[0]);
 
@@ -376,7 +377,10 @@ fn render_issue_list(frame: &mut Frame<'_>, area: Rect, app: &SyncDashboardApp) 
     let title = panel_title(title_text, app.focus == Focus::List);
     let items = if app.data.issues.is_empty() {
         vec![ListItem::new(empty_state(
-            "No backlog entries were found under `.metastack/backlog/`.",
+            format!(
+                "No backlog entries were found under `{}/backlog/`.",
+                crate::branding::PROJECT_DIR
+            ),
             "Create or link a backlog entry, then rerun `meta backlog sync`.",
         ))]
     } else if results.is_empty() {
@@ -854,7 +858,10 @@ impl SyncDashboardApp {
             }
             Focus::List => {
                 if self.data.issues.is_empty() {
-                    "No backlog entries were discovered under `.metastack/backlog/`.".to_string()
+                    format!(
+                        "No backlog entries were discovered under `{}/backlog/`.",
+                        crate::branding::PROJECT_DIR
+                    )
                 } else if loading > 0 {
                     let visible = self.visible_issue_results().len();
                     format!(
@@ -987,11 +994,9 @@ impl SyncDashboardApp {
             }
             Focus::List => {
                 if self.data.issues.is_empty() {
-                    "Create or link backlog entries under `.metastack/backlog/`, then rerun `meta backlog sync`."
-                        .to_string()
+                    format!("Create or link backlog entries under `{}/backlog/`, then rerun `meta backlog sync`.", crate::branding::PROJECT_DIR)
                 } else {
-                    "Step 1 of 3: choose backlog entries from `.metastack/backlog/`. Space selects, / searches, Ctrl+A selects all visible."
-                        .to_string()
+                    format!("Step 1 of 3: choose backlog entries from `{}/backlog/`. Space selects, / searches, Ctrl+A selects all visible.", crate::branding::PROJECT_DIR)
                 }
             }
             Focus::Preview => {
@@ -1073,11 +1078,11 @@ impl SyncDashboardApp {
         badges
     }
 
-    fn action_description(&self, action: SyncSelectionAction, enabled: bool) -> &'static str {
+    fn action_description(&self, action: SyncSelectionAction, enabled: bool) -> String {
         if enabled {
             action.description()
         } else {
-            "Link this backlog entry first; remote sync actions stay disabled until `.linear.json` points at a Linear issue."
+            "Link this backlog entry first; remote sync actions stay disabled until `.linear.json` points at a Linear issue.".to_string()
         }
     }
 }
@@ -1135,7 +1140,8 @@ impl SyncDashboardIssue {
                 self.local_status.as_str()
             ))]),
             Line::from(vec![Span::raw(format!(
-                "path .metastack/backlog/{}",
+                "path {}/backlog/{}",
+                crate::branding::PROJECT_DIR,
                 self.entry_slug
             ))]),
             Line::from(""),
@@ -1157,11 +1163,11 @@ impl SyncSelectionAction {
         }
     }
 
-    fn description(self) -> &'static str {
+    fn description(self) -> String {
         match self {
-            Self::Pull => "Refresh `.metastack/backlog/<ISSUE>/` from the Linear issue.",
+            Self::Pull => format!("Refresh `{}/backlog/<ISSUE>/` from the Linear issue.", crate::branding::PROJECT_DIR),
             Self::Push => {
-                "Sync CLI-managed attachment files; `index.md` stays local unless you run `meta backlog sync push <ISSUE> --update-description`."
+                "Sync CLI-managed attachment files; `index.md` stays local unless you run `meta backlog sync push <ISSUE> --update-description`.".to_string()
             }
         }
     }

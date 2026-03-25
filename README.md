@@ -1,6 +1,6 @@
 
 <div align="center">
-  <h1>MetaStack CLI</h1>
+  <h1>Intuition Engineer CLI</h1>
   <p><strong>Linear-native planning, repo context, and local agent automation from one CLI.</strong></p>
   <p>Create backlog items, sync planning files, run reusable workflows, and supervise unattended ticket execution without leaving the terminal.</p>
   <p>
@@ -36,7 +36,7 @@ Most planning tools split work across issue trackers, docs, scripts, and ad hoc 
 - `meta agents improve` inspects open PRs, accepts improvement instructions, and publishes stacked PRs targeting the source PR branch from an isolated workspace.
 - `meta agents execute <ISSUE_ID>` runs a one-off headless agent session for a single Linear issue, persisting session state for later adoption by `meta agents listen`.
 - `meta agents listen` runs unattended ticket execution in dedicated workspace clones instead of your source checkout. Execute-started sessions are visible in the listen dashboard but not auto-claimed.
-- `meta workspace` inventories and cleans those sibling listener workspace clones after the listener finishes.
+- `meta workspace` inventories and cleans sibling workspace clones (listener, improve, and review) with automatic merged-workspace cleanup and batch reconciliation.
 
 ## Install `meta` During Development
 
@@ -193,7 +193,7 @@ The preferred public surface is domain-first. Legacy top-level commands such as 
 | `meta runtime` | Configure install-scoped and repo-scoped defaults and supervise cron jobs |
 | `meta dashboard` | Open Linear, agents, team, or ops-oriented dashboard views |
 | `meta merge` | Discover open GitHub PRs, batch them in a one-shot dashboard, and publish one aggregate PR |
-| `meta workspace` | List, clean, and prune sibling listener workspace clones under the fixed workspace root |
+| `meta workspace` | List, clean, and prune sibling workspace clones (listener, improve, review) under the fixed workspace root |
 | `meta upgrade` | Check and apply verified GitHub Release self-updates for release installs on macOS/Linux |
 
 ## Interactive TUI Scrolling
@@ -1203,7 +1203,7 @@ Legacy alias: `meta listen`
 
 The live terminal dashboard refreshes locally every second so session-state changes stay visible, while the configured listen poll interval continues to control how often Linear is queried. Steady-state listen runs stay entirely in the terminal TUI as an interactive session browser, `--render-once` emits a terminal snapshot, and `--once --json` emits one machine-readable poll-cycle payload without going through the ratatui snapshot path.
 
-When built-in `codex` or `claude` workers emit structured usage telemetry, `meta agents listen` accumulates session-level input and output tokens across repeated turns. Runtime summaries, detail panes, and textual inspection output render `in`, `out`, and `total`, while the session table keeps a compact total-only token column. When exact counts are unavailable, the dashboard and textual summaries continue to show `n/a`.
+When built-in `codex` or `claude` workers emit structured usage telemetry, `meta agents listen` accumulates session-level input and output tokens across repeated turns. Runtime summaries, detail panes, and default textual inspection output render session-level `in`, `out`, and `total`, while the session table keeps a compact total-only token column. The worker also appends one per-turn token summary line to the per-issue log and persists additive turn-history snapshots in the mirrored detail artifact so `meta listen sessions inspect --turns` can render the exact turn order, prompt mode (`full_prompt` or `continuation`), and per-turn token counts without reparsing raw provider JSON. The listener also persists canonical provider, model, reasoning, and token metadata into install-scoped session state plus mirrored detail artifacts so mixed-provider histories total correctly across Codex and Claude runs. On startup, the listener performs a best-effort historical repair pass from canonical detail data, legacy state, and worker logs; when exact counts still cannot be recovered, the dashboard and textual summaries continue to show `n/a`.
 The interactive dashboard has two primary panes: **Agent Sessions** (active and completed listener
 workers) and **In Progress Issues - All Users** (all Linear issues currently in `In Progress`). The In Progress Issues
 pane displays each issue's short title, assignee, and whether an open GitHub PR is attached.
@@ -1287,6 +1287,7 @@ Stored-session management commands:
 ```bash
 meta listen sessions list
 meta listen sessions inspect
+meta listen sessions inspect --turns
 meta listen sessions clear
 meta listen sessions resume --project-key <PROJECT_KEY> --once
 ```
@@ -1295,7 +1296,9 @@ meta listen sessions resume --project-key <PROJECT_KEY> --once
 `meta listen sessions inspect` now expands the latest stored session with structured detail-artifact
 fields when available, including PR URL/state, workspace/backlog/workpad references, recent
 milestones, prompt-context references, compact log excerpts, and a fallback `Detail PR Ref: #N`
-line when the detail artifact only carries a PR number.
+line when the detail artifact only carries a PR number. Pass `--turns` to append the persisted
+per-turn token breakdown (`turn N tokens: in ... | out ... | prompt_mode=...`) from the detail
+artifact; without that flag the inspect output stays compact.
 The interactive selected-session detail pane follows the same fallback contract and shows `PR Ref:
 #N` when the detail artifact has a PR number but no published PR URL yet.
 Within the live dashboard, `P` pauses the selected running worker, and `R` either resumes a paused
@@ -1303,11 +1306,27 @@ worker or retries a blocked session from its existing workspace state.
 
 ### `workspace`
 
-Manage the sibling listener workspace clones created by `meta agents listen`. These commands always resolve the workspace root from the repository root with the fixed sibling convention:
+Manage the sibling workspace clones created by `meta agents listen`, `meta agents improve`, and `meta agents review`. These commands always resolve the workspace root from the repository root with the fixed sibling convention:
 
 - `<parent>/<repo>-workspace/`
 
-That root is intentionally not configurable in this backlog, and TTL-based or automatic pruning is intentionally out of scope.
+That root is intentionally not configurable.
+
+#### Automatic cleanup
+
+When a listener session completes (the Linear ticket moves to a non-active state such as Done or Cancelled), the listener worker attempts to auto-clean the corresponding workspace clone immediately. Auto-clean succeeds only when the workspace has no uncommitted changes, no unpushed commits, and HEAD is not detached. When any safety check fails, the workspace is left in place and a manual-review-needed skip is logged. This ensures no local work is ever lost automatically.
+
+The same ticket-scoped listen artifacts (session entry, detail file, log file) that manual `meta workspace clean` removes are also removed during auto-clean.
+
+#### Batch reconciliation
+
+`meta workspace prune` reconciles previously missed merged workspaces across all managed workspace families:
+
+- **Listener clones** (`<TICKET>/`): removed when the Linear ticket is Done or Cancelled and the workspace is safe.
+- **Improve workspaces** (`improve-<session-id>/`): removed when the associated PR is merged or closed and the workspace is safe.
+- **Review remediation workspaces** (`review-runs/pr-<number>/`): removed when the associated PR is merged or closed and the workspace is safe.
+
+Workspaces with uncommitted changes, unpushed commits, or detached HEAD are always kept regardless of PR or ticket state.
 
 Examples:
 
@@ -1327,8 +1346,8 @@ Behavior:
 - GitHub PR enrichment is optional. When `gh` auth is unavailable, `list` and `prune` still succeed and mark PR data as unavailable while continuing from Linear completion state alone.
 - `meta workspace clean <TICKET>` deletes one clone after confirmation unless `--force` is passed, and it always reports dirty or ahead safety signals before removal.
 - `meta workspace clean --target-only` removes `target/` directories across all listener clones by default, or narrows to one ticket when a ticket identifier is also supplied.
-- `meta workspace prune --dry-run` previews every clone, whether it would be removed or kept, why, and the estimated reclaimed space.
-- `meta workspace prune` removes clones whose Linear tickets are Done or Cancelled, keeps clones with open PRs when PR data is available, skips clones with unpushed commits, and prints a final `Removed N clones, freed X GB. Kept M clones.` summary.
+- `meta workspace prune --dry-run` previews every clone, whether it would be removed or kept, why, and the estimated reclaimed space. Includes listener ticket clones, improve workspaces, and review remediation workspaces.
+- `meta workspace prune` removes clones whose Linear tickets are Done or Cancelled (for listener clones) or whose associated PRs are merged or closed (for improve and review workspaces), keeps clones with open PRs when PR data is available, skips clones with unpushed commits, and prints a final `Removed N clones, freed X GB. Kept M clones.` summary.
 - Clone deletion also removes only the matching ticket-scoped MetaListen session entry and per-ticket log artifact from the install-scoped project store, leaving unrelated sessions for the same repository intact.
 
 For built-in `codex` and `claude` listen workers, the install-scoped `session.json` state now keeps

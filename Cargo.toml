@@ -4,13 +4,13 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 description = "Agent orchestration CLI that polls Linear, creates per-issue workspaces, and runs coding agents unattended"
-repository = "https://github.com/metastack-systems/metastack-cli"
-homepage = "https://github.com/metastack-systems/metastack-cli"
+repository = "https://github.com/0xintuition/intuition-harness-cli"
+homepage = "https://github.com/0xintuition/intuition-harness-cli"
 readme = "README.md"
 keywords = ["cli", "agents", "linear", "orchestration", "automation"]
 categories = ["command-line-utilities", "development-tools"]
 rust-version = "1.85"
-default-run = "meta"
+default-run = "intu"
 autobins = false
 exclude = [
     ".github/",
@@ -18,15 +18,24 @@ exclude = [
     "tests/",
     "scripts/",
     "Makefile",
+    # Must match [package.metadata.branding] project_dir
     ".metastack/",
     "AGENTS.md",
     "WORKFLOW.md",
 ]
 
+[package.metadata.branding]
+command_name = "intu"
+project_dir = ".intuition"
+display_name = "Intuition"
 
 [[bin]]
-name = "meta"
+name = "intu"
 path = "src/main.rs"
+
+[build-dependencies]
+toml = "1.0.6"
+walkdir = "2.5.0"
 
 [dependencies]
 anyhow = "1.0.102"
@@ -35,7 +44,8 @@ base64 = "0.22.1"
 chrono = { version = "0.4.42", features = ["serde"] }
 clap = { version = "4.6.0", features = ["derive", "env"] }
 cron = "0.15.0"
-crossterm = "0.29.0"
+crossterm = { version = "0.29.0", features = ["event-stream"] }
+futures = "0.3"
 flate2 = "1.1.5"
 ignore = "0.4.25"
 image = "0.25.8"

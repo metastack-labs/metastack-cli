@@ -64,8 +64,9 @@ use dashboard::{
 use state::{ReviewPhase, ReviewSession};
 use store::ReviewProjectStore;
 
-const REVIEW_INSTRUCTIONS: &str = include_str!("../artifacts/REVIEW.md");
-const VIEW_LINEAR_INSTRUCTIONS: &str = include_str!("../artifacts/VIEW_LINEAR.md");
+const REVIEW_INSTRUCTIONS: &str = include_str!(concat!(env!("OUT_DIR"), "/artifacts/REVIEW.md"));
+const VIEW_LINEAR_INSTRUCTIONS: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/artifacts/VIEW_LINEAR.md"));
 const METASTACK_LABEL: &str = "metastack";
 const INPUT_POLL_INTERVAL_MILLIS: u64 = 100;
 const TERMINAL_REFRESH_INTERVAL_SECONDS: u64 = 1;
@@ -371,17 +372,17 @@ enum ReviewCommandKind {
 }
 
 impl ReviewCommandKind {
-    fn command_name(self) -> &'static str {
+    fn command_name(self) -> String {
         match self {
-            Self::Review => "meta agents review",
-            Self::Retro => "meta agents retro",
+            Self::Review => format!("{} agents review", crate::branding::COMMAND_NAME),
+            Self::Retro => format!("{} agents retro", crate::branding::COMMAND_NAME),
         }
     }
 
-    fn dashboard_title(self) -> &'static str {
+    fn dashboard_title(self) -> String {
         match self {
-            Self::Review => "meta agents review",
-            Self::Retro => "meta agents retro",
+            Self::Review => format!("{} agents review", crate::branding::COMMAND_NAME),
+            Self::Retro => format!("{} agents retro", crate::branding::COMMAND_NAME),
         }
     }
 }
@@ -676,7 +677,7 @@ fn run_review_interactive(
 ) -> Result<()> {
     let root = canonicalize_existing_dir(&args.root)?;
     let config = AppConfig::load()?;
-    let planning_meta = crate::config::load_required_planning_meta(&root, command.command_name())?;
+    let planning_meta = crate::config::load_required_planning_meta(&root, &command.command_name())?;
     let gh = GhCli;
     let store = ReviewProjectStore::resolve(&root).ok();
     if let Some(ref store) = store {
@@ -1087,7 +1088,10 @@ fn run_review_interactive(
 fn run_fix_pr(args: &ReviewRunArgs, pr_number: u64) -> Result<()> {
     let root = canonicalize_existing_dir(&args.root)?;
     let config = AppConfig::load()?;
-    let planning_meta = crate::config::load_required_planning_meta(&root, "meta agents review")?;
+    let planning_meta = crate::config::load_required_planning_meta(
+        &root,
+        &format!("{} agents review", crate::branding::COMMAND_NAME),
+    )?;
     let gh = GhCli;
     let store = ReviewProjectStore::resolve(&root)?;
     let state = store.load_state()?;
@@ -1297,7 +1301,10 @@ fn run_skip_pr(args: &ReviewRunArgs, pr_number: u64) -> Result<()> {
 fn run_review_one_shot(args: &ReviewRunArgs, pr_number: u64) -> Result<()> {
     let root = canonicalize_existing_dir(&args.root)?;
     let config = AppConfig::load()?;
-    let planning_meta = crate::config::load_required_planning_meta(&root, "meta agents review")?;
+    let planning_meta = crate::config::load_required_planning_meta(
+        &root,
+        &format!("{} agents review", crate::branding::COMMAND_NAME),
+    )?;
     let gh = GhCli;
 
     verify_gh_auth(&root)?;
@@ -1383,7 +1390,10 @@ fn run_review_one_shot(args: &ReviewRunArgs, pr_number: u64) -> Result<()> {
 fn run_retro_one_shot(args: &ReviewRunArgs, pr_number: u64) -> Result<()> {
     let root = canonicalize_existing_dir(&args.root)?;
     let config = AppConfig::load()?;
-    let planning_meta = crate::config::load_required_planning_meta(&root, "meta agents retro")?;
+    let planning_meta = crate::config::load_required_planning_meta(
+        &root,
+        &format!("{} agents retro", crate::branding::COMMAND_NAME),
+    )?;
     let gh = GhCli;
 
     verify_gh_auth(&root)?;
@@ -5873,8 +5883,10 @@ fn run_remediation_attempt(
         context.review_output,
         context.linear_identifier,
     );
-    let body_path = workspace_path.join(".metastack").join("review-pr-body.md");
-    ensure_dir(&workspace_path.join(".metastack"))?;
+    let body_path = workspace_path
+        .join(crate::branding::PROJECT_DIR)
+        .join("review-pr-body.md");
+    ensure_dir(&workspace_path.join(crate::branding::PROJECT_DIR))?;
     std::fs::write(&body_path, &pr_body).context("failed to write remediation PR body")?;
 
     let result = gh.publish_branch_pull_request(
@@ -6210,7 +6222,10 @@ async fn run_review_listener(args: &ReviewRunArgs) -> Result<()> {
 
 fn run_review_check(root: &Path, args: &ReviewRunArgs) -> Result<()> {
     let config = AppConfig::load()?;
-    let planning_meta = crate::config::load_required_planning_meta(root, "meta agents review")?;
+    let planning_meta = crate::config::load_required_planning_meta(
+        root,
+        &format!("{} agents review", crate::branding::COMMAND_NAME),
+    )?;
 
     verify_gh_auth(root)?;
     println!("gh auth: ok");
@@ -6454,7 +6469,10 @@ fn run_review_for_session(
     args: &ReviewRunArgs,
 ) -> Result<ReviewResult> {
     let config = AppConfig::load()?;
-    let planning_meta = crate::config::load_required_planning_meta(root, "meta agents review")?;
+    let planning_meta = crate::config::load_required_planning_meta(
+        root,
+        &format!("{} agents review", crate::branding::COMMAND_NAME),
+    )?;
     let gh = GhCli;
 
     let pr = fetch_pr_metadata(&gh, root, pr_number)?;

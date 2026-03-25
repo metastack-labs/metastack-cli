@@ -20,6 +20,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Padding, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 
+use crate::branding;
 use crate::config::{
     AppConfig, DEFAULT_LINEAR_API_URL, ListenAssignmentScope, ListenRefreshPolicy,
     validate_interactive_plan_follow_up_question_limit, validate_listen_poll_interval_seconds,
@@ -808,7 +809,10 @@ fn step_copy(app: &OnboardingApp) -> Vec<Line<'static>> {
             Line::from(
                 "This wizard configures install-scoped defaults shared across all repositories.",
             ),
-            Line::from("Repo-level overrides live in `.metastack/meta.json`."),
+            Line::from(format!(
+                "Repo-level overrides live in `{}/meta.json`.",
+                branding::PROJECT_DIR
+            )),
         ],
         OnboardingStep::ApiKey => vec![
             Line::from("Paste a personal or workspace Linear API key."),
@@ -824,7 +828,10 @@ fn step_copy(app: &OnboardingApp) -> Vec<Line<'static>> {
         ],
         OnboardingStep::Team => vec![
             Line::from("Choose exactly one install default team."),
-            Line::from("Repo-scoped `.metastack/meta.json` can still override this later."),
+            Line::from(format!(
+                "Repo-scoped `{}/meta.json` can still override this later.",
+                branding::PROJECT_DIR
+            )),
         ],
         OnboardingStep::Project => vec![
             Line::from("Choose an install default project, or press Enter to skip."),
@@ -865,7 +872,10 @@ fn step_copy(app: &OnboardingApp) -> Vec<Line<'static>> {
         ],
         OnboardingStep::PlanLabel => vec![
             Line::from("Default label for issues created by `meta backlog plan`."),
-            Line::from("Repo defaults still win when `.metastack/meta.json` sets one."),
+            Line::from(format!(
+                "Repo defaults still win when `{}/meta.json` sets one.",
+                branding::PROJECT_DIR
+            )),
         ],
         OnboardingStep::TechnicalLabel => vec![
             Line::from("Default label for issues created by `meta backlog tech`."),

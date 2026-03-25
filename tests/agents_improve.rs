@@ -1,6 +1,7 @@
 #![allow(dead_code, unused_imports)]
 
 include!("support/common.rs");
+use metastack_cli::branding;
 
 // ---------------------------------------------------------------------------
 // Render-once snapshot tests (require gh stub)
@@ -243,7 +244,7 @@ fn improve_render_once_session_detail() -> Result<(), Box<dyn Error>> {
     let config_path = temp.path().join("meta.toml");
     fs::write(&config_path, "[onboarding]\ncompleted = true\n")?;
 
-    let meta_dir = repo.join(".metastack");
+    let meta_dir = repo.join(branding::PROJECT_DIR);
     let improve_sessions_dir = meta_dir.join("agents").join("improve").join("sessions");
     fs::create_dir_all(&improve_sessions_dir)?;
     fs::write(
@@ -321,7 +322,7 @@ fn improve_render_once_with_persisted_session() -> Result<(), Box<dyn Error>> {
     let config_path = temp.path().join("meta.toml");
     fs::write(&config_path, "[onboarding]\ncompleted = true\n")?;
 
-    let meta_dir = repo.join(".metastack");
+    let meta_dir = repo.join(branding::PROJECT_DIR);
     let improve_sessions_dir = meta_dir.join("agents").join("improve").join("sessions");
     fs::create_dir_all(&improve_sessions_dir)?;
     fs::write(

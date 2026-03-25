@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow};
 
+use crate::branding;
 use crate::cli::{
     ContextArgs, ContextCommands, ContextDoctorArgs, ContextMapArgs, ContextReloadArgs,
     ContextShowArgs, ScanArgs,
@@ -263,8 +264,9 @@ fn diagnose_context(root: &Path) -> Result<DoctorReport> {
             ));
         } else {
             issues.push(format!(
-                "Configured instructions file `{}` is missing. Update `.metastack/meta.json` or create the file.",
-                display_path(&instructions_path, root)
+                "Configured instructions file `{}` is missing. Update `{}/meta.json` or create the file.",
+                display_path(&instructions_path, root),
+                branding::PROJECT_DIR
             ));
         }
     } else {
@@ -288,7 +290,10 @@ fn diagnose_context(root: &Path) -> Result<DoctorReport> {
     .filter_map(|(_, path)| (!path.is_file()).then(|| display_path(&path, root)))
     .collect::<Vec<_>>();
     if missing_codebase.is_empty() {
-        notices.push("All expected `.metastack/codebase/*.md` files are present.".to_string());
+        notices.push(format!(
+            "All expected `{}/codebase/*.md` files are present.",
+            branding::PROJECT_DIR
+        ));
     } else {
         issues.push(format!(
             "Missing codebase context files: {}. Run `meta context reload --root {}` or `meta context scan --root {}`.",
@@ -333,7 +338,7 @@ fn render_source_block(source: Option<&InstructionSource>, root: &Path) -> Vec<S
             String::new(),
             source.contents.clone(),
         ],
-        None => vec![no_repo_scoped_instructions_message().to_string()],
+        None => vec![no_repo_scoped_instructions_message()],
     }
 }
 
