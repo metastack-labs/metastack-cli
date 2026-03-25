@@ -3672,6 +3672,19 @@ fn render_agent_prompt(
     )
 }
 
+fn render_continuation_prompt(issue: &IssueSummary, turn_number: u32, max_turns: u32) -> String {
+    format!(
+        "Continuation guidance for `{identifier}`:\n\n\
+         - The previous turn completed normally, but the Linear issue is still in an active state.\n\
+         - This is continuation turn #{turn_number} of {max_turns} for the current agent run.\n\
+         - Resume from the current workspace and workpad state instead of restarting from scratch.\n\
+         - The original task instructions and prior turn context are already present in this session.\n\
+         - Focus on the remaining ticket work and do not restart completed steps.\n\
+         - Do not end the turn while the issue remains active unless you are blocked by missing required auth, permissions, or secrets.",
+        identifier = issue.identifier,
+    )
+}
+
 fn truncate_discussion_excerpt(contents: &str, char_limit: usize) -> String {
     if contents.len() <= char_limit {
         return contents.to_string();
@@ -3986,7 +3999,7 @@ mod tests {
         ListenState, PullRequestSummary, SessionOrigin, SessionPhase, TODO_STATE, TokenUsage,
         capture_workspace_snapshot, compact_identifier, format_duration, format_number,
         listen_browser_action, listen_scope_label, mark_running_session_stale, render_agent_prompt,
-        required_label_skip_reason,
+        render_continuation_prompt, required_label_skip_reason,
     };
     use crate::config::{
         AppConfig, LinearConfig, ListenAssignmentScope, ListenRefreshPolicy,
@@ -4862,6 +4875,55 @@ mod tests {
         assert!(prompt.contains("[truncated to most recent excerpt]"));
         assert!(prompt.contains("Newest discussion tail."));
         assert!(!prompt.contains("Old details that should be truncated away."));
+    }
+
+    #[test]
+    fn render_continuation_prompt_includes_identifier_and_turn() {
+        let issue = test_issue("MET-57");
+        let prompt = render_continuation_prompt(&issue, 3, 20);
+
+        assert!(prompt.contains("MET-57"));
+        assert!(prompt.contains("continuation turn #3 of 20"));
+        assert!(prompt.contains("Resume from the current workspace"));
+        assert!(prompt.contains("already present in this session"));
+    }
+
+    #[test]
+    fn render_continuation_prompt_is_compact() {
+        let issue = test_issue("MET-57");
+        let prompt = render_continuation_prompt(&issue, 2, 20);
+
+        // Continuation prompt should be much smaller than the full prompt.
+        assert!(
+            prompt.len() < 600,
+            "continuation prompt too large: {} bytes",
+            prompt.len()
+        );
+        // Must not include fields from the full prompt.
+        assert!(!prompt.contains("Description:"));
+        assert!(!prompt.contains("Workspace:"));
+        assert!(!prompt.contains("Labels:"));
+    }
+
+    #[test]
+    fn full_prompt_is_larger_than_continuation() {
+        let temp = tempdir().expect("temp dir should build");
+        let workspace = temp.path();
+        fs::create_dir_all(workspace.join(".metastack")).expect("metastack dir should build");
+
+        let issue = test_issue("MET-57");
+        let full = render_agent_prompt(&issue, workspace, "comment-1", None, 2, 20);
+        let cont = render_continuation_prompt(&issue, 2, 20);
+
+        // With a minimal test issue, the full prompt is modest. In production, issue
+        // descriptions, backlog context, and discussion excerpts push it to 2-10KB
+        // while the continuation prompt stays ~500 bytes.
+        assert!(
+            full.len() > cont.len(),
+            "full prompt ({} bytes) should be larger than continuation prompt ({} bytes)",
+            full.len(),
+            cont.len(),
+        );
     }
 
     fn test_issue(identifier: &str) -> IssueSummary {

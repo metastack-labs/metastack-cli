@@ -230,14 +230,6 @@ pub enum TurnPromptMode {
 }
 
 impl TurnPromptMode {
-    pub(super) fn for_turn(turn: u32) -> Self {
-        if turn > 1 {
-            Self::Continuation
-        } else {
-            Self::FullPrompt
-        }
-    }
-
     pub(super) fn label(self) -> &'static str {
         match self {
             Self::FullPrompt => "full_prompt",

@@ -7995,3 +7995,414 @@ printf '%s' "$1" > "$TEST_OUTPUT_DIR/payload.txt"
 
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Session resume: continuation prompt on turn 2+ (ENG-10303)
+// ---------------------------------------------------------------------------
+
+/// Validates that a Claude listen worker uses the continuation prompt on turn 2
+/// when a resume handle is captured from turn 1. Turn 1 should receive the full
+/// prompt and instructions. Turn 2 should receive a compact continuation prompt
+/// with no instructions, and the CLI args should include `--resume <session_id>`.
+#[cfg(unix)]
+#[test]
+fn listen_worker_claude_uses_continuation_prompt_on_resumed_turn() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let stub_dir = temp.path().join("stub-output");
+    let server = DynamicLinearServer::start_with_completion_after_refreshes(1_000_000)?;
+    let api_url = server.url.clone();
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&stub_dir)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+    write_onboarded_config(
+        &config_path,
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+"#,
+        ),
+    )?;
+
+    // Stub claude binary that:
+    // 1. Tracks turn count via a file
+    // 2. Captures prompt (env) and args per turn
+    // 3. Outputs session_id for resume handle capture
+    // 4. Creates a source file change (prevents stall detection)
+    let claude_path = bin_dir.join("claude");
+    fs::write(
+        &claude_path,
+        r#"#!/bin/sh
+if [ "$1" = "-p" ] && [ "$2" = "--help" ]; then
+  cat <<'EOF'
+-p, --print
+--model <model>
+--effort <level>
+--verbose
+--output-format <format>
+--permission-mode <mode>
+--resume <session_id>
+EOF
+  exit 0
+fi
+count_file="$TEST_OUTPUT_DIR/count.txt"
+count=0
+if [ -f "$count_file" ]; then
+  count=$(cat "$count_file")
+fi
+count=$((count + 1))
+printf '%s' "$count" > "$count_file"
+printf '%s\n' "$@" > "$TEST_OUTPUT_DIR/claude-args-$count.txt"
+printf '%s' "$METASTACK_AGENT_PROMPT" > "$TEST_OUTPUT_DIR/prompt-$count.txt"
+printf '%s' "$METASTACK_AGENT_INSTRUCTIONS" > "$TEST_OUTPUT_DIR/instructions-$count.txt"
+mkdir -p src
+printf '// turn %s\n' "$count" > "src/turn-$count.rs"
+printf '%s\n' '{"type":"message_start","message":{"usage":{"input_tokens":210}}}'
+printf '%s\n' '{"type":"message_delta","usage":{"output_tokens":34}}'
+printf '%s' '{"type":"result","subtype":"success","result":"claude listen ok","session_id":"claude-session-resume-1"}'
+"#,
+    )?;
+    let mut permissions = fs::metadata(&claude_path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&claude_path, permissions)?;
+
+    init_repo_with_origin(&repo_root)?;
+    let workspace = create_workspace_clone_checkout(&repo_root, "repo-workspace/MET-32")?;
+
+    // Start with NO pre-existing resume handle — clean session.
+    let state_path = write_listen_store_session(
+        &config_path,
+        &repo_root,
+        vec![json!({
+            "issue_id": "issue-32",
+            "issue_identifier": "MET-32",
+            "issue_title": "Session resume continuation test",
+            "project_name": "MetaStack CLI",
+            "team_key": "MET",
+            "issue_url": "https://linear.app/issues/MET-32",
+            "phase": "running",
+            "summary": "Starting multi-turn test",
+            "brief_path": null,
+            "workspace_path": workspace.display().to_string(),
+            "workpad_comment_id": "comment-32",
+            "updated_at_epoch_seconds": 1_773_575_100u64,
+            "pid": null,
+            "session_id": null,
+            "latest_resume_handle": null,
+            "turns": 0,
+            "tokens": {},
+            "canonical": {},
+            "log_path": "logs/MET-32.log"
+        })],
+    )?;
+
+    let current_path = std::env::var("PATH")?;
+    meta()
+        .current_dir(&workspace)
+        .env_remove("ANTHROPIC_API_KEY")
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &stub_dir)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "listen-worker",
+            "--source-root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+            "--workspace",
+            workspace.to_str().expect("workspace path should be utf-8"),
+            "--issue",
+            "MET-32",
+            "--workpad-comment-id",
+            "comment-32",
+            "--api-key",
+            "token",
+            "--api-url",
+            &api_url,
+            "--agent",
+            "claude",
+            "--max-turns",
+            "2",
+        ])
+        .assert()
+        .success();
+
+    // Verify both turns ran.
+    let turn_count = fs::read_to_string(stub_dir.join("count.txt"))?
+        .trim()
+        .parse::<u32>()?;
+    assert_eq!(turn_count, 2, "expected exactly 2 agent turns");
+
+    // Turn 1: full prompt with issue context, full instructions.
+    let prompt_1 = fs::read_to_string(stub_dir.join("prompt-1.txt"))?;
+    let instructions_1 = fs::read_to_string(stub_dir.join("instructions-1.txt"))?;
+    assert!(
+        prompt_1.contains("You are working on Linear ticket"),
+        "turn 1 should receive full prompt, got: {}",
+        &prompt_1[..prompt_1.len().min(200)]
+    );
+    assert!(
+        !instructions_1.is_empty(),
+        "turn 1 should receive instructions"
+    );
+
+    // Turn 1 args: no --resume flag (no pre-existing handle).
+    let args_1 = fs::read_to_string(stub_dir.join("claude-args-1.txt"))?;
+    assert!(
+        !args_1.contains("--resume"),
+        "turn 1 should not have --resume flag"
+    );
+
+    // Turn 2: continuation prompt (compact), no instructions.
+    let prompt_2 = fs::read_to_string(stub_dir.join("prompt-2.txt"))?;
+    let instructions_2 = fs::read_to_string(stub_dir.join("instructions-2.txt"))?;
+    assert!(
+        prompt_2.contains("Continuation guidance"),
+        "turn 2 should receive continuation prompt, got: {}",
+        &prompt_2[..prompt_2.len().min(200)]
+    );
+    assert!(
+        !prompt_2.contains("You are working on Linear ticket"),
+        "turn 2 continuation prompt should not include full issue context"
+    );
+    assert!(
+        instructions_2.is_empty(),
+        "turn 2 should have empty instructions on resume, got: {}",
+        &instructions_2[..instructions_2.len().min(200)]
+    );
+
+    // Turn 2 args: --resume flag with session_id from turn 1.
+    let args_2 = fs::read_to_string(stub_dir.join("claude-args-2.txt"))?;
+    assert!(
+        args_2.contains("--resume"),
+        "turn 2 should have --resume flag"
+    );
+    assert!(
+        args_2.contains("claude-session-resume-1"),
+        "turn 2 should resume with session_id from turn 1"
+    );
+
+    // Session state should have the new resume handle.
+    let state = fs::read_to_string(state_path)?;
+    assert!(state.contains("\"id\": \"claude-session-resume-1\""));
+
+    Ok(())
+}
+
+/// Same as the Claude test but for the Codex provider: validates continuation
+/// prompt on turn 2 when a resume handle (thread_id) is captured from turn 1.
+#[cfg(unix)]
+#[test]
+fn listen_worker_codex_uses_continuation_prompt_on_resumed_turn() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let home_dir = temp.path().join("home");
+    let stub_dir = temp.path().join("stub-output");
+    let server = DynamicLinearServer::start_with_completion_after_refreshes(1_000_000)?;
+    let api_url = server.url.clone();
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&home_dir)?;
+    fs::create_dir_all(&stub_dir)?;
+    fs::create_dir_all(home_dir.join(".codex"))?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+    write_onboarded_config(
+        &config_path,
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+"#,
+        ),
+    )?;
+    fs::write(
+        home_dir.join(".codex/config.toml"),
+        r#"approval_policy = "never"
+sandbox_mode = "danger-full-access"
+"#,
+    )?;
+
+    // Stub codex binary: tracks turns, captures prompt/instructions/args, outputs thread_id.
+    let codex_path = bin_dir.join("codex");
+    fs::write(
+        &codex_path,
+        r#"#!/bin/sh
+if [ "$1" = "--help" ]; then
+  cat <<'EOF'
+-a, --ask-for-approval <APPROVAL_POLICY>
+-s, --sandbox <SANDBOX_MODE>
+-C, --cd <DIR>
+    --add-dir <DIR>
+    --dangerously-bypass-approvals-and-sandbox
+EOF
+  exit 0
+fi
+if [ "$1" = "exec" ] && [ "$2" = "--help" ]; then
+  cat <<'EOF'
+-m, --model <MODEL>
+-c, --config <key=value>
+    --json
+EOF
+  exit 0
+fi
+count_file="$TEST_OUTPUT_DIR/count.txt"
+count=0
+if [ -f "$count_file" ]; then
+  count=$(cat "$count_file")
+fi
+count=$((count + 1))
+printf '%s' "$count" > "$count_file"
+printf '%s\n' "$@" > "$TEST_OUTPUT_DIR/codex-args-$count.txt"
+printf '%s' "$METASTACK_AGENT_PROMPT" > "$TEST_OUTPUT_DIR/prompt-$count.txt"
+printf '%s' "$METASTACK_AGENT_INSTRUCTIONS" > "$TEST_OUTPUT_DIR/instructions-$count.txt"
+mkdir -p src
+printf '// turn %s\n' "$count" > "src/turn-$count.rs"
+printf '%s\n' '{"type":"thread.started","thread_id":"codex-thread-resume-1"}'
+printf '%s' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"summary\":\"codex listen ok\"}"}}'
+"#,
+    )?;
+    let mut permissions = fs::metadata(&codex_path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&codex_path, permissions)?;
+
+    init_repo_with_origin(&repo_root)?;
+    let workspace = create_workspace_clone_checkout(&repo_root, "repo-workspace/MET-32")?;
+
+    // Start with NO pre-existing resume handle.
+    let state_path = write_listen_store_session(
+        &config_path,
+        &repo_root,
+        vec![json!({
+            "issue_id": "issue-32",
+            "issue_identifier": "MET-32",
+            "issue_title": "Session resume codex continuation test",
+            "project_name": "MetaStack CLI",
+            "team_key": "MET",
+            "issue_url": "https://linear.app/issues/MET-32",
+            "phase": "running",
+            "summary": "Starting multi-turn codex test",
+            "brief_path": null,
+            "workspace_path": workspace.display().to_string(),
+            "workpad_comment_id": "comment-32",
+            "updated_at_epoch_seconds": 1_773_575_100u64,
+            "pid": null,
+            "session_id": null,
+            "latest_resume_handle": null,
+            "turns": 0,
+            "tokens": {},
+            "canonical": {},
+            "log_path": "logs/MET-32.log"
+        })],
+    )?;
+
+    let current_path = std::env::var("PATH")?;
+    meta()
+        .current_dir(&workspace)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &stub_dir)
+        .env("HOME", &home_dir)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "listen-worker",
+            "--source-root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+            "--workspace",
+            workspace.to_str().expect("workspace path should be utf-8"),
+            "--issue",
+            "MET-32",
+            "--workpad-comment-id",
+            "comment-32",
+            "--api-key",
+            "token",
+            "--api-url",
+            &api_url,
+            "--agent",
+            "codex",
+            "--max-turns",
+            "2",
+        ])
+        .assert()
+        .success();
+
+    // Verify both turns ran.
+    let turn_count = fs::read_to_string(stub_dir.join("count.txt"))?
+        .trim()
+        .parse::<u32>()?;
+    assert_eq!(turn_count, 2, "expected exactly 2 agent turns");
+
+    // Turn 1: full prompt with issue context, full instructions.
+    let prompt_1 = fs::read_to_string(stub_dir.join("prompt-1.txt"))?;
+    let instructions_1 = fs::read_to_string(stub_dir.join("instructions-1.txt"))?;
+    assert!(
+        prompt_1.contains("You are working on Linear ticket"),
+        "turn 1 should receive full prompt"
+    );
+    assert!(
+        !instructions_1.is_empty(),
+        "turn 1 should receive instructions"
+    );
+
+    // Turn 1 args: no resume flag (no pre-existing handle).
+    let args_1 = fs::read_to_string(stub_dir.join("codex-args-1.txt"))?;
+    assert!(
+        !args_1.contains("resume"),
+        "turn 1 should not have resume arg"
+    );
+
+    // Turn 2: continuation prompt (compact), no instructions.
+    let prompt_2 = fs::read_to_string(stub_dir.join("prompt-2.txt"))?;
+    let instructions_2 = fs::read_to_string(stub_dir.join("instructions-2.txt"))?;
+    assert!(
+        prompt_2.contains("Continuation guidance"),
+        "turn 2 should receive continuation prompt, got: {}",
+        &prompt_2[..prompt_2.len().min(200)]
+    );
+    assert!(
+        !prompt_2.contains("You are working on Linear ticket"),
+        "turn 2 should not include full issue context"
+    );
+    assert!(
+        instructions_2.is_empty(),
+        "turn 2 should have empty instructions on resume"
+    );
+
+    // Turn 2 args: resume flag with thread_id from turn 1.
+    let args_2 = fs::read_to_string(stub_dir.join("codex-args-2.txt"))?;
+    assert!(args_2.contains("resume"), "turn 2 should have resume arg");
+    assert!(
+        args_2.contains("codex-thread-resume-1"),
+        "turn 2 should resume with thread_id from turn 1"
+    );
+
+    // Session state should have the new resume handle.
+    let state = fs::read_to_string(state_path)?;
+    assert!(state.contains("\"id\": \"codex-thread-resume-1\""));
+
+    Ok(())
+}

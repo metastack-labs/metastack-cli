@@ -23,8 +23,10 @@ use crate::agents::{
 use crate::backlog::load_issue_metadata;
 use crate::cli::{ListenWorkerArgs, RunAgentArgs};
 use crate::config::{
-    AGENT_ROUTE_AGENTS_LISTEN, AppConfig, LinearConfig, LinearConfigOverrides, PromptTransport,
+    AGENT_ROUTE_AGENTS_LISTEN, AppConfig, LinearConfig, LinearConfigOverrides, PlanningMeta,
+    PromptTransport,
 };
+use crate::config_resolution::{AgentConfigOverrides, normalize_agent_name, resolve_agent_config};
 use crate::fs::{PlanningPaths, canonicalize_existing_dir, write_text_file};
 use crate::github_pr::{
     GhCli, PullRequestLifecycleAction, PullRequestLifecycleResult, PullRequestPublishMode,
@@ -44,7 +46,8 @@ use super::{
     compact_blocked_summary, compact_completed_summary, compact_running_summary,
     compare_workspace_snapshots, current_workspace_branch, issue_state_label, issue_team_key,
     listen_issue_is_active, now_epoch_seconds, now_timestamp, preflight, render_agent_prompt,
-    try_transition_issue_to_review_state, workspace_has_meaningful_progress, write_listen_session,
+    render_continuation_prompt, try_transition_issue_to_review_state,
+    workspace_has_meaningful_progress, write_listen_session,
 };
 
 const REQUIRED_LISTEN_PR_LABEL: &str = "metastack";
@@ -247,6 +250,22 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
             ),
         )?;
 
+        // Determine whether this turn will actually attempt a resumed invocation.
+        // Only retry on failure when resume was genuinely attempted (not just "handle exists").
+        let attempted_resume = turn_number > 1
+            && session_context
+                .latest_resume_handle
+                .as_ref()
+                .is_some_and(|h| {
+                    resolve_effective_listen_agent(
+                        &app_config,
+                        &planning_meta,
+                        args.agent.as_deref(),
+                    )
+                    .as_deref()
+                    .is_some_and(|a| h.matches_agent(a))
+                });
+
         // Keep provider-native manual resume handles separate from provider session bookkeeping.
         let provider_session_id_state = RefCell::new(provider_session_id.clone());
         let turn_result = match execute_agent_turn(
@@ -307,6 +326,114 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
             },
         ) {
             Ok(result) => result,
+            Err(error)
+                if attempted_resume
+                    && resolve_effective_listen_agent(
+                        &app_config,
+                        &planning_meta,
+                        args.agent.as_deref(),
+                    )
+                    .and_then(|agent| crate::agent_provider::builtin_provider_adapter(&agent))
+                    .is_some_and(|provider| {
+                        provider.is_invalid_resume_error(&error.to_string())
+                    }) =>
+            {
+                eprintln!(
+                    "listen: invalid resume for {} turn {turn_number}, retrying as cold start: {error}",
+                    issue.identifier,
+                );
+                session_context.latest_resume_handle = None;
+                let provider_session_id_retry = RefCell::new(provider_session_id.clone());
+                match execute_agent_turn(
+                    &issue,
+                    turn_number,
+                    &turn_context,
+                    None,
+                    |current_session_id| {
+                        if provider_session_id_retry.borrow().as_deref() == Some(current_session_id)
+                        {
+                            return Ok(());
+                        }
+                        *provider_session_id_retry.borrow_mut() =
+                            Some(current_session_id.to_string());
+                        write_listen_session(
+                            &source_root,
+                            project_selector,
+                            build_worker_session(
+                                &issue,
+                                SessionPhase::Running,
+                                compact_running_summary(
+                                    backlog_progress_before.as_ref(),
+                                    turn_number,
+                                    args.max_turns,
+                                    0,
+                                ),
+                                &session_context,
+                                turns_completed,
+                                provider_session_id_retry.borrow().as_deref(),
+                                &session_context.canonical,
+                            ),
+                        )
+                    },
+                    |usage| {
+                        let mut displayed_tokens = session_tokens.clone();
+                        let mut displayed_canonical = session_context.canonical.clone();
+                        displayed_tokens.accumulate(&TokenUsage {
+                            input: usage.input,
+                            output: usage.output,
+                        });
+                        displayed_canonical.tokens = displayed_tokens.clone();
+                        write_listen_session(
+                            &source_root,
+                            project_selector,
+                            build_worker_session(
+                                &issue,
+                                SessionPhase::Running,
+                                compact_running_summary(
+                                    backlog_progress_before.as_ref(),
+                                    turn_number,
+                                    args.max_turns,
+                                    0,
+                                ),
+                                &session_context,
+                                turns_completed,
+                                provider_session_id_retry.borrow().as_deref(),
+                                &displayed_canonical,
+                            ),
+                        )
+                    },
+                ) {
+                    Ok(result) => {
+                        // Sync the retry provider session ID back so the outer into_inner picks it up.
+                        *provider_session_id_state.borrow_mut() =
+                            provider_session_id_retry.into_inner();
+                        result
+                    }
+                    Err(retry_error) => {
+                        write_listen_session(
+                            &source_root,
+                            project_selector,
+                            build_worker_session(
+                                &issue,
+                                SessionPhase::Blocked,
+                                compact_blocked_summary(
+                                    &format!(
+                                        "Blocked | turn {turn_number}/{} failed (resume retry)",
+                                        args.max_turns
+                                    ),
+                                    backlog_progress_before.as_ref(),
+                                    &log_path,
+                                ),
+                                &session_context,
+                                turns_completed,
+                                provider_session_id.as_deref(),
+                                &session_context.canonical,
+                            ),
+                        )?;
+                        return Err(retry_error);
+                    }
+                }
+            }
             Err(error) => {
                 write_listen_session(
                     &source_root,
@@ -331,6 +458,17 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
         session_context.latest_resume_handle = turn_result
             .latest_resume_handle
             .or(session_context.latest_resume_handle);
+        if session_context.latest_resume_handle.is_some() {
+            eprintln!(
+                "listen: captured resume handle for {} on turn {turn_number}",
+                issue.identifier,
+            );
+        } else {
+            eprintln!(
+                "listen: no resume handle captured for {} on turn {turn_number}",
+                issue.identifier,
+            );
+        }
         provider_session_id = turn_result
             .session_id
             .or_else(|| provider_session_id_state.into_inner());
@@ -909,21 +1047,35 @@ fn build_listen_run_args(
     issue: &IssueSummary,
     turn_number: u32,
     context: &ListenTurnContext<'_>,
+    has_resume_handle: bool,
 ) -> Result<RunAgentArgs> {
-    let instructions = build_agent_instructions(issue, turn_number, context)?;
-    Ok(RunAgentArgs {
-        root: Some(context.source_root.to_path_buf()),
-        route_key: Some(AGENT_ROUTE_AGENTS_LISTEN.to_string()),
-        agent: context.args.agent.clone(),
-        prompt: render_agent_prompt(
+    let use_continuation = has_resume_handle && turn_number > 1;
+
+    let prompt = if use_continuation {
+        render_continuation_prompt(issue, turn_number, context.max_turns)
+    } else {
+        render_agent_prompt(
             issue,
             context.workspace_path,
             context.workpad_comment_id,
             context.backlog_issue,
             turn_number,
             context.max_turns,
-        ),
-        instructions: Some(instructions),
+        )
+    };
+
+    let instructions = if use_continuation {
+        None
+    } else {
+        Some(build_agent_instructions(issue, turn_number, context)?)
+    };
+
+    Ok(RunAgentArgs {
+        root: Some(context.source_root.to_path_buf()),
+        route_key: Some(AGENT_ROUTE_AGENTS_LISTEN.to_string()),
+        agent: context.args.agent.clone(),
+        prompt,
+        instructions,
         model: context.args.model.clone(),
         reasoning: context.args.reasoning.clone(),
         transport: None,
@@ -958,8 +1110,31 @@ fn execute_agent_turn(
     mut on_session_started: impl FnMut(&str) -> Result<()>,
     mut on_usage: impl FnMut(&AgentTokenUsage) -> Result<()>,
 ) -> Result<TurnExecutionResult> {
-    let prompt_mode = TurnPromptMode::for_turn(turn_number);
-    let run_args = build_listen_run_args(issue, turn_number, context)?;
+    let effective_agent = resolve_effective_listen_agent(
+        context.app_config,
+        context.planning_meta,
+        context.args.agent.as_deref(),
+    );
+    let has_resume_handle = continuation_handle
+        .filter(|h| {
+            effective_agent
+                .as_deref()
+                .is_some_and(|a| h.matches_agent(a))
+        })
+        .is_some();
+    let use_continuation = has_resume_handle && turn_number > 1;
+    let prompt_mode = if use_continuation {
+        TurnPromptMode::Continuation
+    } else {
+        TurnPromptMode::FullPrompt
+    };
+    eprintln!(
+        "listen: turn {turn_number}/{} for {} | resume={has_resume_handle} | prompt_mode={}",
+        context.max_turns,
+        issue.identifier,
+        prompt_mode.label(),
+    );
+    let run_args = build_listen_run_args(issue, turn_number, context, has_resume_handle)?;
     let invocation = resolve_agent_invocation_for_planning(
         context.app_config,
         context.planning_meta,
@@ -967,7 +1142,12 @@ fn execute_agent_turn(
     )?;
     let capture_output = invocation.builtin_provider;
     let command_args = if capture_output {
-        let continuation = continuation_id_for_invocation(&invocation.agent, continuation_handle);
+        // Only pass --resume on turn 2+; turn 1 must always cold-start even with a stale handle.
+        let continuation = if use_continuation {
+            continuation_id_for_invocation(&invocation.agent, continuation_handle)
+        } else {
+            None
+        };
         command_args_for_invocation_with_options(
             &invocation,
             AgentExecutionOptions {
@@ -1125,20 +1305,23 @@ fn execute_agent_turn(
             .take()
             .ok_or_else(|| anyhow!("failed to capture stderr for listen turn {turn_number}"))?;
         let stderr_log_path = log_path.clone();
-        let stderr_handle = thread::spawn(move || -> Result<()> {
+        let stderr_handle = thread::spawn(move || -> Result<String> {
             let mut stderr_log = fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(&stderr_log_path)
                 .with_context(|| format!("failed to open `{}`", stderr_log_path.display()))?;
+            let mut collected = String::new();
             for line in BufReader::new(stderr).lines() {
                 let line = line.with_context(|| {
                     format!("failed to read stderr for `{}`", stderr_log_path.display())
                 })?;
                 writeln!(stderr_log, "{line}")
                     .with_context(|| format!("failed to write `{}`", stderr_log_path.display()))?;
+                collected.push_str(&line);
+                collected.push('\n');
             }
-            Ok(())
+            Ok(collected)
         });
 
         let mut stdout_log = fs::OpenOptions::new()
@@ -1178,7 +1361,7 @@ fn execute_agent_turn(
         let status = child
             .wait()
             .with_context(|| format!("failed to wait for agent turn {turn_number}"))?;
-        stderr_handle
+        let stderr_output = stderr_handle
             .join()
             .map_err(|_| anyhow!("stderr drain thread panicked for listen turn {turn_number}"))??;
         if !status.success() {
@@ -1187,8 +1370,9 @@ fn execute_agent_turn(
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "terminated by signal".to_string());
             bail!(
-                "agent `{}` exited unsuccessfully during listen turn {turn_number} ({code})",
-                invocation.agent
+                "agent `{}` exited unsuccessfully during listen turn {turn_number} ({code}): {}",
+                invocation.agent,
+                stderr_output.trim()
             );
         }
         let parsed = provider.parse_capture_output(&raw_stdout)?;
@@ -1245,6 +1429,24 @@ fn append_turn_token_summary(log_path: &Path, snapshot: &TurnTokenSnapshot) -> R
         .with_context(|| format!("failed to write `{}`", log_path.display()))
 }
 
+fn resolve_effective_listen_agent(
+    app_config: &AppConfig,
+    planning_meta: &PlanningMeta,
+    agent_override: Option<&str>,
+) -> Option<String> {
+    resolve_agent_config(
+        app_config,
+        planning_meta,
+        Some(AGENT_ROUTE_AGENTS_LISTEN),
+        AgentConfigOverrides {
+            provider: agent_override.map(String::from),
+            ..Default::default()
+        },
+    )
+    .ok()
+    .map(|resolved| normalize_agent_name(&resolved.provider))
+}
+
 fn continuation_id_for_invocation(
     agent: &str,
     continuation_handle: Option<&LatestResumeHandle>,
@@ -1268,9 +1470,14 @@ fn parse_resume_handle_line(agent: &str, line: &[u8]) -> Option<LatestResumeHand
 }
 
 fn parse_claude_resume_handle(value: &Value) -> Option<LatestResumeHandle> {
+    // Claude stream-json wraps each event in an array: [{"type":"system","session_id":"..."}]
+    let obj = value
+        .as_array()
+        .and_then(|arr| arr.first())
+        .unwrap_or(value);
     Some(LatestResumeHandle {
         provider: ResumeProvider::Claude,
-        id: value.get("session_id")?.as_str()?.to_string(),
+        id: obj.get("session_id")?.as_str()?.to_string(),
     })
 }
 
@@ -2038,5 +2245,145 @@ mod tests {
         restore_env_var("SQLITE3_ROWS", None);
 
         assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn build_listen_run_args_uses_continuation_prompt_on_resume() {
+        let temp = tempdir().expect("tempdir should build");
+        let workspace = temp.path();
+        fs::create_dir_all(workspace.join(".metastack")).expect("metastack dir should build");
+        let source_root = temp.path();
+
+        let issue = test_issue("MET-57");
+        let app_config = crate::config::AppConfig::default();
+        let planning_meta = crate::config::PlanningMeta::default();
+        let args = crate::cli::ListenWorkerArgs {
+            source_root: source_root.to_path_buf(),
+            project: None,
+            workspace: workspace.to_path_buf(),
+            issue: "MET-57".to_string(),
+            workpad_comment_id: "comment-1".to_string(),
+            backlog_issue: None,
+            max_turns: 20,
+            api_key: None,
+            api_url: None,
+            profile: None,
+            team: None,
+            agent: None,
+            model: None,
+            reasoning: None,
+        };
+        let context = super::ListenTurnContext {
+            app_config: &app_config,
+            planning_meta: &planning_meta,
+            args: &args,
+            source_root,
+            project_selector: None,
+            workspace_path: workspace,
+            workpad_comment_id: "comment-1",
+            backlog_issue: None,
+            max_turns: 20,
+        };
+
+        // Turn 2 with resume handle → continuation prompt, no instructions.
+        let resumed = super::build_listen_run_args(&issue, 2, &context, true)
+            .expect("build_listen_run_args should succeed");
+        assert!(
+            resumed.prompt.contains("Continuation guidance"),
+            "resume turn 2 should use continuation prompt"
+        );
+        assert!(
+            resumed.instructions.is_none(),
+            "resume turn 2 should omit instructions"
+        );
+
+        // Turn 2 without resume handle → full prompt with instructions.
+        let cold = super::build_listen_run_args(&issue, 2, &context, false)
+            .expect("build_listen_run_args should succeed");
+        assert!(
+            cold.prompt.contains("You are working on Linear ticket"),
+            "cold turn 2 should use full prompt"
+        );
+        assert!(
+            cold.instructions.is_some(),
+            "cold turn 2 should include instructions"
+        );
+    }
+
+    #[test]
+    fn build_listen_run_args_uses_full_prompt_on_turn_one_even_with_resume() {
+        let temp = tempdir().expect("tempdir should build");
+        let workspace = temp.path();
+        fs::create_dir_all(workspace.join(".metastack")).expect("metastack dir should build");
+        let source_root = temp.path();
+
+        let issue = test_issue("MET-57");
+        let app_config = crate::config::AppConfig::default();
+        let planning_meta = crate::config::PlanningMeta::default();
+        let args = crate::cli::ListenWorkerArgs {
+            source_root: source_root.to_path_buf(),
+            project: None,
+            workspace: workspace.to_path_buf(),
+            issue: "MET-57".to_string(),
+            workpad_comment_id: "comment-1".to_string(),
+            backlog_issue: None,
+            max_turns: 20,
+            api_key: None,
+            api_url: None,
+            profile: None,
+            team: None,
+            agent: None,
+            model: None,
+            reasoning: None,
+        };
+        let context = super::ListenTurnContext {
+            app_config: &app_config,
+            planning_meta: &planning_meta,
+            args: &args,
+            source_root,
+            project_selector: None,
+            workspace_path: workspace,
+            workpad_comment_id: "comment-1",
+            backlog_issue: None,
+            max_turns: 20,
+        };
+
+        // Turn 1 with resume handle should still use full prompt (initial context load).
+        let result = super::build_listen_run_args(&issue, 1, &context, true)
+            .expect("build_listen_run_args should succeed");
+        assert!(
+            result.prompt.contains("You are working on Linear ticket"),
+            "turn 1 should always use full prompt"
+        );
+        assert!(
+            result.instructions.is_some(),
+            "turn 1 should always include instructions"
+        );
+    }
+
+    #[test]
+    fn parse_claude_resume_handle_from_array_wrapped_stream_json() {
+        // Claude --output-format=stream-json wraps each event in an array
+        let line = r#"[{"type":"system","subtype":"init","session_id":"22ca497e-d7da-4118-9433-1902769c6737","tools":["Bash"]}]"#;
+        let handle = super::parse_resume_handle_line("claude", line.as_bytes());
+        assert!(
+            handle.is_some(),
+            "should parse session_id from array-wrapped JSON"
+        );
+        let handle = handle.unwrap();
+        assert_eq!(handle.id, "22ca497e-d7da-4118-9433-1902769c6737");
+        assert_eq!(handle.provider, super::super::state::ResumeProvider::Claude);
+    }
+
+    #[test]
+    fn parse_claude_resume_handle_from_plain_object() {
+        // Also works with unwrapped objects (e.g. --output-format=json)
+        let line = r#"{"type":"result","session_id":"abc-123"}"#;
+        let handle = super::parse_resume_handle_line("claude", line.as_bytes());
+        assert!(
+            handle.is_some(),
+            "should parse session_id from plain JSON object"
+        );
+        assert_eq!(handle.unwrap().id, "abc-123");
     }
 }
