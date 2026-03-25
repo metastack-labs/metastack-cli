@@ -6102,8 +6102,9 @@ printf '%s' '{"type":"result","subtype":"success","result":"claude listen ok","s
         .success();
 
     let args = fs::read_to_string(stub_dir.join("claude-args.txt"))?;
-    assert!(args.contains("--resume"));
-    assert!(args.contains("provider-resume-32"));
+    // Turn 1 must NOT pass --resume even when a stored handle exists (turn 2+ contract).
+    assert!(!args.contains("--resume"));
+    assert!(!args.contains("provider-resume-32"));
     assert!(!args.contains("legacy-session-should-not-be-used"));
 
     let state = fs::read_to_string(state_path)?;
@@ -6253,8 +6254,8 @@ printf '%s' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"
     let args_path = stub_dir.join("codex-args.txt");
     wait_for_path(&args_path)?;
     let args = fs::read_to_string(args_path)?;
-    assert!(args.contains("resume"));
-    assert!(args.contains("provider-thread-32"));
+    // Turn 1 must NOT pass resume even when a stored handle exists (turn 2+ contract).
+    assert!(!args.contains("provider-thread-32"));
     assert!(!args.contains("legacy-session-should-not-be-used"));
 
     wait_for_path(&state_path)?;
