@@ -879,6 +879,8 @@ The command requires a configured local agent, or one of the built-in supported 
 
 In machine mode, `meta backlog tech --no-interactive <ISSUE>` emits the created child issue, parent issue, and local backlog path as JSON. Missing-input failures also emit structured JSON.
 
+Across `meta backlog plan`, `meta backlog spec`, and `meta backlog tech`, recovered generation failures now stay visible until the next real edit or resubmit instead of disappearing on routine navigation. If capture-mode execution fails with `agent returned empty response — check provider CLI version or agent configuration`, treat that as a provider CLI regression or local agent-command misconfiguration before debugging downstream JSON parsing.
+
 In a TTY, the parent-issue picker now uses the shared Linear issue browser:
 
 - type to search by identifier, title, state, project, or description

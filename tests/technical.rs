@@ -110,6 +110,7 @@ transport = "stdin"
         &stub_path,
         format!(
             "#!/bin/sh\ncat > \"$TEST_OUTPUT_DIR/payload.txt\"\ncat <<'JSON'\n\
+Context {{not json}}\n\
 {{\"files\":[\n\
   {{\"path\":\"index.md\",\"contents\":\"# Technical: Create the technical and sync commands\\n\\nAgent-generated technical backlog for parent `MET-35`.\\n\"}},\n\
   {{\"path\":\"README.md\",\"contents\":\"# Backlog Item Template\\n\\nThis directory is the canonical backlog for the technical child ticket.\\n\"}},\n\

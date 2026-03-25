@@ -37,6 +37,13 @@ printf '%s' "$METASTACK_AGENT_INSTRUCTIONS" > "$TEST_OUTPUT_DIR/instructions-$co
 case "$METASTACK_AGENT_PROMPT" in
   *"Return JSON only using this exact shape"*)
     case "$METASTACK_AGENT_PROMPT" in
+      *"Wrap follow-up questions in prose"*)
+        printf '%s' 'Context {{not json}}
+{{"questions":["Who is the primary user for this workflow?","What should stay explicitly out of scope?"]}}'
+        ;;
+      *"Return empty follow-up output"*)
+        printf '%s' ''
+        ;;
       *"Skip follow-up questions entirely"*)
         printf '%s' '{{"questions":[]}}'
         ;;
@@ -372,6 +379,64 @@ fn spec_command_render_once_covers_major_tui_states() -> Result<(), Box<dyn Erro
             .join(format!("{}/SPEC.md", branding::PROJECT_DIR))
             .exists()
     );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn spec_render_once_accepts_prose_wrapped_follow_up_json() -> Result<(), Box<dyn Error>> {
+    let (_temp, repo_root, config_path, output_dir) = setup_spec_repo()?;
+
+    cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &output_dir)
+        .args([
+            "backlog",
+            "spec",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--render-once",
+            "--request",
+            "Wrap follow-up questions in prose",
+            "--events",
+            "enter,wait,wait",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Create SPEC follow-up interview"))
+        .stdout(predicate::str::contains(
+            "Who is the primary user for this workflow?",
+        ));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn spec_render_once_keeps_empty_response_error_sticky() -> Result<(), Box<dyn Error>> {
+    let (_temp, repo_root, config_path, output_dir) = setup_spec_repo()?;
+
+    cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &output_dir)
+        .args([
+            "backlog",
+            "spec",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--render-once",
+            "--request",
+            "Return empty follow-up output",
+            "--events",
+            "enter,wait,down",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("agent returned empty response"))
+        .stdout(predicate::str::contains(
+            "What should this repository build?",
+        ));
+
     Ok(())
 }
 

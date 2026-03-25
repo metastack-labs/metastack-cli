@@ -136,6 +136,7 @@ struct RequestApp {
     mode: SpecMode,
     request: InputFieldState,
     error: Option<String>,
+    sticky_error: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -151,6 +152,7 @@ struct QuestionsApp {
     questions: Vec<QuestionAnswer>,
     selected: usize,
     error: Option<String>,
+    sticky_error: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -228,6 +230,41 @@ pub(crate) enum SpecAction {
 enum InteractiveExit {
     Cancelled,
     Confirmed(String),
+}
+
+fn clear_error(error: &mut Option<String>, sticky_error: &mut bool) {
+    *error = None;
+    *sticky_error = false;
+}
+
+fn clear_error_for_navigation(error: &mut Option<String>, sticky_error: &bool) {
+    if !*sticky_error {
+        *error = None;
+    }
+}
+
+fn set_transient_error(error: &mut Option<String>, sticky_error: &mut bool, message: String) {
+    *error = Some(message);
+    *sticky_error = false;
+}
+
+fn set_sticky_error(error: &mut Option<String>, sticky_error: &mut bool, message: String) {
+    *error = Some(message);
+    *sticky_error = true;
+}
+
+fn input_key_clears_sticky_error(key: KeyEvent) -> bool {
+    matches!(
+        key.code,
+        KeyCode::Backspace | KeyCode::Delete
+            | KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL)
+    ) || matches!(
+        key.code,
+        KeyCode::Char(_) if !key.modifiers.contains(KeyModifiers::CONTROL)
+    ) || matches!(
+        key.code,
+        KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT)
+    )
 }
 
 struct TerminalCleanup;
@@ -511,6 +548,7 @@ impl BacklogSpecApp {
                 mode,
                 request: InputFieldState::multiline(initial_request.unwrap_or_default()),
                 error: None,
+                sticky_error: false,
             }),
             pending: None,
         }
@@ -547,18 +585,24 @@ impl BacklogSpecApp {
                 KeyCode::Enter if !key.modifiers.contains(KeyModifiers::SHIFT) => {
                     let request = app.request.value().trim();
                     if request.is_empty() {
-                        app.error = Some(
+                        set_transient_error(
+                            &mut app.error,
+                            &mut app.sticky_error,
                             "Enter what this repository should build before continuing."
                                 .to_string(),
                         );
                     } else {
-                        app.error = None;
+                        clear_error(&mut app.error, &mut app.sticky_error);
                         next = NextStep::StartQuestions(request.to_string());
                     }
                 }
                 _ => {
                     if app.request.handle_key(key) {
-                        app.error = None;
+                        if input_key_clears_sticky_error(key) {
+                            clear_error(&mut app.error, &mut app.sticky_error);
+                        } else {
+                            clear_error_for_navigation(&mut app.error, &app.sticky_error);
+                        }
                     }
                 }
             },
@@ -576,13 +620,13 @@ impl BacklogSpecApp {
                         } else {
                             app.selected -= 1;
                         }
-                        app.error = None;
+                        clear_error_for_navigation(&mut app.error, &app.sticky_error);
                     }
                 }
                 KeyCode::Down | KeyCode::Tab => {
                     if !app.questions.is_empty() {
                         app.selected = (app.selected + 1) % app.questions.len();
-                        app.error = None;
+                        clear_error_for_navigation(&mut app.error, &app.sticky_error);
                     }
                 }
                 KeyCode::Enter if !key.modifiers.contains(KeyModifiers::SHIFT) => {
@@ -591,12 +635,14 @@ impl BacklogSpecApp {
                         .iter()
                         .any(|q| q.answer.value().trim().is_empty());
                     if has_empty {
-                        app.error = Some(
+                        set_transient_error(
+                            &mut app.error,
+                            &mut app.sticky_error,
                             "Answer each follow-up question before generating the SPEC."
                                 .to_string(),
                         );
                     } else {
-                        app.error = None;
+                        clear_error(&mut app.error, &mut app.sticky_error);
                         let follow_ups = collect_follow_up_answers(&app.questions)?;
                         next = NextStep::StartGeneration(app.request.clone(), follow_ups);
                     }
@@ -604,7 +650,11 @@ impl BacklogSpecApp {
                 _ => {
                     if let Some(current) = app.questions.get_mut(app.selected) {
                         if current.answer.handle_key(key) {
-                            app.error = None;
+                            if input_key_clears_sticky_error(key) {
+                                clear_error(&mut app.error, &mut app.sticky_error);
+                            } else {
+                                clear_error_for_navigation(&mut app.error, &app.sticky_error);
+                            }
                         }
                     }
                 }
@@ -679,6 +729,7 @@ impl BacklogSpecApp {
                     mode,
                     request: InputFieldState::multiline(request),
                     error: None,
+                    sticky_error: false,
                 });
                 Ok(None)
             }
@@ -699,6 +750,7 @@ impl BacklogSpecApp {
                         .collect(),
                     selected: 0,
                     error: None,
+                    sticky_error: false,
                 });
                 Ok(None)
             }
@@ -710,14 +762,14 @@ impl BacklogSpecApp {
         match &mut self.stage {
             SpecStage::Request(app) => {
                 if app.request.paste(text) {
-                    app.error = None;
+                    clear_error(&mut app.error, &mut app.sticky_error);
                 }
             }
             SpecStage::Questions(app) => {
                 if let Some(current) = app.questions.get_mut(app.selected)
                     && current.answer.paste(text)
                 {
-                    app.error = None;
+                    clear_error(&mut app.error, &mut app.sticky_error);
                 }
             }
             _ => {}
@@ -753,6 +805,7 @@ fn start_questions(
         mode: app.mode,
         request: InputFieldState::multiline(request.clone()),
         error: None,
+        sticky_error: false,
     });
     app.stage = SpecStage::Loading(LoadingApp {
         mode: app.mode,
@@ -795,6 +848,7 @@ fn start_generation(
             .collect(),
         selected: 0,
         error: None,
+        sticky_error: false,
     });
     let existing_spec = app.existing_spec.clone();
     app.stage = SpecStage::Loading(LoadingApp {
@@ -894,6 +948,7 @@ fn finish_pending(app: &mut BacklogSpecApp, result: Result<PendingResult>) -> Re
                 questions: question_answers,
                 selected: 0,
                 error: None,
+                sticky_error: false,
             });
             Ok(())
         }
@@ -918,7 +973,10 @@ fn finish_pending(app: &mut BacklogSpecApp, result: Result<PendingResult>) -> Re
             });
             Ok(())
         }
-        Err(error) => restore_from_error(app, error.to_string()),
+        Err(error) => {
+            restore_recovery_stage(app, pending.recovery_stage, error.to_string());
+            Ok(())
+        }
     }
 }
 
@@ -927,17 +985,21 @@ fn restore_from_error(app: &mut BacklogSpecApp, error: String) -> Result<()> {
         .pending
         .take()
         .ok_or_else(|| anyhow!("SPEC pending job disappeared unexpectedly"))?;
-    match pending.recovery_stage {
+    restore_recovery_stage(app, pending.recovery_stage, error);
+    Ok(())
+}
+
+fn restore_recovery_stage(app: &mut BacklogSpecApp, recovery_stage: RecoveryStage, error: String) {
+    match recovery_stage {
         RecoveryStage::Request(mut request) => {
-            request.error = Some(error);
+            set_sticky_error(&mut request.error, &mut request.sticky_error, error);
             app.stage = SpecStage::Request(request);
         }
         RecoveryStage::Questions(mut questions) => {
-            questions.error = Some(error);
+            set_sticky_error(&mut questions.error, &mut questions.sticky_error, error);
             app.stage = SpecStage::Questions(questions);
         }
     }
-    Ok(())
 }
 
 fn spawn_question_job(
@@ -1193,26 +1255,45 @@ where
     T: for<'de> Deserialize<'de>,
 {
     let trimmed = raw.trim();
-    let mut candidates = vec![trimmed.to_string()];
-    if let Some(stripped) = strip_code_fence(trimmed) {
-        candidates.push(stripped);
-    }
-    if let (Some(start), Some(end)) = (trimmed.find('{'), trimmed.rfind('}'))
-        && start <= end
-    {
-        candidates.push(trimmed[start..=end].to_string());
-    }
-
-    for candidate in candidates {
+    for candidate in parse_json_candidates(trimmed) {
         if let Ok(parsed) = serde_json::from_str::<T>(&candidate) {
             return Ok(parsed);
         }
     }
 
+    eprintln!("warning: SPEC JSON parse failed during {phase}; raw agent output:\n{trimmed}");
     bail!(
         "agent returned invalid JSON during {phase}: {}",
         preview_text(trimmed)
     )
+}
+
+fn parse_json_candidates(raw: &str) -> Vec<String> {
+    let mut candidates = Vec::new();
+    push_json_candidate(&mut candidates, raw);
+    if let Some(stripped) = strip_code_fence(raw) {
+        push_json_candidate(&mut candidates, &stripped);
+        append_progressive_json_candidates(&mut candidates, &stripped);
+    }
+    append_progressive_json_candidates(&mut candidates, raw);
+    candidates
+}
+
+fn append_progressive_json_candidates(candidates: &mut Vec<String>, raw: &str) {
+    let Some(end) = raw.rfind('}') else {
+        return;
+    };
+    for (start, character) in raw.char_indices() {
+        if character == '{' && start <= end {
+            push_json_candidate(candidates, &raw[start..=end]);
+        }
+    }
+}
+
+fn push_json_candidate(candidates: &mut Vec<String>, candidate: &str) {
+    if !candidate.is_empty() && !candidates.iter().any(|existing| existing == candidate) {
+        candidates.push(candidate.to_string());
+    }
 }
 
 fn preview_text(raw: &str) -> String {
@@ -1619,6 +1700,7 @@ mod tests {
             mode: SpecMode::Create,
             request: InputFieldState::multiline("Add a repo-local feature spec workflow"),
             error: None,
+            sticky_error: false,
         });
         assert!(snapshot.contains("What should this repository build?"));
         assert!(snapshot.contains("Repo-local SPEC lifecycle"));
@@ -1660,6 +1742,58 @@ mod tests {
                 .is_ok()
         );
         assert!(ensure_required_headings("# Overview\n\n## GOALS").is_err());
+    }
+
+    #[test]
+    fn parse_agent_json_accepts_progressive_brace_scan() {
+        let parsed: FollowUpQuestions = parse_agent_json(
+            "Context {not json}\n{\"questions\":[\"Who is the primary user?\"]}",
+            "SPEC follow-up questions",
+        )
+        .expect("progressive brace scan should find the JSON payload");
+
+        assert_eq!(parsed.questions, vec!["Who is the primary user?"]);
+    }
+
+    #[test]
+    fn request_stage_keeps_sticky_recovered_error_visible_during_cursor_navigation() {
+        let mut app = BacklogSpecApp::new(
+            PathBuf::from("."),
+            SpecMode::Create,
+            PathBuf::from(".metastack/SPEC.md"),
+            None,
+            Some("Draft a repo-local spec".to_string()),
+            Vec::new(),
+            None,
+            None,
+            None,
+        );
+        match &mut app.stage {
+            SpecStage::Request(request) => {
+                request.error = Some("recovered".to_string());
+                request.sticky_error = true;
+            }
+            other => panic!("expected request stage, got {other:?}"),
+        }
+
+        let exit = app
+            .handle_key(
+                Path::new("."),
+                KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+                &None,
+                &None,
+                &None,
+            )
+            .expect("down should not fail");
+
+        assert!(exit.is_none());
+        match &app.stage {
+            SpecStage::Request(request) => {
+                assert_eq!(request.error.as_deref(), Some("recovered"));
+                assert!(request.sticky_error);
+            }
+            other => panic!("expected request stage, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1713,6 +1847,7 @@ mod tests {
                 }],
                 selected: 0,
                 error: None,
+                sticky_error: false,
             }),
             pending: None,
         };
@@ -1759,6 +1894,7 @@ mod tests {
                     mode: SpecMode::Create,
                     request: InputFieldState::multiline("Draft a repo-local spec"),
                     error: None,
+                    sticky_error: false,
                 }),
             }),
         };

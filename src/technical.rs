@@ -91,6 +91,7 @@ struct IssuePickerApp {
     focus: IssuePickerFocus,
     preview_scroll: ScrollState,
     error: Option<String>,
+    sticky_error: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -107,6 +108,7 @@ struct AcceptanceCriteriaApp {
     parent: IssueSummary,
     criteria: MultiSelectFieldState,
     error: Option<String>,
+    sticky_error: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -173,6 +175,43 @@ enum TechnicalRecoveryStage {
 enum InteractiveTechnicalExit {
     Cancelled,
     Confirmed(TechnicalGeneratedBacklog),
+}
+
+fn clear_error(error: &mut Option<String>, sticky_error: &mut bool) {
+    *error = None;
+    *sticky_error = false;
+}
+
+fn clear_error_for_navigation(error: &mut Option<String>, sticky_error: &bool) {
+    if !*sticky_error {
+        *error = None;
+    }
+}
+
+fn set_transient_error(error: &mut Option<String>, sticky_error: &mut bool, message: String) {
+    *error = Some(message);
+    *sticky_error = false;
+}
+
+fn set_sticky_error(error: &mut Option<String>, sticky_error: &mut bool, message: String) {
+    *error = Some(message);
+    *sticky_error = true;
+}
+
+fn input_key_clears_sticky_error(key: crossterm::event::KeyEvent) -> bool {
+    matches!(
+        key.code,
+        KeyCode::Backspace | KeyCode::Delete
+            | KeyCode::Char('u') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+    ) || matches!(
+        key.code,
+        KeyCode::Char(_) if !key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+    ) || matches!(
+        key.code,
+        KeyCode::Enter if key
+            .modifiers
+            .contains(crossterm::event::KeyModifiers::SHIFT)
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -410,6 +449,7 @@ fn run_interactive_technical_session(
                     parent,
                     criteria: MultiSelectFieldState::new(criteria.clone(), 0..criteria.len()),
                     error: None,
+                    sticky_error: false,
                 }),
                 pending: None,
             }
@@ -423,6 +463,7 @@ fn run_interactive_technical_session(
                 focus: IssuePickerFocus::List,
                 preview_scroll: ScrollState::default(),
                 error: None,
+                sticky_error: false,
             }),
             pending: None,
         }
@@ -508,6 +549,7 @@ fn run_interactive_technical_session(
                                         0..criteria.len(),
                                     ),
                                     error: None,
+                                    sticky_error: false,
                                 });
                             }
                         }
@@ -581,7 +623,7 @@ fn handle_issue_picker_key(
                 IssuePickerFocus::List => IssuePickerFocus::Preview,
                 IssuePickerFocus::Preview => IssuePickerFocus::List,
             };
-            app.error = None;
+            clear_error_for_navigation(&mut app.error, &app.sticky_error);
             TechnicalAction::None
         }
         KeyCode::Up => {
@@ -602,7 +644,7 @@ fn handle_issue_picker_key(
                 }
                 app.preview_scroll.reset();
             }
-            app.error = None;
+            clear_error_for_navigation(&mut app.error, &app.sticky_error);
             TechnicalAction::None
         }
         KeyCode::Down => {
@@ -621,7 +663,7 @@ fn handle_issue_picker_key(
                 }
                 app.preview_scroll.reset();
             }
-            app.error = None;
+            clear_error_for_navigation(&mut app.error, &app.sticky_error);
             TechnicalAction::None
         }
         KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End
@@ -632,24 +674,32 @@ fn handle_issue_picker_key(
                 preview_viewport,
                 app.preview_content_rows(preview_viewport.width.max(1)),
             );
-            app.error = None;
+            clear_error_for_navigation(&mut app.error, &app.sticky_error);
             TechnicalAction::None
         }
         KeyCode::Enter => {
             let filtered = search_results(app);
             let Some(issue_index) = filtered.get(app.selected).map(|result| result.issue_index)
             else {
-                app.error = Some("No issues match the current search.".to_string());
+                set_transient_error(
+                    &mut app.error,
+                    &mut app.sticky_error,
+                    "No issues match the current search.".to_string(),
+                );
                 return TechnicalAction::None;
             };
-            app.error = None;
+            clear_error(&mut app.error, &mut app.sticky_error);
             TechnicalAction::SelectIssue(app.issues[issue_index].clone())
         }
         _ => {
             if app.focus == IssuePickerFocus::List && app.query.handle_key(key) {
                 app.selected = 0;
                 app.preview_scroll.reset();
-                app.error = None;
+                if input_key_clears_sticky_error(key) {
+                    clear_error(&mut app.error, &mut app.sticky_error);
+                } else {
+                    clear_error_for_navigation(&mut app.error, &app.sticky_error);
+                }
             }
             TechnicalAction::None
         }
@@ -660,7 +710,7 @@ fn handle_issue_picker_paste(app: &mut IssuePickerApp, text: &str) {
     if app.focus == IssuePickerFocus::List && app.query.paste(text) {
         app.selected = 0;
         app.preview_scroll.reset();
-        app.error = None;
+        clear_error(&mut app.error, &mut app.sticky_error);
     }
 }
 
@@ -678,13 +728,15 @@ fn handle_acceptance_criteria_key(
                 .map(str::to_string)
                 .collect::<Vec<_>>();
             if selected_acceptance_criteria.is_empty() {
-                app.error = Some(
+                set_transient_error(
+                    &mut app.error,
+                    &mut app.sticky_error,
                     "Select at least one acceptance criterion before generating the technical backlog."
                         .to_string(),
                 );
                 return TechnicalAction::None;
             }
-            app.error = None;
+            clear_error(&mut app.error, &mut app.sticky_error);
             TechnicalAction::Generate(TechnicalGenerationRequest {
                 parent: app.parent.clone(),
                 selected_acceptance_criteria,
@@ -693,7 +745,11 @@ fn handle_acceptance_criteria_key(
         }
         _ => {
             if app.criteria.handle_key(key) {
-                app.error = None;
+                if matches!(key.code, KeyCode::Char(' ')) {
+                    clear_error(&mut app.error, &mut app.sticky_error);
+                } else {
+                    clear_error_for_navigation(&mut app.error, &app.sticky_error);
+                }
             }
             TechnicalAction::None
         }
@@ -860,11 +916,19 @@ fn process_pending_generation(app: &mut TechnicalSessionApp) -> Result<()> {
                 }
                 Err(error) => match pending.previous_stage {
                     Some(TechnicalRecoveryStage::PickIssue(mut picker)) => {
-                        picker.error = Some(error.to_string());
+                        set_sticky_error(
+                            &mut picker.error,
+                            &mut picker.sticky_error,
+                            error.to_string(),
+                        );
                         app.stage = TechnicalStage::PickIssue(picker);
                     }
                     Some(TechnicalRecoveryStage::SelectCriteria(mut criteria)) => {
-                        criteria.error = Some(error.to_string());
+                        set_sticky_error(
+                            &mut criteria.error,
+                            &mut criteria.sticky_error,
+                            error.to_string(),
+                        );
                         app.stage = TechnicalStage::SelectCriteria(criteria);
                     }
                     None => return Err(error),
@@ -879,13 +943,17 @@ fn process_pending_generation(app: &mut TechnicalSessionApp) -> Result<()> {
                 .ok_or_else(|| anyhow!("technical generation job disappeared unexpectedly"))?;
             match pending.previous_stage {
                 Some(TechnicalRecoveryStage::PickIssue(mut picker)) => {
-                    picker.error = Some(
+                    set_sticky_error(
+                        &mut picker.error,
+                        &mut picker.sticky_error,
                         "technical generation worker exited before returning a result".to_string(),
                     );
                     app.stage = TechnicalStage::PickIssue(picker);
                 }
                 Some(TechnicalRecoveryStage::SelectCriteria(mut criteria)) => {
-                    criteria.error = Some(
+                    set_sticky_error(
+                        &mut criteria.error,
+                        &mut criteria.sticky_error,
                         "technical generation worker exited before returning a result".to_string(),
                     );
                     app.stage = TechnicalStage::SelectCriteria(criteria);
@@ -1624,27 +1692,47 @@ where
     T: for<'de> Deserialize<'de>,
 {
     let trimmed = raw.trim();
-    let mut candidates = vec![trimmed.to_string()];
-
-    if let Some(stripped) = strip_code_fence(trimmed) {
-        candidates.push(stripped);
-    }
-    if let (Some(start), Some(end)) = (trimmed.find('{'), trimmed.rfind('}'))
-        && start <= end
-    {
-        candidates.push(trimmed[start..=end].to_string());
-    }
-
-    for candidate in candidates {
+    for candidate in parse_json_candidates(trimmed) {
         if let Ok(parsed) = serde_json::from_str::<T>(&candidate) {
             return Ok(parsed);
         }
     }
 
+    eprintln!(
+        "warning: technical backlog JSON parse failed during {phase}; raw agent output:\n{trimmed}"
+    );
     bail!(
         "technical backlog agent returned invalid JSON during {phase}: {}",
         preview_text(trimmed)
     )
+}
+
+fn parse_json_candidates(raw: &str) -> Vec<String> {
+    let mut candidates = Vec::new();
+    push_json_candidate(&mut candidates, raw);
+    if let Some(stripped) = strip_code_fence(raw) {
+        push_json_candidate(&mut candidates, &stripped);
+        append_progressive_json_candidates(&mut candidates, &stripped);
+    }
+    append_progressive_json_candidates(&mut candidates, raw);
+    candidates
+}
+
+fn append_progressive_json_candidates(candidates: &mut Vec<String>, raw: &str) {
+    let Some(end) = raw.rfind('}') else {
+        return;
+    };
+    for (start, character) in raw.char_indices() {
+        if character == '{' && start <= end {
+            push_json_candidate(candidates, &raw[start..=end]);
+        }
+    }
+}
+
+fn push_json_candidate(candidates: &mut Vec<String>, candidate: &str) {
+    if !candidate.is_empty() && !candidates.iter().any(|existing| existing == candidate) {
+        candidates.push(candidate.to_string());
+    }
 }
 
 fn strip_code_fence(raw: &str) -> Option<String> {
@@ -1860,9 +1948,11 @@ fn snapshot(backend: &TestBackend) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        AcceptanceCriteriaApp, IssuePickerApp, IssuePickerFocus, LoadingApp,
-        TechnicalGeneratedBacklog, TechnicalReviewApp, TechnicalReviewFocus,
-        extract_acceptance_criteria, handle_issue_picker_paste, render_acceptance_criteria_frame,
+        AcceptanceCriteriaApp, IssuePickerApp, IssuePickerFocus, LoadingApp, PendingTechnicalJob,
+        TechnicalAction, TechnicalBacklogDraft, TechnicalGeneratedBacklog, TechnicalRecoveryStage,
+        TechnicalReviewApp, TechnicalReviewFocus, TechnicalSessionApp, TechnicalStage,
+        extract_acceptance_criteria, handle_issue_picker_key, handle_issue_picker_paste,
+        parse_agent_json, process_pending_generation, render_acceptance_criteria_frame,
         render_issue_picker_frame, render_loading_frame, render_review_frame,
         render_technical_prompt, search_results, snapshot,
     };
@@ -1874,10 +1964,12 @@ mod tests {
     };
     use crate::tui::fields::{InputFieldState, MultiSelectFieldState};
     use crate::tui::scroll::ScrollState;
+    use anyhow::anyhow;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
     use std::fs;
+    use std::sync::mpsc;
     use tempfile::tempdir;
 
     fn issue(identifier: &str, title: &str, description: &str) -> IssueSummary {
@@ -1961,6 +2053,7 @@ mod tests {
             focus: IssuePickerFocus::List,
             preview_scroll: ScrollState::default(),
             error: None,
+            sticky_error: false,
         };
 
         let filtered = search_results(&picker);
@@ -1989,6 +2082,7 @@ mod tests {
             focus: IssuePickerFocus::List,
             preview_scroll: ScrollState::default(),
             error: None,
+            sticky_error: false,
         });
 
         assert!(snapshot.contains("Select Parent Issue [search]"));
@@ -2010,6 +2104,7 @@ mod tests {
             focus: IssuePickerFocus::List,
             preview_scroll: ScrollState::default(),
             error: Some("stale".to_string()),
+            sticky_error: false,
         };
 
         handle_issue_picker_paste(&mut app, " backlog\n generator\n");
@@ -2134,10 +2229,97 @@ mod tests {
             focus: IssuePickerFocus::List,
             preview_scroll: ScrollState::default(),
             error: None,
+            sticky_error: false,
         });
 
         assert!(snapshot.contains("No issues match the current search."));
         assert!(snapshot.contains("Search results appear here."));
+    }
+
+    #[test]
+    fn parse_agent_json_accepts_progressive_brace_scan() {
+        let parsed: TechnicalBacklogDraft = parse_agent_json(
+            "Context {not json}\n{\"files\":[{\"path\":\"index.md\",\"contents\":\"# Draft\"}]}",
+            "technical backlog generation",
+        )
+        .expect("progressive brace scan should find the JSON payload");
+
+        assert_eq!(parsed.files.len(), 1);
+        assert_eq!(parsed.files[0].path, "index.md");
+    }
+
+    #[test]
+    fn picker_keeps_sticky_recovered_error_visible_during_navigation() {
+        let mut app = IssuePickerApp {
+            query: InputFieldState::new("MET"),
+            issues: vec![issue(
+                "MET-42",
+                "Terminal experience",
+                "Improve planning flow.",
+            )],
+            selected: 0,
+            focus: IssuePickerFocus::List,
+            preview_scroll: ScrollState::default(),
+            error: Some("recovered".to_string()),
+            sticky_error: true,
+        };
+
+        let action = handle_issue_picker_key(
+            &mut app,
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Tab,
+                crossterm::event::KeyModifiers::NONE,
+            ),
+            Rect::new(0, 0, 80, 20),
+        );
+
+        assert!(matches!(action, TechnicalAction::None));
+        assert_eq!(app.error.as_deref(), Some("recovered"));
+        assert!(app.sticky_error);
+    }
+
+    #[test]
+    fn process_pending_generation_restores_picker_error_as_sticky() {
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(Err(anyhow!("recovered failure")))
+            .expect("generation failure should send");
+        drop(sender);
+
+        let picker = IssuePickerApp {
+            query: InputFieldState::new("MET"),
+            issues: vec![issue(
+                "MET-42",
+                "Terminal experience",
+                "Improve planning flow.",
+            )],
+            selected: 0,
+            focus: IssuePickerFocus::List,
+            preview_scroll: ScrollState::default(),
+            error: None,
+            sticky_error: false,
+        };
+        let mut app = TechnicalSessionApp {
+            stage: TechnicalStage::Loading(LoadingApp {
+                message: "Generating technical backlog".to_string(),
+                detail: "Building backlog files.".to_string(),
+                spinner_index: 0,
+            }),
+            pending: Some(PendingTechnicalJob {
+                receiver,
+                previous_stage: Some(TechnicalRecoveryStage::PickIssue(picker)),
+            }),
+        };
+
+        process_pending_generation(&mut app).expect("pending generation should restore the picker");
+
+        match app.stage {
+            TechnicalStage::PickIssue(restored) => {
+                assert_eq!(restored.error.as_deref(), Some("recovered failure"));
+                assert!(restored.sticky_error);
+            }
+            other => panic!("expected picker stage, got {other:?}"),
+        }
     }
 
     #[test]
@@ -2179,6 +2361,7 @@ Ignored.
                 [0usize],
             ),
             error: None,
+            sticky_error: false,
         });
 
         assert!(snapshot.contains("Acceptance Criteria (1/2)"));
