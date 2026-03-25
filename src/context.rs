@@ -296,9 +296,11 @@ fn diagnose_context(root: &Path) -> Result<DoctorReport> {
         ));
     } else {
         issues.push(format!(
-            "Missing codebase context files: {}. Run `meta context reload --root {}` or `meta context scan --root {}`.",
+            "Missing codebase context files: {}. Run `{} context reload --root {}` or `{} context scan --root {}`.",
             missing_codebase.join(", "),
+            branding::COMMAND_NAME,
             root.display(),
+            branding::COMMAND_NAME,
             root.display()
         ));
     }
@@ -394,8 +396,14 @@ mod tests {
         assert!(bundle.contains("## STACK.md"));
         assert!(bundle.contains("## STRUCTURE.md"));
         assert!(bundle.contains("## TESTING.md"));
-        assert!(bundle.contains("_Missing `SCAN.md`. Run `meta context reload --root "));
-        assert!(bundle.contains("` or `meta context scan --root "));
+        assert!(bundle.contains(&format!(
+            "_Missing `SCAN.md`. Run `{} context reload --root ",
+            branding::COMMAND_NAME
+        )));
+        assert!(bundle.contains(&format!(
+            "` or `{} context scan --root ",
+            branding::COMMAND_NAME
+        )));
         assert!(bundle.contains("` to generate it._"));
     }
 }

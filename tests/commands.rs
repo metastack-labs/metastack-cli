@@ -347,6 +347,18 @@ fn runtime_config_help_describes_precedence_catalog_and_dry_run_diagnostics() {
         .stdout(predicate::str::contains("claude: sonnet, opus"))
         .stdout(predicate::str::contains("--replay-onboarding"))
         .stdout(predicate::str::contains(format!(
+            "Update how many times `{} merge` will ask the agent to repair failed validation by default.",
+            branding::COMMAND_NAME
+        )))
+        .stdout(predicate::str::contains(format!(
+            "Update how many transient validation reruns `{} merge` will allow before escalating.",
+            branding::COMMAND_NAME
+        )))
+        .stdout(predicate::str::contains(format!(
+            "Update how many times `{} merge` retries push and PR publication after transient remote failures.",
+            branding::COMMAND_NAME
+        )))
+        .stdout(predicate::str::contains(format!(
             "{} agents workflows run ticket-implementation --root . --dry-run",
             branding::COMMAND_NAME
         )));

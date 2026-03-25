@@ -129,7 +129,8 @@ pub(crate) async fn run_upgrade(args: &UpgradeArgs) -> Result<()> {
     }
 
     println!(
-        "upgraded meta from {} to {} at {}",
+        "upgraded {} from {} to {} at {}",
+        branding::COMMAND_NAME,
         install.version,
         target_version,
         executable_path.display()
@@ -183,13 +184,15 @@ impl InstallOrigin {
         match self {
             Self::StandaloneRelease => Ok(()),
             Self::CargoInstall => bail!(
-                "self-update only supports GitHub Release installs, but '{}' looks like a Cargo install.\nUpgrade this install with Cargo, or reinstall from GitHub Releases to enable `meta upgrade`:\n  curl -fsSL {} | sh",
+                "self-update only supports GitHub Release installs, but '{}' looks like a Cargo install.\nUpgrade this install with Cargo, or reinstall from GitHub Releases to enable `{} upgrade`:\n  curl -fsSL {} | sh",
                 executable_path.display(),
+                branding::COMMAND_NAME,
                 INSTALLER_URL
             ),
             Self::SourceCheckoutBuild => bail!(
-                "self-update only supports GitHub Release installs, but '{}' looks like a source-checkout build under `target/`.\nRebuild from source in your checkout, or reinstall from GitHub Releases to enable `meta upgrade`:\n  curl -fsSL {} | sh",
+                "self-update only supports GitHub Release installs, but '{}' looks like a source-checkout build under `target/`.\nRebuild from source in your checkout, or reinstall from GitHub Releases to enable `{} upgrade`:\n  curl -fsSL {} | sh",
                 executable_path.display(),
+                branding::COMMAND_NAME,
                 INSTALLER_URL
             ),
         }
@@ -475,7 +478,8 @@ fn print_check_report(
     println!("status: {}", status);
     if origin != InstallOrigin::StandaloneRelease {
         println!(
-            "remediation: reinstall from GitHub Releases to enable `meta upgrade`: curl -fsSL {} | sh",
+            "remediation: reinstall from GitHub Releases to enable `{} upgrade`: curl -fsSL {} | sh",
+            branding::COMMAND_NAME,
             INSTALLER_URL
         );
     }

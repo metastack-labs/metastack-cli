@@ -17,6 +17,7 @@ use crate::agents::{
     command_args_for_invocation, render_invocation_diagnostics,
     resolve_agent_invocation_for_planning, validate_invocation_command_surface,
 };
+use crate::branding;
 use crate::cli::{
     CronApprovalsArgs, CronApproveArgs, CronDaemonArgs, CronRejectArgs, CronResumeArgs,
     CronRunArgs, CronStartArgs, RunAgentArgs,
@@ -135,7 +136,8 @@ pub(super) fn run_start(root: &Path, args: &CronStartArgs) -> Result<Option<Stri
     if let Some(pid) = read_pid(&paths)? {
         if pid_is_running(pid) {
             return Ok(Some(format!(
-                "Cron scheduler is already running with pid {pid}. Use `meta cron status` for details."
+                "Cron scheduler is already running with pid {pid}. Use `{} cron status` for details.",
+                branding::COMMAND_NAME
             )));
         }
 
@@ -150,7 +152,8 @@ pub(super) fn run_start(root: &Path, args: &CronStartArgs) -> Result<Option<Stri
     #[cfg(not(unix))]
     {
         bail!(
-            "detached cron scheduling is only supported on Unix-like hosts today; rerun with `meta cron start --foreground`"
+            "detached cron scheduling is only supported on Unix-like hosts today; rerun with `{} cron start --foreground`",
+            branding::COMMAND_NAME
         );
     }
 
@@ -158,8 +161,10 @@ pub(super) fn run_start(root: &Path, args: &CronStartArgs) -> Result<Option<Stri
     {
         use std::os::unix::process::CommandExt;
 
-        let current_exe =
-            env::current_exe().context("failed to resolve the current `meta` executable")?;
+        let current_exe = env::current_exe().context(format!(
+            "failed to resolve the current `{}` executable",
+            branding::COMMAND_NAME
+        ))?;
         let log_path = paths.cron_scheduler_log_path();
         let stdout = OpenOptions::new()
             .create(true)
@@ -198,8 +203,9 @@ pub(super) fn run_start(root: &Path, args: &CronStartArgs) -> Result<Option<Stri
 
         if !pid_is_running(child.id()) {
             bail!(
-                "detached cron scheduler exited immediately; inspect `{}` for details or rerun with `meta cron start --foreground`",
-                display_path(&log_path, root)
+                "detached cron scheduler exited immediately; inspect `{}` for details or rerun with `{} cron start --foreground`",
+                display_path(&log_path, root),
+                branding::COMMAND_NAME
             );
         }
 
@@ -236,7 +242,10 @@ pub(super) fn run_stop(root: &Path) -> Result<String> {
 
     #[cfg(not(unix))]
     {
-        bail!("`meta cron stop` is only supported on Unix-like hosts today");
+        bail!(
+            "`{} cron stop` is only supported on Unix-like hosts today",
+            branding::COMMAND_NAME
+        );
     }
 
     #[cfg(unix)]
@@ -996,8 +1005,10 @@ fn execute_cli_step(
     display_log_path: &str,
     log: &mut std::fs::File,
 ) -> Result<Value> {
-    let current_exe =
-        env::current_exe().context("failed to resolve the current `meta` executable")?;
+    let current_exe = env::current_exe().context(format!(
+        "failed to resolve the current `{}` executable",
+        branding::COMMAND_NAME
+    ))?;
     let working_directory = resolve_working_directory(root, &step.working_directory)?;
     let stdout = log
         .try_clone()
@@ -1012,9 +1023,10 @@ fn execute_cli_step(
 
     writeln!(
         log,
-        "[{}] cli step `{}` start\ncommand: meta {} {}\n",
+        "[{}] cli step `{}` start\ncommand: {} {} {}\n",
         Local::now().to_rfc3339(),
         step.id,
+        branding::COMMAND_NAME,
         command,
         step.args.clone().unwrap_or_default().join(" ")
     )?;
@@ -1102,8 +1114,10 @@ fn prepare_run_for_resume(run: &mut PersistedRun) -> Result<()> {
         }
         RunStatus::WaitingForApproval => {
             bail!(
-                "run `{}` is waiting for approval; use `meta cron approve` or `meta cron reject`",
-                run.run_id
+                "run `{}` is waiting for approval; use `{} cron approve` or `{} cron reject`",
+                run.run_id,
+                branding::COMMAND_NAME,
+                branding::COMMAND_NAME
             )
         }
         RunStatus::Succeeded | RunStatus::Rejected => {
@@ -1728,4 +1742,96 @@ fn pid_is_running(pid: u32) -> bool {
 #[cfg(not(unix))]
 fn pid_is_running(_pid: u32) -> bool {
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PersistedRun, RunAttempt, RunStatus, prepare_run_for_resume, run_start};
+    use crate::branding;
+    use crate::cli::CronStartArgs;
+    use crate::cron::{CronDefinitionSource, CronDefinitionSourceKind, CronRetryPolicy};
+    use chrono::Utc;
+    use tempfile::tempdir;
+
+    #[cfg(unix)]
+    #[test]
+    fn run_start_reports_branded_status_hint_when_scheduler_is_running() {
+        let temp = tempdir().expect("tempdir should be created");
+        let runtime_dir = temp
+            .path()
+            .join(format!("{}/cron/.runtime", branding::PROJECT_DIR));
+        std::fs::create_dir_all(&runtime_dir).expect("runtime dir should be created");
+        std::fs::write(
+            runtime_dir.join("scheduler.pid"),
+            format!("{}\n", std::process::id()),
+        )
+        .expect("pid file should be written");
+
+        let output = run_start(
+            temp.path(),
+            &CronStartArgs {
+                poll_interval_seconds: 1,
+                foreground: false,
+            },
+        )
+        .expect("running scheduler check should succeed");
+
+        assert_eq!(
+            output,
+            Some(format!(
+                "Cron scheduler is already running with pid {}. Use `{} cron status` for details.",
+                std::process::id(),
+                branding::COMMAND_NAME
+            ))
+        );
+    }
+
+    #[test]
+    fn prepare_run_for_resume_reports_branded_approval_commands() {
+        let now = Utc::now();
+        let mut run = PersistedRun {
+            version: 1,
+            run_id: "review-123".to_string(),
+            job_name: "review".to_string(),
+            definition_path: format!("{}/cron/review.md", branding::PROJECT_DIR),
+            source: CronDefinitionSource {
+                kind: CronDefinitionSourceKind::Repository,
+                label: "repository".to_string(),
+                path: format!("{}/cron", branding::PROJECT_DIR),
+            },
+            trigger: "manual".to_string(),
+            status: RunStatus::WaitingForApproval,
+            created_at: now,
+            updated_at: now,
+            started_at: Some(now),
+            finished_at: None,
+            retry: CronRetryPolicy {
+                max_attempts: 1,
+                backoff_seconds: 0,
+            },
+            log_path: format!(
+                "{}/cron/.runtime/logs/review-123.log",
+                branding::PROJECT_DIR
+            ),
+            steps: Vec::new(),
+            attempts: vec![RunAttempt {
+                number: 1,
+                started_at: now,
+                finished_at: None,
+                error: None,
+            }],
+            pending_approval: None,
+            last_error: None,
+        };
+
+        let error = prepare_run_for_resume(&mut run).expect_err("resume should be rejected");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "run `review-123` is waiting for approval; use `{} cron approve` or `{} cron reject`",
+                branding::COMMAND_NAME,
+                branding::COMMAND_NAME
+            )
+        );
+    }
 }

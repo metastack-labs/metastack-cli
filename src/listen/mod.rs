@@ -18,11 +18,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
-use futures::StreamExt;
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
+use futures::StreamExt;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use serde::Serialize;
@@ -1706,12 +1706,11 @@ where
             metadata: brief_metadata,
             output: None,
         };
-        let brief_path = tokio::task::spawn_blocking(move || {
-            write_agent_brief(&brief_workspace, brief_request)
-        })
-        .await?
-        .map(|path| path.display().to_string())
-        .ok();
+        let brief_path =
+            tokio::task::spawn_blocking(move || write_agent_brief(&brief_workspace, brief_request))
+                .await?
+                .map(|path| path.display().to_string())
+                .ok();
 
         let timestamp = now_timestamp();
         let workpad_body = render_bootstrap_workpad(&detailed_issue, &workspace, &timestamp);

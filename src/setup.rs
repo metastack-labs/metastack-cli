@@ -351,12 +351,13 @@ fn resolve_backlog_template_conflicts(
 
     Err(anyhow!(
         "repo setup found existing canonical backlog template files with local changes:\n{}\n\
-rerun `meta setup --root {}` in an interactive terminal to choose overwrite, skip, or cancel.",
+rerun `{} setup --root {}` in an interactive terminal to choose overwrite, skip, or cancel.",
         conflicts
             .iter()
             .map(|path| format!("- {}/backlog/_TEMPLATE/{path}", branding::PROJECT_DIR))
             .collect::<Vec<_>>()
             .join("\n"),
+        branding::COMMAND_NAME,
         root.display()
     ))
 }
@@ -592,7 +593,14 @@ fn render_summary(view: &SetupViewData, include_paths: bool) -> String {
 }
 
 fn listen_prerequisites_summary() -> &'static str {
-    "Built-in Codex listen runs require `~/.codex/config.toml` with `approval_policy = \"never\"` and `sandbox_mode = \"danger-full-access\"`, plus `[mcp_servers.linear]` removed or disabled. Built-in Claude listen runs require `claude` on PATH and no `ANTHROPIC_API_KEY` override. Use `meta agents listen --check --root .` to verify."
+    concat!(
+        "Built-in Codex listen runs require `~/.codex/config.toml` with ",
+        "`approval_policy = \"never\"` and `sandbox_mode = \"danger-full-access\"`, plus ",
+        "`[mcp_servers.linear]` removed or disabled. Built-in Claude listen runs require ",
+        "`claude` on PATH and no `ANTHROPIC_API_KEY` override. Use `",
+        env!("BRAND_COMMAND_NAME"),
+        " agents listen --check --root .` to verify."
+    )
 }
 
 fn has_direct_updates(args: &SetupArgs) -> bool {
@@ -1768,7 +1776,11 @@ fn render_step_panel(frame: &mut Frame<'_>, app: &SetupApp, area: Rect) {
             area,
             &title,
             &app.interactive_plan_limit,
-            "Optional `meta backlog plan` interactive follow-up limit between 1 and 10.",
+            concat!(
+                "Optional `",
+                env!("BRAND_COMMAND_NAME"),
+                " backlog plan` interactive follow-up limit between 1 and 10."
+            ),
         ),
         SetupStep::PlanDefaultMode => {
             render_select_panel(frame, area, &title, &app.plan_default_mode)
@@ -1788,14 +1800,22 @@ fn render_step_panel(frame: &mut Frame<'_>, app: &SetupApp, area: Rect) {
             area,
             &title,
             &app.plan_label,
-            "Optional repo default label for `meta backlog plan` issues. Leave blank for `plan`.",
+            concat!(
+                "Optional repo default label for `",
+                env!("BRAND_COMMAND_NAME"),
+                " backlog plan` issues. Leave blank for `plan`."
+            ),
         ),
         SetupStep::TechnicalLabel => render_input_panel(
             frame,
             area,
             &title,
             &app.technical_label,
-            "Optional repo default label for `meta backlog tech` issues. Leave blank for `technical`.",
+            concat!(
+                "Optional repo default label for `",
+                env!("BRAND_COMMAND_NAME"),
+                " backlog tech` issues. Leave blank for `technical`."
+            ),
         ),
         SetupStep::Save => render_save_panel(frame, area),
     }

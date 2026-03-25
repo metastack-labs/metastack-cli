@@ -146,7 +146,9 @@ pub fn run_sync_dashboard(
 
     if !io::stdout().is_terminal() {
         bail!(
-            "the interactive sync dashboard requires a TTY; use `meta backlog sync pull <ISSUE>` or `meta backlog sync push <ISSUE>` for scripted runs"
+            "the interactive sync dashboard requires a TTY; use `{} backlog sync pull <ISSUE>` or `{} backlog sync push <ISSUE>` for scripted runs",
+            branding::COMMAND_NAME,
+            branding::COMMAND_NAME
         );
     }
 
@@ -381,7 +383,10 @@ fn render_issue_list(frame: &mut Frame<'_>, area: Rect, app: &SyncDashboardApp) 
                 "No backlog entries were found under `{}/backlog/`.",
                 crate::branding::PROJECT_DIR
             ),
-            "Create or link a backlog entry, then rerun `meta backlog sync`.",
+            format!(
+                "Create or link a backlog entry, then rerun `{} backlog sync`.",
+                branding::COMMAND_NAME
+            ),
         ))]
     } else if results.is_empty() {
         vec![ListItem::new(empty_state(
@@ -994,7 +999,11 @@ impl SyncDashboardApp {
             }
             Focus::List => {
                 if self.data.issues.is_empty() {
-                    format!("Create or link backlog entries under `{}/backlog/`, then rerun `meta backlog sync`.", crate::branding::PROJECT_DIR)
+                    format!(
+                        "Create or link backlog entries under `{}/backlog/`, then rerun `{} backlog sync`.",
+                        crate::branding::PROJECT_DIR,
+                        branding::COMMAND_NAME
+                    )
                 } else {
                     format!("Step 1 of 3: choose backlog entries from `{}/backlog/`. Space selects, / searches, Ctrl+A selects all visible.", crate::branding::PROJECT_DIR)
                 }
@@ -1019,7 +1028,8 @@ impl SyncDashboardApp {
                     match self.selected_issue() {
                         Some(issue) if issue.is_linked() => "Step 3 of 3: choose pull to refresh local files or push to sync managed attachments. `index.md` only updates the Linear description when you run push with `--update-description`.".to_string(),
                         Some(issue) => format!(
-                            "This backlog entry is unlinked. Run `meta backlog sync link <ISSUE> --entry {}` before pull or push becomes available.",
+                            "This backlog entry is unlinked. Run `{} backlog sync link <ISSUE> --entry {}` before pull or push becomes available.",
+                            branding::COMMAND_NAME,
                             issue.entry_slug
                         ),
                         None => "No backlog entry is selected.".to_string(),
@@ -1147,7 +1157,8 @@ impl SyncDashboardIssue {
             Line::from(""),
             Line::from("This backlog entry is not linked to Linear yet."),
             Line::from(format!(
-                "Run `meta backlog sync link <ISSUE> --entry {}` to enable pull and push.",
+                "Run `{} backlog sync link <ISSUE> --entry {}` to enable pull and push.",
+                branding::COMMAND_NAME,
                 self.entry_slug
             )),
         ]);
@@ -1165,9 +1176,15 @@ impl SyncSelectionAction {
 
     fn description(self) -> String {
         match self {
-            Self::Pull => format!("Refresh `{}/backlog/<ISSUE>/` from the Linear issue.", crate::branding::PROJECT_DIR),
+            Self::Pull => format!(
+                "Refresh `{}/backlog/<ISSUE>/` from the Linear issue.",
+                crate::branding::PROJECT_DIR
+            ),
             Self::Push => {
-                "Sync CLI-managed attachment files; `index.md` stays local unless you run `meta backlog sync push <ISSUE> --update-description`.".to_string()
+                format!(
+                    "Sync CLI-managed attachment files; `index.md` stays local unless you run `{} backlog sync push <ISSUE> --update-description`.",
+                    branding::COMMAND_NAME
+                )
             }
         }
     }
@@ -1433,10 +1450,50 @@ mod tests {
         };
         assert!(snapshot.contains("link required"));
         assert!(snapshot.contains("This backlog entry is unlinked."));
-        assert!(
-            snapshot.contains("<ISSUE> --entry MET-13` before pull or push becomes available.")
-        );
+        assert!(snapshot.contains(&format!(
+            "{} backlog sync link <ISSUE> --entry MET-13",
+            crate::branding::COMMAND_NAME
+        )));
+        assert!(snapshot.contains("before pull or push becomes available."));
         assert!(!snapshot.contains("Ready to push"));
+    }
+
+    #[test]
+    fn render_once_empty_state_uses_branded_sync_command() {
+        let exit = run_sync_dashboard(
+            SyncDashboardData {
+                title: "Backlog Sync".to_string(),
+                issues: Vec::new(),
+            },
+            SyncDashboardOptions {
+                render_once: true,
+                width: 120,
+                height: 36,
+                actions: vec![],
+                vim_mode: false,
+            },
+            None,
+        )
+        .expect("render once should succeed");
+
+        let SyncDashboardExit::Snapshot(snapshot) = exit else {
+            panic!("render_once should return a snapshot");
+        };
+        assert!(snapshot.contains(&format!(
+            "rerun `{} backlog sync`",
+            crate::branding::COMMAND_NAME
+        )));
+    }
+
+    #[test]
+    fn render_once_push_description_uses_branded_sync_command() {
+        let description = SyncSelectionAction::Push.description();
+
+        assert!(description.contains(&format!(
+            "{} backlog sync push",
+            crate::branding::COMMAND_NAME
+        )));
+        assert!(description.contains("--update-description"));
     }
 
     #[test]
