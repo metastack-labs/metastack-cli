@@ -324,11 +324,20 @@ fn run_agent_capture_attempt(
         (raw_stdout, None, None)
     };
 
+    ensure_nonempty_capture_output(&stdout)?;
+
     Ok(AgentCaptureReport {
         continuation,
         stdout,
         usage,
     })
+}
+
+fn ensure_nonempty_capture_output(stdout: &str) -> Result<()> {
+    if stdout.trim().is_empty() {
+        bail!("agent returned empty response — check provider CLI version or agent configuration");
+    }
+    Ok(())
 }
 
 fn run_agent_streaming_text_attempt(
@@ -454,7 +463,7 @@ fn spawn_output_reader(
 #[cfg(test)]
 mod tests {
     use super::super::resolution::ResolvedAgentInvocation;
-    use super::{AgentContinuation, apply_invocation_environment};
+    use super::{AgentContinuation, apply_invocation_environment, ensure_nonempty_capture_output};
     use crate::agent_provider::{BuiltinInvocationContext, builtin_provider_adapter};
     use crate::config::{AgentConfigSource, PromptTransport};
     use std::process::Command;
@@ -626,5 +635,13 @@ mod tests {
             "continuation should be None when session_id is missing"
         );
         assert_eq!(parsed.response_text.as_deref(), Some("done"));
+    }
+
+    #[test]
+    fn empty_capture_output_is_rejected_before_downstream_parsing() {
+        let error = ensure_nonempty_capture_output("   ")
+            .expect_err("whitespace-only output should fail in the capture layer");
+
+        assert!(error.to_string().contains("agent returned empty response"));
     }
 }

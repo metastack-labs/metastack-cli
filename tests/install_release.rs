@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::process::Command as ProcessCommand;
 
+use metastack_cli::branding;
 #[cfg(unix)]
 use tempfile::tempdir;
 
@@ -13,7 +14,11 @@ use tempfile::tempdir;
 fn write_meta_stub(path: &Path, version: &str) -> Result<(), Box<dyn Error>> {
     fs::write(
         path,
-        format!("#!/bin/sh\nset -eu\nprintf 'meta {}\\n'\n", version),
+        format!(
+            "#!/bin/sh\nset -eu\nprintf '{} {}\\n'\n",
+            branding::COMMAND_NAME,
+            version
+        ),
     )?;
 
     let metadata = fs::metadata(path)?;
@@ -162,7 +167,10 @@ fn installer_installs_latest_release_into_default_bin_dir() -> Result<(), Box<dy
 
     let version = ProcessCommand::new(&installed).arg("--version").output()?;
     assert!(version.status.success());
-    assert_eq!(String::from_utf8_lossy(&version.stdout), "meta 0.1.0\n");
+    assert_eq!(
+        String::from_utf8_lossy(&version.stdout),
+        format!("{} 0.1.0\n", branding::COMMAND_NAME)
+    );
 
     Ok(())
 }
@@ -203,7 +211,10 @@ fn installer_accepts_pinned_versions_and_custom_bin_dir() -> Result<(), Box<dyn 
 
     let version = ProcessCommand::new(&installed).arg("--version").output()?;
     assert!(version.status.success());
-    assert_eq!(String::from_utf8_lossy(&version.stdout), "meta 0.1.0\n");
+    assert_eq!(
+        String::from_utf8_lossy(&version.stdout),
+        format!("{} 0.1.0\n", branding::COMMAND_NAME)
+    );
 
     Ok(())
 }

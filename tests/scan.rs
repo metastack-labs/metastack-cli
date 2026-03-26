@@ -2,6 +2,8 @@
 
 include!("support/common.rs");
 
+use metastack_cli::branding;
+
 #[cfg(unix)]
 #[test]
 fn scan_runs_configured_agent_and_refreshes_repository_context_files() -> Result<(), Box<dyn Error>>
@@ -46,31 +48,33 @@ transport = "arg"
     )?;
     fs::write(
         &stub_path,
-        r#"#!/bin/sh
-echo "RAW AGENT LOG: starting scan"
-echo "RAW AGENT STDERR: token-by-token noise" >&2
-printf '%s' "$PWD" > "$TEST_OUTPUT_DIR/cwd.txt"
-printf '%s' "$1" > "$TEST_OUTPUT_DIR/prompt.txt"
-printf '%s' "$METASTACK_AGENT_PROMPT" > "$TEST_OUTPUT_DIR/agent-prompt.txt"
-printf '%s' "$METASTACK_AGENT_PROVIDER_SOURCE" > "$TEST_OUTPUT_DIR/provider-source.txt"
-printf '%s' "$METASTACK_AGENT_ROUTE_KEY" > "$TEST_OUTPUT_DIR/route-key.txt"
-printf '%s' "$METASTACK_SCAN_FACT_BASE" > "$TEST_OUTPUT_DIR/fact-base.txt"
-printf '%s' "$METASTACK_SCAN_DOCUMENTS" > "$TEST_OUTPUT_DIR/documents.txt"
-mkdir -p .metastack/codebase
-for pair in \
-  "ARCHITECTURE.md:# Architecture" \
-  "CONCERNS.md:# Codebase Concerns" \
-  "CONVENTIONS.md:# Coding Conventions" \
-  "INTEGRATIONS.md:# External Integrations" \
-  "STACK.md:# Technology Stack" \
-  "STRUCTURE.md:# Codebase Structure" \
-  "TESTING.md:# Testing Patterns"
-do
-  file="${pair%%:*}"
-  header="${pair#*:}"
-  printf '%s\n' "$header" > ".metastack/codebase/$file"
-done
-"#,
+        format!(
+            "#!/bin/sh\n\
+echo \"RAW AGENT LOG: starting scan\"\n\
+echo \"RAW AGENT STDERR: token-by-token noise\" >&2\n\
+printf '%s' \"$PWD\" > \"$TEST_OUTPUT_DIR/cwd.txt\"\n\
+printf '%s' \"$1\" > \"$TEST_OUTPUT_DIR/prompt.txt\"\n\
+printf '%s' \"$METASTACK_AGENT_PROMPT\" > \"$TEST_OUTPUT_DIR/agent-prompt.txt\"\n\
+printf '%s' \"$METASTACK_AGENT_PROVIDER_SOURCE\" > \"$TEST_OUTPUT_DIR/provider-source.txt\"\n\
+printf '%s' \"$METASTACK_AGENT_ROUTE_KEY\" > \"$TEST_OUTPUT_DIR/route-key.txt\"\n\
+printf '%s' \"$METASTACK_SCAN_FACT_BASE\" > \"$TEST_OUTPUT_DIR/fact-base.txt\"\n\
+printf '%s' \"$METASTACK_SCAN_DOCUMENTS\" > \"$TEST_OUTPUT_DIR/documents.txt\"\n\
+mkdir -p {0}/codebase\n\
+for pair in \\\n\
+  \"ARCHITECTURE.md:# Architecture\" \\\n\
+  \"CONCERNS.md:# Codebase Concerns\" \\\n\
+  \"CONVENTIONS.md:# Coding Conventions\" \\\n\
+  \"INTEGRATIONS.md:# External Integrations\" \\\n\
+  \"STACK.md:# Technology Stack\" \\\n\
+  \"STRUCTURE.md:# Codebase Structure\" \\\n\
+  \"TESTING.md:# Testing Patterns\"\n\
+do\n\
+  file=\"${{pair%%:*}}\"\n\
+  header=\"${{pair#*:}}\"\n\
+  printf '%s\\n' \"$header\" > \"{0}/codebase/$file\"\n\
+done\n",
+            branding::PROJECT_DIR
+        ),
     )?;
     let mut permissions = fs::metadata(&stub_path)?.permissions();
     permissions.set_mode(0o755);
@@ -86,10 +90,14 @@ done
         .stdout(predicate::str::contains("Codebase scan completed"))
         .stdout(predicate::str::contains("Steps:"))
         .stdout(predicate::str::contains("Files:"))
-        .stdout(predicate::str::contains(".metastack/codebase/CONCERNS.md"))
-        .stdout(predicate::str::contains(
-            ".metastack/codebase/INTEGRATIONS.md",
-        ))
+        .stdout(predicate::str::contains(format!(
+            "{}/codebase/CONCERNS.md",
+            branding::PROJECT_DIR
+        )))
+        .stdout(predicate::str::contains(format!(
+            "{}/codebase/INTEGRATIONS.md",
+            branding::PROJECT_DIR
+        )))
         .stdout(predicate::str::contains("RAW AGENT LOG: starting scan").not())
         .stdout(predicate::str::contains("RAW AGENT STDERR: token-by-token noise").not());
 
@@ -107,27 +115,44 @@ done
     assert_eq!(payload["result"]["agent"], "scan-stub");
     assert_eq!(
         payload["result"]["log_path"],
-        ".metastack/agents/sessions/scan.log"
+        format!("{}/agents/sessions/scan.log", branding::PROJECT_DIR)
     );
     assert!(
         payload["result"]["written_files"]
             .as_array()
             .is_some_and(|files| files
                 .iter()
-                .any(|path| path == ".metastack/codebase/SCAN.md"))
+                .any(|path| path == &format!("{}/codebase/SCAN.md", branding::PROJECT_DIR)))
     );
 
-    let scan = fs::read_to_string(repo_root.join(".metastack/codebase/SCAN.md"))?;
-    let architecture = fs::read_to_string(repo_root.join(".metastack/codebase/ARCHITECTURE.md"))?;
-    let concerns = fs::read_to_string(repo_root.join(".metastack/codebase/CONCERNS.md"))?;
-    let conventions = fs::read_to_string(repo_root.join(".metastack/codebase/CONVENTIONS.md"))?;
-    let integrations = fs::read_to_string(repo_root.join(".metastack/codebase/INTEGRATIONS.md"))?;
-    let stack = fs::read_to_string(repo_root.join(".metastack/codebase/STACK.md"))?;
-    let structure = fs::read_to_string(repo_root.join(".metastack/codebase/STRUCTURE.md"))?;
-    let testing = fs::read_to_string(repo_root.join(".metastack/codebase/TESTING.md"))?;
-    let codebase_entries = fs::read_dir(repo_root.join(".metastack/codebase"))?
-        .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().to_string()))
-        .collect::<Result<Vec<_>, _>>()?;
+    let scan =
+        fs::read_to_string(repo_root.join(format!("{}/codebase/SCAN.md", branding::PROJECT_DIR)))?;
+    let architecture = fs::read_to_string(repo_root.join(format!(
+        "{}/codebase/ARCHITECTURE.md",
+        branding::PROJECT_DIR
+    )))?;
+    let concerns = fs::read_to_string(
+        repo_root.join(format!("{}/codebase/CONCERNS.md", branding::PROJECT_DIR)),
+    )?;
+    let conventions = fs::read_to_string(
+        repo_root.join(format!("{}/codebase/CONVENTIONS.md", branding::PROJECT_DIR)),
+    )?;
+    let integrations = fs::read_to_string(repo_root.join(format!(
+        "{}/codebase/INTEGRATIONS.md",
+        branding::PROJECT_DIR
+    )))?;
+    let stack =
+        fs::read_to_string(repo_root.join(format!("{}/codebase/STACK.md", branding::PROJECT_DIR)))?;
+    let structure = fs::read_to_string(
+        repo_root.join(format!("{}/codebase/STRUCTURE.md", branding::PROJECT_DIR)),
+    )?;
+    let testing = fs::read_to_string(
+        repo_root.join(format!("{}/codebase/TESTING.md", branding::PROJECT_DIR)),
+    )?;
+    let codebase_entries =
+        fs::read_dir(repo_root.join(format!("{}/codebase", branding::PROJECT_DIR)))?
+            .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().to_string()))
+            .collect::<Result<Vec<_>, _>>()?;
 
     assert!(scan.contains("demo-cli"));
     assert!(scan.contains("Manual directory sweep used as the fact base for the scan agent."));
@@ -167,7 +192,7 @@ done
     );
     assert_eq!(
         fs::read_to_string(output_dir.join("fact-base.txt"))?,
-        ".metastack/codebase/SCAN.md"
+        format!("{}/codebase/SCAN.md", branding::PROJECT_DIR)
     );
     assert_eq!(
         fs::read_to_string(output_dir.join("provider-source.txt"))?,
@@ -184,7 +209,10 @@ done
     assert!(!prompt.contains("MetaStack CLI"));
     assert!(fs::read_to_string(output_dir.join("documents.txt"))?.contains("ARCHITECTURE.md"));
     assert!(fs::read_to_string(output_dir.join("documents.txt"))?.contains("INTEGRATIONS.md"));
-    let scan_log = fs::read_to_string(repo_root.join(".metastack/agents/sessions/scan.log"))?;
+    let scan_log = fs::read_to_string(repo_root.join(format!(
+        "{}/agents/sessions/scan.log",
+        branding::PROJECT_DIR
+    )))?;
     assert!(scan_log.contains("RAW AGENT LOG: starting scan"));
     assert!(scan_log.contains("RAW AGENT STDERR: token-by-token noise"));
     assert!(scan_log.contains("Resolved provider: scan-stub"));
@@ -251,13 +279,17 @@ exit 7
         .arg("scan")
         .assert()
         .failure()
-        .stderr(predicate::str::contains(
-            "full agent output was saved to `.metastack/agents/sessions/scan.log`",
-        ))
+        .stderr(predicate::str::contains(format!(
+            "full agent output was saved to `{}/agents/sessions/scan.log`",
+            branding::PROJECT_DIR
+        )))
         .stderr(predicate::str::contains("RAW AGENT LOG: failing scan").not())
         .stderr(predicate::str::contains("RAW AGENT STDERR: failure noise").not());
 
-    let scan_log = fs::read_to_string(repo_root.join(".metastack/agents/sessions/scan.log"))?;
+    let scan_log = fs::read_to_string(repo_root.join(format!(
+        "{}/agents/sessions/scan.log",
+        branding::PROJECT_DIR
+    )))?;
     assert!(scan_log.contains("RAW AGENT LOG: failing scan"));
     assert!(scan_log.contains("RAW AGENT STDERR: failure noise"));
 

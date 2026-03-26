@@ -100,7 +100,8 @@ pub fn run_merge_dashboard(
 
     if !io::stdout().is_terminal() {
         bail!(
-            "the interactive merge dashboard requires a TTY; use `meta merge --json` for discovery or `meta merge --no-interactive --pull-request <NUMBER>` for scripted runs"
+            "the interactive merge dashboard requires a TTY; use `{cmd} merge --json` for discovery or `{cmd} merge --no-interactive --pull-request <NUMBER>` for scripted runs",
+            cmd = crate::branding::COMMAND_NAME
         );
     }
 
@@ -209,7 +210,7 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &MergeDashboardApp) {
                 ("q", "exit"),
             ]),
         ]),
-        panel_title("meta merge", false),
+        panel_title(format!("{} merge", crate::branding::COMMAND_NAME), false),
     );
     frame.render_widget(header, outer[0]);
 
@@ -639,7 +640,7 @@ mod tests {
 
     fn demo_data() -> MergeDashboardData {
         MergeDashboardData {
-            title: "meta merge".to_string(),
+            title: format!("{} merge", crate::branding::COMMAND_NAME),
             repo_label: "metastack-systems/metastack-cli".to_string(),
             base_branch: "main".to_string(),
             pull_requests: vec![
@@ -669,7 +670,7 @@ mod tests {
     fn render_once_handles_empty_state() {
         let exit = run_merge_dashboard(
             MergeDashboardData {
-                title: "meta merge".to_string(),
+                title: format!("{} merge", crate::branding::COMMAND_NAME),
                 repo_label: "demo/repo".to_string(),
                 base_branch: "main".to_string(),
                 pull_requests: Vec::new(),

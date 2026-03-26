@@ -1,6 +1,7 @@
 #![allow(dead_code, unused_imports)]
 
 include!("support/common.rs");
+use metastack_cli::branding;
 
 #[cfg(unix)]
 fn write_onboarded_config(
@@ -606,9 +607,10 @@ fn merge_requires_pull_request_selection_for_no_interactive_runs() -> Result<(),
         .args(["merge", "--no-interactive"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains(
-            "`meta merge --no-interactive` requires at least one `--pull-request <NUMBER>`",
-        ));
+        .stderr(predicate::str::contains(format!(
+            "`{} merge --no-interactive` requires at least one `--pull-request <NUMBER>`",
+            branding::COMMAND_NAME
+        )));
 
     Ok(())
 }
@@ -682,8 +684,14 @@ fn merge_requires_a_tty_for_interactive_dashboard_runs() -> Result<(), Box<dyn E
         .stderr(predicate::str::contains(
             "the interactive merge dashboard requires a TTY",
         ))
-        .stderr(predicate::str::contains("meta merge --json"))
-        .stderr(predicate::str::contains("meta merge --no-interactive"));
+        .stderr(predicate::str::contains(format!(
+            "{} merge --json",
+            branding::COMMAND_NAME
+        )))
+        .stderr(predicate::str::contains(format!(
+            "{} merge --no-interactive",
+            branding::COMMAND_NAME
+        )));
 
     Ok(())
 }
@@ -760,7 +768,7 @@ transport = "arg"
             "Created aggregate PR https://github.com/example/pull/999",
         ));
 
-    let run_root = repo_root.join(".metastack/merge-runs");
+    let run_root = repo_root.join(format!("{}/merge-runs", branding::PROJECT_DIR));
     let mut run_dirs = fs::read_dir(&run_root)?
         .map(|entry| entry.map(|item| item.path()))
         .collect::<Result<Vec<_>, _>>()?;
@@ -842,7 +850,7 @@ transport = "arg"
         .stdout(predicate::str::contains("Running phase 4/6: Validation"))
         .stdout(predicate::str::contains("validation still needs attention"));
 
-    let run_root = repo_root.join(".metastack/merge-runs");
+    let run_root = repo_root.join(format!("{}/merge-runs", branding::PROJECT_DIR));
     let mut run_dirs = fs::read_dir(&run_root)?
         .map(|entry| entry.map(|item| item.path()))
         .collect::<Result<Vec<_>, _>>()?;
@@ -969,7 +977,7 @@ printf '%s' '{"merge_order":[11,12],"conflict_hotspots":[],"summary":"route"}'
         "route-stub"
     );
     assert!(!output_dir.join("global-agent.txt").exists());
-    let run_root = repo_root.join(".metastack/merge-runs");
+    let run_root = repo_root.join(format!("{}/merge-runs", branding::PROJECT_DIR));
     let mut run_dirs = fs::read_dir(&run_root)?
         .map(|entry| entry.map(|item| item.path()))
         .collect::<Result<Vec<_>, _>>()?;
@@ -1042,7 +1050,7 @@ transport = "arg"
             "Created aggregate PR https://github.com/example/pull/2999",
         ));
 
-    let run_root = repo_root.join(".metastack/merge-runs");
+    let run_root = repo_root.join(format!("{}/merge-runs", branding::PROJECT_DIR));
     let mut run_dirs = fs::read_dir(&run_root)?
         .map(|entry| entry.map(|item| item.path()))
         .collect::<Result<Vec<_>, _>>()?;
@@ -1135,7 +1143,7 @@ transport = "arg"
             "Created aggregate PR https://github.com/example/pull/3999",
         ));
 
-    let run_root = repo_root.join(".metastack/merge-runs");
+    let run_root = repo_root.join(format!("{}/merge-runs", branding::PROJECT_DIR));
     let mut run_dirs = fs::read_dir(&run_root)?
         .map(|entry| entry.map(|item| item.path()))
         .collect::<Result<Vec<_>, _>>()?;
@@ -1208,7 +1216,7 @@ transport = "arg"
             "Created aggregate PR https://github.com/example/pull/1999",
         ));
 
-    let run_root = repo_root.join(".metastack/merge-runs");
+    let run_root = repo_root.join(format!("{}/merge-runs", branding::PROJECT_DIR));
     let mut run_dirs = fs::read_dir(&run_root)?
         .map(|entry| entry.map(|item| item.path()))
         .collect::<Result<Vec<_>, _>>()?;
@@ -1304,7 +1312,7 @@ transport = "arg"
             "Created aggregate PR https://github.com/example/pull/2001",
         ));
 
-    let run_root = repo_root.join(".metastack/merge-runs");
+    let run_root = repo_root.join(format!("{}/merge-runs", branding::PROJECT_DIR));
     let mut run_dirs = fs::read_dir(&run_root)?
         .map(|entry| entry.map(|item| item.path()))
         .collect::<Result<Vec<_>, _>>()?;
@@ -1453,7 +1461,7 @@ transport = "arg"
         .success()
         .stdout(predicate::str::contains("validation still needs attention"));
 
-    let run_root = repo_root.join(".metastack/merge-runs");
+    let run_root = repo_root.join(format!("{}/merge-runs", branding::PROJECT_DIR));
     let mut run_dirs = fs::read_dir(&run_root)?
         .map(|entry| entry.map(|item| item.path()))
         .collect::<Result<Vec<_>, _>>()?;
@@ -1555,7 +1563,7 @@ transport = "arg"
         .success()
         .stdout(predicate::str::contains("validation still needs attention"));
 
-    let run_root = repo_root.join(".metastack/merge-runs");
+    let run_root = repo_root.join(format!("{}/merge-runs", branding::PROJECT_DIR));
     let mut run_dirs = fs::read_dir(&run_root)?
         .map(|entry| entry.map(|item| item.path()))
         .collect::<Result<Vec<_>, _>>()?;
@@ -1630,7 +1638,7 @@ transport = "arg"
             "merge planner must return the full selected pull request set in merge_order",
         ));
 
-    let run_root = repo_root.join(".metastack/merge-runs");
+    let run_root = repo_root.join(format!("{}/merge-runs", branding::PROJECT_DIR));
     let mut run_dirs = fs::read_dir(&run_root)?
         .map(|entry| entry.map(|item| item.path()))
         .collect::<Result<Vec<_>, _>>()?;
@@ -1732,7 +1740,7 @@ transport = "arg"
             "Created aggregate PR https://github.com/example/pull/1000",
         ));
 
-    let run_root = repo_root.join(".metastack/merge-runs");
+    let run_root = repo_root.join(format!("{}/merge-runs", branding::PROJECT_DIR));
     let mut run_dirs = fs::read_dir(&run_root)?
         .map(|entry| entry.map(|item| item.path()))
         .collect::<Result<Vec<_>, _>>()?;
@@ -1821,7 +1829,7 @@ transport = "arg"
     ]);
     repeat.assert().success();
 
-    let run_root = repo_root.join(".metastack/merge-runs");
+    let run_root = repo_root.join(format!("{}/merge-runs", branding::PROJECT_DIR));
     let mut run_dirs = fs::read_dir(&run_root)?
         .map(|entry| entry.map(|item| item.path()))
         .collect::<Result<Vec<_>, _>>()?;
@@ -1890,7 +1898,7 @@ transport = "arg"
             "Updated aggregate PR https://github.com/example/pull/2000",
         ));
 
-    let run_root = repo_root.join(".metastack/merge-runs");
+    let run_root = repo_root.join(format!("{}/merge-runs", branding::PROJECT_DIR));
     let mut run_dirs = fs::read_dir(&run_root)?
         .map(|entry| entry.map(|item| item.path()))
         .collect::<Result<Vec<_>, _>>()?;

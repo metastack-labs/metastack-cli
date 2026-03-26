@@ -32,6 +32,7 @@ use crate::backlog::{
     BacklogIssueMetadata, INDEX_FILE_NAME, ManagedFileRecord, save_issue_metadata,
     write_issue_description,
 };
+use crate::branding;
 use crate::cli::{BacklogImproveArgs, BacklogImproveModeArg, RunAgentArgs};
 use crate::config::AGENT_ROUTE_BACKLOG_IMPROVE;
 use crate::fs::{
@@ -126,6 +127,21 @@ struct ImprovementProposal {
     acceptance_criteria: Vec<String>,
 }
 
+/// Classifies the kind of error encountered during the apply-back flow so that
+/// downstream error messages can distinguish a Linear permission/auth failure from
+/// generic operational errors.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ImprovementErrorKind {
+    /// Linear API returned a permission or authentication error (HTTP 401/403 or
+    /// GraphQL error containing auth/permission keywords).
+    LinearPermission,
+    /// A network-level failure prevented the Linear request from completing.
+    LinearNetwork,
+    /// Any other error during the apply-back flow.
+    Other,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct ImprovementApplyRecord {
     requested: bool,
@@ -136,6 +152,8 @@ struct ImprovementApplyRecord {
     remote_before_path: Option<String>,
     remote_after_path: Option<String>,
     error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    error_kind: Option<ImprovementErrorKind>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -402,7 +420,14 @@ struct ImprovementDashboardApp {
 pub async fn run_backlog_improve(args: &BacklogImproveArgs) -> Result<()> {
     let root = canonicalize_existing_dir(&args.client.root)?;
     ensure_planning_layout(&root, false)?;
-    let command_context = load_linear_command_context(&args.client, None)?;
+    let mut command_context = load_linear_command_context(&args.client, None)?;
+    if let Some(project_name) = &args.project {
+        let project_id = command_context
+            .service
+            .resolve_project_selector_strict(project_name, command_context.default_team.as_deref())
+            .await?;
+        command_context.default_project_id = Some(project_id);
+    }
     let issues = load_backlog_improve_issues_with_loading(&command_context, args).await?;
 
     if issues.is_empty() {
@@ -559,6 +584,7 @@ async fn run_interactive_improvement_session(
                             remote_before_path: None,
                             remote_after_path: None,
                             error: None,
+                            error_kind: None,
                         }
                     };
                     let report = finalize_issue_run(
@@ -867,7 +893,7 @@ fn render_improvement_dashboard(frame: &mut Frame<'_>, app: &ImprovementDashboar
                 ("Esc", "cancel"),
             ]),
         ]),
-        panel_title("meta backlog improve", false),
+        panel_title(format!("{} backlog improve", branding::COMMAND_NAME), false),
     );
     frame.render_widget(header, outer[0]);
 
@@ -1082,7 +1108,10 @@ fn continue_issue_with_follow_up_loading(
         continuation,
     )
     .with_context(|| {
-        "meta backlog improve requires a configured local agent to continue backlog issue review"
+        format!(
+            "{} backlog improve requires a configured local agent to continue backlog issue review",
+            branding::COMMAND_NAME
+        )
     })?;
     let parsed: ImprovementOutput =
         parse_agent_json(&report.stdout, "backlog improvement follow-up")?;
@@ -1333,7 +1362,7 @@ fn render_improvement_review(frame: &mut Frame<'_>, app: &ImprovementReviewApp) 
             Line::from(app.output.summary.clone()),
             key_hints(&review_key_hints(route, !app.questions.is_empty())),
         ]),
-        panel_title("meta backlog improve", false),
+        panel_title(format!("{} backlog improve", branding::COMMAND_NAME), false),
     );
     frame.render_widget(header, outer[0]);
 
@@ -1918,7 +1947,7 @@ fn render_instruction_prompt(frame: &mut Frame<'_>, app: &InstructionPromptApp) 
             )),
             key_hints(&hints),
         ]),
-        panel_title("meta backlog improve", false),
+        panel_title(format!("{} backlog improve", branding::COMMAND_NAME), false),
     );
     frame.render_widget(header, outer[0]);
 
@@ -2389,6 +2418,7 @@ async fn improve_issue(
             remote_before_path: None,
             remote_after_path: None,
             error: None,
+            error_kind: None,
         }
     };
 
@@ -2495,7 +2525,7 @@ fn analyze_issue(
         run_agent_capture(&agent_args)
     }
     .with_context(|| {
-        "meta backlog improve requires a configured local agent to review repo-scoped backlog issues"
+        format!("{} backlog improve requires a configured local agent to review repo-scoped backlog issues", branding::COMMAND_NAME)
     })?;
     let parsed: ImprovementOutput =
         parse_agent_json(&output.stdout, "backlog improvement proposal")?;
@@ -2532,6 +2562,42 @@ fn analyze_issue(
     })
 }
 
+/// Inspects the error chain from a failed Linear API call and classifies it as a
+/// permission/auth error, a network error, or a generic error.
+fn classify_linear_error(error: &anyhow::Error) -> ImprovementErrorKind {
+    let message = format!("{error:#}").to_ascii_lowercase();
+    let permission_signals = [
+        "permission",
+        "unauthorized",
+        "forbidden",
+        "authentication required",
+        "not authorized",
+        "access denied",
+        "status 401",
+        "status 403",
+    ];
+    if permission_signals
+        .iter()
+        .any(|signal| message.contains(signal))
+    {
+        return ImprovementErrorKind::LinearPermission;
+    }
+    let network_signals = [
+        "failed to reach",
+        "connection refused",
+        "dns error",
+        "timed out",
+        "connection reset",
+    ];
+    if network_signals
+        .iter()
+        .any(|signal| message.contains(signal))
+    {
+        return ImprovementErrorKind::LinearNetwork;
+    }
+    ImprovementErrorKind::Other
+}
+
 async fn apply_improvement(
     root: &Path,
     service: &LinearService<ReqwestLinearClient>,
@@ -2546,6 +2612,7 @@ async fn apply_improvement(
         remote_before_path: None,
         remote_after_path: None,
         error: None,
+        error_kind: None,
     };
 
     let local_before_path = issue_run.run_dir.join("applied-local-before.md");
@@ -2601,6 +2668,8 @@ async fn apply_improvement(
                 apply.remote_updated = true;
             }
             Err(error) => {
+                let kind = classify_linear_error(&error);
+                apply.error_kind = Some(kind);
                 apply.error = Some(error.to_string());
             }
         }
@@ -2646,11 +2715,25 @@ fn finalize_issue_run(
     )?;
 
     if let Some(error) = summary.apply.error.as_deref() {
-        bail!(
-            "improved `{}` but failed to finish the apply-back flow: {}",
-            issue_run.issue.identifier,
-            error
-        );
+        let run_dir_display = display_path(&issue_run.run_dir, root);
+        match summary.apply.error_kind.as_ref() {
+            Some(ImprovementErrorKind::LinearPermission) => {
+                bail!(
+                    "Local proposal saved to {}. \
+                     Linear update failed: permission denied — check LINEAR_API_KEY scopes. \
+                     ({})",
+                    run_dir_display,
+                    error,
+                );
+            }
+            _ => {
+                bail!(
+                    "improved `{}` but failed to finish the apply-back flow: {}",
+                    issue_run.issue.identifier,
+                    error
+                );
+            }
+        }
     }
 
     Ok(ImprovementReport {
@@ -2970,7 +3053,7 @@ Instructions:\n\
 2. Inspect issue hygiene gaps: weak title, weak description, missing acceptance criteria, absent or unclear labels, missing priority/estimate, and opportunities to group work under an existing parent issue.\n\
 3. Stay inside the provided repository scope. Do not invent cross-repo work or new storage models.\n\
 4. When you propose a parent issue, choose only from the provided related backlog issue catalog and only when the relationship is strong.\n\
-5. When you propose description changes, return the full Markdown description ready for `.metastack/backlog/<ISSUE>/index.md`.\n\
+5. When you propose description changes, return the full Markdown description ready for `{project_dir}/backlog/<ISSUE>/index.md`.\n\
 6. In `basic` mode, prefer modest rewrites and safe metadata cleanup. In `advanced` mode, you may rewrite more substantially and use structure changes when justified.\n\
 7. First choose exactly one route:\n\
 - `no_update_needed`: the issue is already strong enough. Do not propose changes.\n\
@@ -3034,6 +3117,7 @@ Instructions:\n\
         children = issue.children.len(),
         url = issue.url,
         current_description_block = render_fenced_block("md", current_description),
+        project_dir = branding::PROJECT_DIR,
     ))
 }
 
@@ -3194,10 +3278,11 @@ fn read_context(path: &Path) -> Result<String> {
     match fs::read_to_string(path) {
         Ok(contents) => Ok(contents),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(format!(
-            "_Missing `{}`. Run `meta scan` to generate it._",
+            "_Missing `{}`. Run `{} scan` to generate it._",
             path.file_name()
                 .map(|value| value.to_string_lossy())
-                .unwrap_or_default()
+                .unwrap_or_default(),
+            crate::branding::COMMAND_NAME,
         )),
         Err(error) => Err(error).with_context(|| format!("failed to read `{}`", path.display())),
     }
@@ -3207,7 +3292,8 @@ fn parse_agent_json<T>(raw: &str, phase: &str) -> Result<T>
 where
     T: for<'de> Deserialize<'de>,
 {
-    let trimmed = raw.trim();
+    let sanitized = strip_ansi_escapes(raw);
+    let trimmed = sanitized.trim();
     let mut candidates = vec![trimmed.to_string()];
     if let Some(stripped) = strip_code_fence(trimmed) {
         candidates.push(stripped);
@@ -3228,6 +3314,49 @@ where
         "backlog improvement agent returned invalid JSON during {phase}: {}",
         preview_text(trimmed)
     )
+}
+
+/// Strips ANSI escape sequences (CSI sequences and OSC sequences) from agent
+/// subprocess output. This prevents terminal corruption when the agent emits
+/// escape sequences despite `TERM=dumb` and `NO_COLOR=1`.
+fn strip_ansi_escapes(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            match chars.peek() {
+                Some('[') => {
+                    // CSI sequence: ESC [ <params> <final byte>
+                    chars.next();
+                    for next in chars.by_ref() {
+                        if next.is_ascii_alphabetic() || next == '~' {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    // OSC sequence: ESC ] ... ST (ST = ESC \ or BEL)
+                    chars.next();
+                    while let Some(next) = chars.next() {
+                        if next == '\x07' {
+                            break;
+                        }
+                        if next == '\x1b' && chars.peek() == Some(&'\\') {
+                            chars.next();
+                            break;
+                        }
+                    }
+                }
+                _ => {
+                    // Single-char escape — skip the escape and the next char.
+                    chars.next();
+                }
+            }
+        } else {
+            output.push(ch);
+        }
+    }
+    output
 }
 
 fn strip_code_fence(raw: &str) -> Option<String> {
@@ -3850,5 +3979,78 @@ mod tests {
         let exit =
             simulate_instruction_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(exit, Some(InstructionPromptExit::Cancelled));
+    }
+
+    #[test]
+    fn classify_linear_error_detects_permission_keywords() {
+        let cases = [
+            "Linear request failed: You do not have permission to update this issue",
+            "Linear request failed with status 403: Forbidden",
+            "Linear request failed with status 401: Unauthorized",
+            "failed to reach the Linear GraphQL endpoint: Authentication required",
+            "Not authorized to perform this action",
+            "Access denied for this resource",
+        ];
+        for message in cases {
+            let error = anyhow::anyhow!("{message}");
+            assert_eq!(
+                classify_linear_error(&error),
+                ImprovementErrorKind::LinearPermission,
+                "expected LinearPermission for: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_linear_error_detects_network_failures() {
+        let cases = [
+            "failed to reach the Linear GraphQL endpoint: connection refused",
+            "dns error: could not resolve host",
+            "request timed out after 30s",
+        ];
+        for message in cases {
+            let error = anyhow::anyhow!("{message}");
+            assert_eq!(
+                classify_linear_error(&error),
+                ImprovementErrorKind::LinearNetwork,
+                "expected LinearNetwork for: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_linear_error_falls_back_to_other() {
+        let error = anyhow::anyhow!("no issue fields were provided to edit");
+        assert_eq!(classify_linear_error(&error), ImprovementErrorKind::Other);
+    }
+
+    #[test]
+    fn strip_ansi_escapes_removes_csi_sequences() {
+        assert_eq!(strip_ansi_escapes("\x1b[1mhello\x1b[0m"), "hello");
+        assert_eq!(
+            strip_ansi_escapes("\x1b[31;1mred bold\x1b[0m text"),
+            "red bold text"
+        );
+    }
+
+    #[test]
+    fn strip_ansi_escapes_removes_osc_sequences() {
+        assert_eq!(strip_ansi_escapes("\x1b]0;title\x07content"), "content");
+        assert_eq!(
+            strip_ansi_escapes("\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\"),
+            "link"
+        );
+    }
+
+    #[test]
+    fn strip_ansi_escapes_preserves_plain_text() {
+        let plain = r#"{"summary":"test","needs_improvement":false}"#;
+        assert_eq!(strip_ansi_escapes(plain), plain);
+    }
+
+    #[test]
+    fn strip_ansi_escapes_handles_mixed_content() {
+        let input = "\x1b[1m{\"key\":\x1b[32m\"value\"\x1b[0m}\x1b[0m";
+        assert_eq!(strip_ansi_escapes(input), "{\"key\":\"value\"}");
     }
 }

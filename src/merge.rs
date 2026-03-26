@@ -279,13 +279,19 @@ pub async fn run_merge(args: &MergeArgs) -> Result<()> {
             },
         )?;
         let MergeDashboardExit::Snapshot(snapshot) = exit else {
-            bail!("`meta merge --render-once` should only emit a snapshot");
+            bail!(
+                "`{} merge --render-once` should only emit a snapshot",
+                crate::branding::COMMAND_NAME
+            );
         };
         println!("{snapshot}");
         return Ok(());
     } else if args.no_interactive {
         if args.pull_requests.is_empty() {
-            bail!("`meta merge --no-interactive` requires at least one `--pull-request <NUMBER>`");
+            bail!(
+                "`{} merge --no-interactive` requires at least one `--pull-request <NUMBER>`",
+                crate::branding::COMMAND_NAME
+            );
         }
         args.pull_requests.clone()
     } else {
@@ -352,7 +358,11 @@ fn build_dashboard_data(
     pull_requests: &[GithubPullRequest],
 ) -> MergeDashboardData {
     MergeDashboardData {
-        title: format!("meta merge ({})", repository.name_with_owner),
+        title: format!(
+            "{} merge ({})",
+            crate::branding::COMMAND_NAME,
+            repository.name_with_owner
+        ),
         repo_label: repository.name_with_owner.clone(),
         base_branch: repository.default_branch.clone(),
         pull_requests: pull_requests
@@ -456,7 +466,11 @@ fn execute_merge_run(
         ProgressOutputMode::Interactive
     };
     let mut tracker = ProgressTracker::start(
-        format!("meta merge progress ({})", repository.name_with_owner),
+        format!(
+            "{} merge progress ({})",
+            crate::branding::COMMAND_NAME,
+            repository.name_with_owner
+        ),
         run_dir.join("progress.json"),
         &merge_progress_steps(),
         progress_mode,
@@ -1765,7 +1779,10 @@ fn commit_validation_repair(
         &[
             "commit",
             "-m",
-            &format!("meta merge: repair validation failures (attempt {repair_attempt})"),
+            &format!(
+                "{} merge: repair validation failures (attempt {repair_attempt})",
+                crate::branding::COMMAND_NAME
+            ),
         ],
     )?;
     Ok(Some(git_stdout(
@@ -1927,7 +1944,7 @@ fn aggregate_pr_title(selected_pull_requests: &[GithubPullRequest]) -> String {
         .map(|pr| format!("#{}", pr.number))
         .collect::<Vec<_>>()
         .join(", ");
-    format!("meta merge: {numbers}")
+    format!("{} merge: {numbers}", crate::branding::COMMAND_NAME)
 }
 
 fn aggregate_pr_body(

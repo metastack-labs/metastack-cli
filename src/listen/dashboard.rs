@@ -1057,7 +1057,10 @@ fn render_session_detail_text(
     if session.origin.is_execute() {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            "This session was started by `meta agents execute`. Use R to resume/adopt or clear it to re-pick.",
+            format!(
+                "This session was started by `{} agents execute`. Use R to resume/adopt or clear it to re-pick.",
+                crate::branding::COMMAND_NAME
+            ),
             Style::default().fg(Color::Yellow),
         )));
     }
@@ -1205,6 +1208,15 @@ fn phase_style(phase: SessionPhase) -> Style {
         SessionPhase::Running => Style::default()
             .fg(Color::Green)
             .add_modifier(Modifier::BOLD),
+        SessionPhase::Reviewing => Style::default()
+            .fg(Color::Blue)
+            .add_modifier(Modifier::BOLD),
+        SessionPhase::FinalReview => Style::default()
+            .fg(Color::Blue)
+            .add_modifier(Modifier::BOLD),
+        SessionPhase::Publishing => Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
         SessionPhase::Paused => Style::default()
             .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD),
@@ -1250,7 +1262,10 @@ mod tests {
     fn demo_cycle() -> ListenCycleData {
         ListenCycleData::demo(
             Path::new("."),
-            ".metastack/agents/sessions/listen-state.json".to_string(),
+            format!(
+                "{}/agents/sessions/listen-state.json",
+                crate::branding::PROJECT_DIR
+            ),
         )
     }
 

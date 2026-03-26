@@ -39,6 +39,17 @@ where
         self.upsert_comment_with_marker(issue, "## Codex Workpad", body)
             .await
     }
+
+    /// Update the tracked `## Codex Workpad` comment by id.
+    ///
+    /// Returns an error when the underlying Linear comment mutation fails.
+    pub async fn update_workpad_comment_by_id(
+        &self,
+        comment_id: &str,
+        body: String,
+    ) -> Result<IssueComment> {
+        self.client.update_comment(comment_id, body).await
+    }
 }
 
 fn is_active_marker_comment(comment: &IssueComment, marker: &str) -> bool {

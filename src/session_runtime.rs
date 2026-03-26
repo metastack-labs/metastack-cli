@@ -338,26 +338,38 @@ mod tests {
     fn workflow_layout_builds_expected_paths() {
         let workflow = WorkflowRootLayout::repo_scoped(
             Path::new("/tmp/example"),
-            ".metastack/improve",
+            format!("{}/improve", crate::branding::PROJECT_DIR),
             "current.json",
         );
         let sessions = WorkflowSessionLayout::with_sessions_dir(workflow.clone(), "sessions");
 
         assert_eq!(
             workflow.root(),
-            Path::new("/tmp/example/.metastack/improve")
+            Path::new(&format!(
+                "/tmp/example/{}/improve",
+                crate::branding::PROJECT_DIR
+            ))
         );
         assert_eq!(
             workflow.active_session_path(),
-            Path::new("/tmp/example/.metastack/improve/current.json")
+            Path::new(&format!(
+                "/tmp/example/{}/improve/current.json",
+                crate::branding::PROJECT_DIR
+            ))
         );
         assert_eq!(
             sessions.sessions_dir(),
-            Path::new("/tmp/example/.metastack/improve/sessions")
+            Path::new(&format!(
+                "/tmp/example/{}/improve/sessions",
+                crate::branding::PROJECT_DIR
+            ))
         );
         assert_eq!(
             sessions.session_dir("sess-1"),
-            Path::new("/tmp/example/.metastack/improve/sessions/sess-1")
+            Path::new(&format!(
+                "/tmp/example/{}/improve/sessions/sess-1",
+                crate::branding::PROJECT_DIR
+            ))
         );
         assert_eq!(
             sessions.workflow().active_session_path(),

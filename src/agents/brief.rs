@@ -82,7 +82,7 @@ fn render_brief(request: &AgentBriefRequest, paths: &PlanningPaths) -> Result<St
         "## Guidance".to_string(),
         String::new(),
         "- Reconfirm the issue scope and current repository state before editing.".to_string(),
-        "- Use `.metastack/codebase/*.md` as the reusable source of context for future agents.".to_string(),
+        format!("- Use `{}/codebase/*.md` as the reusable source of context for future agents.", crate::branding::PROJECT_DIR),
         "- Capture reproduction, implement the requested change, validate with focused command proofs, and update the workpad.".to_string(),
         String::new(),
         "## Scan".to_string(),
@@ -134,10 +134,11 @@ fn read_context(path: &PathBuf) -> Result<String> {
     match fs::read_to_string(path) {
         Ok(contents) => Ok(contents),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(format!(
-            "_Missing `{}`. Run `metastack-cli scan` to generate it._",
+            "_Missing `{}`. Run `{} scan` to generate it._",
             path.file_name()
                 .map(|value| value.to_string_lossy())
-                .unwrap_or_default()
+                .unwrap_or_default(),
+            crate::branding::COMMAND_NAME,
         )),
         Err(error) => Err(error).with_context(|| format!("failed to read `{}`", path.display())),
     }

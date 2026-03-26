@@ -55,7 +55,7 @@ impl BuiltinProviderAdapter for ClaudeProviderAdapter {
     }
 
     fn transport(&self) -> PromptTransport {
-        PromptTransport::Arg
+        PromptTransport::Stdin
     }
 
     fn prepare_command_args(
@@ -162,12 +162,14 @@ impl BuiltinProviderAdapter for ClaudeProviderAdapter {
             .map(str::trim)
             .filter(|line| !line.is_empty())
         {
-            let value = match serde_json::from_str::<serde_json::Value>(line) {
+            let raw_value = match serde_json::from_str::<serde_json::Value>(line) {
                 Ok(value) => value,
                 Err(_) => continue,
             };
             parsed_any = true;
-            super::merge_usage(&mut usage, super::extract_usage_from_value(&value));
+            // Claude stream-json wraps events in an array: [{...}]
+            let value = unwrap_stream_array(&raw_value);
+            super::merge_usage(&mut usage, super::extract_usage_from_value(&raw_value));
             response_text = match value.get("result") {
                 Some(serde_json::Value::String(text)) => Some(text.clone()),
                 Some(value) => Some(
@@ -185,9 +187,10 @@ impl BuiltinProviderAdapter for ClaudeProviderAdapter {
         }
 
         if !parsed_any {
-            let value: serde_json::Value = serde_json::from_str(trimmed)
+            let raw_value: serde_json::Value = serde_json::from_str(trimmed)
                 .context("failed to parse Claude `--output-format=json` response")?;
-            super::merge_usage(&mut usage, super::extract_usage_from_value(&value));
+            let value = unwrap_stream_array(&raw_value);
+            super::merge_usage(&mut usage, super::extract_usage_from_value(&raw_value));
             response_text = match value.get("result") {
                 Some(serde_json::Value::String(text)) => Some(text.clone()),
                 Some(value) => Some(
@@ -215,6 +218,15 @@ impl BuiltinProviderAdapter for ClaudeProviderAdapter {
         lower.contains("no conversation found with session id")
             || lower.contains("--resume requires a valid session id")
     }
+}
+
+/// Claude `--output-format=stream-json` wraps each event in a JSON array: `[{...}]`.
+/// This unwraps to the inner object so field lookups like `.get("session_id")` work.
+fn unwrap_stream_array(value: &serde_json::Value) -> &serde_json::Value {
+    value
+        .as_array()
+        .and_then(|arr| arr.first())
+        .unwrap_or(value)
 }
 
 #[cfg(test)]
@@ -251,6 +263,39 @@ mod tests {
     }
 
     #[test]
+    fn claude_default_transport_uses_stdin() {
+        let adapter = ClaudeProviderAdapter;
+        assert_eq!(adapter.transport(), PromptTransport::Stdin);
+    }
+
+    #[test]
+    fn claude_stdin_transport_omits_prompt_argument() {
+        let adapter = ClaudeProviderAdapter;
+        let args = adapter
+            .prepare_command_args(
+                &[
+                    "-p".to_string(),
+                    "--model=haiku".to_string(),
+                    "--effort=low".to_string(),
+                ],
+                None,
+                BuiltinInvocationContext::Planning,
+                PromptTransport::Stdin,
+                true,
+                Some("session-123"),
+            )
+            .expect("claude args should render");
+
+        assert_eq!(args[0], "-p");
+        assert!(args.contains(&"--output-format=json".to_string()));
+        assert!(args.contains(&"--resume".to_string()));
+        assert!(args.contains(&"session-123".to_string()));
+        assert!(args.contains(&"--model=haiku".to_string()));
+        assert!(args.contains(&"--effort=low".to_string()));
+        assert!(!args.iter().any(|arg| arg == "plan the work"));
+    }
+
+    #[test]
     fn claude_capture_output_extracts_result_and_session_id() {
         let adapter = ClaudeProviderAdapter;
         let parsed = adapter
@@ -284,6 +329,24 @@ mod tests {
                 output: Some(34),
             })
         );
+    }
+
+    #[test]
+    fn claude_capture_output_extracts_session_id_from_stream_json_array() {
+        let adapter = ClaudeProviderAdapter;
+        // Claude --output-format=stream-json wraps each event in an array
+        let parsed = adapter
+            .parse_capture_output(
+                r#"[{"type":"system","subtype":"init","session_id":"22ca497e-d7da-4118-9433-1902769c6737","tools":["Bash","Read"]}]
+[{"type":"result","subtype":"success","result":"done","session_id":"22ca497e-d7da-4118-9433-1902769c6737"}]"#,
+            )
+            .expect("array-wrapped output should parse");
+
+        assert_eq!(
+            parsed.continuation.as_deref(),
+            Some("22ca497e-d7da-4118-9433-1902769c6737")
+        );
+        assert_eq!(parsed.response_text.as_deref(), Some("done"));
     }
 
     #[test]

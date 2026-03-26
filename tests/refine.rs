@@ -1,6 +1,7 @@
 #![allow(dead_code, unused_imports)]
 
 include!("support/common.rs");
+use metastack_cli::branding;
 
 #[cfg(unix)]
 #[test]
@@ -26,16 +27,21 @@ fn refine_command_writes_critique_only_artifacts_without_mutating_linear()
 }
 "#,
     )?;
-    fs::remove_file(repo_root.join(".metastack/codebase/STACK.md"))?;
+    fs::remove_file(repo_root.join(format!("{}/codebase/STACK.md", branding::PROJECT_DIR)))?;
     write_refine_config(&config_path, &api_url, &stub_path)?;
     write_refine_stub(
         &stub_path,
-        r##"#!/bin/sh
-cat > "$TEST_OUTPUT_DIR/payload-1.txt"
-cat <<'JSON'
-{"summary":"Tighten the ticket structure.","findings":{"missing_requirements":["Name the exact refinement artifacts."],"unclear_scope":["Clarify the repo-scoped command path."],"validation_gaps":["Add command proofs for critique-only and apply-back."],"dependency_risks":["Agent output quality can drift across passes."],"follow_up_ideas":["Document how refinement fits after meta plan."]},"rewrite":"# Refined MET-148\n\n## Context\n\nClarify the refinement loop.\n\n## Validation\n\n- `cargo test`\n- `meta issues refine MET-148`\n"}
-JSON
-"##,
+        &format!(
+            "#!/bin/sh\ncat > \"$TEST_OUTPUT_DIR/payload-1.txt\"\ncat <<'JSON'\n\
+{{\"summary\":\"Tighten the ticket structure.\",\
+\"findings\":{{\"missing_requirements\":[\"Name the exact refinement artifacts.\"],\
+\"unclear_scope\":[\"Clarify the repo-scoped command path.\"],\
+\"validation_gaps\":[\"Add command proofs for critique-only and apply-back.\"],\
+\"dependency_risks\":[\"Agent output quality can drift across passes.\"],\
+\"follow_up_ideas\":[\"Document how refinement fits after {cmd} plan.\"]}},\
+\"rewrite\":\"# Refined MET-148\\n\\n## Context\\n\\nClarify the refinement loop.\\n\\n## Validation\\n\\n- `cargo test`\\n- `{cmd} issues refine MET-148`\\n\"}}\nJSON\n",
+            cmd = branding::COMMAND_NAME,
+        ),
     )?;
 
     let issue = issue_node(
@@ -99,7 +105,9 @@ JSON
     );
     assert_eq!(payload["result"]["reports"][0]["apply_requested"], false);
 
-    let run_dir = latest_refinement_dir(&repo_root.join(".metastack/backlog/MET-148"))?;
+    let run_dir = latest_refinement_dir(
+        &repo_root.join(format!("{}/backlog/MET-148", branding::PROJECT_DIR)),
+    )?;
     let original = fs::read_to_string(run_dir.join("original.md"))?;
     let findings = fs::read_to_string(run_dir.join("pass-01-findings.md"))?;
     let rewrite = fs::read_to_string(run_dir.join("final-proposed.md"))?;
@@ -119,11 +127,17 @@ JSON
     assert!(!payload.contains("## CONCERNS.md"));
     assert!(!payload.contains("## INTEGRATIONS.md"));
     assert!(!payload.contains("## STRUCTURE.md"));
-    assert!(payload.contains("_Missing `STACK.md`. Run `meta scan` to generate it._"));
-    assert!(!payload.contains("meta context reload"));
+    assert!(payload.contains(&format!(
+        "_Missing `STACK.md`. Run `{} scan` to generate it._",
+        branding::COMMAND_NAME
+    )));
+    assert!(!payload.contains(&format!("{} context reload", branding::COMMAND_NAME)));
     assert!(
         !repo_root
-            .join(".metastack/backlog/MET-148/index.md")
+            .join(format!(
+                "{}/backlog/MET-148/index.md",
+                branding::PROJECT_DIR
+            ))
             .exists()
     );
     update_issue_mock.assert_calls(0);
@@ -260,8 +274,12 @@ esac
         .stdout(predicate::str::contains("MET-201"))
         .stdout(predicate::str::contains("MET-202"));
 
-    let issue_one_run = latest_refinement_dir(&repo_root.join(".metastack/backlog/MET-201"))?;
-    let issue_two_run = latest_refinement_dir(&repo_root.join(".metastack/backlog/MET-202"))?;
+    let issue_one_run = latest_refinement_dir(
+        &repo_root.join(format!("{}/backlog/MET-201", branding::PROJECT_DIR)),
+    )?;
+    let issue_two_run = latest_refinement_dir(
+        &repo_root.join(format!("{}/backlog/MET-202", branding::PROJECT_DIR)),
+    )?;
     assert!(issue_one_run.join("pass-01.json").exists());
     assert!(issue_one_run.join("pass-02.json").exists());
     assert!(issue_two_run.join("pass-01.json").exists());
@@ -441,13 +459,13 @@ fn refine_command_apply_updates_local_backlog_and_linear_description() -> Result
     write_refine_config(&config_path, &api_url, &stub_path)?;
     write_refine_stub(
         &stub_path,
-        r##"#!/bin/sh
-cat > "$TEST_OUTPUT_DIR/payload-1.txt"
-printf '%s' '{"summary":"Ready to apply.","findings":{"missing_requirements":[],"unclear_scope":[],"validation_gaps":["Keep the apply proof."],"dependency_risks":[],"follow_up_ideas":[]},"rewrite":"# Applied Rewrite\n\n## Validation\n\n- `meta issues refine MET-301 --apply`\n"}'
-"##,
+        &format!(
+            "#!/bin/sh\ncat > \"$TEST_OUTPUT_DIR/payload-1.txt\"\nprintf '%s' '{{\"summary\":\"Ready to apply.\",\"findings\":{{\"missing_requirements\":[],\"unclear_scope\":[],\"validation_gaps\":[\"Keep the apply proof.\"],\"dependency_risks\":[],\"follow_up_ideas\":[]}},\"rewrite\":\"# Applied Rewrite\\n\\n## Validation\\n\\n- `{} issues refine MET-301 --apply`\\n\"}}'\n",
+            branding::COMMAND_NAME,
+        ),
     )?;
 
-    let issue_dir = repo_root.join(".metastack/backlog/MET-301");
+    let issue_dir = repo_root.join(format!("{}/backlog/MET-301", branding::PROJECT_DIR));
     fs::create_dir_all(&issue_dir)?;
     fs::write(issue_dir.join("index.md"), "# Old Local Index\n")?;
 
@@ -521,7 +539,10 @@ printf '%s' '{"summary":"Ready to apply.","findings":{"missing_requirements":[],
 
     assert_eq!(
         fs::read_to_string(issue_dir.join("index.md"))?,
-        "# Applied Rewrite\n\n## Validation\n\n- `meta issues refine MET-301 --apply`"
+        format!(
+            "# Applied Rewrite\n\n## Validation\n\n- `{} issues refine MET-301 --apply`",
+            branding::COMMAND_NAME
+        )
     );
     let run_dir = latest_refinement_dir(&issue_dir)?;
     let summary = fs::read_to_string(run_dir.join("summary.json"))?;
@@ -574,7 +595,7 @@ printf '%s' '{"summary":"Ready to apply, but remote update fails.","findings":{"
 "##,
     )?;
 
-    let issue_dir = repo_root.join(".metastack/backlog/MET-302");
+    let issue_dir = repo_root.join(format!("{}/backlog/MET-302", branding::PROJECT_DIR));
     fs::create_dir_all(&issue_dir)?;
     fs::write(issue_dir.join("index.md"), "# Previous Local Index\n")?;
 
@@ -747,7 +768,11 @@ printf '%s' '{"summary":"This should never run.","findings":{"missing_requiremen
             "outside the configured repo team scope `MET`",
         ));
 
-    assert!(!repo_root.join(".metastack/backlog/MET-401").exists());
+    assert!(
+        !repo_root
+            .join(format!("{}/backlog/MET-401", branding::PROJECT_DIR))
+            .exists()
+    );
     assert!(!output_dir.join("payload-1.txt").exists());
 
     Ok(())
@@ -840,10 +865,10 @@ printf '%s' '{"summary":"Rewrite blocked from apply during listen.","findings":{
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "disabled during `meta listen` because it would overwrite the primary Linear issue description",
+            format!("disabled during `{} listen` because it would overwrite the primary Linear issue description", branding::COMMAND_NAME),
         ));
 
-    let issue_dir = repo_root.join(".metastack/backlog/MET-402");
+    let issue_dir = repo_root.join(format!("{}/backlog/MET-402", branding::PROJECT_DIR));
     let run_dir = latest_refinement_dir(&issue_dir)?;
     let summary = fs::read_to_string(run_dir.join("summary.json"))?;
 
@@ -851,7 +876,10 @@ printf '%s' '{"summary":"Rewrite blocked from apply during listen.","findings":{
     assert!(summary.contains("\"requested\": true"));
     assert!(summary.contains("\"local_updated\": false"));
     assert!(summary.contains("\"remote_updated\": false"));
-    assert!(summary.contains("disabled during `meta listen`"));
+    assert!(summary.contains(&format!(
+        "disabled during `{} listen`",
+        branding::COMMAND_NAME
+    )));
     update_issue_mock.assert_calls(0);
 
     Ok(())

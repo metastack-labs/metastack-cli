@@ -70,7 +70,7 @@ impl BuiltinProviderAdapter for CodexProviderAdapter {
     }
 
     fn transport(&self) -> PromptTransport {
-        PromptTransport::Arg
+        PromptTransport::Stdin
     }
 
     fn prepare_command_args(
@@ -380,6 +380,41 @@ mod tests {
         assert!(args.contains(&"--json".to_string()));
         assert!(args.contains(&"thread-1".to_string()));
         assert_eq!(args.last().map(String::as_str), Some("plan the work"));
+    }
+
+    #[test]
+    fn codex_default_transport_uses_stdin() {
+        let adapter = CodexProviderAdapter;
+        assert_eq!(adapter.transport(), PromptTransport::Stdin);
+    }
+
+    #[test]
+    fn codex_stdin_transport_omits_prompt_argument() {
+        let adapter = CodexProviderAdapter;
+        let args = adapter
+            .prepare_command_args(
+                &[
+                    "exec".to_string(),
+                    "--model=gpt-5.4".to_string(),
+                    "-c".to_string(),
+                    "reasoning.effort=\"high\"".to_string(),
+                ],
+                None,
+                BuiltinInvocationContext::Planning,
+                PromptTransport::Stdin,
+                true,
+                Some("thread-1"),
+            )
+            .expect("codex args should render");
+
+        assert_eq!(args[0], "--sandbox");
+        assert!(args.contains(&"exec".to_string()));
+        assert!(args.contains(&"resume".to_string()));
+        assert!(args.contains(&"--json".to_string()));
+        assert!(args.contains(&"--model=gpt-5.4".to_string()));
+        assert!(args.contains(&"-c".to_string()));
+        assert!(args.contains(&"reasoning.effort=\"high\"".to_string()));
+        assert!(!args.iter().any(|arg| arg == "plan the work"));
     }
 
     #[test]

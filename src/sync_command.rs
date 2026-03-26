@@ -15,6 +15,7 @@ use crate::backlog::{
     compute_remote_sync_hash, load_issue_metadata, resolve_backlog_sync_status,
     save_issue_metadata, write_issue_attachment_file,
 };
+use crate::branding;
 use crate::cli::{LinearClientArgs, SyncLinkArgs, SyncPullArgs, SyncPushArgs, SyncStatusArgs};
 use crate::config::load_required_planning_meta;
 use crate::fs::{
@@ -249,9 +250,9 @@ fn build_placeholder_issues(entries: &[BacklogSyncEntry]) -> Vec<SyncDashboardIs
                             .unwrap_or_else(|| slug.clone()),
                         title: entry.title.clone(),
                         description: None,
-                        url: metadata
-                            .map(|m| m.url.clone())
-                            .unwrap_or_else(|| format!(".metastack/backlog/{slug}")),
+                        url: metadata.map(|m| m.url.clone()).unwrap_or_else(|| {
+                            format!("{}/backlog/{slug}", crate::branding::PROJECT_DIR)
+                        }),
                         priority: None,
                         estimate: None,
                         updated_at: "-".to_string(),
@@ -338,9 +339,11 @@ fn build_unlinked_sync_dashboard_issue(entry: &BacklogSyncEntry) -> SyncDashboar
             identifier: slug.clone(),
             title: entry.title.clone(),
             description: Some(format!(
-                "Local backlog entry under `.metastack/backlog/{slug}`. Link it with `meta backlog sync link <ISSUE> --entry {slug}` to enable pull and push."
+                "Local backlog entry under `{}/backlog/{slug}`. Link it with `{} backlog sync link <ISSUE> --entry {slug}` to enable pull and push.",
+                crate::branding::PROJECT_DIR,
+                crate::branding::COMMAND_NAME
             )),
-            url: format!(".metastack/backlog/{slug}"),
+            url: format!("{}/backlog/{slug}", crate::branding::PROJECT_DIR),
             priority: None,
             estimate: None,
             updated_at: "local-only".to_string(),
@@ -448,7 +451,8 @@ pub async fn run_sync_link(
         None => {
             if no_interactive || !io::stdin().is_terminal() || !io::stdout().is_terminal() {
                 bail!(
-                    "`meta backlog sync link` requires <ISSUE> when `--no-interactive` is used or when the command runs without a TTY"
+                    "`{} backlog sync link` requires <ISSUE> when `--no-interactive` is used or when the command runs without a TTY",
+                    branding::COMMAND_NAME
                 );
             }
             let (_service, issues, _) =
@@ -536,7 +540,7 @@ pub async fn run_sync_link(
     Ok(())
 }
 
-/// Show the current sync state for every backlog entry under `.metastack/backlog/`.
+/// Show the current sync state for every backlog entry under `<PROJECT_DIR>/backlog/`.
 ///
 /// Returns an error when planning metadata is missing, backlog entries cannot be scanned, or
 /// `--fetch` is used and Linear issue state cannot be loaded.
@@ -566,7 +570,10 @@ pub async fn run_sync_status(
                 )?
             );
         } else {
-            println!("No backlog entries found under .metastack/backlog/.");
+            println!(
+                "No backlog entries found under {}/backlog/.",
+                crate::branding::PROJECT_DIR
+            );
         }
         return Ok(());
     }
@@ -801,7 +808,9 @@ fn guard_listen_issue_description_sync(identifier: &str) -> Result<()> {
             .is_some_and(|value| value.eq_ignore_ascii_case(identifier))
     {
         bail!(
-            "`meta backlog sync push {identifier}` is disabled during `meta agents listen` because it would overwrite the primary Linear issue description; update the workpad comment instead"
+            "`{} backlog sync push {identifier}` is disabled during `{} agents listen` because it would overwrite the primary Linear issue description; update the workpad comment instead",
+            branding::COMMAND_NAME,
+            branding::COMMAND_NAME
         );
     }
 
@@ -824,7 +833,10 @@ async fn run_sync_pull_all(
         if json_output {
             emit_sync_batch_result(json_output, "pull", &summary)?;
         } else {
-            println!("No linked backlog entries found under .metastack/backlog/.");
+            println!(
+                "No linked backlog entries found under {}/backlog/.",
+                crate::branding::PROJECT_DIR
+            );
         }
         return Ok(());
     }
@@ -873,7 +885,8 @@ async fn run_sync_pull_all(
             emit_sync_batch_result(false, "pull", &summary)?;
         }
         bail!(
-            "`meta backlog sync pull --all` completed with {} error{}",
+            "`{} backlog sync pull --all` completed with {} error{}",
+            branding::COMMAND_NAME,
             summary.errors,
             plural_suffix(summary.errors),
         );
@@ -900,7 +913,10 @@ async fn run_sync_push_all(
         if json_output {
             emit_sync_batch_result(json_output, "push", &summary)?;
         } else {
-            println!("No linked backlog entries found under .metastack/backlog/.");
+            println!(
+                "No linked backlog entries found under {}/backlog/.",
+                crate::branding::PROJECT_DIR
+            );
         }
         return Ok(());
     }
@@ -963,7 +979,8 @@ async fn run_sync_push_all(
             emit_sync_batch_result(false, "push", &summary)?;
         }
         bail!(
-            "`meta backlog sync push --all` completed with {} error{}",
+            "`{} backlog sync push --all` completed with {} error{}",
+            branding::COMMAND_NAME,
             summary.errors,
             plural_suffix(summary.errors),
         );
@@ -1032,7 +1049,8 @@ async fn sync_pull_issue(
             }
         } else {
             bail!(
-                "`meta backlog sync pull {}` refused to overwrite local backlog content because the sync state is `{}`; rerun in a TTY to review the diff and confirm the overwrite",
+                "`{} backlog sync pull {}` refused to overwrite local backlog content because the sync state is `{}`; rerun in a TTY to review the diff and confirm the overwrite",
+                branding::COMMAND_NAME,
                 issue.identifier,
                 resolution.status.as_str(),
             );
@@ -1134,9 +1152,10 @@ async fn sync_push_issue(
 ) -> Result<SyncExecutionOutcome> {
     if !issue_dir.is_dir() {
         bail!(
-            "backlog item `{}` was not found at `{}`; run `meta backlog sync pull {}` first",
+            "backlog item `{}` was not found at `{}`; run `{} backlog sync pull {}` first",
             issue.identifier,
             issue_dir.display(),
+            branding::COMMAND_NAME,
             issue.identifier
         );
     }
@@ -1144,8 +1163,9 @@ async fn sync_push_issue(
     let index_path = issue_dir.join(INDEX_FILE_NAME);
     let description = fs::read_to_string(&index_path).with_context(|| {
         format!(
-            "failed to read `{}`; `meta backlog sync push` requires `{}`",
+            "failed to read `{}`; `{} backlog sync push` requires `{}`",
             index_path.display(),
+            branding::COMMAND_NAME,
             INDEX_FILE_NAME
         )
     })?;
@@ -1173,7 +1193,8 @@ async fn sync_push_issue(
         )
     {
         bail!(
-            "`meta backlog sync push {}` refused to update the Linear description because the sync state is `{}`; pull first or reconcile the local backlog before retrying with `--update-description`",
+            "`{} backlog sync push {}` refused to update the Linear description because the sync state is `{}`; pull first or reconcile the local backlog before retrying with `--update-description`",
+            branding::COMMAND_NAME,
             issue.identifier,
             resolution.status.as_str(),
         );
@@ -1497,7 +1518,9 @@ async fn load_sync_project_issues(
     } else {
         let project_id = default_project_id.ok_or_else(|| {
             anyhow!(
-                "`meta backlog sync` requires a repo default project or `--project`. Run `meta runtime setup --root . --project <PROJECT>` or pass `--project \"Project Name\"`."
+                "`{} backlog sync` requires a repo default project or `--project`. Run `{} runtime setup --root . --project <PROJECT>` or pass `--project \"Project Name\"`.",
+                branding::COMMAND_NAME,
+                branding::COMMAND_NAME
             )
         })?;
         (
@@ -1520,13 +1543,13 @@ fn sync_dashboard_title(
     default_project_id: Option<&str>,
 ) -> String {
     if let Some(project_name) = project_override {
-        return format!("meta backlog sync ({project_name})");
+        return format!("{} backlog sync ({project_name})", branding::COMMAND_NAME);
     }
 
     if let Some(project_id) = default_project_id {
-        format!("meta backlog sync ({project_id})")
+        format!("{} backlog sync ({project_id})", branding::COMMAND_NAME)
     } else {
-        "meta backlog sync".to_string()
+        format!("{} backlog sync", branding::COMMAND_NAME)
     }
 }
 
@@ -1606,7 +1629,8 @@ fn resolve_link_issue_dir(
     } else {
         if no_interactive || !io::stdin().is_terminal() || !io::stdout().is_terminal() {
             bail!(
-                "`meta backlog sync link {}` requires `--entry <SLUG>` when `--no-interactive` is used or when the command runs without a TTY",
+                "`{} backlog sync link {}` requires `--entry <SLUG>` when `--no-interactive` is used or when the command runs without a TTY",
+                branding::COMMAND_NAME,
                 issue.identifier,
             );
         }
@@ -1690,13 +1714,19 @@ fn resolve_entry_by_slug(root: &Path, entries: &[BacklogSyncEntry], slug: &str) 
         .iter()
         .find(|entry| entry.slug == slug)
         .ok_or_else(|| {
-            anyhow!("backlog entry `{slug}` was not found under `.metastack/backlog/`")
+            anyhow!(
+                "backlog entry `{slug}` was not found under `{}/backlog/`",
+                crate::branding::PROJECT_DIR
+            )
         })?;
     if !entry
         .issue_dir
         .starts_with(PlanningPaths::new(root).backlog_dir)
     {
-        bail!("refusing to use backlog entry outside `.metastack/backlog/`");
+        bail!(
+            "refusing to use backlog entry outside `{}/backlog/`",
+            crate::branding::PROJECT_DIR
+        );
     }
     Ok(entry.issue_dir.clone())
 }
@@ -1932,7 +1962,8 @@ fn prompt_pull_overwrite_with_io(
 ) -> Result<bool> {
     writeln!(
         writer,
-        "`meta backlog sync pull {identifier}` detected `{}`. Review the incoming description diff before overwriting local backlog files:",
+        "`{} backlog sync pull {identifier}` detected `{}`. Review the incoming description diff before overwriting local backlog files:",
+        branding::COMMAND_NAME,
         status.as_str(),
     )?;
     writeln!(writer, "{diff}")?;

@@ -101,11 +101,13 @@ impl fmt::Display for NoAgentSelectedError {
         match self.route_key() {
             Some(route_key) => write!(
                 f,
-                "no agent was selected for route `{route_key}`. Pass `--agent <NAME>` or configure a route or global default with `meta runtime config`."
+                "no agent was selected for route `{route_key}`. Pass `--agent <NAME>` or configure a route or global default with `{} runtime config`.",
+                crate::branding::COMMAND_NAME,
             ),
             None => write!(
                 f,
-                "no agent was selected. Pass `--agent <NAME>` or run `meta runtime config` to configure a default agent."
+                "no agent was selected. Pass `--agent <NAME>` or run `{} runtime config` to configure a default agent.",
+                crate::branding::COMMAND_NAME,
             ),
         }
     }
@@ -151,7 +153,9 @@ pub fn load_required_planning_meta(root: &Path, command_name: &str) -> Result<Pl
     let meta_path = PlanningPaths::new(root).meta_path();
     if !meta_path.is_file() {
         return Err(anyhow!(
-            "`meta {command_name}` requires repo setup. Run `meta runtime setup --root {}` and rerun.",
+            "`{} {command_name}` requires repo setup. Run `{} runtime setup --root {}` and rerun.",
+            crate::branding::COMMAND_NAME,
+            crate::branding::COMMAND_NAME,
             root.display()
         ));
     }
@@ -259,7 +263,8 @@ impl LinearConfig {
     /// Returns the standard missing-auth error used by Linear-backed commands.
     pub fn missing_auth_error() -> anyhow::Error {
         anyhow!(
-            "Linear auth is required for this command. Set LINEAR_API_KEY, run `meta runtime config`, or pass `--api-key <token>`."
+            "Linear auth is required for this command. Set LINEAR_API_KEY, run `{} runtime config`, or pass `--api-key <token>`.",
+            crate::branding::COMMAND_NAME,
         )
     }
 }
@@ -410,62 +415,62 @@ pub fn supported_agent_route_definitions() -> &'static [AgentRouteDefinition] {
         AgentRouteDefinition {
             key: AGENT_ROUTE_BACKLOG_SPEC,
             family: "backlog",
-            label: "meta backlog spec",
+            label: concat!(env!("BRAND_COMMAND_NAME"), " backlog spec"),
         },
         AgentRouteDefinition {
             key: AGENT_ROUTE_BACKLOG_PLAN,
             family: "backlog",
-            label: "meta backlog plan",
+            label: concat!(env!("BRAND_COMMAND_NAME"), " backlog plan"),
         },
         AgentRouteDefinition {
             key: AGENT_ROUTE_BACKLOG_IMPROVE,
             family: "backlog",
-            label: "meta backlog improve",
+            label: concat!(env!("BRAND_COMMAND_NAME"), " backlog improve"),
         },
         AgentRouteDefinition {
             key: AGENT_ROUTE_BACKLOG_SPLIT,
             family: "backlog",
-            label: "meta backlog split",
+            label: concat!(env!("BRAND_COMMAND_NAME"), " backlog split"),
         },
         AgentRouteDefinition {
             key: AGENT_ROUTE_CONTEXT_SCAN,
             family: "context",
-            label: "meta context scan",
+            label: concat!(env!("BRAND_COMMAND_NAME"), " context scan"),
         },
         AgentRouteDefinition {
             key: AGENT_ROUTE_CONTEXT_RELOAD,
             family: "context",
-            label: "meta context reload",
+            label: concat!(env!("BRAND_COMMAND_NAME"), " context reload"),
         },
         AgentRouteDefinition {
             key: AGENT_ROUTE_LINEAR_ISSUES_REFINE,
             family: "linear",
-            label: "meta linear issues refine",
+            label: concat!(env!("BRAND_COMMAND_NAME"), " linear issues refine"),
         },
         AgentRouteDefinition {
             key: AGENT_ROUTE_AGENTS_LISTEN,
             family: "agents",
-            label: "meta agents listen",
+            label: concat!(env!("BRAND_COMMAND_NAME"), " agents listen"),
         },
         AgentRouteDefinition {
             key: AGENT_ROUTE_AGENTS_WORKFLOWS_RUN,
             family: "agents",
-            label: "meta agents workflows run",
+            label: concat!(env!("BRAND_COMMAND_NAME"), " agents workflows run"),
         },
         AgentRouteDefinition {
             key: AGENT_ROUTE_RUNTIME_CRON_PROMPT,
             family: "runtime.cron",
-            label: "meta runtime cron prompt jobs",
+            label: concat!(env!("BRAND_COMMAND_NAME"), " runtime cron prompt jobs"),
         },
         AgentRouteDefinition {
             key: AGENT_ROUTE_AGENTS_REVIEW,
             family: "agents",
-            label: "meta agents review",
+            label: concat!(env!("BRAND_COMMAND_NAME"), " agents review"),
         },
         AgentRouteDefinition {
             key: AGENT_ROUTE_MERGE,
             family: "merge",
-            label: "meta merge",
+            label: concat!(env!("BRAND_COMMAND_NAME"), " merge"),
         },
     ];
     ROUTES

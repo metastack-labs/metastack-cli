@@ -2,6 +2,8 @@
 
 include!("support/common.rs");
 
+use metastack_cli::branding;
+
 fn write_onboarded_config(config_path: &Path, body: &str) -> Result<(), Box<dyn Error>> {
     let body = body.trim_start();
     let content = if body.is_empty() {
@@ -33,7 +35,11 @@ fn config_json_is_global_only_and_does_not_scaffold_repo_defaults() -> Result<()
         .stdout(predicate::str::contains("\"config_path\""))
         .stdout(predicate::str::contains("\"metastack_meta_path\"").not());
 
-    assert!(!repo_root.join(".metastack/meta.json").exists());
+    assert!(
+        !repo_root
+            .join(format!("{}/meta.json", branding::PROJECT_DIR))
+            .exists()
+    );
     Ok(())
 }
 
@@ -129,7 +135,11 @@ fn setup_json_scaffolds_repo_defaults() -> Result<(), Box<dyn Error>> {
         .success()
         .stdout(predicate::str::contains("\"metastack_meta_path\""));
 
-    assert!(repo_root.join(".metastack/meta.json").is_file());
+    assert!(
+        repo_root
+            .join(format!("{}/meta.json", branding::PROJECT_DIR))
+            .is_file()
+    );
     Ok(())
 }
 
@@ -157,8 +167,9 @@ fn setup_direct_updates_persist_fast_plan_defaults() -> Result<(), Box<dyn Error
         .assert()
         .success();
 
-    let parsed: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(repo_root.join(".metastack/meta.json"))?)?;
+    let parsed: serde_json::Value = serde_json::from_str(&fs::read_to_string(
+        repo_root.join(format!("{}/meta.json", branding::PROJECT_DIR)),
+    )?)?;
     assert_eq!(parsed["plan"]["default_mode"].as_str(), Some("fast"));
     assert_eq!(parsed["plan"]["fast_single_ticket"].as_bool(), Some(false));
     assert_eq!(parsed["plan"]["fast_questions"].as_u64(), Some(2));
@@ -171,7 +182,10 @@ fn setup_json_fails_when_backlog_template_conflicts_exist() -> Result<(), Box<dy
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
     let config_path = temp.path().join("metastack.toml");
-    let conflicting_index = repo_root.join(".metastack/backlog/_TEMPLATE/index.md");
+    let conflicting_index = repo_root.join(format!(
+        "{}/backlog/_TEMPLATE/index.md",
+        branding::PROJECT_DIR
+    ));
     fs::create_dir_all(
         conflicting_index
             .parent()
@@ -208,13 +222,16 @@ fn setup_json_fails_when_backlog_template_conflicts_exist() -> Result<(), Box<dy
         payload["error"]["message"]
             .as_str()
             .unwrap_or_default()
-            .contains(".metastack/backlog/_TEMPLATE/index.md")
+            .contains(&format!(
+                "{}/backlog/_TEMPLATE/index.md",
+                branding::PROJECT_DIR
+            ))
     );
     assert!(
         payload["error"]["message"]
             .as_str()
             .unwrap_or_default()
-            .contains("rerun `meta setup --root")
+            .contains(&format!("rerun `{} setup --root", branding::COMMAND_NAME))
     );
 
     assert_eq!(
@@ -411,8 +428,9 @@ default_model = "gpt-5.4"
         .stdout(predicate::str::contains("Repo setup saved."));
 
     let config = fs::read_to_string(&config_path)?;
-    let planning_meta: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(repo_root.join(".metastack/meta.json"))?)?;
+    let planning_meta: serde_json::Value = serde_json::from_str(&fs::read_to_string(
+        repo_root.join(format!("{}/meta.json", branding::PROJECT_DIR)),
+    )?)?;
     let canonical_repo_root = fs::canonicalize(&repo_root)?;
 
     assert!(config.contains(&format!(
@@ -814,7 +832,10 @@ fn repo_dependent_commands_redirect_into_onboarding_when_meta_is_missing()
         .assert()
         .success()
         .stdout(predicate::str::contains("MetaStack"))
-        .stdout(predicate::str::contains("meta plan"));
+        .stdout(predicate::str::contains(format!(
+            "{} plan",
+            branding::COMMAND_NAME
+        )));
 
     cli()
         .args(["sync", "--root", repo_root.to_string_lossy().as_ref()])
@@ -822,7 +843,10 @@ fn repo_dependent_commands_redirect_into_onboarding_when_meta_is_missing()
         .success()
         .stdout(predicate::str::contains("MetaStack"))
         .stdout(predicate::str::contains("onboarding"))
-        .stdout(predicate::str::contains("meta sync"))
+        .stdout(predicate::str::contains(format!(
+            "{} sync",
+            branding::COMMAND_NAME
+        )))
         .stderr(predicate::str::contains("requires repo setup").not());
 
     cli()
@@ -830,7 +854,10 @@ fn repo_dependent_commands_redirect_into_onboarding_when_meta_is_missing()
         .assert()
         .success()
         .stdout(predicate::str::contains("MetaStack"))
-        .stdout(predicate::str::contains("meta technical"));
+        .stdout(predicate::str::contains(format!(
+            "{} technical",
+            branding::COMMAND_NAME
+        )));
 
     cli()
         .args([
@@ -843,7 +870,10 @@ fn repo_dependent_commands_redirect_into_onboarding_when_meta_is_missing()
         .success()
         .stdout(predicate::str::contains("MetaStack"))
         .stdout(predicate::str::contains("onboarding"))
-        .stdout(predicate::str::contains("meta listen"))
+        .stdout(predicate::str::contains(format!(
+            "{} listen",
+            branding::COMMAND_NAME
+        )))
         .stderr(predicate::str::contains("compatibility alias").not());
 
     Ok(())
@@ -923,7 +953,10 @@ fn first_run_interception_redirects_normal_commands_into_onboarding() -> Result<
         .success()
         .stdout(predicate::str::contains("MetaStack"))
         .stdout(predicate::str::contains("onboarding"))
-        .stdout(predicate::str::contains("meta plan"))
+        .stdout(predicate::str::contains(format!(
+            "{} plan",
+            branding::COMMAND_NAME
+        )))
         .stderr(predicate::str::contains("requires repo setup").not());
 
     Ok(())
@@ -943,7 +976,10 @@ fn first_run_interception_redirects_setup_into_onboarding() -> Result<(), Box<dy
         .success()
         .stdout(predicate::str::contains("MetaStack"))
         .stdout(predicate::str::contains("onboarding"))
-        .stdout(predicate::str::contains("meta setup"))
+        .stdout(predicate::str::contains(format!(
+            "{} setup",
+            branding::COMMAND_NAME
+        )))
         .stdout(predicate::str::contains("Repo setup").not());
 
     Ok(())
@@ -1025,7 +1061,7 @@ fn setup_render_once_covers_long_summary_values() -> Result<(), Box<dyn Error>> 
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
     let config_path = temp.path().join("metastack.toml");
-    fs::create_dir_all(repo_root.join(".metastack"))?;
+    fs::create_dir_all(repo_root.join(branding::PROJECT_DIR))?;
     write_onboarded_config(
         &config_path,
         r#"[linear]
@@ -1038,7 +1074,7 @@ default_model = "gpt-5.4"
 "#,
     )?;
     fs::write(
-        repo_root.join(".metastack/meta.json"),
+        repo_root.join(format!("{}/meta.json", branding::PROJECT_DIR)),
         r#"{
   "linear": {
     "profile": null,
@@ -1101,7 +1137,7 @@ fn setup_render_once_keeps_sidebar_content_readable_at_narrow_width() -> Result<
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
     let config_path = temp.path().join("metastack.toml");
-    fs::create_dir_all(repo_root.join(".metastack"))?;
+    fs::create_dir_all(repo_root.join(branding::PROJECT_DIR))?;
     write_onboarded_config(
         &config_path,
         r#"[linear]
@@ -1114,7 +1150,7 @@ default_model = "gpt-5.4"
 "#,
     )?;
     fs::write(
-        repo_root.join(".metastack/meta.json"),
+        repo_root.join(format!("{}/meta.json", branding::PROJECT_DIR)),
         r#"{
   "linear": {
     "profile": "ops profile west",

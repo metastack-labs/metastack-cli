@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+use crate::branding;
 use crate::fs::PlanningPaths;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,11 +106,16 @@ fn render_missing_codebase_context(
         .unwrap_or_default();
     match missing_hint {
         MissingCodebaseContextHint::Scan => {
-            format!("_Missing `{file_name}`. Run `meta scan` to generate it._")
+            format!(
+                "_Missing `{file_name}`. Run `{} scan` to generate it._",
+                branding::COMMAND_NAME
+            )
         }
         MissingCodebaseContextHint::ReloadOrScan => format!(
-            "_Missing `{file_name}`. Run `meta context reload --root {}` or `meta context scan --root {}` to generate it._",
+            "_Missing `{file_name}`. Run `{} context reload --root {}` or `{} context scan --root {}` to generate it._",
+            branding::COMMAND_NAME,
             root.display(),
+            branding::COMMAND_NAME,
             root.display()
         ),
     }

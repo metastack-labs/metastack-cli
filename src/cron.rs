@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use walkdir::WalkDir;
 
+use crate::branding;
 use crate::cli::{
     CronArgs, CronCommands, CronInitArgs, CronInitEventArg, CronListArgs, CronValidateArgs,
 };
@@ -29,15 +30,20 @@ use crate::fs::{
 };
 use crate::output::render_json_success;
 
-const CRON_README: &str = r#"# Cron Jobs
+fn cron_readme() -> String {
+    format!(
+        r#"# Cron Jobs
 
-Use this directory for repository-local automation jobs managed by `meta cron`.
+Use this directory for repository-local automation jobs managed by `{command} cron`.
 
 - One Markdown file per job, such as `nightly.md`
 - YAML front matter stores the schedule and command metadata
 - Markdown body stores operator notes and future-agent context
 - `.runtime/` is created on demand for PID files, logs, and scheduler state
-"#;
+"#,
+        command = branding::COMMAND_NAME,
+    )
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CronJobFrontMatter {
@@ -459,12 +465,14 @@ fn run_init_non_interactive(
 ) -> Result<CronInitFormValues> {
     let name = args.name.as_deref().ok_or_else(|| {
         anyhow!(
-            "`NAME` is required when `--no-interactive` is used or when `meta cron init` runs without a TTY"
+            "`NAME` is required when `--no-interactive` is used or when `{} cron init` runs without a TTY",
+            branding::COMMAND_NAME,
         )
     })?;
     let schedule = args.schedule.as_deref().ok_or_else(|| {
         anyhow!(
-            "`--schedule` is required when `--no-interactive` is used or when `meta cron init` runs without a TTY"
+            "`--schedule` is required when `--no-interactive` is used or when `{} cron init` runs without a TTY",
+            branding::COMMAND_NAME,
         )
     })?;
     validate_job_name(name)?;
@@ -497,7 +505,8 @@ fn run_init_non_interactive(
     let agent = if prompt.is_some() {
         explicit_agent.or(default_agent).ok_or_else(|| {
             anyhow!(
-                "an agent is required when `--prompt` is set; pass `--agent <NAME>` or run `meta runtime config`"
+                "an agent is required when `--prompt` is set; pass `--agent <NAME>` or run `{} runtime config`",
+                branding::COMMAND_NAME,
             )
         })?
     } else {
@@ -1231,7 +1240,7 @@ fn ensure_cron_layout(root: &Path) -> Result<()> {
     let paths = PlanningPaths::new(root);
     ensure_dir(&paths.metastack_dir)?;
     ensure_dir(&paths.cron_dir)?;
-    write_text_file(&paths.cron_readme_path(), CRON_README, false)?;
+    write_text_file(&paths.cron_readme_path(), &cron_readme(), false)?;
     Ok(())
 }
 

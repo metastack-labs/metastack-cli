@@ -3,15 +3,22 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+use crate::branding;
 use crate::config::PlanningMeta;
 use crate::fs::display_path;
 use crate::repo_target::RepoTarget;
 
-const BUILTIN_WORKFLOW_CONTRACT: &str =
-    include_str!("artifacts/injected-agent-workflow-contract.md");
+const BUILTIN_WORKFLOW_CONTRACT: &str = include_str!(concat!(
+    env!("OUT_DIR"),
+    "/artifacts/injected-agent-workflow-contract.md"
+));
 const NO_REPO_OVERLAYS_MESSAGE: &str = "_No repo overlay files were found. `AGENTS.md` and legacy `WORKFLOW.md` are optional additive inputs._";
-const NO_REPO_SCOPED_INSTRUCTIONS_MESSAGE: &str =
-    "_No repo-scoped instructions file is configured in `.metastack/meta.json`._";
+fn no_repo_scoped_instructions_text() -> String {
+    format!(
+        "_No repo-scoped instructions file is configured in `{}/meta.json`._",
+        branding::PROJECT_DIR
+    )
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct InstructionSource {
@@ -78,7 +85,56 @@ impl WorkflowInstructionBundle {
                 lines.push(String::new());
                 lines.push(source.contents.clone());
             }
-            None => lines.push(NO_REPO_SCOPED_INSTRUCTIONS_MESSAGE.to_string()),
+            None => lines.push(no_repo_scoped_instructions_text()),
+        }
+
+        lines.join("\n")
+    }
+
+    fn render_for_listen_prompt(&self) -> String {
+        let mut lines = vec![
+            "## Built-in Workflow Contract".to_string(),
+            String::new(),
+            self.builtin_contract().to_string(),
+            String::new(),
+            "## Repository Scope".to_string(),
+            String::new(),
+            self.repo_target.prompt_scope_block(),
+            String::new(),
+            "## Repo Overlays".to_string(),
+            String::new(),
+        ];
+
+        if self.repo_overlays.is_empty() {
+            lines.push(NO_REPO_OVERLAYS_MESSAGE.to_string());
+        } else {
+            for source in &self.repo_overlays {
+                lines.push(format!(
+                    "- `{}`: read this file directly from disk before acting on repo-specific rules.",
+                    display_path(&source.path, self.repo_target.repo_root())
+                ));
+                if source.label == "WORKFLOW.md" {
+                    lines.push(
+                        "  Treat this as legacy compatibility/documentation context; consult it only when the ticket or repo state requires clarification."
+                            .to_string(),
+                    );
+                }
+            }
+        }
+
+        lines.extend([
+            "".to_string(),
+            "## Repo-Scoped Instructions".to_string(),
+            String::new(),
+        ]);
+        match &self.repo_scoped_instructions {
+            Some(source) => {
+                lines.push(format!(
+                    "Read `{}` directly from disk before starting. Use it as additional repo-specific guidance.",
+                    display_path(&source.path, self.repo_target.repo_root())
+                ));
+            }
+            None => lines.push(no_repo_scoped_instructions_text()),
         }
 
         lines.join("\n")
@@ -145,8 +201,8 @@ pub(crate) fn no_repo_overlays_message() -> &'static str {
     NO_REPO_OVERLAYS_MESSAGE
 }
 
-pub(crate) fn no_repo_scoped_instructions_message() -> &'static str {
-    NO_REPO_SCOPED_INSTRUCTIONS_MESSAGE
+pub(crate) fn no_repo_scoped_instructions_message() -> String {
+    no_repo_scoped_instructions_text()
 }
 
 pub(crate) fn render_repo_overlay_bundle(root: &Path) -> Result<String> {
@@ -169,7 +225,7 @@ pub(crate) fn render_repo_overlay_bundle(root: &Path) -> Result<String> {
 pub(crate) fn render_repo_scoped_instructions(root: &Path) -> Result<String> {
     match load_repo_scoped_instructions_source(root)? {
         Some(source) => Ok(source.contents),
-        None => Ok(NO_REPO_SCOPED_INSTRUCTIONS_MESSAGE.to_string()),
+        None => Ok(no_repo_scoped_instructions_text()),
     }
 }
 
@@ -177,11 +233,19 @@ pub(crate) fn render_workflow_contract(root: &Path, repo_target: RepoTarget) -> 
     Ok(WorkflowInstructionBundle::load(root, repo_target)?.render_for_prompt())
 }
 
+pub(crate) fn render_workflow_contract_for_listen(
+    root: &Path,
+    repo_target: RepoTarget,
+) -> Result<String> {
+    Ok(WorkflowInstructionBundle::load(root, repo_target)?.render_for_listen_prompt())
+}
+
 #[cfg(test)]
 mod tests {
     use tempfile::tempdir;
 
     use super::{WorkflowInstructionBundle, builtin_workflow_contract};
+    use crate::branding;
     use crate::repo_target::RepoTarget;
 
     #[test]
@@ -196,9 +260,10 @@ mod tests {
             "# Listener Instructions\nKeep work scoped.\n",
         )
         .expect("instructions should write");
-        std::fs::create_dir_all(root.join(".metastack")).expect("metastack dir should exist");
+        std::fs::create_dir_all(root.join(branding::PROJECT_DIR))
+            .expect("metastack dir should exist");
         std::fs::write(
-            root.join(".metastack/meta.json"),
+            root.join(format!("{}/meta.json", branding::PROJECT_DIR)),
             r#"{"listen":{"instructions_path":"instructions/listen.md"}}"#,
         )
         .expect("meta should write");
@@ -218,5 +283,28 @@ mod tests {
     #[test]
     fn builtin_contract_is_not_empty() {
         assert!(builtin_workflow_contract().contains("Inject"));
+    }
+
+    #[test]
+    fn listen_prompt_render_references_overlay_paths_without_inlining_contents() {
+        let temp = tempdir().expect("tempdir should create");
+        let root = temp.path();
+        std::fs::write(root.join("AGENTS.md"), "# AGENTS\nUse tests.\n")
+            .expect("agents should write");
+        std::fs::write(
+            root.join("WORKFLOW.md"),
+            "# Workflow\nVery long legacy guidance.\n",
+        )
+        .expect("workflow should write");
+
+        let bundle = WorkflowInstructionBundle::load(root, RepoTarget::from_root(root))
+            .expect("bundle should load");
+        let rendered = bundle.render_for_listen_prompt();
+
+        assert!(rendered.contains("## Repo Overlays"));
+        assert!(rendered.contains("`AGENTS.md`: read this file directly from disk"));
+        assert!(rendered.contains("`WORKFLOW.md`: read this file directly from disk"));
+        assert!(rendered.contains("legacy compatibility/documentation context"));
+        assert!(!rendered.contains("Very long legacy guidance."));
     }
 }

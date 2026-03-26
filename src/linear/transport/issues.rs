@@ -61,7 +61,7 @@ query Issues($first: Int!, $after: String, $filter: IssueFilter) {
         name
         email
       }
-      labels {
+      labels(first: 50) {
         nodes {
           id
           name
@@ -113,7 +113,7 @@ assignee {
   name
   email
 }
-labels {
+labels(first: 50) {
   nodes {
     id
     name
@@ -160,7 +160,7 @@ assignee {
   name
   email
 }
-labels {
+labels(first: 50) {
   nodes {
     id
     name

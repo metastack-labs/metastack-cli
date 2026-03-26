@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::branding;
 use crate::cli::{ListenRefreshPolicyArg, PromptTransportArg};
 #[allow(unused_imports)]
 pub(crate) use crate::config_resolution::data_root_from_config_path;
@@ -815,11 +816,13 @@ impl PlanningMeta {
             )?;
         } else if normalize_optional_ref(self.agent.model.as_deref()).is_some() {
             return Err(anyhow!(
-                "repo default model requires a repo default provider under `.metastack/meta.json`"
+                "repo default model requires a repo default provider under `{}/meta.json`",
+                branding::PROJECT_DIR
             ));
         } else if normalize_optional_ref(self.agent.reasoning.as_deref()).is_some() {
             return Err(anyhow!(
-                "repo default reasoning requires a repo default provider under `.metastack/meta.json`"
+                "repo default reasoning requires a repo default provider under `{}/meta.json`",
+                branding::PROJECT_DIR
             ));
         }
         if let Some(interval) = self.listen.poll_interval_seconds {

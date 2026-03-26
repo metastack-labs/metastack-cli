@@ -64,8 +64,9 @@ use dashboard::{
 use state::{ReviewPhase, ReviewSession};
 use store::ReviewProjectStore;
 
-const REVIEW_INSTRUCTIONS: &str = include_str!("../artifacts/REVIEW.md");
-const VIEW_LINEAR_INSTRUCTIONS: &str = include_str!("../artifacts/VIEW_LINEAR.md");
+const REVIEW_INSTRUCTIONS: &str = include_str!(concat!(env!("OUT_DIR"), "/artifacts/REVIEW.md"));
+const VIEW_LINEAR_INSTRUCTIONS: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/artifacts/VIEW_LINEAR.md"));
 const METASTACK_LABEL: &str = "metastack";
 const INPUT_POLL_INTERVAL_MILLIS: u64 = 100;
 const TERMINAL_REFRESH_INTERVAL_SECONDS: u64 = 1;
@@ -371,17 +372,17 @@ enum ReviewCommandKind {
 }
 
 impl ReviewCommandKind {
-    fn command_name(self) -> &'static str {
+    fn command_name(self) -> String {
         match self {
-            Self::Review => "meta agents review",
-            Self::Retro => "meta agents retro",
+            Self::Review => format!("{} agents review", crate::branding::COMMAND_NAME),
+            Self::Retro => format!("{} agents retro", crate::branding::COMMAND_NAME),
         }
     }
 
-    fn dashboard_title(self) -> &'static str {
+    fn dashboard_title(self) -> String {
         match self {
-            Self::Review => "meta agents review",
-            Self::Retro => "meta agents retro",
+            Self::Review => format!("{} agents review", crate::branding::COMMAND_NAME),
+            Self::Retro => format!("{} agents retro", crate::branding::COMMAND_NAME),
         }
     }
 }
@@ -676,7 +677,7 @@ fn run_review_interactive(
 ) -> Result<()> {
     let root = canonicalize_existing_dir(&args.root)?;
     let config = AppConfig::load()?;
-    let planning_meta = crate::config::load_required_planning_meta(&root, command.command_name())?;
+    let planning_meta = crate::config::load_required_planning_meta(&root, &command.command_name())?;
     let gh = GhCli;
     let store = ReviewProjectStore::resolve(&root).ok();
     if let Some(ref store) = store {
@@ -1087,7 +1088,10 @@ fn run_review_interactive(
 fn run_fix_pr(args: &ReviewRunArgs, pr_number: u64) -> Result<()> {
     let root = canonicalize_existing_dir(&args.root)?;
     let config = AppConfig::load()?;
-    let planning_meta = crate::config::load_required_planning_meta(&root, "meta agents review")?;
+    let planning_meta = crate::config::load_required_planning_meta(
+        &root,
+        &format!("{} agents review", crate::branding::COMMAND_NAME),
+    )?;
     let gh = GhCli;
     let store = ReviewProjectStore::resolve(&root)?;
     let state = store.load_state()?;
@@ -1297,7 +1301,10 @@ fn run_skip_pr(args: &ReviewRunArgs, pr_number: u64) -> Result<()> {
 fn run_review_one_shot(args: &ReviewRunArgs, pr_number: u64) -> Result<()> {
     let root = canonicalize_existing_dir(&args.root)?;
     let config = AppConfig::load()?;
-    let planning_meta = crate::config::load_required_planning_meta(&root, "meta agents review")?;
+    let planning_meta = crate::config::load_required_planning_meta(
+        &root,
+        &format!("{} agents review", crate::branding::COMMAND_NAME),
+    )?;
     let gh = GhCli;
 
     verify_gh_auth(&root)?;
@@ -1383,7 +1390,10 @@ fn run_review_one_shot(args: &ReviewRunArgs, pr_number: u64) -> Result<()> {
 fn run_retro_one_shot(args: &ReviewRunArgs, pr_number: u64) -> Result<()> {
     let root = canonicalize_existing_dir(&args.root)?;
     let config = AppConfig::load()?;
-    let planning_meta = crate::config::load_required_planning_meta(&root, "meta agents retro")?;
+    let planning_meta = crate::config::load_required_planning_meta(
+        &root,
+        &format!("{} agents retro", crate::branding::COMMAND_NAME),
+    )?;
     let gh = GhCli;
 
     verify_gh_auth(&root)?;
@@ -5722,7 +5732,11 @@ fn print_dry_run_output(
     )?;
     let diagnostics = render_invocation_diagnostics(&invocation);
 
-    println!("--- dry-run: meta agents review #{} ---", pr.number);
+    println!(
+        "--- dry-run: {} agents review #{} ---",
+        crate::branding::COMMAND_NAME,
+        pr.number
+    );
     println!("PR: #{} — {}", pr.number, pr.title);
     println!("URL: {}", pr.url);
     println!("Author: {}", pr.author.login);
@@ -5873,8 +5887,10 @@ fn run_remediation_attempt(
         context.review_output,
         context.linear_identifier,
     );
-    let body_path = workspace_path.join(".metastack").join("review-pr-body.md");
-    ensure_dir(&workspace_path.join(".metastack"))?;
+    let body_path = workspace_path
+        .join(crate::branding::PROJECT_DIR)
+        .join("review-pr-body.md");
+    ensure_dir(&workspace_path.join(crate::branding::PROJECT_DIR))?;
     std::fs::write(&body_path, &pr_body).context("failed to write remediation PR body")?;
 
     let result = gh.publish_branch_pull_request(
@@ -5972,12 +5988,13 @@ fn remediation_pull_request_body(
 ) -> String {
     format!(
         "## Summary\n\n\
-         Automated remediation PR for #{original_pr_number} based on `meta agents review` audit.\n\
+         Automated remediation PR for #{original_pr_number} based on `{} agents review` audit.\n\
          This follow-up PR targets the reviewed branch `{target_branch}` so it can merge into the original PR.\n\n\
          ## Review Findings\n\n\
          {review_output}\n\n\
          ## Linear Ticket\n\n\
-         {linear_identifier}\n"
+         {linear_identifier}\n",
+        crate::branding::COMMAND_NAME,
     )
 }
 
@@ -6178,7 +6195,10 @@ fn git_stdout(root: &Path, args: &[&str]) -> Result<String> {
 
 async fn run_review_listener(args: &ReviewRunArgs) -> Result<()> {
     if args.json && !args.once {
-        bail!("`--json` requires `--once` for `meta agents review`");
+        bail!(
+            "`--json` requires `--once` for `{} agents review`",
+            crate::branding::COMMAND_NAME
+        );
     }
 
     let root = canonicalize_existing_dir(&args.root)?;
@@ -6201,7 +6221,10 @@ async fn run_review_listener(args: &ReviewRunArgs) -> Result<()> {
 
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         bail!(
-            "the interactive review dashboard requires a TTY; use `meta agents review <PR_NUMBER> --dry-run`, `meta agents review --once`, or `meta agents review --once --json` for scripted runs"
+            "the interactive review dashboard requires a TTY; use `{} agents review <PR_NUMBER> --dry-run`, `{} agents review --once`, or `{} agents review --once --json` for scripted runs",
+            crate::branding::COMMAND_NAME,
+            crate::branding::COMMAND_NAME,
+            crate::branding::COMMAND_NAME,
         );
     }
 
@@ -6210,7 +6233,10 @@ async fn run_review_listener(args: &ReviewRunArgs) -> Result<()> {
 
 fn run_review_check(root: &Path, args: &ReviewRunArgs) -> Result<()> {
     let config = AppConfig::load()?;
-    let planning_meta = crate::config::load_required_planning_meta(root, "meta agents review")?;
+    let planning_meta = crate::config::load_required_planning_meta(
+        root,
+        &format!("{} agents review", crate::branding::COMMAND_NAME),
+    )?;
 
     verify_gh_auth(root)?;
     println!("gh auth: ok");
@@ -6454,7 +6480,10 @@ fn run_review_for_session(
     args: &ReviewRunArgs,
 ) -> Result<ReviewResult> {
     let config = AppConfig::load()?;
-    let planning_meta = crate::config::load_required_planning_meta(root, "meta agents review")?;
+    let planning_meta = crate::config::load_required_planning_meta(
+        root,
+        &format!("{} agents review", crate::branding::COMMAND_NAME),
+    )?;
     let gh = GhCli;
 
     let pr = fetch_pr_metadata(&gh, root, pr_number)?;
@@ -6686,6 +6715,49 @@ impl Drop for ReviewTerminalDashboard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+
+    use anyhow::Result;
+
+    use crate::agents::{command_args_for_invocation, resolve_agent_invocation_for_planning};
+    use crate::cli::RunAgentArgs;
+    use crate::config::{AgentSettings, AppConfig, PlanningMeta, PromptTransport};
+
+    fn review_test_config() -> AppConfig {
+        AppConfig {
+            agents: AgentSettings {
+                default_agent: None,
+                default_model: Some("gpt-5.4".to_string()),
+                default_reasoning: None,
+                routing: Default::default(),
+                commands: BTreeMap::new(),
+            },
+            ..AppConfig::default()
+        }
+    }
+
+    fn review_test_pr() -> GhPrMetadata {
+        GhPrMetadata {
+            number: 42,
+            title: "MET-42: Review flow".to_string(),
+            url: "https://example.test/pull/42".to_string(),
+            body: Some("Implements MET-42".to_string()),
+            author: GhPrAuthor {
+                login: "metasudo".to_string(),
+            },
+            head_ref_name: "met-42-review".to_string(),
+            base_ref_name: "main".to_string(),
+            changed_files: 1,
+            additions: 10,
+            deletions: 2,
+            state: "OPEN".to_string(),
+            labels: vec![GhPrLabel {
+                name: "metastack".to_string(),
+            }],
+            assignees: Vec::new(),
+            review_decision: Some("REVIEW_REQUIRED".to_string()),
+        }
+    }
 
     #[test]
     fn extract_linear_identifier_from_branch() {
@@ -7854,5 +7926,94 @@ mod tests {
         let parsed = parse_follow_up_ticket_set(&input).unwrap();
         assert_eq!(parsed.summary, "summary");
         assert_eq!(parsed.tickets[0].title, "T");
+    }
+
+    #[test]
+    fn retro_invocation_uses_stdin_transport_without_payload_argv() -> Result<()> {
+        let pr = review_test_pr();
+        let prompt = assemble_follow_up_linear_prompt(
+            &pr,
+            "MET-42",
+            "diff --git a/file b/file",
+            "",
+            "",
+            "",
+            "Identifier: MET-42",
+        );
+
+        let invocation = resolve_agent_invocation_for_planning(
+            &review_test_config(),
+            &PlanningMeta::default(),
+            &RunAgentArgs {
+                root: None,
+                route_key: Some(AGENT_ROUTE_AGENTS_REVIEW.to_string()),
+                agent: Some("codex".to_string()),
+                prompt,
+                instructions: Some(VIEW_LINEAR_INSTRUCTIONS.to_string()),
+                model: None,
+                reasoning: None,
+                transport: None,
+                attachments: Vec::new(),
+            },
+        )?;
+
+        assert_eq!(invocation.transport, PromptTransport::Stdin);
+        assert_eq!(
+            invocation.args,
+            vec!["exec".to_string(), "--model=gpt-5.4".to_string()]
+        );
+        assert!(invocation.payload.contains("MET-42"));
+
+        let command_args = command_args_for_invocation(&invocation, None)?;
+        assert!(!command_args.iter().any(|arg| arg.contains("MET-42")));
+
+        Ok(())
+    }
+
+    #[test]
+    fn remediation_invocation_uses_stdin_transport_without_payload_argv() -> Result<()> {
+        let prompt = remediation_fix_prompt(
+            "### Remediation Required\nYES",
+            1,
+            Some("previous attempt failed"),
+            false,
+        );
+
+        let invocation = resolve_agent_invocation_for_planning(
+            &review_test_config(),
+            &PlanningMeta::default(),
+            &RunAgentArgs {
+                root: None,
+                route_key: Some(AGENT_ROUTE_AGENTS_REVIEW.to_string()),
+                agent: Some("codex".to_string()),
+                prompt,
+                instructions: None,
+                model: None,
+                reasoning: None,
+                transport: None,
+                attachments: Vec::new(),
+            },
+        )?;
+
+        assert_eq!(invocation.transport, PromptTransport::Stdin);
+        assert_eq!(
+            invocation.args,
+            vec!["exec".to_string(), "--model=gpt-5.4".to_string()]
+        );
+        assert!(invocation.payload.contains("### Remediation Required"));
+        assert!(
+            invocation
+                .payload
+                .contains("This is remediation attempt #1.")
+        );
+
+        let command_args = command_args_for_invocation(&invocation, None)?;
+        assert!(
+            !command_args
+                .iter()
+                .any(|arg| arg.contains("This is remediation attempt #1."))
+        );
+
+        Ok(())
     }
 }

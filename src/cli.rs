@@ -6,194 +6,15 @@ use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 
 use crate::tui::prompt_images::PromptImageAttachment;
 
-const ROOT_HELP_EXAMPLES: &str = "\
-Example flows:
-  engineer:
-    meta runtime setup --root . --team MET --project \"MetaStack CLI\"
-    meta context scan --root .
-    meta backlog plan --root . --request \"Break the next release into tickets\"
-
-  team lead:
-    meta linear issues list --team MET --state \"In Progress\"
-    meta dashboard team --team MET --project \"MetaStack CLI\"
-
-  ops operator:
-    meta agents listen --team MET --project \"MetaStack CLI\"
-    meta dashboard ops --root .";
-
-const BACKLOG_HELP_EXAMPLES: &str = "\
-Examples:
-  meta backlog spec --root .
-  meta backlog spec --root . --no-interactive --request \"Add a repo-local SPEC workflow\"
-  meta backlog spec --root . --no-interactive --request \"Improve the current SPEC\" --answer \"Clarify the non-goals\"
-  meta backlog plan --root . --request \"Split the onboarding work into tickets\"
-  meta backlog plan --root . ENG-10144
-  meta backlog plan --root . ENG-10144 --velocity
-  meta backlog improve --root . --mode basic
-  meta backlog improve --root . ENG-10144 --mode advanced --apply
-  meta backlog tech MET-35
-  meta backlog split MET-35
-  meta backlog sync status
-  meta backlog sync link MET-35 --entry manual-notes --pull
-  meta backlog sync pull --all
-  meta backlog sync push MET-35 --update-description";
-
-const BACKLOG_IMPROVE_HELP: &str = "\
-Use `meta backlog improve` for a repo-scoped backlog sweep across existing issues in one state.
-Choose `--mode basic` for conservative metadata hygiene and `--mode advanced` for deeper
-rewrites or parent-child structure proposals.
-
-Use `meta linear issues refine` when you already know which issue needs a critique/rewrite and
-the primary goal is improving that issue's description rather than scanning the backlog.";
-
-const ISSUES_REFINE_HELP: &str = "\
-Use `meta linear issues refine` when you already know which issue needs a critique/rewrite and
-want a focused description-quality pass with auditable refinement artifacts.
-
-Use `meta backlog improve` when you want a repo-scoped backlog sweep for missing labels,
-acceptance criteria, priority/estimate, and parent-child structure opportunities.";
-
-const AGENTS_HELP_EXAMPLES: &str = "\
-Examples:
-  meta agents listen --team MET --project \"MetaStack CLI\"
-  meta agents execute MET-45 --team MET --project \"MetaStack CLI\"
-  meta agents execute MET-45 --root . --max-turns 10
-  meta agents review 42 --root .
-  meta agents review 42 --root . --dry-run
-  meta agents review --root .
-  meta agents review --root . --check
-  meta agents review --root . --once
-  meta agents retro 42 --root .
-  meta agents retro --root .
-  meta agents improve --root .
-  meta agents improve --root . --render-once
-  meta agents workflows list --root .
-  meta agents workflows run ticket-implementation --root .
-  meta agents workflows run ticket-implementation --root . --no-interactive --param issue=MET-93
-  meta agents workflows run ticket-implementation --root . --render-once --param issue=MET-93";
-
-const WORKFLOW_RUN_HELP: &str = "\
-Interactive mode:
-  TTY runs open a guided wizard, then land on a review/export dashboard.
-  Use --render-once for deterministic wizard snapshots in tests.
-  Use --events to script render-once snapshots through review, edit, and save states.
-  Use accept-edit/discard-edit to prove edit outcomes, and paste=TEXT to inject scripted input.
-
-Non-interactive mode:
-  Use --no-interactive with explicit --param key=value pairs for scripts and CI.
-  Runs without a TTY use the same fallback automatically unless --render-once is set.
-  Use --output and --overwrite to save the reviewed Markdown artifact headlessly.";
-
-const LISTEN_HELP_EXAMPLES: &str = "\
-Interactive dashboard:
-  - The dashboard has two primary panes: Agent Sessions and In Progress Issues - All Users (from Linear)
-  - Tab switches focus between panes; Left/Right switches Active/Completed views within Agent Sessions
-  - In Progress Issues rows show short title, assignee, and open-PR indicator for each In Progress issue
-  - Press Enter on a selected item to open its detail pane; Esc or Backspace closes it
-  - Session detail includes milestones, references, prompt context, log excerpts, and PR info
-  - In Progress Issue detail shows the issue description, assignee, PR URL, and Linear link
-  - Use Up/Down (or j/k in vim mode) to navigate, PgUp/PgDn to scroll detail content
-  - Press P to pause a running session, R to resume a paused session or retry a blocked one
-  - Use --hide-active-issues or --hide-preview to simplify the dashboard layout
-  - Configure defaults in .metastack/meta.json under listen.dashboard_active_issues and listen.dashboard_preview
-
-Terminal-only examples:
-  meta agents listen --check --root .
-  meta agents listen --team MET --once
-  meta listen sessions list
-
-Concurrent project-scoped examples from one checkout:
-  meta agents listen --team MET --project \"MetaStack CLI\"
-  meta agents listen --team MET --project \"MetaStack API\"
-  meta listen sessions inspect --root . --project \"MetaStack API\"
-  meta listen sessions clear --root . --project \"MetaStack API\"
-  meta listen sessions resume --root . --project \"MetaStack API\" --once
-
-Default-project example:
-  meta runtime setup --root . --team MET --project \"MetaStack CLI\"
-  meta agents listen --team MET";
-
-const CONTEXT_HELP_EXAMPLES: &str = "\
-Examples:
-  meta context show --root .
-  meta context scan --root .
-  meta context doctor --root .";
-
-const RUNTIME_HELP_EXAMPLES: &str = "\
-Examples:
-  meta runtime config --json
-  meta runtime setup --root . --team MET --project \"MetaStack CLI\"
-  meta runtime cron status --root .";
-
-const RUNTIME_CONFIG_HELP: &str = "\
-Resolution precedence for built-in provider/model/reasoning:
-  1. explicit CLI overrides such as --agent/--provider, --model, and --reasoning
-  2. command route override
-  3. family route override
-  4. repo defaults from `meta runtime setup`
-  5. install defaults from `meta runtime config`
-
-Built-in provider catalog:
-  codex: gpt-5.4, gpt-5.3-codex, gpt-5.2-codex, gpt-5.1-codex-max, gpt-5.1-codex,
-         gpt-5.1-codex-mini, gpt-5-codex, gpt-5-codex-mini
-         reasoning: low, medium, high
-  claude: sonnet, opus, haiku, sonnet[1m], opusplan
-          reasoning: low, medium, high, max
-
-Confirm the effective selection before launch:
-  meta agents workflows run ticket-implementation --root . --dry-run";
-
-const RUNTIME_SETUP_HELP: &str = "\
-Repo defaults written by `meta runtime setup` participate in the built-in resolution order:
-  explicit CLI override -> command route -> family route -> repo default -> install default
-
-Built-in provider/model/reasoning combinations are validated before they are saved.
-Use `meta agents workflows run ... --dry-run` or `meta context scan --root .` to confirm the
-resolved provider, model, reasoning, route key, and config source before or during execution.
-
-Listen prerequisites:
-  codex: `~/.codex/config.toml` must set `approval_policy = \"never\"`
-         and `sandbox_mode = \"danger-full-access\"`, and Linear MCP should be removed or
-         disabled with `-c mcp_servers.linear.enabled=false`
-  claude: `claude` must be on PATH and `ANTHROPIC_API_KEY` should be unset
-  verify: `meta agents listen --check --root .`";
-
-const DASHBOARD_HELP_EXAMPLES: &str = "\
-Examples:
-  meta dashboard linear --team MET --project \"MetaStack CLI\"
-  meta dashboard agents --team MET --project \"MetaStack CLI\" --render-once
-  meta dashboard team --team MET
-  meta dashboard ops --root .";
-
-const MERGE_HELP_EXAMPLES: &str = "\
-Examples:
-  meta merge --json
-  meta merge
-  meta merge --render-once --events space,down,space,enter
-  meta merge --no-interactive --pull-request 101 --pull-request 102 --validate \"make quality\"";
-
-const WORKSPACE_HELP_EXAMPLES: &str = "\
-Examples:
-  meta workspace list --root .
-  meta workspace clean ENG-10175 --root .
-  meta workspace clean --target-only --root .
-  meta workspace prune --dry-run --root .";
-
-const UPGRADE_HELP_EXAMPLES: &str = "\
-Default latest-stable path:
-  meta upgrade --check
-  meta upgrade --dry-run
-  meta upgrade
-
-Advanced version-management path:
-  meta upgrade --version 0.2.0 --dry-run
-  meta upgrade --version 0.3.0-rc.1 --prerelease
-  meta upgrade --version 0.1.0 --allow-downgrade";
+mod cli_help {
+    include!(concat!(env!("OUT_DIR"), "/cli_help.rs"));
+}
+use cli_help::*;
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "meta",
-    bin_name = "meta",
+    name = env!("BRAND_COMMAND_NAME"),
+    bin_name = env!("BRAND_COMMAND_NAME"),
     version,
     about = "CLI scaffolding for backlog management, Linear workflows, agent-backed automation, and codebase scanning.",
     after_help = ROOT_HELP_EXAMPLES
@@ -221,44 +42,116 @@ pub enum Command {
     Merge(MergeArgs),
     /// List and clean sibling listener workspace clones under the fixed `<repo>-workspace/` root.
     Workspace(WorkspaceArgs),
-    /// Securely self-update a GitHub Release install of `meta` on macOS/Linux.
+    /// Securely self-update a GitHub Release install on macOS/Linux.
     Upgrade(UpgradeArgs),
-    /// Compatibility alias for `meta backlog plan`.
-    #[command(hide = true)]
+    #[command(
+        hide = true,
+        about = concat!(
+            "Compatibility alias for `",
+            env!("BRAND_COMMAND_NAME"),
+            " backlog plan`."
+        )
+    )]
     Plan(PlanArgs),
-    /// Compatibility alias for `meta backlog tech`.
-    #[command(hide = true)]
+    #[command(
+        hide = true,
+        about = concat!(
+            "Compatibility alias for `",
+            env!("BRAND_COMMAND_NAME"),
+            " backlog tech`."
+        )
+    )]
     Technical(TechnicalArgs),
-    /// Compatibility alias for `meta agents listen`.
-    #[command(hide = true)]
+    #[command(
+        hide = true,
+        about = concat!(
+            "Compatibility alias for `",
+            env!("BRAND_COMMAND_NAME"),
+            " agents listen`."
+        )
+    )]
     Listen(ListenArgs),
-    /// Compatibility alias for `meta linear issues`.
-    #[command(hide = true)]
-    #[command(visible_alias = "tickets")]
+    #[command(
+        hide = true,
+        visible_alias = "tickets",
+        about = concat!(
+            "Compatibility alias for `",
+            env!("BRAND_COMMAND_NAME"),
+            " linear issues`."
+        )
+    )]
     Issues(IssuesArgs),
-    /// Compatibility alias for `meta linear projects`.
-    #[command(hide = true)]
+    #[command(
+        hide = true,
+        about = concat!(
+            "Compatibility alias for `",
+            env!("BRAND_COMMAND_NAME"),
+            " linear projects`."
+        )
+    )]
     Projects(ProjectsArgs),
-    /// Compatibility alias for `meta runtime cron`.
-    #[command(hide = true)]
+    #[command(
+        hide = true,
+        about = concat!(
+            "Compatibility alias for `",
+            env!("BRAND_COMMAND_NAME"),
+            " runtime cron`."
+        )
+    )]
     Cron(CronArgs),
-    /// Compatibility alias for `meta context scan`.
-    #[command(hide = true)]
+    #[command(
+        hide = true,
+        about = concat!(
+            "Compatibility alias for `",
+            env!("BRAND_COMMAND_NAME"),
+            " context scan`."
+        )
+    )]
     Scan(ScanArgs),
-    /// Compatibility alias for `meta agents workflows`.
-    #[command(hide = true)]
+    #[command(
+        hide = true,
+        about = concat!(
+            "Compatibility alias for `",
+            env!("BRAND_COMMAND_NAME"),
+            " agents workflows`."
+        )
+    )]
     Workflows(WorkflowsArgs),
-    /// Compatibility alias for `meta runtime config`.
-    #[command(hide = true)]
+    #[command(
+        hide = true,
+        about = concat!(
+            "Compatibility alias for `",
+            env!("BRAND_COMMAND_NAME"),
+            " runtime config`."
+        )
+    )]
     Config(ConfigArgs),
-    /// Compatibility alias for `meta runtime setup`.
-    #[command(hide = true)]
+    #[command(
+        hide = true,
+        about = concat!(
+            "Compatibility alias for `",
+            env!("BRAND_COMMAND_NAME"),
+            " runtime setup`."
+        )
+    )]
     Setup(SetupArgs),
-    /// Compatibility alias for `meta backlog sync`.
-    #[command(hide = true)]
+    #[command(
+        hide = true,
+        about = concat!(
+            "Compatibility alias for `",
+            env!("BRAND_COMMAND_NAME"),
+            " backlog sync`."
+        )
+    )]
     Sync(SyncArgs),
-    /// Hidden worker used by `meta listen` to supervise repeated agent turns.
-    #[command(hide = true)]
+    #[command(
+        hide = true,
+        about = concat!(
+            "Hidden worker used by `",
+            env!("BRAND_COMMAND_NAME"),
+            " listen` to supervise repeated agent turns."
+        )
+    )]
     ListenWorker(ListenWorkerArgs),
     /// Create the local .metastack workspace and reusable templates.
     #[command(hide = true)]
@@ -349,6 +242,9 @@ pub struct BacklogImproveArgs {
     /// Apply the proposed updates after persisting the local artifact trail.
     #[arg(long)]
     pub apply: bool,
+    /// Override the Linear project scope for targeted issues.
+    #[arg(long)]
+    pub project: Option<String>,
     /// Override the configured default agent/provider for backlog improvement.
     #[arg(long)]
     pub agent: Option<String>,
@@ -817,8 +713,14 @@ pub enum CronCommands {
     Approve(CronApproveArgs),
     /// Reject a waiting cron workflow run.
     Reject(CronRejectArgs),
-    /// Hidden worker used by `meta cron start` for the detached scheduler loop.
-    #[command(hide = true)]
+    #[command(
+        hide = true,
+        about = concat!(
+            "Hidden worker used by `",
+            env!("BRAND_COMMAND_NAME"),
+            " cron start` for the detached scheduler loop."
+        )
+    )]
     Daemon(CronDaemonArgs),
 }
 
@@ -1027,14 +929,32 @@ pub struct ConfigArgs {
     /// Update the global default built-in reasoning option.
     #[arg(long)]
     pub default_reasoning: Option<String>,
-    /// Update how many times `meta merge` will ask the agent to repair failed validation by default.
-    #[arg(long)]
+    #[arg(
+        long,
+        help = concat!(
+            "Update how many times `",
+            env!("BRAND_COMMAND_NAME"),
+            " merge` will ask the agent to repair failed validation by default."
+        )
+    )]
     pub merge_validation_repair_attempts: Option<String>,
-    /// Update how many transient validation reruns `meta merge` will allow before escalating.
-    #[arg(long)]
+    #[arg(
+        long,
+        help = concat!(
+            "Update how many transient validation reruns `",
+            env!("BRAND_COMMAND_NAME"),
+            " merge` will allow before escalating."
+        )
+    )]
     pub merge_validation_transient_retry_attempts: Option<String>,
-    /// Update how many times `meta merge` retries push and PR publication after transient remote failures.
-    #[arg(long)]
+    #[arg(
+        long,
+        help = concat!(
+            "Update how many times `",
+            env!("BRAND_COMMAND_NAME"),
+            " merge` retries push and PR publication after transient remote failures."
+        )
+    )]
     pub merge_publication_retry_attempts: Option<String>,
     /// Update the default assignee used by backlog ticket creation.
     #[arg(long)]
@@ -1075,8 +995,14 @@ pub struct ConfigArgs {
     /// Update the install-scoped plan follow-up question limit.
     #[arg(long)]
     pub plan_follow_up_limit: Option<String>,
-    /// Update the install-scoped default mode for `meta backlog plan`. Supported values: `normal`, `fast`, or `none`.
-    #[arg(long)]
+    #[arg(
+        long,
+        help = concat!(
+            "Update the install-scoped default mode for `",
+            env!("BRAND_COMMAND_NAME"),
+            " backlog plan`. Supported values: `normal`, `fast`, or `none`."
+        )
+    )]
     pub plan_default_mode: Option<String>,
     /// Update whether install-scoped fast planning defaults to a single ticket. Supported values: `true`, `false`, or `none`.
     #[arg(long)]
@@ -1161,26 +1087,65 @@ pub struct SetupArgs {
     /// Update the repo-scoped default built-in reasoning option.
     #[arg(long)]
     pub reasoning: Option<String>,
-    /// Update the labels required for `meta listen` pickup. Provide a comma-separated list.
-    #[arg(long)]
+    #[arg(
+        long,
+        help = concat!(
+            "Update the labels required for `",
+            env!("BRAND_COMMAND_NAME"),
+            " listen` pickup. Provide a comma-separated list."
+        )
+    )]
     pub listen_label: Option<String>,
-    /// Update the assignee scope used by `meta listen`.
-    #[arg(long = "assignee-scope", alias = "assignment-scope", value_enum)]
+    #[arg(
+        long = "assignee-scope",
+        alias = "assignment-scope",
+        value_enum,
+        help = concat!(
+            "Update the assignee scope used by `",
+            env!("BRAND_COMMAND_NAME"),
+            " listen`."
+        )
+    )]
     pub assignee_scope: Option<ListenAssigneeScopeArg>,
-    /// Update how `meta listen` refreshes existing ticket workspaces.
-    #[arg(long, value_enum)]
+    #[arg(
+        long,
+        value_enum,
+        help = concat!(
+            "Update how `",
+            env!("BRAND_COMMAND_NAME"),
+            " listen` refreshes existing ticket workspaces."
+        )
+    )]
     pub refresh_policy: Option<ListenRefreshPolicyArg>,
     /// Update the optional instructions file injected into launched agents.
     #[arg(long)]
     pub instructions_path: Option<String>,
-    /// Update the default Linear refresh cadence used by `meta listen`.
-    #[arg(long)]
+    #[arg(
+        long,
+        help = concat!(
+            "Update the default Linear refresh cadence used by `",
+            env!("BRAND_COMMAND_NAME"),
+            " listen`."
+        )
+    )]
     pub listen_poll_interval: Option<String>,
-    /// Update the interactive `meta plan` follow-up question limit.
-    #[arg(long)]
+    #[arg(
+        long,
+        help = concat!(
+            "Update the interactive `",
+            env!("BRAND_COMMAND_NAME"),
+            " plan` follow-up question limit."
+        )
+    )]
     pub interactive_plan_follow_up_question_limit: Option<String>,
-    /// Update the repo-scoped default mode for `meta backlog plan`. Supported values: `normal`, `fast`, or `none`.
-    #[arg(long)]
+    #[arg(
+        long,
+        help = concat!(
+            "Update the repo-scoped default mode for `",
+            env!("BRAND_COMMAND_NAME"),
+            " backlog plan`. Supported values: `normal`, `fast`, or `none`."
+        )
+    )]
     pub plan_default_mode: Option<String>,
     /// Update whether repo-scoped fast planning defaults to a single ticket. Supported values: `true`, `false`, or `none`.
     #[arg(long)]
@@ -1188,11 +1153,23 @@ pub struct SetupArgs {
     /// Update the repo-scoped fast planning follow-up batch size.
     #[arg(long)]
     pub plan_fast_questions: Option<String>,
-    /// Update the default label applied to issues created by `meta plan`.
-    #[arg(long)]
+    #[arg(
+        long,
+        help = concat!(
+            "Update the default label applied to issues created by `",
+            env!("BRAND_COMMAND_NAME"),
+            " plan`."
+        )
+    )]
     pub plan_label: Option<String>,
-    /// Update the default label applied to issues created by `meta backlog tech`.
-    #[arg(long)]
+    #[arg(
+        long,
+        help = concat!(
+            "Update the default label applied to issues created by `",
+            env!("BRAND_COMMAND_NAME"),
+            " backlog tech`."
+        )
+    )]
     pub technical_label: Option<String>,
     /// Update the default assignee used by backlog ticket creation.
     #[arg(long)]
@@ -1288,6 +1265,9 @@ pub struct ListenSessionListArgs {}
 pub struct ListenSessionInspectArgs {
     #[command(flatten)]
     pub target: ListenSessionTargetArgs,
+    /// Show persisted per-turn token history when detail artifacts include it.
+    #[arg(long)]
+    pub turns: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -1334,8 +1314,14 @@ pub struct ListenRunArgs {
     /// Override the Linear GraphQL endpoint.
     #[arg(long)]
     pub api_url: Option<String>,
-    /// Override the named Linear profile used by `meta listen`.
-    #[arg(long)]
+    #[arg(
+        long,
+        help = concat!(
+            "Override the named Linear profile used by `",
+            env!("BRAND_COMMAND_NAME"),
+            " listen`."
+        )
+    )]
     pub profile: Option<String>,
     /// Default Linear team key.
     #[arg(long)]
@@ -1931,7 +1917,11 @@ pub struct DashboardArgs {
 pub enum DashboardCommands {
     /// Launch the Linear issue dashboard.
     Linear(DashboardLinearArgs),
-    /// Launch the agent-session dashboard exposed by `meta agents listen`.
+    #[doc = concat!(
+        "Launch the agent-session dashboard exposed by `",
+        env!("BRAND_COMMAND_NAME"),
+        " agents listen`."
+    )]
     Agents(DashboardAgentsArgs),
     /// Launch the team-oriented Linear review dashboard.
     Team(DashboardLinearArgs),

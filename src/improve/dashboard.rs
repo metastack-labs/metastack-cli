@@ -531,7 +531,10 @@ mod tests {
                 test_session("s2", ImprovePhase::Completed),
             ],
             now_epoch_seconds: 2000,
-            state_file: ".metastack/agents/improve/sessions/state.json".to_string(),
+            state_file: format!(
+                "{}/agents/improve/sessions/state.json",
+                crate::branding::PROJECT_DIR
+            ),
         }
     }
 

@@ -27,4 +27,4 @@ steps:
       allow: ["github"]
       mutates: []
 ---
-Sample only. Copy into `.metastack/cron/` and enable it explicitly before use.
+Sample only. Copy into `{{brand.project_dir}}/cron/` and enable it explicitly before use.

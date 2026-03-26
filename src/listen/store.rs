@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::fs;
 use std::hash::{Hash, Hasher};
@@ -9,6 +10,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::agent_provider::builtin_provider_adapter;
 use crate::config::resolve_data_root;
 use crate::fs::{PlanningPaths, canonicalize_existing_dir, ensure_dir};
 use crate::listen::compact_session_summary;
@@ -17,14 +19,23 @@ use crate::session_runtime::{
 };
 
 use super::state::{
-    AgentSession, COMPLETED_SESSION_TTL_SECONDS, LatestResumeHandle, ListenState,
-    PullRequestStatus, PullRequestSummary, SessionPhase, TokenUsage,
+    AgentSession, COMPLETED_SESSION_TTL_SECONDS, CanonicalRepairRecord, CanonicalRepairStatus,
+    CanonicalSessionData, LatestResumeHandle, ListenState, PullRequestStatus, PullRequestSummary,
+    SessionPhase, TokenUsage, TurnTokenSnapshot,
 };
 
 const LISTEN_STORE_VERSION: u8 = 1;
-const LISTEN_SESSION_DETAIL_VERSION: u8 = 2;
+const LISTEN_SESSION_DETAIL_VERSION: u8 = 3;
 const LOG_EXCERPT_LIMIT: usize = 6;
 const LOG_EXCERPT_MAX_CHARS: usize = 120;
+
+fn listen_turn_log_prefix() -> String {
+    format!("--- {} listen turn ", crate::branding::COMMAND_NAME)
+}
+
+fn is_listen_turn_log_header(line: &str) -> bool {
+    line.starts_with(&listen_turn_log_prefix()) || line.starts_with("--- meta listen turn ")
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct ListenProjectStore {
@@ -139,6 +150,10 @@ pub(crate) struct ListenSessionDetail {
     pub turns: Option<u32>,
     #[serde(default)]
     pub tokens: TokenUsage,
+    #[serde(default)]
+    pub turn_history: Vec<TurnTokenSnapshot>,
+    #[serde(default)]
+    pub canonical: CanonicalSessionData,
     #[serde(default)]
     pub pull_request: PullRequestSummary,
     #[serde(default)]
@@ -300,11 +315,12 @@ impl ListenProjectStore {
 
     pub(super) fn load_state(&self) -> Result<ListenState> {
         let (mut state, state_exists) = self.load_state_from_disk()?;
+        let repaired = self.repair_state(&mut state)?;
         let pruned = state.prune_completed_sessions_older_than(
             now_epoch_seconds(),
             COMPLETED_SESSION_TTL_SECONDS,
         );
-        if state_exists && !pruned.is_empty() {
+        if state_exists && (repaired || !pruned.is_empty()) {
             self.save_state(&state)?;
         }
         Ok(state)
@@ -478,7 +494,8 @@ impl ListenProjectStore {
             if let Some(existing) = self.load_active_lock()? {
                 if pid_is_running(existing.pid) {
                     bail!(
-                        "another `meta listen` instance already owns project `{}` (pid {}); active lock: {}",
+                        "another `{} listen` instance already owns project `{}` (pid {}); active lock: {}",
+                        crate::branding::COMMAND_NAME,
                         self.identity.project_label,
                         existing.pid,
                         self.paths.lock_path.display()
@@ -669,6 +686,8 @@ impl ListenProjectStore {
                 summary: session.summary.clone(),
                 turns: session.turns,
                 tokens: session.tokens.clone(),
+                turn_history: session.turn_history.clone(),
+                canonical: session.canonical.clone(),
                 pull_request: session.pull_request.clone(),
                 latest_resume_handle: session.latest_resume_handle.clone(),
                 references: SessionDetailReferences::default(),
@@ -686,6 +705,8 @@ impl ListenProjectStore {
         detail.summary = session.summary.clone();
         detail.turns = session.turns;
         detail.tokens = session.tokens.clone();
+        detail.turn_history = session.turn_history.clone();
+        detail.canonical = session.canonical.clone();
         detail.pull_request = session.pull_request.clone();
         detail.latest_resume_handle = session.latest_resume_handle.clone();
         detail.references = SessionDetailReferences {
@@ -701,6 +722,15 @@ impl ListenProjectStore {
         append_milestone(&mut detail.milestones, session);
 
         write_json(&path, &detail)
+    }
+
+    fn repair_state(&self, state: &mut ListenState) -> Result<bool> {
+        let mut changed = false;
+        for session in &mut state.sessions {
+            let detail = self.load_session_detail(&session.issue_identifier)?;
+            changed |= repair_session(self, session, detail.as_ref())?;
+        }
+        Ok(changed)
     }
 
     fn remove_orphaned_session_details(&self, state: &ListenState) -> Result<()> {
@@ -769,7 +799,8 @@ fn resolve_project_identity(
 ) -> Result<ListenProjectIdentity> {
     let requested_root = canonicalize_existing_dir(root)?;
     let source_root = resolve_source_root(&requested_root)?;
-    let metastack_root = canonicalize_existing_dir(&source_root.join(".metastack"))?;
+    let metastack_root =
+        canonicalize_existing_dir(&source_root.join(crate::branding::PROJECT_DIR))?;
     let source_label = source_root
         .file_name()
         .and_then(OsStr::to_str)
@@ -792,7 +823,7 @@ fn resolve_project_identity(
 }
 
 /// Resolves the source repository root for a requested path, collapsing git worktrees back to the
-/// owning repository when the shared `.metastack/` directory lives there.
+/// owning repository when the shared project directory (see `crate::branding::PROJECT_DIR`) lives there.
 ///
 /// Returns an error when the requested path cannot be resolved.
 pub(crate) fn resolve_source_project_root(root: &Path) -> Result<PathBuf> {
@@ -809,7 +840,7 @@ fn resolve_source_root(root: &Path) -> Result<PathBuf> {
         let common_dir = PathBuf::from(common_dir);
         if common_dir.file_name() == Some(OsStr::new(".git"))
             && let Some(source_root) = common_dir.parent()
-            && source_root.join(".metastack").is_dir()
+            && source_root.join(crate::branding::PROJECT_DIR).is_dir()
         {
             return canonicalize_existing_dir(source_root);
         }
@@ -924,6 +955,277 @@ fn build_prompt_context_references(session: &AgentSession) -> Vec<SessionContext
     }
 
     references
+}
+
+fn repair_session(
+    store: &ListenProjectStore,
+    session: &mut AgentSession,
+    detail: Option<&ListenSessionDetail>,
+) -> Result<bool> {
+    let original_tokens = session.tokens.clone();
+    let original_turn_history = session.turn_history.clone();
+    let original_canonical = session.canonical.clone();
+    let log_path = resolve_store_path(
+        store,
+        session
+            .log_path
+            .as_deref()
+            .or_else(|| detail.and_then(|value| value.references.log_path.as_deref())),
+    );
+    let log_recovery = repair_from_worker_log(log_path.as_deref())?;
+    let mut recovered_sources = Vec::new();
+    let mut skip_notes = log_recovery.notes;
+
+    if session.turn_history.is_empty()
+        && let Some(turn_history) = detail
+            .map(|value| value.turn_history.clone())
+            .filter(|turn_history| !turn_history.is_empty())
+    {
+        session.turn_history = turn_history;
+    }
+
+    if session.canonical.provider.is_none() {
+        if let Some(provider) = detail.and_then(|value| value.canonical.provider.clone()) {
+            session.canonical.provider = Some(provider);
+            recovered_sources.push("detail_provider".to_string());
+        } else if let Some(provider) = session
+            .latest_resume_handle
+            .as_ref()
+            .map(|resume| resume.provider.label().to_string())
+        {
+            session.canonical.provider = Some(provider);
+            recovered_sources.push("resume_provider".to_string());
+        } else if let Some(provider) = detail
+            .and_then(|value| value.latest_resume_handle.as_ref())
+            .map(|resume| resume.provider.label().to_string())
+        {
+            session.canonical.provider = Some(provider);
+            recovered_sources.push("detail_resume_provider".to_string());
+        } else if let Some(provider) = log_recovery.provider {
+            session.canonical.provider = Some(provider);
+            recovered_sources.push("worker_log_provider".to_string());
+        }
+    }
+
+    if session.canonical.model.is_none() {
+        if let Some(model) = detail.and_then(|value| value.canonical.model.clone()) {
+            session.canonical.model = Some(model);
+            recovered_sources.push("detail_model".to_string());
+        } else if let Some(model) = log_recovery.model {
+            session.canonical.model = Some(model);
+            recovered_sources.push("worker_log_model".to_string());
+        }
+    }
+
+    if session.canonical.reasoning.is_none() {
+        if let Some(reasoning) = detail.and_then(|value| value.canonical.reasoning.clone()) {
+            session.canonical.reasoning = Some(reasoning);
+            recovered_sources.push("detail_reasoning".to_string());
+        } else if let Some(reasoning) = log_recovery.reasoning {
+            session.canonical.reasoning = Some(reasoning);
+            recovered_sources.push("worker_log_reasoning".to_string());
+        }
+    }
+
+    if !session.canonical.tokens.is_known() {
+        if detail
+            .map(|value| value.canonical.tokens.is_known())
+            .unwrap_or(false)
+        {
+            session.canonical.tokens = detail
+                .map(|value| value.canonical.tokens.clone())
+                .unwrap_or_default();
+            recovered_sources.push("detail_canonical_tokens".to_string());
+        } else if session.tokens.is_known() {
+            session.canonical.tokens = session.tokens.clone();
+            recovered_sources.push("legacy_state_tokens".to_string());
+        } else if detail.map(|value| value.tokens.is_known()).unwrap_or(false) {
+            session.canonical.tokens = detail.map(|value| value.tokens.clone()).unwrap_or_default();
+            recovered_sources.push("detail_tokens".to_string());
+        } else if log_recovery.tokens.is_known() {
+            session.canonical.tokens = log_recovery.tokens;
+            recovered_sources.push("worker_log_tokens".to_string());
+        } else {
+            skip_notes.push("no recoverable token evidence".to_string());
+        }
+    }
+
+    if session.canonical.tokens.is_known() && session.tokens != session.canonical.tokens {
+        session.tokens = session.canonical.tokens.clone();
+    }
+
+    if !recovered_sources.is_empty() {
+        session.canonical.repair = Some(CanonicalRepairRecord {
+            status: CanonicalRepairStatus::Recovered,
+            source: Some(recovered_sources.join(",")),
+            note: None,
+        });
+    } else if original_canonical.provider.is_none()
+        && original_canonical.model.is_none()
+        && original_canonical.reasoning.is_none()
+        && !original_canonical.tokens.is_known()
+        && (!session.canonical.tokens.is_known() || session.canonical.provider.is_none())
+    {
+        session.canonical.repair = Some(CanonicalRepairRecord {
+            status: CanonicalRepairStatus::Skipped,
+            source: Some("local_state,detail,worker_log".to_string()),
+            note: Some(compact_repair_note(&skip_notes)),
+        });
+    }
+
+    Ok(session.tokens != original_tokens
+        || session.turn_history != original_turn_history
+        || session.canonical != original_canonical)
+}
+
+fn resolve_store_path(store: &ListenProjectStore, raw_path: Option<&str>) -> Option<PathBuf> {
+    let raw_path = raw_path?.trim();
+    if raw_path.is_empty() {
+        return None;
+    }
+
+    let candidate = PathBuf::from(raw_path);
+    if candidate.is_absolute() {
+        return Some(candidate);
+    }
+
+    let project_path = store.paths.project_dir.join(&candidate);
+    if project_path.exists() {
+        return Some(project_path);
+    }
+
+    let source_path = store.identity.source_root.join(&candidate);
+    if source_path.exists() {
+        return Some(source_path);
+    }
+
+    Some(project_path)
+}
+
+#[derive(Debug, Default)]
+struct WorkerLogRecovery {
+    provider: Option<String>,
+    model: Option<String>,
+    reasoning: Option<String>,
+    tokens: TokenUsage,
+    notes: Vec<String>,
+}
+
+#[derive(Debug, Default)]
+struct WorkerLogTurn {
+    provider: Option<String>,
+    model: Option<String>,
+    reasoning: Option<String>,
+    contents: String,
+}
+
+fn repair_from_worker_log(path: Option<&Path>) -> Result<WorkerLogRecovery> {
+    let Some(path) = path else {
+        return Ok(WorkerLogRecovery::default());
+    };
+    let contents = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            return Ok(WorkerLogRecovery::default());
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to read `{}`", path.display()));
+        }
+    };
+
+    let mut provider_values = BTreeSet::new();
+    let mut model_values = BTreeSet::new();
+    let mut reasoning_values = BTreeSet::new();
+    let mut turns = Vec::new();
+    let mut current_turn = WorkerLogTurn::default();
+
+    for raw_line in contents.lines() {
+        let line = raw_line.trim();
+        if is_listen_turn_log_header(line) {
+            if !current_turn.contents.is_empty() || current_turn.provider.is_some() {
+                turns.push(current_turn);
+                current_turn = WorkerLogTurn::default();
+            }
+            continue;
+        }
+
+        if let Some(provider) = line.strip_prefix("Resolved provider: ") {
+            let provider = provider.trim();
+            if !provider.is_empty() {
+                provider_values.insert(provider.to_string());
+                current_turn.provider = Some(provider.to_string());
+            }
+        } else if let Some(model) = line.strip_prefix("Resolved model: ") {
+            let model = model.trim();
+            if !model.eq_ignore_ascii_case("unset") && !model.is_empty() {
+                model_values.insert(model.to_string());
+                current_turn.model = Some(model.to_string());
+            }
+        } else if let Some(reasoning) = line.strip_prefix("Resolved reasoning: ") {
+            let reasoning = reasoning.trim();
+            if !reasoning.eq_ignore_ascii_case("unset") && !reasoning.is_empty() {
+                reasoning_values.insert(reasoning.to_string());
+                current_turn.reasoning = Some(reasoning.to_string());
+            }
+        }
+
+        current_turn.contents.push_str(raw_line);
+        current_turn.contents.push('\n');
+    }
+
+    if !current_turn.contents.is_empty() || current_turn.provider.is_some() {
+        turns.push(current_turn);
+    }
+
+    let mut notes = Vec::new();
+    let provider = unique_value(&provider_values, "provider", &mut notes);
+    let model = unique_value(&model_values, "model", &mut notes);
+    let reasoning = unique_value(&reasoning_values, "reasoning", &mut notes);
+
+    let mut recovered_tokens = TokenUsage::default();
+    for turn in turns {
+        let provider_name = turn.provider.as_deref().or(provider.as_deref());
+        let Some(provider_name) = provider_name else {
+            continue;
+        };
+        let Some(adapter) = builtin_provider_adapter(provider_name) else {
+            continue;
+        };
+        let parsed = match adapter.parse_capture_output(&turn.contents) {
+            Ok(parsed) => parsed,
+            Err(_) => continue,
+        };
+        if let Some(usage) = parsed.usage {
+            recovered_tokens.accumulate(&TokenUsage {
+                input: usage.input,
+                output: usage.output,
+            });
+        }
+    }
+
+    Ok(WorkerLogRecovery {
+        provider,
+        model,
+        reasoning,
+        tokens: recovered_tokens,
+        notes,
+    })
+}
+
+fn unique_value(values: &BTreeSet<String>, label: &str, notes: &mut Vec<String>) -> Option<String> {
+    if values.len() > 1 {
+        notes.push(format!("ambiguous {label} evidence"));
+        return None;
+    }
+    values.iter().next().cloned()
+}
+
+fn compact_repair_note(notes: &[String]) -> String {
+    if notes.is_empty() {
+        "no recoverable local evidence".to_string()
+    } else {
+        notes.join("; ")
+    }
 }
 
 fn read_log_excerpts(log_path: Option<&str>) -> Result<Vec<SessionLogExcerpt>> {
@@ -1062,8 +1364,8 @@ mod tests {
 
     use crate::config::data_root_from_config_path;
     use crate::listen::{
-        LatestResumeHandle, ListenSessionDetail, PullRequestSummary, ResumeProvider, SessionOrigin,
-        TokenUsage,
+        CanonicalSessionData, LatestResumeHandle, ListenSessionDetail, PullRequestSummary,
+        ResumeProvider, SessionOrigin, TokenUsage,
     };
 
     use super::{
@@ -1078,7 +1380,7 @@ mod tests {
         let temp = tempdir()?;
         let repo_root = temp.path().join("repo");
         let worktree_root = temp.path().join("repo-worktree");
-        fs::create_dir_all(repo_root.join(".metastack"))?;
+        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
         std::process::Command::new("git")
             .args(["init", "-b", "main", repo_root.to_string_lossy().as_ref()])
             .status()?;
@@ -1135,7 +1437,7 @@ mod tests {
     #[test]
     fn project_key_hash_is_stable_for_same_metastack_root() -> Result<()> {
         let temp = tempdir()?;
-        let metastack_root = temp.path().join("repo").join(".metastack");
+        let metastack_root = temp.path().join("repo").join(crate::branding::PROJECT_DIR);
         fs::create_dir_all(&metastack_root)?;
 
         assert_eq!(
@@ -1159,7 +1461,7 @@ mod tests {
         let temp = tempdir()?;
         let repo_root = temp.path().join("repo");
         let config_path = temp.path().join("metastack.toml");
-        fs::create_dir_all(repo_root.join(".metastack"))?;
+        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
         let data_root = data_root_from_config_path(&config_path)?;
         let store = ListenProjectStore::resolve_with_data_root(
             &repo_root,
@@ -1185,10 +1487,16 @@ mod tests {
             issue_url: format!("https://linear.app/metastack/{issue_identifier}"),
             phase,
             summary: format!("{issue_identifier} summary"),
-            brief_path: Some(format!(".metastack/agents/briefs/{issue_identifier}.md")),
+            brief_path: Some(format!(
+                "{}/agents/briefs/{issue_identifier}.md",
+                crate::branding::PROJECT_DIR
+            )),
             backlog_issue_identifier: Some(format!("TECH-{issue_identifier}")),
             backlog_issue_title: Some(format!("Backlog for {issue_identifier}")),
-            backlog_path: Some(format!(".metastack/backlog/{issue_identifier}")),
+            backlog_path: Some(format!(
+                "{}/backlog/{issue_identifier}",
+                crate::branding::PROJECT_DIR
+            )),
             workspace_path: Some(format!("/tmp/{issue_identifier}")),
             branch: Some(format!("branch-{issue_identifier}")),
             pull_request: Default::default(),
@@ -1196,9 +1504,11 @@ mod tests {
             updated_at_epoch_seconds: updated_at,
             pid: None,
             session_id: Some(format!("session-{issue_identifier}")),
+            turn_history: Vec::new(),
             latest_resume_handle: None,
             turns: Some(1),
             tokens: TokenUsage::default(),
+            canonical: CanonicalSessionData::default(),
             log_path: Some(format!("logs/{issue_identifier}.log")),
             origin: SessionOrigin::Listen,
         }
@@ -1226,7 +1536,7 @@ mod tests {
         let temp = tempdir()?;
         let repo_root = temp.path().join("repo");
         let data_root = temp.path().join("data");
-        fs::create_dir_all(repo_root.join(".metastack"))?;
+        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
         let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
         store.ensure_layout()?;
         fs::write(store.paths().state_path.clone(), "{}")?;
@@ -1236,7 +1546,10 @@ mod tests {
                 pid: 99_999,
                 acquired_at_epoch_seconds: 0,
                 source_root: repo_root.display().to_string(),
-                metastack_root: repo_root.join(".metastack").display().to_string(),
+                metastack_root: repo_root
+                    .join(crate::branding::PROJECT_DIR)
+                    .display()
+                    .to_string(),
             },
         )?;
         seed_state(
@@ -1273,7 +1586,7 @@ mod tests {
         let temp = tempdir()?;
         let repo_root = temp.path().join("repo");
         let data_root = temp.path().join("data");
-        fs::create_dir_all(repo_root.join(".metastack"))?;
+        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
         let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
 
         let mut stale = default_session("ENG-10163", SessionPhase::Blocked, 100);
@@ -1301,7 +1614,7 @@ mod tests {
         let temp = tempdir()?;
         let repo_root = temp.path().join("repo");
         let data_root = temp.path().join("data");
-        fs::create_dir_all(repo_root.join(".metastack"))?;
+        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
         let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
 
         let mut live = default_session("ENG-10163", SessionPhase::Running, 100);
@@ -1330,7 +1643,7 @@ mod tests {
         let temp = tempdir()?;
         let repo_root = temp.path().join("repo");
         let data_root = temp.path().join("data");
-        fs::create_dir_all(repo_root.join(".metastack"))?;
+        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
         let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
         let now = super::now_epoch_seconds();
         let ttl = COMPLETED_SESSION_TTL_SECONDS;
@@ -1373,7 +1686,7 @@ mod tests {
         let temp = tempdir()?;
         let repo_root = temp.path().join("repo");
         let data_root = temp.path().join("data");
-        fs::create_dir_all(repo_root.join(".metastack"))?;
+        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
         let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
         store.ensure_layout()?;
 
@@ -1400,7 +1713,7 @@ mod tests {
         let temp = tempdir()?;
         let repo_root = temp.path().join("repo");
         let data_root = temp.path().join("data");
-        fs::create_dir_all(repo_root.join(".metastack"))?;
+        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
         let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
         store.ensure_layout()?;
 
@@ -1417,6 +1730,8 @@ mod tests {
                 summary: "detail without state".to_string(),
                 turns: Some(1),
                 tokens: TokenUsage::default(),
+                turn_history: Vec::new(),
+                canonical: CanonicalSessionData::default(),
                 pull_request: PullRequestSummary::default(),
                 latest_resume_handle: None,
                 references: SessionDetailReferences::default(),
@@ -1446,7 +1761,7 @@ mod tests {
         let temp = tempdir()?;
         let repo_root = temp.path().join("repo");
         let data_root = temp.path().join("data");
-        fs::create_dir_all(repo_root.join(".metastack"))?;
+        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
         let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
         store.ensure_layout()?;
 
@@ -1485,7 +1800,7 @@ mod tests {
         let temp = tempdir()?;
         let repo_root = temp.path().join("repo");
         let data_root = temp.path().join("data");
-        fs::create_dir_all(repo_root.join(".metastack"))?;
+        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
         let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
         let now = super::now_epoch_seconds();
 
@@ -1522,7 +1837,7 @@ mod tests {
         let temp = tempdir()?;
         let repo_root = temp.path().join("repo");
         let data_root = temp.path().join("data");
-        fs::create_dir_all(repo_root.join(".metastack"))?;
+        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
         let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
         let now = super::now_epoch_seconds();
 
@@ -1561,7 +1876,7 @@ mod tests {
         let temp = tempdir()?;
         let repo_root = temp.path().join("repo");
         let data_root = temp.path().join("data");
-        fs::create_dir_all(repo_root.join(".metastack"))?;
+        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
         let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
         let now = super::now_epoch_seconds();
 
@@ -1582,7 +1897,7 @@ mod tests {
         let temp = tempdir()?;
         let repo_root = temp.path().join("repo");
         let data_root = temp.path().join("data");
-        fs::create_dir_all(repo_root.join(".metastack"))?;
+        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
         let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
         let now = super::now_epoch_seconds();
         let mut child = spawn_sleep_process()?;
@@ -1616,7 +1931,7 @@ mod tests {
         let temp = tempdir()?;
         let repo_root = temp.path().join("repo");
         let data_root = temp.path().join("data");
-        fs::create_dir_all(repo_root.join(".metastack"))?;
+        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
         let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
         let now = super::now_epoch_seconds();
         let mut child = spawn_sleep_process()?;
@@ -1650,7 +1965,7 @@ mod tests {
         let temp = tempdir()?;
         let repo_root = temp.path().join("repo");
         let data_root = temp.path().join("data");
-        fs::create_dir_all(repo_root.join(".metastack"))?;
+        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
         let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
         let now = super::now_epoch_seconds();
 
@@ -1669,6 +1984,203 @@ mod tests {
         assert!(!store.resume_paused_session("ENG-501")?);
         assert!(!store.pause_running_session("ENG-999")?);
         assert!(!store.resume_paused_session("ENG-999")?);
+
+        Ok(())
+    }
+
+    #[test]
+    fn load_state_repairs_canonical_metadata_from_worker_log() -> Result<()> {
+        let temp = tempdir()?;
+        let repo_root = temp.path().join("repo");
+        let data_root = temp.path().join("data");
+        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
+        let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
+
+        let issue_identifier = "ENG-10170";
+        let mut session = default_session(issue_identifier, SessionPhase::Running, 100);
+        session.tokens = TokenUsage::default();
+        session.log_path = Some(store.log_path(issue_identifier).display().to_string());
+        fs::create_dir_all(store.paths().logs_dir.clone())?;
+        fs::write(
+            store.log_path(issue_identifier),
+            format!(
+                "{}1/20 @ 2026-03-23T12:00:00Z ---\n\
+                 Resolved provider: claude\n\
+                 Resolved model: sonnet\n\
+                 Resolved reasoning: high\n\
+                 {{\"type\":\"message_start\",\"message\":{{\"usage\":{{\"input_tokens\":210}}}}}}\n\
+                 {{\"type\":\"message_delta\",\"usage\":{{\"output_tokens\":34}}}}\n\
+                 {{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"ok\",\"session_id\":\"session-123\"}}\n",
+                super::listen_turn_log_prefix(),
+            ),
+        )?;
+        seed_state(&store, vec![session])?;
+
+        let state = store.load_state()?;
+        let repaired = state
+            .sessions
+            .iter()
+            .find(|session| session.issue_identifier == issue_identifier)
+            .context("expected repaired session to be present")?;
+        assert_eq!(repaired.tokens.input, Some(210));
+        assert_eq!(repaired.tokens.output, Some(34));
+        assert_eq!(repaired.canonical.provider.as_deref(), Some("claude"));
+        assert_eq!(repaired.canonical.model.as_deref(), Some("sonnet"));
+        assert_eq!(repaired.canonical.reasoning.as_deref(), Some("high"));
+        assert_eq!(repaired.canonical.tokens.input, Some(210));
+        assert_eq!(repaired.canonical.tokens.output, Some(34));
+        assert_eq!(
+            repaired
+                .canonical
+                .repair
+                .as_ref()
+                .map(|repair| repair.status),
+            Some(super::CanonicalRepairStatus::Recovered)
+        );
+
+        let detail = store
+            .load_session_detail(issue_identifier)?
+            .context("expected repaired detail artifact")?;
+        assert_eq!(detail.canonical.provider.as_deref(), Some("claude"));
+        assert_eq!(detail.canonical.model.as_deref(), Some("sonnet"));
+        assert_eq!(detail.canonical.reasoning.as_deref(), Some("high"));
+        assert_eq!(detail.canonical.tokens.input, Some(210));
+        assert_eq!(detail.canonical.tokens.output, Some(34));
+
+        Ok(())
+    }
+
+    #[test]
+    fn save_state_persists_claude_canonical_tokens_in_detail_artifact() -> Result<()> {
+        let temp = tempdir()?;
+        let repo_root = temp.path().join("repo");
+        let data_root = temp.path().join("data");
+        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
+        let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
+
+        let issue_identifier = "ENG-10172";
+        let mut session = default_session(issue_identifier, SessionPhase::Completed, 100);
+        session.tokens = TokenUsage {
+            input: Some(210),
+            output: Some(34),
+        };
+        session.canonical = CanonicalSessionData {
+            provider: Some("claude".to_string()),
+            model: Some("sonnet".to_string()),
+            reasoning: Some("high".to_string()),
+            tokens: session.tokens.clone(),
+            repair: None,
+        };
+
+        store.save_state(&ListenState::from_sessions(vec![session]))?;
+
+        let detail = store
+            .load_session_detail(issue_identifier)?
+            .context("expected persisted detail artifact")?;
+        assert_eq!(detail.tokens.input, Some(210));
+        assert_eq!(detail.tokens.output, Some(34));
+        assert_eq!(detail.canonical.provider.as_deref(), Some("claude"));
+        assert_eq!(detail.canonical.model.as_deref(), Some("sonnet"));
+        assert_eq!(detail.canonical.reasoning.as_deref(), Some("high"));
+        assert_eq!(detail.canonical.tokens.input, Some(210));
+        assert_eq!(detail.canonical.tokens.output, Some(34));
+
+        Ok(())
+    }
+
+    #[test]
+    fn load_state_marks_unrecoverable_historical_sessions_as_skipped() -> Result<()> {
+        let temp = tempdir()?;
+        let repo_root = temp.path().join("repo");
+        let data_root = temp.path().join("data");
+        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
+        let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
+
+        let issue_identifier = "ENG-10171";
+        let mut session = default_session(issue_identifier, SessionPhase::Blocked, 100);
+        session.tokens = TokenUsage::default();
+        session.latest_resume_handle = None;
+        session.log_path = Some(store.log_path(issue_identifier).display().to_string());
+        fs::create_dir_all(store.paths().logs_dir.clone())?;
+        fs::write(
+            store.log_path(issue_identifier),
+            format!(
+                "{}1/20 @ 2026-03-23T12:00:00Z ---\n\
+                 Resolved provider: codex\n\
+                 {}2/20 @ 2026-03-23T12:01:00Z ---\n\
+                 Resolved provider: claude\n",
+                super::listen_turn_log_prefix(),
+                super::listen_turn_log_prefix(),
+            ),
+        )?;
+        seed_state(&store, vec![session])?;
+
+        let state = store.load_state()?;
+        let skipped = state
+            .sessions
+            .iter()
+            .find(|session| session.issue_identifier == issue_identifier)
+            .context("expected skipped session to be present")?;
+        assert!(skipped.canonical.provider.is_none());
+        assert!(!skipped.canonical.tokens.is_known());
+        assert_eq!(
+            skipped
+                .canonical
+                .repair
+                .as_ref()
+                .map(|repair| repair.status),
+            Some(super::CanonicalRepairStatus::Skipped)
+        );
+        assert!(
+            skipped
+                .canonical
+                .repair
+                .as_ref()
+                .and_then(|repair| repair.note.as_deref())
+                .is_some_and(|note| note.contains("ambiguous provider evidence"))
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn load_state_repairs_canonical_metadata_from_legacy_meta_worker_log() -> Result<()> {
+        let temp = tempdir()?;
+        let repo_root = temp.path().join("repo");
+        let data_root = temp.path().join("data");
+        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
+        let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
+
+        let issue_identifier = "ENG-10172";
+        let mut session = default_session(issue_identifier, SessionPhase::Running, 100);
+        session.tokens = TokenUsage::default();
+        session.log_path = Some(store.log_path(issue_identifier).display().to_string());
+        fs::create_dir_all(store.paths().logs_dir.clone())?;
+        fs::write(
+            store.log_path(issue_identifier),
+            concat!(
+                "--- meta listen turn 1/20 @ 2026-03-23T12:00:00Z ---\n",
+                "Resolved provider: claude\n",
+                "Resolved model: sonnet\n",
+                "Resolved reasoning: high\n",
+                "{\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":210}}}\n",
+                "{\"type\":\"message_delta\",\"usage\":{\"output_tokens\":34}}\n",
+                "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"ok\",\"session_id\":\"session-123\"}\n",
+            ),
+        )?;
+        seed_state(&store, vec![session])?;
+
+        let state = store.load_state()?;
+        let repaired = state
+            .sessions
+            .iter()
+            .find(|session| session.issue_identifier == issue_identifier)
+            .context("expected repaired session to be present")?;
+        assert_eq!(repaired.tokens.input, Some(210));
+        assert_eq!(repaired.tokens.output, Some(34));
+        assert_eq!(repaired.canonical.provider.as_deref(), Some("claude"));
+        assert_eq!(repaired.canonical.model.as_deref(), Some("sonnet"));
+        assert_eq!(repaired.canonical.reasoning.as_deref(), Some("high"));
 
         Ok(())
     }

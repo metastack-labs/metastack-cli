@@ -49,6 +49,23 @@ struct BranchPullRequest {
 }
 
 impl GhCli {
+    fn view_pull_request_by_number(
+        &self,
+        workspace_path: &Path,
+        number: u64,
+    ) -> Result<BranchPullRequest> {
+        self.run_json::<BranchPullRequest>(
+            workspace_path,
+            &[
+                "pr",
+                "view",
+                &number.to_string(),
+                "--json",
+                "number,url,isDraft",
+            ],
+        )
+    }
+
     /// Run `gh` and deserialize its JSON output.
     ///
     /// Returns an error when the command cannot be launched, exits unsuccessfully,
@@ -207,22 +224,48 @@ impl GhCli {
         }))
     }
 
-    /// Promote the open branch PR for the provided head/base pair to ready for review.
+    /// Refresh the title/body for the specified open pull request number.
     ///
-    /// Returns an error when no matching open PR exists or when `gh` fails to promote it.
-    pub(crate) fn promote_branch_pull_request_to_ready(
+    /// Returns an error when `gh` fails to edit the existing pull request.
+    pub(crate) fn refresh_pull_request_by_number(
         &self,
         workspace_path: &Path,
-        head_branch: &str,
-        base_branch: &str,
+        number: u64,
+        title: &str,
+        body_path: &Path,
     ) -> Result<PullRequestLifecycleResult> {
-        let existing = self
-            .find_open_branch_pull_request_raw(workspace_path, head_branch, base_branch)?
-            .ok_or_else(|| {
-                anyhow!(
-                    "no open pull request exists for branch `{head_branch}` against `{base_branch}`"
-                )
-            })?;
+        self.run_plain(
+            workspace_path,
+            &[
+                "pr",
+                "edit",
+                &number.to_string(),
+                "--title",
+                title,
+                "--body-file",
+                body_path_arg(body_path)?,
+            ],
+        )?;
+
+        let refreshed = self.view_pull_request_by_number(workspace_path, number)?;
+
+        Ok(PullRequestLifecycleResult {
+            number: refreshed.number,
+            url: refreshed.url,
+            action: PullRequestLifecycleAction::UpdatedExisting,
+            is_draft: refreshed.is_draft,
+        })
+    }
+
+    /// Promote the provided open pull request number to ready for review.
+    ///
+    /// Returns an error when `gh` cannot inspect or promote the pull request.
+    pub(crate) fn promote_pull_request_to_ready(
+        &self,
+        workspace_path: &Path,
+        number: u64,
+    ) -> Result<PullRequestLifecycleResult> {
+        let existing = self.view_pull_request_by_number(workspace_path, number)?;
         if !existing.is_draft {
             return Ok(PullRequestLifecycleResult {
                 number: existing.number,
@@ -232,13 +275,14 @@ impl GhCli {
             });
         }
 
-        self.run_plain(
-            workspace_path,
-            &["pr", "ready", &existing.number.to_string()],
-        )?;
+        self.run_plain(workspace_path, &["pr", "ready", &number.to_string()])?;
+        let ready = self.view_pull_request_by_number(workspace_path, number)?;
+        if ready.is_draft {
+            bail!("pull request #{number} is still draft after `gh pr ready`");
+        }
         Ok(PullRequestLifecycleResult {
-            number: existing.number,
-            url: existing.url,
+            number: ready.number,
+            url: ready.url,
             action: PullRequestLifecycleAction::PromotedToReady,
             is_draft: false,
         })

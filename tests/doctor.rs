@@ -1,6 +1,7 @@
 #![allow(dead_code, unused_imports)]
 
 include!("support/common.rs");
+use metastack_cli::branding;
 
 #[test]
 fn doctor_reports_pass_for_tools_on_path() -> Result<(), Box<dyn Error>> {

@@ -56,6 +56,10 @@ pub(crate) fn render_invocation_diagnostics(invocation: &ResolvedAgentInvocation
             invocation.family_key.as_deref().unwrap_or("unset")
         ),
         format!(
+            "Resolved transport: {}",
+            format_prompt_transport(invocation.transport)
+        ),
+        format!(
             "Provider source: {}",
             format_agent_config_source(&invocation.provider_source)
         ),
@@ -81,6 +85,13 @@ pub(crate) fn render_invocation_diagnostics(invocation: &ResolvedAgentInvocation
 /// Formats a human-readable label for the attempted command invocation.
 pub(crate) fn attempted_command(command: &str, command_args: &[String]) -> String {
     format!("{command} {}", command_args.join(" "))
+}
+
+pub(crate) fn format_prompt_transport(transport: PromptTransport) -> &'static str {
+    match transport {
+        PromptTransport::Arg => "arg",
+        PromptTransport::Stdin => "stdin",
+    }
 }
 
 /// Validates that the installed CLI binary supports the flags the invocation will emit.
@@ -420,7 +431,7 @@ mod tests {
             provider_source: AgentConfigSource::GlobalDefault,
             model_source: Some(AgentConfigSource::RepoDefault),
             reasoning_source: Some(AgentConfigSource::RepoDefault),
-            transport: PromptTransport::Arg,
+            transport: PromptTransport::Stdin,
             payload: "Prompt:\nhello".to_string(),
             attachments: Vec::new(),
             builtin_provider: true,
@@ -433,6 +444,7 @@ mod tests {
 
         assert!(lines.iter().any(|line| line == "Resolved provider: codex"));
         assert!(lines.iter().any(|line| line == "Resolved model: gpt-5.4"));
+        assert!(lines.iter().any(|line| line == "Resolved transport: stdin"));
         assert!(
             lines
                 .iter()

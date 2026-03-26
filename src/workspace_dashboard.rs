@@ -15,6 +15,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, ListItem, ListState, Wrap};
 use ratatui::{Frame, Terminal};
 
+use crate::branding;
 use crate::tui::fields::InputFieldState;
 use crate::tui::scroll::{ScrollState, plain_text, scrollable_content_paragraph, wrapped_rows};
 use crate::tui::spaced_list::{spaced_list, spaced_list_item};
@@ -133,7 +134,8 @@ pub fn run_workspace_dashboard(
 
     if !io::stdout().is_terminal() {
         bail!(
-            "the interactive workspace dashboard requires a TTY; use `meta workspace list --root .` for scripted runs"
+            "the interactive workspace dashboard requires a TTY; use `{} workspace list --root .` for scripted runs",
+            branding::COMMAND_NAME,
         );
     }
 
@@ -278,7 +280,7 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &WorkspaceDashboardApp) {
                 ("q", "exit"),
             ]),
         ]),
-        panel_title("meta workspace", false),
+        panel_title(format!("{} workspace", branding::COMMAND_NAME), false),
     );
     frame.render_widget(header, outer[0]);
 
@@ -318,7 +320,10 @@ fn render_workspace_list(frame: &mut Frame<'_>, area: Rect, app: &WorkspaceDashb
     let items = if app.data.entries.is_empty() {
         vec![ListItem::new(empty_state(
             "No workspace clones found.",
-            "Run `meta agents listen` to create workspace clones for tickets.",
+            format!(
+                "Run `{} agents listen` to create workspace clones for tickets.",
+                branding::COMMAND_NAME
+            ),
         ))]
     } else if results.is_empty() {
         vec![ListItem::new(empty_state(

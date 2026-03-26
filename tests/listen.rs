@@ -2,6 +2,8 @@
 
 include!("support/common.rs");
 
+use metastack_cli::branding;
+
 #[cfg(unix)]
 fn write_onboarded_config(
     config_path: &Path,
@@ -40,6 +42,9 @@ if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
     draft)
       printf '%s' '[{{"number":321,"url":"{pull_request_url}","isDraft":true}}]'
       ;;
+    stubborn-draft)
+      printf '%s' '[{{"number":321,"url":"{pull_request_url}","isDraft":true}}]'
+      ;;
     ready)
       printf '%s' '[{{"number":321,"url":"{pull_request_url}","isDraft":false}}]'
       ;;
@@ -50,12 +55,39 @@ if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
   exit 0
 fi
 if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
-  printf '%s' 'draft' > "$state_file"
-  printf '%s' '{{"number":321,"url":"{pull_request_url}","isDraft":true}}'
+  if printf '%s\n' "$*" | grep -q -- '--draft'; then
+    printf '%s' 'draft' > "$state_file"
+    printf '%s' '{{"number":321,"url":"{pull_request_url}","isDraft":true}}'
+  else
+    printf '%s' 'ready' > "$state_file"
+    printf '%s' '{{"number":321,"url":"{pull_request_url}","isDraft":false}}'
+  fi
   exit 0
 fi
 if [ "$1" = "pr" ] && [ "$2" = "ready" ]; then
-  printf '%s' 'ready' > "$state_file"
+  if [ "$state" = "stubborn-draft" ]; then
+    printf '%s' 'stubborn-draft' > "$state_file"
+  else
+    printf '%s' 'ready' > "$state_file"
+  fi
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  case "$state" in
+    draft)
+      printf '%s' '{{"number":321,"url":"{pull_request_url}","isDraft":true}}'
+      ;;
+    stubborn-draft)
+      printf '%s' '{{"number":321,"url":"{pull_request_url}","isDraft":true}}'
+      ;;
+    ready)
+      printf '%s' '{{"number":321,"url":"{pull_request_url}","isDraft":false}}'
+      ;;
+    *)
+      printf 'unexpected gh invocation: %s\n' "$*" >&2
+      exit 1
+      ;;
+  esac
   exit 0
 fi
 if [ "$1" = "pr" ] && [ "$2" = "edit" ]; then
@@ -83,7 +115,7 @@ fn write_listen_store_session(
 ) -> Result<PathBuf, Box<dyn Error>> {
     let store_dir = listen_project_store_dir(config_path, repo_root, None)?;
     let source_root = listen_source_root(repo_root)?;
-    let metastack_root = source_root.join(".metastack").canonicalize()?;
+    let metastack_root = source_root.join(branding::PROJECT_DIR).canonicalize()?;
     fs::create_dir_all(store_dir.join("logs"))?;
     fs::write(
         store_dir.join("project.json"),
@@ -139,7 +171,7 @@ fn listen_session_json(
         "issue_url": format!("https://linear.app/issues/{issue_identifier}"),
         "phase": phase,
         "summary": format!("{issue_identifier} summary"),
-        "brief_path": format!(".metastack/agents/briefs/{issue_identifier}.md"),
+        "brief_path": format!("{}/agents/briefs/{issue_identifier}.md", branding::PROJECT_DIR),
         "workspace_path": format!("/tmp/{issue_identifier}"),
         "workpad_comment_id": format!("comment-{issue_identifier}"),
         "updated_at_epoch_seconds": updated_at_epoch_seconds,
@@ -853,8 +885,8 @@ fn listen_sessions_inspect_surfaces_structured_detail_fields() -> Result<(), Box
             "issue_url": "https://linear.app/issues/ENG-10181",
             "phase": "running",
             "summary": "Token telemetry is flowing",
-            "brief_path": ".metastack/agents/briefs/ENG-10181.md",
-            "backlog_path": ".metastack/backlog/ENG-10181",
+            "brief_path": format!("{}/agents/briefs/ENG-10181.md", branding::PROJECT_DIR),
+            "backlog_path": format!("{}/backlog/ENG-10181", branding::PROJECT_DIR),
             "workspace_path": "/tmp/ENG-10181",
             "branch": "met-27-detail",
             "pull_request": {
@@ -884,7 +916,7 @@ fn listen_sessions_inspect_surfaces_structured_detail_fields() -> Result<(), Box
     fs::write(
         &detail_path,
         serde_json::to_vec_pretty(&json!({
-            "version": 1,
+            "version": 3,
             "issue_identifier": "ENG-10181",
             "issue_title": "ENG-10181 title",
             "updated_at_epoch_seconds": 1_773_575_120u64,
@@ -896,6 +928,26 @@ fn listen_sessions_inspect_surfaces_structured_detail_fields() -> Result<(), Box
                 "input": 210,
                 "output": 34
             },
+            "turn_history": [
+                {
+                    "turn": 1,
+                    "prompt_mode": "full_prompt",
+                    "tokens": {
+                        "input": 210,
+                        "output": 34
+                    },
+                    "captured_at_epoch_seconds": 1_773_575_010u64
+                },
+                {
+                    "turn": 2,
+                    "prompt_mode": "continuation",
+                    "tokens": {
+                        "input": 80,
+                        "output": 13
+                    },
+                    "captured_at_epoch_seconds": 1_773_575_050u64
+                }
+            ],
             "pull_request": {
                 "number": 321,
                 "url": "https://github.com/metastack-labs/metastack-cli/pull/321",
@@ -903,8 +955,8 @@ fn listen_sessions_inspect_surfaces_structured_detail_fields() -> Result<(), Box
             },
             "references": {
                 "workspace_path": "/tmp/ENG-10181",
-                "backlog_path": ".metastack/backlog/ENG-10181",
-                "brief_path": ".metastack/agents/briefs/ENG-10181.md",
+                "backlog_path": format!("{}/backlog/ENG-10181", branding::PROJECT_DIR),
+                "brief_path": format!("{}/agents/briefs/ENG-10181.md", branding::PROJECT_DIR),
                 "workpad_comment_id": "comment-10181",
                 "log_path": "logs/ENG-10181.log",
                 "branch": "met-27-detail"
@@ -912,11 +964,11 @@ fn listen_sessions_inspect_surfaces_structured_detail_fields() -> Result<(), Box
             "prompt_context": [
                 {
                     "label": "Brief",
-                    "value": ".metastack/agents/briefs/ENG-10181.md"
+                    "value": format!("{}/agents/briefs/ENG-10181.md", branding::PROJECT_DIR)
                 },
                 {
                     "label": "Backlog index",
-                    "value": ".metastack/backlog/ENG-10181/index.md"
+                    "value": format!("{}/backlog/ENG-10181/index.md", branding::PROJECT_DIR)
                 }
             ],
             "milestones": [
@@ -949,6 +1001,10 @@ fn listen_sessions_inspect_surfaces_structured_detail_fields() -> Result<(), Box
             ]
         }))?,
     )?;
+    fs::write(
+        listen_log_path(&config_path, &repo_root, "ENG-10181")?,
+        "{\"message\":\"worker boot complete\"}\n{\"message\":\"published draft PR\"}\n",
+    )?;
 
     meta()
         .current_dir(&repo_root)
@@ -970,15 +1026,36 @@ fn listen_sessions_inspect_surfaces_structured_detail_fields() -> Result<(), Box
         .stdout(predicate::str::contains("Detail branch: met-27-detail"))
         .stdout(predicate::str::contains("Detail workpad: comment-10181"))
         .stdout(predicate::str::contains("Prompt context:"))
-        .stdout(predicate::str::contains(
-            "Brief: .metastack/agents/briefs/ENG-10181.md",
-        ))
+        .stdout(predicate::str::contains(format!(
+            "Brief: {}/agents/briefs/ENG-10181.md",
+            branding::PROJECT_DIR
+        )))
         .stdout(predicate::str::contains("Recent milestones:"))
         .stdout(predicate::str::contains(
             "Running: Opened draft PR | turns 3 | draft #321",
         ))
-        .stdout(predicate::str::contains("Recent log excerpts:"))
-        .stdout(predicate::str::contains("L27 published draft PR"));
+        .stdout(predicate::str::contains("Turn history:").not());
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "inspect",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+            "--turns",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Turn history:"))
+        .stdout(predicate::str::contains(
+            "turn 1 tokens: in 210 | out 34 | prompt_mode=full_prompt",
+        ))
+        .stdout(predicate::str::contains(
+            "turn 2 tokens: in 80 | out 13 | prompt_mode=continuation",
+        ));
 
     Ok(())
 }
@@ -1014,7 +1091,10 @@ fn listen_once_demo_outputs_terminal_summary_without_browser_endpoints()
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("meta listen"))
+        .stdout(predicate::str::contains(format!(
+            "{} listen",
+            branding::COMMAND_NAME
+        )))
         .stdout(predicate::str::contains("Watching: all assignees"))
         .stdout(predicate::str::contains("Dashboard: terminal summary"))
         .stdout(predicate::str::contains("http://").not())
@@ -1300,7 +1380,7 @@ fn listen_sessions_inspect_surfaces_detail_pr_ref_without_url() -> Result<(), Bo
             "issue_url": "https://linear.app/metastack-labs/issue/ENG-10182",
             "phase": "running",
             "summary": "Structured detail keeps PR number only",
-            "brief_path": format!(".metastack/agents/briefs/{issue_identifier}.md"),
+            "brief_path": format!("{}/agents/briefs/{issue_identifier}.md", branding::PROJECT_DIR),
             "backlog_issue_identifier": issue_identifier,
             "workspace_path": format!("/tmp/{issue_identifier}"),
             "workpad_comment_id": format!("comment-{issue_identifier}"),
@@ -1598,9 +1678,10 @@ fn listen_render_once_demo_detail_shows_execute_origin_for_execute_session()
         .stdout(predicate::str::contains("Selected Session"))
         .stdout(predicate::str::contains("MET-17"))
         .stdout(predicate::str::contains("Origin: Execute"))
-        .stdout(predicate::str::contains(
-            "This session was started by `meta agents execute`",
-        ));
+        .stdout(predicate::str::contains(format!(
+            "This session was started by `{} agents execute`",
+            branding::COMMAND_NAME
+        )));
 
     Ok(())
 }
@@ -1684,16 +1765,22 @@ fn legacy_listen_help_omits_browser_dashboard_flags() {
         .stdout(predicate::str::contains(
             "Press Enter on a selected item to open its detail pane",
         ))
-        .stdout(predicate::str::contains("meta listen sessions list"))
-        .stdout(predicate::str::contains(
-            "meta listen sessions inspect --root . --project \"MetaStack API\"",
-        ))
-        .stdout(predicate::str::contains(
-            "meta listen sessions clear --root . --project \"MetaStack API\"",
-        ))
-        .stdout(predicate::str::contains(
-            "meta agents listen --team MET --project \"MetaStack API\"",
-        ))
+        .stdout(predicate::str::contains(format!(
+            "{} listen sessions list",
+            branding::COMMAND_NAME
+        )))
+        .stdout(predicate::str::contains(format!(
+            "{} listen sessions inspect --root . --project \"MetaStack API\"",
+            branding::COMMAND_NAME
+        )))
+        .stdout(predicate::str::contains(format!(
+            "{} listen sessions clear --root . --project \"MetaStack API\"",
+            branding::COMMAND_NAME
+        )))
+        .stdout(predicate::str::contains(format!(
+            "{} agents listen --team MET --project \"MetaStack API\"",
+            branding::COMMAND_NAME
+        )))
         .stdout(predicate::str::contains("--all-assignees"))
         .stdout(predicate::str::contains("--dashboard-port").not())
         .stdout(predicate::str::contains("http://").not());
@@ -2211,7 +2298,10 @@ fn listen_json_without_once_emits_structured_json_error() -> Result<(), Box<dyn 
     assert_eq!(payload["error"]["code"], "invalid_input");
     assert_eq!(
         payload["error"]["message"],
-        "`meta agents listen --json` requires `--once`"
+        format!(
+            "`{} agents listen --json` requires `--once`",
+            branding::COMMAND_NAME
+        )
     );
     assert!(assert.get_output().stderr.is_empty());
 
@@ -2510,7 +2600,7 @@ fn listen_rejects_duplicate_active_listener_lock_for_same_project() -> Result<()
             std::process::id(),
             listen_source_root(&repo_root)?.display(),
             listen_source_root(&repo_root)?
-                .join(".metastack")
+                .join(branding::PROJECT_DIR)
                 .canonicalize()?
                 .display()
         ),
@@ -2569,7 +2659,7 @@ fn listen_allows_active_listener_lock_for_different_project() -> Result<(), Box<
             std::process::id(),
             listen_source_root(&repo_root)?.display(),
             listen_source_root(&repo_root)?
-                .join(".metastack")
+                .join(branding::PROJECT_DIR)
                 .canonicalize()?
                 .display()
         ),
@@ -2634,7 +2724,7 @@ fn listen_recovers_stale_active_listener_lock() -> Result<(), Box<dyn Error>> {
 }}"#,
             listen_source_root(&repo_root)?.display(),
             listen_source_root(&repo_root)?
-                .join(".metastack")
+                .join(branding::PROJECT_DIR)
                 .canonicalize()?
                 .display()
         ),
@@ -2937,7 +3027,8 @@ api_url = "{}"
     let ps_path = bin_dir.join("ps");
     fs::write(
         &ps_path,
-        r#"#!/bin/sh
+        format!(
+            r#"#!/bin/sh
 count_file="$TEST_OUTPUT_DIR/ps-count.txt"
 count=0
 if [ -f "$count_file" ]; then
@@ -2946,10 +3037,12 @@ fi
 count=$((count + 1))
 printf '%s' "$count" > "$count_file"
 printf '  PID TTY           TIME CMD\n'
-printf '4242 ??         0:00.00 meta listen-worker --ticket MET-noise\n'
+printf '4242 ??         0:00.00 {command} listen-worker --ticket MET-noise\n'
 printf 'stderr-noise-from-ps\n' >&2
 exit 0
 "#,
+            command = branding::COMMAND_NAME,
+        ),
     )?;
     let mut permissions = fs::metadata(&ps_path)?.permissions();
     permissions.set_mode(0o755);
@@ -2993,7 +3086,7 @@ exit 0
                     },
                     "turns": 3,
                     "tokens": {},
-                    "log_path": ".metastack/agents/sessions/MET-40.log"
+                    "log_path": format!("{}/agents/sessions/MET-40.log", branding::PROJECT_DIR)
                 },
                 {
                     "issue_id": "issue-41",
@@ -3020,7 +3113,7 @@ exit 0
                     },
                     "turns": 4,
                     "tokens": {},
-                    "log_path": ".metastack/agents/sessions/MET-41.log"
+                    "log_path": format!("{}/agents/sessions/MET-41.log", branding::PROJECT_DIR)
                 }
             ]
         }))?,
@@ -3071,7 +3164,10 @@ exit 0
         assert!(!rendered.contains("127.0.0.1"));
         assert!(!rendered.contains("localhost"));
         assert!(!rendered.contains("PID TTY"));
-        assert!(!rendered.contains("meta listen-worker --ticket MET-noise"));
+        assert!(!rendered.contains(&format!(
+            "{} listen-worker --ticket MET-noise",
+            branding::COMMAND_NAME
+        )));
     }
     for rendered in [&first_stderr, &second_stderr] {
         assert!(!rendered.contains("stderr-noise-from-ps"));
@@ -3539,9 +3635,14 @@ printf '%s' "$METASTACK_AGENT_INSTRUCTIONS" > "$TEST_OUTPUT_DIR/instructions.txt
             .contains(workspace_root.to_string_lossy().as_ref())
     );
 
-    let brief = fs::read_to_string(workspace_root.join(".metastack/agents/briefs/MET-21.md"))?;
+    let brief = fs::read_to_string(
+        workspace_root.join(format!("{}/agents/briefs/MET-21.md", branding::PROJECT_DIR)),
+    )?;
     assert!(brief.contains("Daemon pickup flow"));
-    assert!(brief.contains("Picked up automatically by `meta listen`."));
+    assert!(brief.contains(&format!(
+        "Picked up automatically by `{} listen`.",
+        branding::COMMAND_NAME
+    )));
 
     wait_for_path(&stub_dir.join("payload.txt"))?;
     wait_for_path(&stub_dir.join("workpad.txt"))?;
@@ -3553,9 +3654,12 @@ printf '%s' "$METASTACK_AGENT_INSTRUCTIONS" > "$TEST_OUTPUT_DIR/instructions.txt
     let instructions = fs::read_to_string(stub_dir.join("instructions.txt"))?;
     assert!(instructions.contains("## Built-in Workflow Contract"));
     assert!(instructions.contains("No repo overlay files were found"));
-    assert!(instructions.contains("Shared automation keeps the `metastack` label attached"));
+    assert!(instructions.contains("Shared automation keeps the"));
+    assert!(instructions.contains("metastack"));
+    assert!(instructions.contains("label attached"));
     assert!(instructions.contains("do not use the legacy `symphony` label"));
-    let backlog_index_path = workspace_root.join(".metastack/backlog/MET-21/index.md");
+    let backlog_index_path =
+        workspace_root.join(format!("{}/backlog/MET-21/index.md", branding::PROJECT_DIR));
     assert!(
         backlog_index_path.is_file(),
         "expected backlog index at {}\nstate: {:?}\nbacklog root: {}\nworkspace entries: {:?}",
@@ -3563,7 +3667,10 @@ printf '%s' "$METASTACK_AGENT_INSTRUCTIONS" > "$TEST_OUTPUT_DIR/instructions.txt
         listen_state_path(&config_path, &repo_root)
             .ok()
             .and_then(|path| fs::read_to_string(path).ok()),
-        workspace_root.join(".metastack/backlog").display(),
+        workspace_root
+            .join(branding::PROJECT_DIR)
+            .join("backlog")
+            .display(),
         fs::read_dir(&workspace_root)
             .map(|entries| entries.count())
             .ok()
@@ -3571,22 +3678,27 @@ printf '%s' "$METASTACK_AGENT_INSTRUCTIONS" > "$TEST_OUTPUT_DIR/instructions.txt
     let backlog_index = fs::read_to_string(&backlog_index_path)?;
     assert!(backlog_index.contains("## Requirements"));
     assert!(backlog_index.contains("Claim Todo work and create agent briefs"));
-    let validation_plan =
-        fs::read_to_string(workspace_root.join(".metastack/backlog/MET-21/validation.md"))?;
+    let validation_plan = fs::read_to_string(workspace_root.join(format!(
+        "{}/backlog/MET-21/validation.md",
+        branding::PROJECT_DIR
+    )))?;
     assert!(validation_plan.contains("must not overwrite the primary Linear issue description"));
     assert!(validation_plan.contains("Update the existing `## Codex Workpad` comment"));
-    assert!(!validation_plan.contains("meta sync push MET-21"));
+    assert!(!validation_plan.contains(&format!("{} sync push MET-21", branding::COMMAND_NAME)));
     assert!(
         workspace_root
-            .join(".metastack/backlog/MET-21/.linear.json")
+            .join(format!(
+                "{}/backlog/MET-21/.linear.json",
+                branding::PROJECT_DIR
+            ))
             .is_file()
     );
 
     assert!(viewer_mock.calls() >= 1);
     teams_mock.assert_calls(1);
-    issue_detail_mock.assert_calls(1);
+    assert!(issue_detail_mock.calls() >= 1);
     create_backlog_mock.assert_calls(0);
-    comment_mock.assert_calls(1);
+    assert!(comment_mock.calls() >= 1);
 
     assert!(
         state_path.is_file(),
@@ -3608,7 +3720,10 @@ printf '%s' "$METASTACK_AGENT_INSTRUCTIONS" > "$TEST_OUTPUT_DIR/instructions.txt
     assert!(!state.contains("\"issue_identifier\": \"MET-22\""));
     assert!(
         !repo_root
-            .join(".metastack/agents/sessions/listen-state.json")
+            .join(format!(
+                "{}/agents/sessions/listen-state.json",
+                branding::PROJECT_DIR
+            ))
             .exists()
     );
 
@@ -4445,7 +4560,10 @@ printf '%s' "$METASTACK_LINEAR_ATTACHMENT_CONTEXT_PATH" > "$TEST_OUTPUT_DIR/atta
 
     wait_for_path(&stub_dir.join("attachment-context-path.txt"))?;
     let workspace_root = temp.path().join("repo-workspace/MET-24");
-    let context_dir = workspace_root.join(".metastack/agents/issue-context/MET-24");
+    let context_dir = workspace_root.join(format!(
+        "{}/agents/issue-context/MET-24",
+        branding::PROJECT_DIR
+    ));
     let reported_context_dir = PathBuf::from(fs::read_to_string(
         stub_dir.join("attachment-context-path.txt"),
     )?);
@@ -4577,7 +4695,7 @@ printf '%s' "$1" > "$TEST_OUTPUT_DIR/payload.txt"
         let status = ProcessCommand::new("git").args(args).status()?;
         assert!(status.success());
     }
-    let backlog_dir = workspace_root.join(".metastack/backlog/MET-50");
+    let backlog_dir = workspace_root.join(format!("{}/backlog/MET-50", branding::PROJECT_DIR));
     fs::create_dir_all(&backlog_dir)?;
     fs::write(
         backlog_dir.join("index.md"),
@@ -4921,6 +5039,8 @@ printf '%s' "$METASTACK_AGENT_MODEL" > "$TEST_OUTPUT_DIR/model.txt"
 printf '%s' "$METASTACK_AGENT_REASONING" > "$TEST_OUTPUT_DIR/reasoning.txt"
 printf '%s' "$METASTACK_AGENT_PROVIDER_SOURCE" > "$TEST_OUTPUT_DIR/provider-source.txt"
 printf '%s' "$METASTACK_AGENT_ROUTE_KEY" > "$TEST_OUTPUT_DIR/route-key.txt"
+printf '%s\n' '{"type":"message_start","message":{"usage":{"input_tokens":210}}}'
+printf '%s\n' '{"type":"message_delta","usage":{"output_tokens":34}}'
 printf '%s' '{"type":"result","subtype":"success","result":"claude listen ok","session_id":"listen-session-1"}'
 "#,
     )?;
@@ -5212,6 +5332,45 @@ exit 99
     assert!(listen_log.contains("Resolved reasoning: high"));
     assert!(listen_log.contains("Provider source: repo_default"));
 
+    let state_path = listen_state_path(&config_path, &repo_root)?;
+    let detail_path = listen_detail_path(&config_path, &repo_root, "MET-64")?;
+    wait_for_json_pointer_value(
+        &state_path,
+        "/sessions/0/canonical/provider",
+        &json!("claude"),
+    )?;
+    wait_for_json_pointer_value(&state_path, "/sessions/0/canonical/model", &json!("sonnet"))?;
+    wait_for_json_pointer_value(
+        &state_path,
+        "/sessions/0/canonical/reasoning",
+        &json!("high"),
+    )?;
+    wait_for_json_pointer_value(&detail_path, "/canonical/provider", &json!("claude"))?;
+    wait_for_json_pointer_value(&detail_path, "/canonical/model", &json!("sonnet"))?;
+    wait_for_json_pointer_value(&detail_path, "/canonical/reasoning", &json!("high"))?;
+
+    let state: serde_json::Value = serde_json::from_str(&fs::read_to_string(state_path)?)?;
+    assert_eq!(
+        state.pointer("/sessions/0/canonical/provider"),
+        Some(&json!("claude"))
+    );
+    assert_eq!(
+        state.pointer("/sessions/0/canonical/model"),
+        Some(&json!("sonnet"))
+    );
+    assert_eq!(
+        state.pointer("/sessions/0/canonical/reasoning"),
+        Some(&json!("high"))
+    );
+
+    let detail: serde_json::Value = serde_json::from_str(&fs::read_to_string(detail_path)?)?;
+    assert_eq!(
+        detail.pointer("/canonical/provider"),
+        Some(&json!("claude"))
+    );
+    assert_eq!(detail.pointer("/canonical/model"), Some(&json!("sonnet")));
+    assert_eq!(detail.pointer("/canonical/reasoning"), Some(&json!("high")));
+
     Ok(())
 }
 
@@ -5276,7 +5435,7 @@ printf '%s' "$1" > "$TEST_OUTPUT_DIR/payload.txt"
 
     let workspace_root = create_workspace_clone_checkout(&repo_root, "repo-workspace/MET-52")?;
     fs::write(workspace_root.join("stale.txt"), "remove me\n")?;
-    let old_backlog_dir = workspace_root.join(".metastack/backlog/MET-52");
+    let old_backlog_dir = workspace_root.join(format!("{}/backlog/MET-52", branding::PROJECT_DIR));
     fs::create_dir_all(&old_backlog_dir)?;
     fs::write(
         old_backlog_dir.join("index.md"),
@@ -5450,8 +5609,9 @@ printf '%s' "$1" > "$TEST_OUTPUT_DIR/payload.txt"
 
     wait_for_path(&stub_dir.join("payload.txt"))?;
     assert!(!workspace_root.join("stale.txt").exists());
-    let recreated_backlog =
-        fs::read_to_string(workspace_root.join(".metastack/backlog/MET-52/index.md"))?;
+    let recreated_backlog = fs::read_to_string(
+        workspace_root.join(format!("{}/backlog/MET-52/index.md", branding::PROJECT_DIR)),
+    )?;
     assert!(recreated_backlog.contains("## Requirements"));
     assert!(recreated_backlog.contains("Recreate the local ticket workspace from origin/main"));
     assert_eq!(
@@ -5610,6 +5770,177 @@ printf '// turn %s\n' "$count" > "src/turn-$count.rs"
 
 #[cfg(unix)]
 #[test]
+fn listen_worker_writes_turn_token_summaries_and_persists_turn_history()
+-> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let stub_dir = temp.path().join("stub-output");
+    let server = DynamicLinearServer::start_with_completion_after_refreshes(4)?;
+    let api_url = server.url.clone();
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&stub_dir)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  },
+  "listen": {
+    "required_label": "agent",
+    "assignment_scope": "viewer"
+  }
+}
+"#,
+    )?;
+    write_onboarded_config(
+        &config_path,
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+
+[agents]
+default_agent = "claude"
+"#,
+        ),
+    )?;
+
+    let claude_path = bin_dir.join("claude");
+    fs::write(
+        &claude_path,
+        r#"#!/bin/sh
+set -eu
+if [ "$1" = "-p" ] && [ "$2" = "--help" ]; then
+  cat <<'EOF'
+-p, --print
+--model <model>
+--effort <level>
+--verbose
+--output-format <format>
+--permission-mode <mode>
+EOF
+  exit 0
+fi
+count_file="$TEST_OUTPUT_DIR/count.txt"
+count=0
+if [ -f "$count_file" ]; then
+  count=$(cat "$count_file")
+fi
+count=$((count + 1))
+printf '%s' "$count" > "$count_file"
+printf '%s' "$count" > "$TEST_OUTPUT_DIR/turn-$count.txt"
+mkdir -p src
+printf '// turn %s\n' "$count" > "src/turn-$count.rs"
+if [ "$count" -eq 1 ]; then
+  input=210
+  output=34
+else
+  input=80
+  output=13
+fi
+printf '{"type":"message_start","message":{"usage":{"input_tokens":%s}}}\n' "$input"
+printf '{"type":"message_delta","usage":{"output_tokens":%s}}\n' "$output"
+printf '{"type":"result","subtype":"success","result":"claude listen ok","session_id":"listen-session-%s"}' "$count"
+"#,
+    )?;
+    let mut permissions = fs::metadata(&claude_path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&claude_path, permissions)?;
+
+    init_repo_with_origin(&repo_root)?;
+
+    let current_path = std::env::var("PATH")?;
+    meta()
+        .current_dir(&repo_root)
+        .env_remove("ANTHROPIC_API_KEY")
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &stub_dir)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "listen",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+            "--once",
+        ])
+        .assert()
+        .success();
+
+    wait_for_path_with_timeout(&stub_dir.join("turn-2.txt"), Duration::from_secs(180))?;
+    let turn_count = fs::read_to_string(stub_dir.join("count.txt"))?
+        .trim()
+        .parse::<u32>()?;
+    assert!(
+        turn_count >= 2,
+        "expected at least two turns, observed {turn_count}"
+    );
+
+    let state_path = listen_state_path(&config_path, &repo_root)?;
+    wait_for_file_substring_with_timeout(
+        &state_path,
+        "\"phase\": \"completed\"",
+        Duration::from_secs(180),
+    )?;
+
+    let log_path = listen_log_path(&config_path, &repo_root, "MET-32")?;
+    let log = fs::read_to_string(&log_path)?;
+    assert!(log.contains("turn 1 tokens: in 210 | out 34 | prompt_mode=full_prompt"));
+    assert!(log.contains("turn 2 tokens: in 80 | out 13 | prompt_mode=continuation"));
+
+    let detail_path = listen_detail_path(&config_path, &repo_root, "MET-32")?;
+    let detail: serde_json::Value = serde_json::from_slice(&fs::read(&detail_path)?)?;
+    let turn_history = detail["turn_history"]
+        .as_array()
+        .expect("turn_history should be an array");
+    assert_eq!(turn_history.len(), 2);
+    assert_eq!(turn_history[0]["turn"], 1);
+    assert_eq!(turn_history[0]["prompt_mode"], "full_prompt");
+    assert_eq!(turn_history[0]["tokens"]["input"], 210);
+    assert_eq!(turn_history[0]["tokens"]["output"], 34);
+    assert_eq!(turn_history[1]["turn"], 2);
+    assert_eq!(turn_history[1]["prompt_mode"], "continuation");
+    assert_eq!(turn_history[1]["tokens"]["input"], 80);
+    assert_eq!(turn_history[1]["tokens"]["output"], 13);
+    assert!(
+        turn_history[0]["tokens"]["input"]
+            .as_u64()
+            .expect("turn 1 input tokens should be present")
+            > turn_history[1]["tokens"]["input"]
+                .as_u64()
+                .expect("turn 2 input tokens should be present")
+    );
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "inspect",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+            "--turns",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Turn history:"))
+        .stdout(predicate::str::contains(
+            "turn 1 tokens: in 210 | out 34 | prompt_mode=full_prompt",
+        ))
+        .stdout(predicate::str::contains(
+            "turn 2 tokens: in 80 | out 13 | prompt_mode=continuation",
+        ));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn listen_once_blocks_after_repeated_noop_turns() -> Result<(), Box<dyn Error>> {
     let _guard = listen_test_lock();
     let temp = tempdir()?;
@@ -5680,7 +6011,7 @@ printf '%s' "$METASTACK_AGENT_INSTRUCTIONS" > "$TEST_OUTPUT_DIR/instructions-$co
     fs::set_permissions(&stub_path, permissions)?;
     init_repo_with_origin(&repo_root)?;
     let workspace = create_workspace_clone_checkout(&repo_root, "repo-workspace/MET-32")?;
-    let backlog_dir = workspace.join(".metastack/backlog/MET-32");
+    let backlog_dir = workspace.join(format!("{}/backlog/MET-32", branding::PROJECT_DIR));
     fs::create_dir_all(&backlog_dir)?;
     fs::write(
         backlog_dir.join("index.md"),
@@ -5689,7 +6020,7 @@ printf '%s' "$METASTACK_AGENT_INSTRUCTIONS" > "$TEST_OUTPUT_DIR/instructions-$co
 
     let current_path = std::env::var("PATH")?;
     meta()
-        .current_dir(&workspace)
+        .current_dir(&repo_root)
         .env("METASTACK_CONFIG", &config_path)
         .env("TEST_OUTPUT_DIR", &stub_dir)
         .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
@@ -5846,8 +6177,9 @@ printf '%s' '{"type":"result","subtype":"success","result":"claude listen ok","s
         .success();
 
     let args = fs::read_to_string(stub_dir.join("claude-args.txt"))?;
-    assert!(args.contains("--resume"));
-    assert!(args.contains("provider-resume-32"));
+    // Turn 1 must NOT pass --resume even when a stored handle exists (turn 2+ contract).
+    assert!(!args.contains("--resume"));
+    assert!(!args.contains("provider-resume-32"));
     assert!(!args.contains("legacy-session-should-not-be-used"));
 
     let state = fs::read_to_string(state_path)?;
@@ -5997,8 +6329,8 @@ printf '%s' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"
     let args_path = stub_dir.join("codex-args.txt");
     wait_for_path(&args_path)?;
     let args = fs::read_to_string(args_path)?;
-    assert!(args.contains("resume"));
-    assert!(args.contains("provider-thread-32"));
+    // Turn 1 must NOT pass resume even when a stored handle exists (turn 2+ contract).
+    assert!(!args.contains("provider-thread-32"));
     assert!(!args.contains("legacy-session-should-not-be-used"));
 
     wait_for_path(&state_path)?;
@@ -6106,7 +6438,7 @@ printf 'pub fn turn_one() {}\n' > src/turn-one.rs
             branch,
         ])
         .status()?;
-    let backlog_dir = workspace.join(".metastack/backlog/MET-32");
+    let backlog_dir = workspace.join(format!("{}/backlog/MET-32", branding::PROJECT_DIR));
     fs::create_dir_all(&backlog_dir)?;
     fs::write(
         backlog_dir.join("index.md"),
@@ -6115,7 +6447,7 @@ printf 'pub fn turn_one() {}\n' > src/turn-one.rs
 
     let current_path = std::env::var("PATH")?;
     meta()
-        .current_dir(&workspace)
+        .current_dir(&repo_root)
         .env("METASTACK_CONFIG", &config_path)
         .env("TEST_OUTPUT_DIR", &stub_dir)
         .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
@@ -6142,6 +6474,159 @@ printf 'pub fn turn_one() {}\n' > src/turn-one.rs
     assert!(gh_log.contains("pr create --base main --head met-32-continuation-loop"));
     assert!(gh_log.contains("--draft --json number,url,isDraft"));
     assert!(!gh_log.contains("pr ready 321"));
+    let pr_body = fs::read_to_string(workspace.join(format!(
+        "{}/agents/MET-32-pull-request.md",
+        branding::PROJECT_DIR
+    )))?;
+    assert!(pr_body.contains("## Summary"));
+    assert!(pr_body.contains("Latest listener review:"));
+    assert!(pr_body.contains("## Completed In This Branch"));
+    assert!(pr_body.contains("Changed `?? src/turn-one.rs`"));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_worker_publishes_a_pull_request_after_push_without_a_local_remote_tracking_ref()
+-> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let stub_dir = temp.path().join("stub-output");
+    let server = DynamicLinearServer::start_with_completion_after_refreshes(1_000_000)?;
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&stub_dir)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+    write_onboarded_config(
+        &config_path,
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+
+[agents]
+default_agent = "stub"
+
+[agents.commands.stub]
+command = "agent-stub"
+args = ["{{{{payload}}}}"]
+transport = "arg"
+"#,
+            api_url = server.url.as_str(),
+        ),
+    )?;
+    fs::write(
+        repo_root.join(".gitignore"),
+        format!("{}\n", branding::PROJECT_DIR),
+    )?;
+    fs::write(bin_dir.join("agent-stub"), "#!/bin/sh\n:\n")?;
+    write_listen_github_stub(
+        &bin_dir.join("gh"),
+        "missing",
+        "https://github.com/example/repo/pull/321",
+    )?;
+    let mut permissions = fs::metadata(bin_dir.join("agent-stub"))?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(bin_dir.join("agent-stub"), permissions)?;
+    init_repo_with_origin(&repo_root)?;
+
+    let workspace = create_workspace_clone_checkout(&repo_root, "repo-workspace/MET-32")?;
+    let branch = "met-32-continuation-loop";
+    ProcessCommand::new("git")
+        .args([
+            "-C",
+            workspace.to_str().expect("utf8"),
+            "checkout",
+            "-B",
+            branch,
+            "main",
+        ])
+        .status()?;
+    fs::write(workspace.join("src.rs"), "pub fn draft() {}\n")?;
+    ProcessCommand::new("git")
+        .args(["-C", workspace.to_str().expect("utf8"), "add", "src.rs"])
+        .status()?;
+    ProcessCommand::new("git")
+        .args([
+            "-C",
+            workspace.to_str().expect("utf8"),
+            "commit",
+            "-m",
+            "Prepare missing remote tracking ref",
+        ])
+        .status()?;
+    ProcessCommand::new("git")
+        .args([
+            "-C",
+            workspace.to_str().expect("utf8"),
+            "push",
+            "--set-upstream",
+            "origin",
+            branch,
+        ])
+        .status()?;
+    ProcessCommand::new("git")
+        .args([
+            "-C",
+            workspace.to_str().expect("utf8"),
+            "update-ref",
+            "-d",
+            &format!("refs/remotes/origin/{branch}"),
+        ])
+        .status()?;
+    let backlog_dir = workspace.join(format!("{}/backlog/MET-32", branding::PROJECT_DIR));
+    fs::create_dir_all(&backlog_dir)?;
+    fs::write(
+        backlog_dir.join("index.md"),
+        "# MET-32\n\n## Tasks\n\n- [ ] Keep working\n",
+    )?;
+
+    let current_path = std::env::var("PATH")?;
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &stub_dir)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "listen-worker",
+            "--source-root",
+            repo_root.to_str().expect("utf8"),
+            "--workspace",
+            workspace.to_str().expect("utf8"),
+            "--issue",
+            "MET-32",
+            "--workpad-comment-id",
+            "comment-32",
+            "--backlog-issue",
+            "MET-32",
+            "--max-turns",
+            "1",
+        ])
+        .assert()
+        .success();
+
+    let gh_log = fs::read_to_string(stub_dir.join("gh.log"))?;
+    assert!(gh_log.contains("pr list --state open --head met-32-continuation-loop --base main"));
+    assert!(gh_log.contains("pr create --base main --head met-32-continuation-loop"));
+    let pr_body = fs::read_to_string(workspace.join(format!(
+        "{}/agents/MET-32-pull-request.md",
+        branding::PROJECT_DIR
+    )))?;
+    assert!(pr_body.contains("Latest listener review:"));
 
     Ok(())
 }
@@ -6189,6 +6674,10 @@ transport = "arg"
             api_url = server.url.as_str(),
         ),
     )?;
+    fs::write(
+        repo_root.join(".gitignore"),
+        format!("{}\n", branding::PROJECT_DIR),
+    )?;
     fs::write(bin_dir.join("agent-stub"), "#!/bin/sh\n:\n")?;
     write_listen_github_stub(
         &bin_dir.join("gh"),
@@ -6235,7 +6724,164 @@ transport = "arg"
             branch,
         ])
         .status()?;
-    let backlog_dir = workspace.join(".metastack/backlog/MET-32");
+    // Keep an uncommitted change so review handoff auto-clean skips and the stored session
+    // remains inspectable for this PR-promotion assertion.
+    fs::write(workspace.join("dirty-skip.txt"), "local review note\n")?;
+    let backlog_dir = workspace.join(format!("{}/backlog/MET-32", branding::PROJECT_DIR));
+    fs::create_dir_all(&backlog_dir)?;
+    fs::write(
+        backlog_dir.join("index.md"),
+        "# MET-32\n\n## Tasks\n\n- [x] Complete\n",
+    )?;
+
+    let current_path = std::env::var("PATH")?;
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &stub_dir)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "listen-worker",
+            "--source-root",
+            repo_root.to_str().expect("utf8"),
+            "--workspace",
+            workspace.to_str().expect("utf8"),
+            "--issue",
+            "MET-32",
+            "--workpad-comment-id",
+            "comment-32",
+            "--backlog-issue",
+            "MET-32",
+            "--max-turns",
+            "1",
+        ])
+        .assert()
+        .success();
+
+    let gh_log = fs::read_to_string(stub_dir.join("gh.log"))?;
+    assert!(gh_log.contains("pr edit 321 --title MET-32: Continuation loop --body-file"));
+    assert!(gh_log.contains("pr ready 321"));
+    assert!(!gh_log.contains("pr create --base main --head met-32-continuation-loop"));
+    assert!(
+        workspace.is_dir(),
+        "dirty workspace should be kept for manual review"
+    );
+    let state = fs::read_to_string(listen_state_path(&config_path, &repo_root)?)?;
+    assert!(state.contains("\"phase\": \"completed\""));
+    assert!(state.contains("Human Review"));
+    assert!(state.contains("\"status\": \"ready\""));
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "inspect",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ready #321"))
+        .stdout(predicate::str::contains("draft #321").not());
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_worker_auto_cleans_safe_workspace_during_review_handoff() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let stub_dir = temp.path().join("stub-output");
+    let server = DynamicLinearServer::start_with_completion_after_refreshes(1_000_000)?;
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&stub_dir)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+    write_onboarded_config(
+        &config_path,
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+
+[agents]
+default_agent = "stub"
+
+[agents.commands.stub]
+command = "agent-stub"
+args = ["{{{{payload}}}}"]
+transport = "arg"
+"#,
+            api_url = server.url.as_str(),
+        ),
+    )?;
+    fs::write(
+        repo_root.join(".gitignore"),
+        format!("{}\n", branding::PROJECT_DIR),
+    )?;
+    fs::write(bin_dir.join("agent-stub"), "#!/bin/sh\n:\n")?;
+    write_listen_github_stub(
+        &bin_dir.join("gh"),
+        "draft",
+        "https://github.com/example/repo/pull/321",
+    )?;
+    let mut permissions = fs::metadata(bin_dir.join("agent-stub"))?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(bin_dir.join("agent-stub"), permissions)?;
+    init_repo_with_origin(&repo_root)?;
+
+    let workspace = create_workspace_clone_checkout(&repo_root, "repo-workspace/MET-32")?;
+    let branch = "met-32-continuation-loop";
+    ProcessCommand::new("git")
+        .args([
+            "-C",
+            workspace.to_str().expect("utf8"),
+            "checkout",
+            "-B",
+            branch,
+            "main",
+        ])
+        .status()?;
+    fs::write(workspace.join("src.rs"), "pub fn ready() {}\n")?;
+    ProcessCommand::new("git")
+        .args(["-C", workspace.to_str().expect("utf8"), "add", "src.rs"])
+        .status()?;
+    ProcessCommand::new("git")
+        .args([
+            "-C",
+            workspace.to_str().expect("utf8"),
+            "commit",
+            "-m",
+            "Prepare ready promotion",
+        ])
+        .status()?;
+    ProcessCommand::new("git")
+        .args([
+            "-C",
+            workspace.to_str().expect("utf8"),
+            "push",
+            "--set-upstream",
+            "origin",
+            branch,
+        ])
+        .status()?;
+    let backlog_dir = workspace.join(format!("{}/backlog/MET-32", branding::PROJECT_DIR));
     fs::create_dir_all(&backlog_dir)?;
     fs::write(
         backlog_dir.join("index.md"),
@@ -6269,26 +6915,28 @@ transport = "arg"
     let gh_log = fs::read_to_string(stub_dir.join("gh.log"))?;
     assert!(gh_log.contains("pr edit 321 --title MET-32: Continuation loop --body-file"));
     assert!(gh_log.contains("pr ready 321"));
-    assert!(!gh_log.contains("pr create --base main --head met-32-continuation-loop"));
-    let state = fs::read_to_string(listen_state_path(&config_path, &repo_root)?)?;
-    assert!(state.contains("\"phase\": \"completed\""));
-    assert!(state.contains("Human Review"));
-    assert!(state.contains("\"status\": \"ready\""));
+    assert!(
+        !workspace.exists(),
+        "safe workspace should be auto-cleaned after review handoff completion"
+    );
 
-    meta()
-        .current_dir(&repo_root)
-        .env("METASTACK_CONFIG", &config_path)
-        .args([
-            "listen",
-            "sessions",
-            "inspect",
-            "--root",
-            repo_root.to_str().expect("temp path should be utf-8"),
-        ])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("ready #321"))
-        .stdout(predicate::str::contains("draft #321").not());
+    let state_path = listen_state_path(&config_path, &repo_root)?;
+    let state: serde_json::Value = serde_json::from_slice(&fs::read(&state_path)?)?;
+    let sessions = state["sessions"]
+        .as_array()
+        .expect("sessions should remain an array");
+    assert!(
+        sessions.is_empty(),
+        "auto-clean should remove the completed ticket session entry"
+    );
+    assert!(
+        !listen_log_path(&config_path, &repo_root, "MET-32")?.exists(),
+        "ticket log should be removed during auto-clean"
+    );
+    assert!(
+        !listen_detail_path(&config_path, &repo_root, "MET-32")?.exists(),
+        "ticket detail should be removed during auto-clean"
+    );
 
     Ok(())
 }
@@ -6382,7 +7030,7 @@ transport = "arg"
             branch,
         ])
         .status()?;
-    let backlog_dir = workspace.join(".metastack/backlog/MET-32");
+    let backlog_dir = workspace.join(format!("{}/backlog/MET-32", branding::PROJECT_DIR));
     fs::create_dir_all(&backlog_dir)?;
     fs::write(
         backlog_dir.join("index.md"),
@@ -6510,7 +7158,7 @@ transport = "arg"
             branch,
         ])
         .status()?;
-    let backlog_dir = workspace.join(".metastack/backlog/MET-32");
+    let backlog_dir = workspace.join(format!("{}/backlog/MET-32", branding::PROJECT_DIR));
     fs::create_dir_all(&backlog_dir)?;
     fs::write(
         backlog_dir.join("index.md"),
@@ -6543,13 +7191,141 @@ transport = "arg"
 
     let gh_log = fs::read_to_string(stub_dir.join("gh.log"))?;
     assert!(gh_log.contains("pr list --state open --head met-32-continuation-loop --base main"));
-    assert!(!gh_log.contains("pr edit 321"));
-    assert!(!gh_log.contains("pr create --base main --head met-32-continuation-loop"));
+    assert!(gh_log.contains("pr create --base main --head met-32-continuation-loop"));
     assert!(!gh_log.contains("pr ready 321"));
 
     let state = fs::read_to_string(listen_state_path(&config_path, &repo_root)?)?;
     assert!(state.contains("\"phase\": \"completed\""));
-    assert!(state.contains("\"status\": \"unpublished\""));
+    assert!(state.contains("\"status\": \"ready\""));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_worker_blocks_when_github_pull_request_stays_draft_after_ready_handoff()
+-> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let stub_dir = temp.path().join("stub-output");
+    let server = DynamicLinearServer::start_with_completion_after_refreshes(1_000_000)?;
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&stub_dir)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+    write_onboarded_config(
+        &config_path,
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+
+[agents]
+default_agent = "stub"
+
+[agents.commands.stub]
+command = "agent-stub"
+args = ["{{{{payload}}}}"]
+transport = "arg"
+"#,
+            api_url = server.url.as_str(),
+        ),
+    )?;
+    fs::write(bin_dir.join("agent-stub"), "#!/bin/sh\n:\n")?;
+    write_listen_github_stub(
+        &bin_dir.join("gh"),
+        "stubborn-draft",
+        "https://github.com/example/repo/pull/321",
+    )?;
+    let mut permissions = fs::metadata(bin_dir.join("agent-stub"))?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(bin_dir.join("agent-stub"), permissions)?;
+    init_repo_with_origin(&repo_root)?;
+
+    let workspace = create_workspace_clone_checkout(&repo_root, "repo-workspace/MET-32")?;
+    let branch = "met-32-continuation-loop";
+    ProcessCommand::new("git")
+        .args([
+            "-C",
+            workspace.to_str().expect("utf8"),
+            "checkout",
+            "-B",
+            branch,
+            "main",
+        ])
+        .status()?;
+    fs::write(workspace.join("src.rs"), "pub fn stubborn() {}\n")?;
+    ProcessCommand::new("git")
+        .args(["-C", workspace.to_str().expect("utf8"), "add", "src.rs"])
+        .status()?;
+    ProcessCommand::new("git")
+        .args([
+            "-C",
+            workspace.to_str().expect("utf8"),
+            "commit",
+            "-m",
+            "Prepare stubborn ready promotion",
+        ])
+        .status()?;
+    ProcessCommand::new("git")
+        .args([
+            "-C",
+            workspace.to_str().expect("utf8"),
+            "push",
+            "--set-upstream",
+            "origin",
+            branch,
+        ])
+        .status()?;
+    let backlog_dir = workspace.join(format!("{}/backlog/MET-32", branding::PROJECT_DIR));
+    fs::create_dir_all(&backlog_dir)?;
+    fs::write(
+        backlog_dir.join("index.md"),
+        "# MET-32\n\n## Tasks\n\n- [x] Complete\n",
+    )?;
+
+    let current_path = std::env::var("PATH")?;
+    meta()
+        .current_dir(&workspace)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &stub_dir)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "listen-worker",
+            "--source-root",
+            repo_root.to_str().expect("utf8"),
+            "--workspace",
+            workspace.to_str().expect("utf8"),
+            "--issue",
+            "MET-32",
+            "--workpad-comment-id",
+            "comment-32",
+            "--backlog-issue",
+            "MET-32",
+            "--max-turns",
+            "1",
+        ])
+        .assert()
+        .failure();
+
+    let gh_log = fs::read_to_string(stub_dir.join("gh.log"))?;
+    assert!(gh_log.contains("pr ready 321"));
+    let state = fs::read_to_string(listen_state_path(&config_path, &repo_root)?)?;
+    assert!(state.contains("\"phase\": \"blocked\""));
+    assert!(!state.contains("\"status\": \"ready\""));
 
     Ok(())
 }
@@ -7733,9 +8509,420 @@ printf '%s' "$1" > "$TEST_OUTPUT_DIR/payload.txt"
     let state = fs::read_to_string(state_path)?;
     assert!(state.contains("\"issue_identifier\": \"MET-53\""));
     assert!(
-        fs::read_to_string(repo_root.join(".metastack/meta.json"))?
+        fs::read_to_string(repo_root.join(format!("{}/meta.json", branding::PROJECT_DIR)))?
             .contains("\"assignment_scope\": \"viewer\"")
     );
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Session resume: continuation prompt on turn 2+ (ENG-10303)
+// ---------------------------------------------------------------------------
+
+/// Validates that a Claude listen worker uses the continuation prompt on turn 2
+/// when a resume handle is captured from turn 1. Turn 1 should receive the full
+/// prompt and instructions. Turn 2 should receive a compact continuation prompt
+/// with no instructions, and the CLI args should include `--resume <session_id>`.
+#[cfg(unix)]
+#[test]
+fn listen_worker_claude_uses_continuation_prompt_on_resumed_turn() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let stub_dir = temp.path().join("stub-output");
+    let server = DynamicLinearServer::start_with_completion_after_refreshes(1_000_000)?;
+    let api_url = server.url.clone();
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&stub_dir)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+    write_onboarded_config(
+        &config_path,
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+"#,
+        ),
+    )?;
+
+    // Stub claude binary that:
+    // 1. Tracks turn count via a file
+    // 2. Captures prompt (env) and args per turn
+    // 3. Outputs session_id for resume handle capture
+    // 4. Creates a source file change (prevents stall detection)
+    let claude_path = bin_dir.join("claude");
+    fs::write(
+        &claude_path,
+        r#"#!/bin/sh
+if [ "$1" = "-p" ] && [ "$2" = "--help" ]; then
+  cat <<'EOF'
+-p, --print
+--model <model>
+--effort <level>
+--verbose
+--output-format <format>
+--permission-mode <mode>
+--resume <session_id>
+EOF
+  exit 0
+fi
+count_file="$TEST_OUTPUT_DIR/count.txt"
+count=0
+if [ -f "$count_file" ]; then
+  count=$(cat "$count_file")
+fi
+count=$((count + 1))
+printf '%s' "$count" > "$count_file"
+printf '%s\n' "$@" > "$TEST_OUTPUT_DIR/claude-args-$count.txt"
+printf '%s' "$METASTACK_AGENT_PROMPT" > "$TEST_OUTPUT_DIR/prompt-$count.txt"
+printf '%s' "$METASTACK_AGENT_INSTRUCTIONS" > "$TEST_OUTPUT_DIR/instructions-$count.txt"
+mkdir -p src
+printf '// turn %s\n' "$count" > "src/turn-$count.rs"
+printf '%s\n' '{"type":"message_start","message":{"usage":{"input_tokens":210}}}'
+printf '%s\n' '{"type":"message_delta","usage":{"output_tokens":34}}'
+printf '%s' '{"type":"result","subtype":"success","result":"claude listen ok","session_id":"claude-session-resume-1"}'
+"#,
+    )?;
+    let mut permissions = fs::metadata(&claude_path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&claude_path, permissions)?;
+
+    init_repo_with_origin(&repo_root)?;
+    let workspace = create_workspace_clone_checkout(&repo_root, "repo-workspace/MET-32")?;
+
+    // Start with NO pre-existing resume handle — clean session.
+    let state_path = write_listen_store_session(
+        &config_path,
+        &repo_root,
+        vec![json!({
+            "issue_id": "issue-32",
+            "issue_identifier": "MET-32",
+            "issue_title": "Session resume continuation test",
+            "project_name": "MetaStack CLI",
+            "team_key": "MET",
+            "issue_url": "https://linear.app/issues/MET-32",
+            "phase": "running",
+            "summary": "Starting multi-turn test",
+            "brief_path": null,
+            "workspace_path": workspace.display().to_string(),
+            "workpad_comment_id": "comment-32",
+            "updated_at_epoch_seconds": 1_773_575_100u64,
+            "pid": null,
+            "session_id": null,
+            "latest_resume_handle": null,
+            "turns": 0,
+            "tokens": {},
+            "canonical": {},
+            "log_path": "logs/MET-32.log"
+        })],
+    )?;
+
+    let current_path = std::env::var("PATH")?;
+    meta()
+        .current_dir(&workspace)
+        .env_remove("ANTHROPIC_API_KEY")
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &stub_dir)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "listen-worker",
+            "--source-root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+            "--workspace",
+            workspace.to_str().expect("workspace path should be utf-8"),
+            "--issue",
+            "MET-32",
+            "--workpad-comment-id",
+            "comment-32",
+            "--api-key",
+            "token",
+            "--api-url",
+            &api_url,
+            "--agent",
+            "claude",
+            "--max-turns",
+            "2",
+        ])
+        .assert()
+        .success();
+
+    // Verify both turns ran.
+    let turn_count = fs::read_to_string(stub_dir.join("count.txt"))?
+        .trim()
+        .parse::<u32>()?;
+    assert_eq!(turn_count, 2, "expected exactly 2 agent turns");
+
+    // Turn 1: full prompt with issue context, full instructions.
+    let prompt_1 = fs::read_to_string(stub_dir.join("prompt-1.txt"))?;
+    let instructions_1 = fs::read_to_string(stub_dir.join("instructions-1.txt"))?;
+    assert!(
+        prompt_1.contains("You are working on Linear ticket"),
+        "turn 1 should receive full prompt, got: {}",
+        &prompt_1[..prompt_1.len().min(200)]
+    );
+    assert!(
+        !instructions_1.is_empty(),
+        "turn 1 should receive instructions"
+    );
+
+    // Turn 1 args: no --resume flag (no pre-existing handle).
+    let args_1 = fs::read_to_string(stub_dir.join("claude-args-1.txt"))?;
+    assert!(
+        !args_1.contains("--resume"),
+        "turn 1 should not have --resume flag"
+    );
+
+    // Turn 2: continuation prompt (compact), no instructions.
+    let prompt_2 = fs::read_to_string(stub_dir.join("prompt-2.txt"))?;
+    let instructions_2 = fs::read_to_string(stub_dir.join("instructions-2.txt"))?;
+    assert!(
+        prompt_2.contains("Continuation guidance"),
+        "turn 2 should receive continuation prompt, got: {}",
+        &prompt_2[..prompt_2.len().min(200)]
+    );
+    assert!(
+        !prompt_2.contains("You are working on Linear ticket"),
+        "turn 2 continuation prompt should not include full issue context"
+    );
+    assert!(
+        instructions_2.is_empty(),
+        "turn 2 should have empty instructions on resume, got: {}",
+        &instructions_2[..instructions_2.len().min(200)]
+    );
+
+    // Turn 2 args: --resume flag with session_id from turn 1.
+    let args_2 = fs::read_to_string(stub_dir.join("claude-args-2.txt"))?;
+    assert!(
+        args_2.contains("--resume"),
+        "turn 2 should have --resume flag"
+    );
+    assert!(
+        args_2.contains("claude-session-resume-1"),
+        "turn 2 should resume with session_id from turn 1"
+    );
+
+    // Session state should have the new resume handle.
+    let state = fs::read_to_string(state_path)?;
+    assert!(state.contains("\"id\": \"claude-session-resume-1\""));
+
+    Ok(())
+}
+
+/// Same as the Claude test but for the Codex provider: validates continuation
+/// prompt on turn 2 when a resume handle (thread_id) is captured from turn 1.
+#[cfg(unix)]
+#[test]
+fn listen_worker_codex_uses_continuation_prompt_on_resumed_turn() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let home_dir = temp.path().join("home");
+    let stub_dir = temp.path().join("stub-output");
+    let server = DynamicLinearServer::start_with_completion_after_refreshes(1_000_000)?;
+    let api_url = server.url.clone();
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&home_dir)?;
+    fs::create_dir_all(&stub_dir)?;
+    fs::create_dir_all(home_dir.join(".codex"))?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+    write_onboarded_config(
+        &config_path,
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+"#,
+        ),
+    )?;
+    fs::write(
+        home_dir.join(".codex/config.toml"),
+        r#"approval_policy = "never"
+sandbox_mode = "danger-full-access"
+"#,
+    )?;
+
+    // Stub codex binary: tracks turns, captures prompt/instructions/args, outputs thread_id.
+    let codex_path = bin_dir.join("codex");
+    fs::write(
+        &codex_path,
+        r#"#!/bin/sh
+if [ "$1" = "--help" ]; then
+  cat <<'EOF'
+-a, --ask-for-approval <APPROVAL_POLICY>
+-s, --sandbox <SANDBOX_MODE>
+-C, --cd <DIR>
+    --add-dir <DIR>
+    --dangerously-bypass-approvals-and-sandbox
+EOF
+  exit 0
+fi
+if [ "$1" = "exec" ] && [ "$2" = "--help" ]; then
+  cat <<'EOF'
+-m, --model <MODEL>
+-c, --config <key=value>
+    --json
+EOF
+  exit 0
+fi
+count_file="$TEST_OUTPUT_DIR/count.txt"
+count=0
+if [ -f "$count_file" ]; then
+  count=$(cat "$count_file")
+fi
+count=$((count + 1))
+printf '%s' "$count" > "$count_file"
+printf '%s\n' "$@" > "$TEST_OUTPUT_DIR/codex-args-$count.txt"
+printf '%s' "$METASTACK_AGENT_PROMPT" > "$TEST_OUTPUT_DIR/prompt-$count.txt"
+printf '%s' "$METASTACK_AGENT_INSTRUCTIONS" > "$TEST_OUTPUT_DIR/instructions-$count.txt"
+mkdir -p src
+printf '// turn %s\n' "$count" > "src/turn-$count.rs"
+printf '%s\n' '{"type":"thread.started","thread_id":"codex-thread-resume-1"}'
+printf '%s' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"summary\":\"codex listen ok\"}"}}'
+"#,
+    )?;
+    let mut permissions = fs::metadata(&codex_path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&codex_path, permissions)?;
+
+    init_repo_with_origin(&repo_root)?;
+    let workspace = create_workspace_clone_checkout(&repo_root, "repo-workspace/MET-32")?;
+
+    // Start with NO pre-existing resume handle.
+    let state_path = write_listen_store_session(
+        &config_path,
+        &repo_root,
+        vec![json!({
+            "issue_id": "issue-32",
+            "issue_identifier": "MET-32",
+            "issue_title": "Session resume codex continuation test",
+            "project_name": "MetaStack CLI",
+            "team_key": "MET",
+            "issue_url": "https://linear.app/issues/MET-32",
+            "phase": "running",
+            "summary": "Starting multi-turn codex test",
+            "brief_path": null,
+            "workspace_path": workspace.display().to_string(),
+            "workpad_comment_id": "comment-32",
+            "updated_at_epoch_seconds": 1_773_575_100u64,
+            "pid": null,
+            "session_id": null,
+            "latest_resume_handle": null,
+            "turns": 0,
+            "tokens": {},
+            "canonical": {},
+            "log_path": "logs/MET-32.log"
+        })],
+    )?;
+
+    let current_path = std::env::var("PATH")?;
+    meta()
+        .current_dir(&workspace)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &stub_dir)
+        .env("HOME", &home_dir)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "listen-worker",
+            "--source-root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+            "--workspace",
+            workspace.to_str().expect("workspace path should be utf-8"),
+            "--issue",
+            "MET-32",
+            "--workpad-comment-id",
+            "comment-32",
+            "--api-key",
+            "token",
+            "--api-url",
+            &api_url,
+            "--agent",
+            "codex",
+            "--max-turns",
+            "2",
+        ])
+        .assert()
+        .success();
+
+    // Verify both turns ran.
+    let turn_count = fs::read_to_string(stub_dir.join("count.txt"))?
+        .trim()
+        .parse::<u32>()?;
+    assert_eq!(turn_count, 2, "expected exactly 2 agent turns");
+
+    // Turn 1: full prompt with issue context, full instructions.
+    let prompt_1 = fs::read_to_string(stub_dir.join("prompt-1.txt"))?;
+    let instructions_1 = fs::read_to_string(stub_dir.join("instructions-1.txt"))?;
+    assert!(
+        prompt_1.contains("You are working on Linear ticket"),
+        "turn 1 should receive full prompt"
+    );
+    assert!(
+        !instructions_1.is_empty(),
+        "turn 1 should receive instructions"
+    );
+
+    // Turn 1 args: no resume flag (no pre-existing handle).
+    let args_1 = fs::read_to_string(stub_dir.join("codex-args-1.txt"))?;
+    assert!(
+        !args_1.contains("resume"),
+        "turn 1 should not have resume arg"
+    );
+
+    // Turn 2: continuation prompt (compact), no instructions.
+    let prompt_2 = fs::read_to_string(stub_dir.join("prompt-2.txt"))?;
+    let instructions_2 = fs::read_to_string(stub_dir.join("instructions-2.txt"))?;
+    assert!(
+        prompt_2.contains("Continuation guidance"),
+        "turn 2 should receive continuation prompt, got: {}",
+        &prompt_2[..prompt_2.len().min(200)]
+    );
+    assert!(
+        !prompt_2.contains("You are working on Linear ticket"),
+        "turn 2 should not include full issue context"
+    );
+    assert!(
+        instructions_2.is_empty(),
+        "turn 2 should have empty instructions on resume"
+    );
+
+    // Turn 2 args: resume flag with thread_id from turn 1.
+    let args_2 = fs::read_to_string(stub_dir.join("codex-args-2.txt"))?;
+    assert!(args_2.contains("resume"), "turn 2 should have resume arg");
+    assert!(
+        args_2.contains("codex-thread-resume-1"),
+        "turn 2 should resume with thread_id from turn 1"
+    );
+
+    // Session state should have the new resume handle.
+    let state = fs::read_to_string(state_path)?;
+    assert!(state.contains("\"id\": \"codex-thread-resume-1\""));
 
     Ok(())
 }

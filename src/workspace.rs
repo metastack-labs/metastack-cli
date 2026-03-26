@@ -15,10 +15,295 @@ use crate::fs::{canonicalize_existing_dir, ensure_workspace_path_is_safe, siblin
 use crate::linear::{IssueListFilters, load_linear_command_context};
 use crate::listen::store::{ListenProjectStore, resolve_source_project_root};
 
+// ---------------------------------------------------------------------------
+// Shared cleanup contract types
+// ---------------------------------------------------------------------------
+
+/// Reason a workspace was skipped during automatic cleanup instead of being removed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CleanupSkipReason {
+    /// The workspace has uncommitted (dirty) changes.
+    UncommittedChanges,
+    /// The workspace has unpushed (ahead) commits.
+    UnpushedCommits,
+    /// The workspace HEAD is detached.
+    DetachedHead,
+    /// The workspace path failed safety validation.
+    UnsafePath(String),
+}
+
+impl std::fmt::Display for CleanupSkipReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UncommittedChanges => write!(f, "uncommitted changes detected"),
+            Self::UnpushedCommits => write!(f, "unpushed commits detected"),
+            Self::DetachedHead => write!(f, "workspace HEAD is detached"),
+            Self::UnsafePath(detail) => write!(f, "unsafe path: {detail}"),
+        }
+    }
+}
+
+/// Outcome of attempting to auto-clean a single workspace.
+#[derive(Debug, Clone)]
+pub(crate) enum AutoCleanOutcome {
+    /// The workspace was successfully removed, along with its listen artifacts.
+    Removed { bytes_reclaimed: u64 },
+    /// The workspace was not safe to remove and was skipped.
+    Skipped { reason: CleanupSkipReason },
+}
+
+/// Evaluate the git safety signals for a workspace directory.
+///
+/// Returns an error when the workspace directory cannot be inspected via `git`.
+pub(crate) fn evaluate_workspace_git_safety(workspace_path: &Path) -> Result<WorkspaceGitSignals> {
+    let branch = git_stdout(workspace_path, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .context("failed to inspect the workspace branch")?;
+    let status = git_stdout(workspace_path, &["status", "--porcelain"])
+        .context("failed to inspect local workspace changes")?;
+    Ok(WorkspaceGitSignals {
+        has_uncommitted_changes: !status.trim().is_empty(),
+        has_unpushed_commits: workspace_has_unpushed_commits(workspace_path)?,
+        is_detached: branch == "HEAD",
+    })
+}
+
+/// Attempt to safely auto-clean a single workspace clone and its ticket-scoped listen artifacts.
+///
+/// The workspace is removed only when all safety checks pass (no uncommitted changes, no unpushed
+/// commits, HEAD is not detached, and the path is within the expected workspace root). When any
+/// check fails, returns `AutoCleanOutcome::Skipped` with the reason instead of removing the
+/// workspace.
+///
+/// Returns an error only for unexpected I/O or subprocess failures, never for safety-driven skips.
+pub(crate) fn try_auto_clean_workspace(
+    source_root: &Path,
+    project_selector: Option<&str>,
+    workspace_root: &Path,
+    workspace_path: &Path,
+    ticket: &str,
+) -> Result<AutoCleanOutcome> {
+    // Validate the path is safe before inspecting git state.
+    if let Err(error) = ensure_workspace_path_is_safe(source_root, workspace_root, workspace_path) {
+        return Ok(AutoCleanOutcome::Skipped {
+            reason: CleanupSkipReason::UnsafePath(error.to_string()),
+        });
+    }
+
+    let git = evaluate_workspace_git_safety(workspace_path)?;
+
+    if git.has_uncommitted_changes {
+        return Ok(AutoCleanOutcome::Skipped {
+            reason: CleanupSkipReason::UncommittedChanges,
+        });
+    }
+    if git.has_unpushed_commits {
+        return Ok(AutoCleanOutcome::Skipped {
+            reason: CleanupSkipReason::UnpushedCommits,
+        });
+    }
+    if git.is_detached {
+        return Ok(AutoCleanOutcome::Skipped {
+            reason: CleanupSkipReason::DetachedHead,
+        });
+    }
+
+    let (disk_usage_bytes, _) = scan_workspace_usage(workspace_path)?;
+    fs::remove_dir_all(workspace_path)
+        .with_context(|| format!("failed to remove `{}`", workspace_path.display()))?;
+
+    // Remove ticket-scoped listen artifacts (session entry, detail, log).
+    let store = ListenProjectStore::resolve(source_root, project_selector)?;
+    store.remove_ticket_artifacts(ticket)?;
+
+    Ok(AutoCleanOutcome::Removed {
+        bytes_reclaimed: disk_usage_bytes,
+    })
+}
+
+/// Attempt to safely auto-clean a follow-up workspace (improve or review) that does not have
+/// ticket-scoped listen artifacts.
+///
+/// Follows the same safety contract as [`try_auto_clean_workspace`] but skips the listen
+/// artifact removal step since follow-up workspaces are not tied to the listen store.
+///
+/// Returns an error only for unexpected I/O or subprocess failures, never for safety-driven skips.
+pub(crate) fn try_auto_clean_followup_workspace(
+    source_root: &Path,
+    workspace_root: &Path,
+    workspace_path: &Path,
+) -> Result<AutoCleanOutcome> {
+    if let Err(error) = ensure_workspace_path_is_safe(source_root, workspace_root, workspace_path) {
+        return Ok(AutoCleanOutcome::Skipped {
+            reason: CleanupSkipReason::UnsafePath(error.to_string()),
+        });
+    }
+
+    let git = evaluate_workspace_git_safety(workspace_path)?;
+
+    if git.has_uncommitted_changes {
+        return Ok(AutoCleanOutcome::Skipped {
+            reason: CleanupSkipReason::UncommittedChanges,
+        });
+    }
+    if git.has_unpushed_commits {
+        return Ok(AutoCleanOutcome::Skipped {
+            reason: CleanupSkipReason::UnpushedCommits,
+        });
+    }
+    if git.is_detached {
+        return Ok(AutoCleanOutcome::Skipped {
+            reason: CleanupSkipReason::DetachedHead,
+        });
+    }
+
+    let (disk_usage_bytes, _) = scan_workspace_usage(workspace_path)?;
+    fs::remove_dir_all(workspace_path)
+        .with_context(|| format!("failed to remove `{}`", workspace_path.display()))?;
+
+    Ok(AutoCleanOutcome::Removed {
+        bytes_reclaimed: disk_usage_bytes,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Follow-up workspace discovery for prune reconciliation
+// ---------------------------------------------------------------------------
+
+/// A managed follow-up workspace entry discovered during prune reconciliation. Listener ticket
+/// workspaces go through the existing `WorkspaceEntry` path and are not represented here.
+#[derive(Debug, Clone)]
+pub(crate) enum ManagedWorkspace {
+    /// An improve-session workspace (`improve-<session-id>/`).
+    Improve {
+        session_id: String,
+        path: PathBuf,
+        branch: String,
+        disk_usage_bytes: u64,
+        git: WorkspaceGitSignals,
+    },
+    /// A review remediation workspace (`review-runs/pr-<number>/`).
+    ReviewRemediation {
+        pr_number: u64,
+        path: PathBuf,
+        branch: String,
+        disk_usage_bytes: u64,
+        git: WorkspaceGitSignals,
+    },
+}
+
+/// Discover improve workspaces under `<workspace-root>/improve-*/`.
+pub(crate) fn discover_improve_workspaces(workspace_root: &Path) -> Result<Vec<ManagedWorkspace>> {
+    let mut results = Vec::new();
+    let entries = match fs::read_dir(workspace_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(results),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to read `{}`", workspace_root.display()));
+        }
+    };
+
+    for entry in entries {
+        let entry =
+            entry.with_context(|| format!("failed to read `{}`", workspace_root.display()))?;
+        if !entry
+            .file_type()
+            .with_context(|| format!("failed to inspect `{}`", entry.path().display()))?
+            .is_dir()
+        {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some(session_id) = name.strip_prefix("improve-") else {
+            continue;
+        };
+        if session_id.is_empty() || !entry.path().join(".git").exists() {
+            continue;
+        }
+
+        let path = entry.path();
+        let branch = git_stdout(&path, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default();
+        let (disk_usage_bytes, _) =
+            scan_workspace_usage(&path).unwrap_or((0, SystemTime::UNIX_EPOCH));
+        let git = evaluate_workspace_git_safety(&path)
+            .unwrap_or_else(|_| WorkspaceGitSignals::unsafe_for_failed_inspection());
+
+        results.push(ManagedWorkspace::Improve {
+            session_id: session_id.to_string(),
+            path,
+            branch,
+            disk_usage_bytes,
+            git,
+        });
+    }
+
+    Ok(results)
+}
+
+/// Discover review remediation workspaces under `<workspace-root>/review-runs/pr-*/`.
+pub(crate) fn discover_review_workspaces(workspace_root: &Path) -> Result<Vec<ManagedWorkspace>> {
+    let mut results = Vec::new();
+    let review_runs_dir = workspace_root.join("review-runs");
+    let entries = match fs::read_dir(&review_runs_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(results),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to read `{}`", review_runs_dir.display()));
+        }
+    };
+
+    for entry in entries {
+        let entry =
+            entry.with_context(|| format!("failed to read `{}`", review_runs_dir.display()))?;
+        if !entry
+            .file_type()
+            .with_context(|| format!("failed to inspect `{}`", entry.path().display()))?
+            .is_dir()
+        {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some(pr_str) = name.strip_prefix("pr-") else {
+            continue;
+        };
+        let Ok(pr_number) = pr_str.parse::<u64>() else {
+            continue;
+        };
+        if !entry.path().join(".git").exists() {
+            continue;
+        }
+
+        let path = entry.path();
+        let branch = git_stdout(&path, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default();
+        let (disk_usage_bytes, _) =
+            scan_workspace_usage(&path).unwrap_or((0, SystemTime::UNIX_EPOCH));
+        let git = evaluate_workspace_git_safety(&path)
+            .unwrap_or_else(|_| WorkspaceGitSignals::unsafe_for_failed_inspection());
+
+        results.push(ManagedWorkspace::ReviewRemediation {
+            pr_number,
+            path,
+            branch,
+            disk_usage_bytes,
+            git,
+        });
+    }
+
+    Ok(results)
+}
+
+// ---------------------------------------------------------------------------
+// Internal types (unchanged signatures, visibility promoted where needed)
+// ---------------------------------------------------------------------------
+
 #[derive(Debug, Clone)]
 struct WorkspaceContext {
     source_root: PathBuf,
     workspace_root: PathBuf,
+    project_selector: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -32,10 +317,10 @@ struct WorkspaceEntry {
 }
 
 #[derive(Debug, Clone, Default)]
-struct WorkspaceGitSignals {
-    has_uncommitted_changes: bool,
-    has_unpushed_commits: bool,
-    is_detached: bool,
+pub(crate) struct WorkspaceGitSignals {
+    pub(crate) has_uncommitted_changes: bool,
+    pub(crate) has_unpushed_commits: bool,
+    pub(crate) is_detached: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -352,12 +637,19 @@ pub(crate) fn run_workspace_clean(args: &WorkspaceCleanArgs) -> Result<String> {
 }
 
 /// Removes completed workspace clones when their Linear ticket is done or cancelled, preserving
-/// clones with open pull requests or local safety risks. Returns an error when repository or
-/// Linear metadata cannot be resolved.
+/// clones with open pull requests or local safety risks. Also reconciles follow-up workspaces
+/// (improve and review remediation) whose associated PRs have been merged. Returns an error when
+/// repository or Linear metadata cannot be resolved.
 pub(crate) async fn run_workspace_prune(args: &WorkspacePruneArgs) -> Result<String> {
     let context = resolve_workspace_context(&args.client.root)?;
     let entries = discover_workspace_entries(&context)?;
-    if entries.is_empty() {
+    let improve_workspaces = discover_improve_workspaces(&context.workspace_root)?;
+    let review_workspaces = discover_review_workspaces(&context.workspace_root)?;
+
+    let has_any =
+        !entries.is_empty() || !improve_workspaces.is_empty() || !review_workspaces.is_empty();
+
+    if !has_any {
         return Ok(format!(
             "Removed 0 clones, freed {}. Kept 0 clones.\nWorkspace root: {}",
             format_bytes(0),
@@ -367,11 +659,17 @@ pub(crate) async fn run_workspace_prune(args: &WorkspacePruneArgs) -> Result<Str
 
     let linear = load_linear_command_context(&args.client, None)?;
     let github = discover_github_prs(&context.source_root);
+
+    // Build ticket-based prune decisions (unchanged contract).
     let records = enrich_workspace_entries(entries, &linear.service, &github).await?;
     let decisions = records
         .into_iter()
         .map(build_prune_decision)
         .collect::<Vec<_>>();
+
+    // Build follow-up workspace prune decisions (improve + review).
+    let followup_decisions =
+        build_followup_prune_decisions(&improve_workspaces, &review_workspaces, &github);
 
     let mut removed = 0usize;
     let mut kept = 0usize;
@@ -396,7 +694,21 @@ pub(crate) async fn run_workspace_prune(args: &WorkspacePruneArgs) -> Result<Str
         ));
     }
 
-    if let GithubPrLookup::Unavailable(reason) = github {
+    for (label, action, bytes, reason) in &followup_decisions {
+        let action_str = match action {
+            PruneAction::Remove => "REMOVE",
+            PruneAction::Keep => "KEEP",
+        };
+        lines.push(format!(
+            "{}  {}  {}  {}",
+            action_str,
+            label,
+            format_bytes(*bytes),
+            reason,
+        ));
+    }
+
+    if let GithubPrLookup::Unavailable(reason) = &github {
         lines.push(String::new());
         lines.push(format!(
             "GitHub PR data unavailable; using Linear completion state only: {reason}"
@@ -404,14 +716,19 @@ pub(crate) async fn run_workspace_prune(args: &WorkspacePruneArgs) -> Result<Str
     }
 
     if !args.dry_run {
-        let removals = decisions
+        let ticket_removals = decisions
             .iter()
             .filter(|d| d.action == PruneAction::Remove)
             .count();
-        if removals > 0 && !args.force {
+        let followup_removals = followup_decisions
+            .iter()
+            .filter(|(_, action, _, _)| *action == PruneAction::Remove)
+            .count();
+        let total_removals = ticket_removals + followup_removals;
+        if total_removals > 0 && !args.force {
             let prompt = format!(
-                "Remove {removals} workspace clone{}? [y/N]: ",
-                if removals == 1 { "" } else { "s" }
+                "Remove {total_removals} workspace clone{}? [y/N]: ",
+                if total_removals == 1 { "" } else { "s" }
             );
             if io::stdin().is_terminal() {
                 print!("{prompt}");
@@ -433,6 +750,7 @@ pub(crate) async fn run_workspace_prune(args: &WorkspacePruneArgs) -> Result<Str
             }
         }
 
+        // Remove ticket-based workspaces.
         for decision in &decisions {
             match decision.action {
                 PruneAction::Remove => {
@@ -442,11 +760,61 @@ pub(crate) async fn run_workspace_prune(args: &WorkspacePruneArgs) -> Result<Str
                 PruneAction::Keep => kept += 1,
             }
         }
+
+        // Remove follow-up workspaces.
+        for managed in improve_workspaces.iter().chain(review_workspaces.iter()) {
+            let (path, _disk_bytes, _git) = match managed {
+                ManagedWorkspace::Improve {
+                    path,
+                    disk_usage_bytes,
+                    git,
+                    ..
+                } => (path, *disk_usage_bytes, git),
+                ManagedWorkspace::ReviewRemediation {
+                    path,
+                    disk_usage_bytes,
+                    git,
+                    ..
+                } => (path, *disk_usage_bytes, git),
+            };
+            let should_remove = followup_decisions.iter().any(|(label, action, _, _)| {
+                *action == PruneAction::Remove && followup_label_matches(label, managed)
+            });
+            if should_remove {
+                match try_auto_clean_followup_workspace(
+                    &context.source_root,
+                    &followup_workspace_root(&context.workspace_root, managed),
+                    path,
+                ) {
+                    Ok(AutoCleanOutcome::Removed { bytes_reclaimed }) => {
+                        freed_bytes += bytes_reclaimed;
+                        removed += 1;
+                    }
+                    Ok(AutoCleanOutcome::Skipped { .. }) => kept += 1,
+                    Err(_) => {
+                        // Best-effort: count as kept if removal fails.
+                        freed_bytes += 0;
+                        kept += 1;
+                    }
+                }
+            } else {
+                kept += 1;
+            }
+        }
     } else {
         for decision in &decisions {
             match decision.action {
                 PruneAction::Remove => {
                     freed_bytes += decision.record.entry.disk_usage_bytes;
+                    removed += 1;
+                }
+                PruneAction::Keep => kept += 1,
+            }
+        }
+        for (_, action, bytes, _) in &followup_decisions {
+            match action {
+                PruneAction::Remove => {
+                    freed_bytes += bytes;
                     removed += 1;
                 }
                 PruneAction::Keep => kept += 1,
@@ -462,12 +830,134 @@ pub(crate) async fn run_workspace_prune(args: &WorkspacePruneArgs) -> Result<Str
     Ok(lines.join("\n"))
 }
 
+/// Build prune decisions for follow-up workspaces (improve + review).
+///
+/// For improve workspaces, the associated PR is discovered via the branch name convention
+/// `improve/<source-branch>`. For review remediation workspaces, the associated PR is discovered
+/// via the `pr-<number>` directory name. Both families are eligible for removal when the
+/// associated PR is merged and the workspace has no local safety risks.
+fn build_followup_prune_decisions(
+    improve_workspaces: &[ManagedWorkspace],
+    review_workspaces: &[ManagedWorkspace],
+    github: &GithubPrLookup,
+) -> Vec<(String, PruneAction, u64, String)> {
+    let mut decisions = Vec::new();
+
+    for managed in improve_workspaces.iter().chain(review_workspaces.iter()) {
+        match managed {
+            ManagedWorkspace::Improve {
+                session_id,
+                branch,
+                disk_usage_bytes,
+                git,
+                ..
+            } => {
+                let label = format!("improve-{session_id}");
+                let pr_status = match github {
+                    GithubPrLookup::Available(prs) => prs
+                        .iter()
+                        .find(|pr| pr.head_ref_name == *branch)
+                        .map(|pr| PullRequestStatus::from_gh_state(&pr.state))
+                        .unwrap_or(PullRequestStatus::None),
+                    GithubPrLookup::Unavailable(_) => PullRequestStatus::Unavailable,
+                };
+
+                let (action, reason) = evaluate_followup_prune(git, &pr_status);
+                decisions.push((label, action, *disk_usage_bytes, reason));
+            }
+            ManagedWorkspace::ReviewRemediation {
+                pr_number,
+                branch,
+                disk_usage_bytes,
+                git,
+                ..
+            } => {
+                let label = format!("review-runs/pr-{pr_number}");
+                let pr_status = match github {
+                    GithubPrLookup::Available(prs) => prs
+                        .iter()
+                        .find(|pr| pr.head_ref_name == *branch)
+                        .map(|pr| PullRequestStatus::from_gh_state(&pr.state))
+                        .unwrap_or(PullRequestStatus::None),
+                    GithubPrLookup::Unavailable(_) => PullRequestStatus::Unavailable,
+                };
+
+                let (action, reason) = evaluate_followup_prune(git, &pr_status);
+                decisions.push((label, action, *disk_usage_bytes, reason));
+            }
+        }
+    }
+
+    decisions
+}
+
+/// Evaluate whether a follow-up workspace should be pruned.
+///
+/// Follow-up workspaces are eligible for removal when their associated PR is merged and the
+/// workspace has no local safety risks.
+fn evaluate_followup_prune(
+    git: &WorkspaceGitSignals,
+    pr_status: &PullRequestStatus,
+) -> (PruneAction, String) {
+    if !matches!(
+        pr_status,
+        PullRequestStatus::Merged | PullRequestStatus::Closed
+    ) {
+        let reason = match pr_status {
+            PullRequestStatus::Open => "branch pull request is still open",
+            PullRequestStatus::None => "no associated PR found",
+            PullRequestStatus::Unavailable => "PR data unavailable; skipping",
+            _ => "PR is not merged or closed",
+        };
+        return (PruneAction::Keep, reason.to_string());
+    }
+    if git.has_unpushed_commits {
+        return (PruneAction::Keep, "unpushed commits detected".to_string());
+    }
+    if git.has_uncommitted_changes {
+        return (
+            PruneAction::Keep,
+            "uncommitted changes detected".to_string(),
+        );
+    }
+    if git.is_detached {
+        return (PruneAction::Keep, "workspace HEAD is detached".to_string());
+    }
+
+    let reason = match pr_status {
+        PullRequestStatus::Merged => "associated PR is merged",
+        PullRequestStatus::Closed => "associated PR is closed",
+        _ => "eligible for removal",
+    };
+    (PruneAction::Remove, reason.to_string())
+}
+
+fn followup_label_matches(label: &str, managed: &ManagedWorkspace) -> bool {
+    match managed {
+        ManagedWorkspace::Improve { session_id, .. } => label == format!("improve-{session_id}"),
+        ManagedWorkspace::ReviewRemediation { pr_number, .. } => {
+            label == format!("review-runs/pr-{pr_number}")
+        }
+    }
+}
+
+fn followup_workspace_root(workspace_root: &Path, managed: &ManagedWorkspace) -> PathBuf {
+    match managed {
+        ManagedWorkspace::Improve { .. } => workspace_root.to_path_buf(),
+        ManagedWorkspace::ReviewRemediation { .. } => workspace_root.join("review-runs"),
+    }
+}
+
 fn resolve_workspace_context(root: &Path) -> Result<WorkspaceContext> {
     let source_root = resolve_source_project_root(&canonicalize_existing_dir(root)?)?;
     let workspace_root = sibling_workspace_root(&source_root)?;
+    let project_selector = crate::config::PlanningMeta::load(&source_root)
+        .ok()
+        .and_then(|meta| meta.linear.project_id);
     Ok(WorkspaceContext {
         source_root,
         workspace_root,
+        project_selector,
     })
 }
 
@@ -792,7 +1282,8 @@ fn remove_workspace_clone(context: &WorkspaceContext, entry: &WorkspaceEntry) ->
     let reclaimed = entry.disk_usage_bytes;
     fs::remove_dir_all(&entry.path)
         .with_context(|| format!("failed to remove `{}`", entry.path.display()))?;
-    let store = ListenProjectStore::resolve(&context.source_root, None)?;
+    let store =
+        ListenProjectStore::resolve(&context.source_root, context.project_selector.as_deref())?;
     store.remove_ticket_artifacts(&entry.ticket)?;
     Ok(reclaimed)
 }
@@ -962,6 +1453,14 @@ fn git_stdout(root: &Path, args: &[&str]) -> Result<String> {
 }
 
 impl WorkspaceGitSignals {
+    fn unsafe_for_failed_inspection() -> Self {
+        Self {
+            has_uncommitted_changes: true,
+            has_unpushed_commits: true,
+            is_detached: true,
+        }
+    }
+
     fn display_label(&self) -> String {
         let mut labels = Vec::new();
         if self.has_uncommitted_changes {
@@ -999,5 +1498,148 @@ impl PullRequestStatus {
             Self::Unavailable => "unavailable",
             Self::None => "none",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn cleanup_skip_reason_display_formatting() {
+        assert_eq!(
+            CleanupSkipReason::UncommittedChanges.to_string(),
+            "uncommitted changes detected"
+        );
+        assert_eq!(
+            CleanupSkipReason::UnpushedCommits.to_string(),
+            "unpushed commits detected"
+        );
+        assert_eq!(
+            CleanupSkipReason::DetachedHead.to_string(),
+            "workspace HEAD is detached"
+        );
+        assert_eq!(
+            CleanupSkipReason::UnsafePath("symlink escape".to_string()).to_string(),
+            "unsafe path: symlink escape"
+        );
+    }
+
+    #[test]
+    fn evaluate_followup_prune_removes_merged_clean_workspace() {
+        let git = WorkspaceGitSignals::default();
+        let (action, reason) = evaluate_followup_prune(&git, &PullRequestStatus::Merged);
+        assert_eq!(action, PruneAction::Remove);
+        assert!(reason.contains("merged"));
+    }
+
+    #[test]
+    fn evaluate_followup_prune_keeps_dirty_merged_workspace() {
+        let git = WorkspaceGitSignals {
+            has_uncommitted_changes: true,
+            ..Default::default()
+        };
+        let (action, reason) = evaluate_followup_prune(&git, &PullRequestStatus::Merged);
+        assert_eq!(action, PruneAction::Keep);
+        assert!(reason.contains("uncommitted"));
+    }
+
+    #[test]
+    fn evaluate_followup_prune_keeps_ahead_merged_workspace() {
+        let git = WorkspaceGitSignals {
+            has_unpushed_commits: true,
+            ..Default::default()
+        };
+        let (action, reason) = evaluate_followup_prune(&git, &PullRequestStatus::Merged);
+        assert_eq!(action, PruneAction::Keep);
+        assert!(reason.contains("unpushed"));
+    }
+
+    #[test]
+    fn evaluate_followup_prune_keeps_open_pr_workspace() {
+        let git = WorkspaceGitSignals::default();
+        let (action, reason) = evaluate_followup_prune(&git, &PullRequestStatus::Open);
+        assert_eq!(action, PruneAction::Keep);
+        assert!(reason.contains("open"));
+    }
+
+    #[test]
+    fn evaluate_followup_prune_keeps_workspace_with_no_pr() {
+        let git = WorkspaceGitSignals::default();
+        let (action, _) = evaluate_followup_prune(&git, &PullRequestStatus::None);
+        assert_eq!(action, PruneAction::Keep);
+    }
+
+    #[test]
+    fn evaluate_followup_prune_removes_closed_clean_workspace() {
+        let git = WorkspaceGitSignals::default();
+        let (action, reason) = evaluate_followup_prune(&git, &PullRequestStatus::Closed);
+        assert_eq!(action, PruneAction::Remove);
+        assert!(reason.contains("closed"));
+    }
+
+    #[test]
+    fn evaluate_followup_prune_keeps_detached_merged_workspace() {
+        let git = WorkspaceGitSignals {
+            is_detached: true,
+            ..Default::default()
+        };
+        let (action, reason) = evaluate_followup_prune(&git, &PullRequestStatus::Merged);
+        assert_eq!(action, PruneAction::Keep);
+        assert!(reason.contains("detached"));
+    }
+
+    #[test]
+    fn failed_git_inspection_is_treated_as_unsafe() {
+        let signals = WorkspaceGitSignals::unsafe_for_failed_inspection();
+        assert!(signals.has_uncommitted_changes);
+        assert!(signals.has_unpushed_commits);
+        assert!(signals.is_detached);
+        assert_eq!(signals.display_label(), "dirty+ahead+detached");
+    }
+
+    #[test]
+    fn discover_improve_workspaces_marks_failed_git_inspection_as_unsafe() -> Result<()> {
+        let temp = tempdir()?;
+        let workspace_root = temp.path();
+        let workspace_path = workspace_root.join("improve-session-1");
+        fs::create_dir_all(&workspace_path)?;
+        fs::write(workspace_path.join(".git"), "not a git dir")?;
+
+        let workspaces = discover_improve_workspaces(workspace_root)?;
+        assert_eq!(workspaces.len(), 1);
+        match &workspaces[0] {
+            ManagedWorkspace::Improve { git, .. } => {
+                assert!(git.has_uncommitted_changes);
+                assert!(git.has_unpushed_commits);
+                assert!(git.is_detached);
+            }
+            other => panic!("expected improve workspace, got {other:?}"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn discover_review_workspaces_marks_failed_git_inspection_as_unsafe() -> Result<()> {
+        let temp = tempdir()?;
+        let workspace_root = temp.path();
+        let workspace_path = workspace_root.join("review-runs").join("pr-321");
+        fs::create_dir_all(&workspace_path)?;
+        fs::write(workspace_path.join(".git"), "not a git dir")?;
+
+        let workspaces = discover_review_workspaces(workspace_root)?;
+        assert_eq!(workspaces.len(), 1);
+        match &workspaces[0] {
+            ManagedWorkspace::ReviewRemediation { git, .. } => {
+                assert!(git.has_uncommitted_changes);
+                assert!(git.has_unpushed_commits);
+                assert!(git.is_detached);
+            }
+            other => panic!("expected review remediation workspace, got {other:?}"),
+        }
+
+        Ok(())
     }
 }

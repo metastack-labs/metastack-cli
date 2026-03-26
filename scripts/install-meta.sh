@@ -8,7 +8,7 @@ die() {
 
 usage() {
   cat <<'EOF'
-Install the `meta` CLI from GitHub Releases.
+Install the CLI from GitHub Releases.
 
 Usage:
   ./scripts/install-meta.sh [--version VERSION] [--bin-dir DIR] [--repo OWNER/REPO]
@@ -95,6 +95,7 @@ sha256_file() {
 
 VERSION_INPUT=${META_INSTALL_VERSION:-}
 BIN_DIR=${META_INSTALL_DIR:-$HOME/.local/bin}
+BIN_NAME=${META_INSTALL_BIN_NAME:-meta}
 REPO=${META_INSTALL_REPO:-metastack-systems/metastack-cli}
 BASE_URL=${META_INSTALL_BASE_URL:-https://github.com}
 BASE_URL=${BASE_URL%/}
@@ -155,7 +156,7 @@ trap cleanup EXIT INT TERM
 archive_path=$tmp_dir/$ASSET_NAME
 checksum_path=$tmp_dir/SHA256SUMS
 extract_dir=$tmp_dir/extract
-install_path=$BIN_DIR/meta
+install_path=$BIN_DIR/$BIN_NAME
 
 curl -fsSL "$DOWNLOAD_ROOT/$ASSET_NAME" -o "$archive_path" || {
   die "failed to download '$ASSET_NAME' from release '$TAG'"
@@ -174,16 +175,16 @@ actual_checksum=$(sha256_file "$archive_path")
 
 mkdir -p "$extract_dir"
 tar -xzf "$archive_path" -C "$extract_dir"
-[ -f "$extract_dir/meta" ] || die "release archive '$ASSET_NAME' did not contain a 'meta' binary"
+[ -f "$extract_dir/$BIN_NAME" ] || die "release archive '$ASSET_NAME' did not contain a '$BIN_NAME' binary"
 
 mkdir -p "$BIN_DIR"
-cp "$extract_dir/meta" "$install_path"
+cp "$extract_dir/$BIN_NAME" "$install_path"
 chmod 755 "$install_path"
 
-printf '%s\n' "installed meta $VERSION to $install_path"
+printf '%s\n' "installed $BIN_NAME $VERSION to $install_path"
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
   *)
-    printf '%s\n' "note: add $BIN_DIR to your PATH to run 'meta' globally" >&2
+    printf '%s\n' "note: add $BIN_DIR to your PATH to run '$BIN_NAME' globally" >&2
     ;;
 esac

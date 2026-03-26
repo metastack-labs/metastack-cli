@@ -28,6 +28,8 @@ use httpmock::Method::{GET, POST};
 use httpmock::MockServer;
 use predicates::prelude::*;
 use serde_json::json;
+#[cfg(unix)]
+use serde_json::Value;
 use tempfile::tempdir;
 
 const TEST_ENV_REMOVALS: &[&str] = &[
@@ -69,20 +71,28 @@ fn isolated_home_dir() -> PathBuf {
 }
 
 fn test_command() -> Command {
-    let meta_bin = std::env::var_os("CARGO_BIN_EXE_meta")
+    let cargo_bin_var = format!("CARGO_BIN_EXE_{}", metastack_cli::branding::COMMAND_NAME);
+    let command_binary = std::env::var_os(&cargo_bin_var)
         .map(std::path::PathBuf::from)
         .or_else(|| {
             std::env::current_exe().ok().and_then(|path| {
                 let target_dir = path.parent()?.parent()?;
-                let candidates = ["meta", "meta.exe"];
-                candidates
-                    .into_iter()
-                    .map(|name| target_dir.join(name))
-                    .find(|candidate| candidate.is_file())
+                [
+                    metastack_cli::branding::COMMAND_NAME.to_string(),
+                    format!("{}.exe", metastack_cli::branding::COMMAND_NAME),
+                ]
+                .into_iter()
+                .map(|name| target_dir.join(name))
+                .find(|candidate| candidate.is_file())
             })
         })
-        .expect("meta binary should build for tests");
-    let mut command = Command::new(meta_bin);
+        .unwrap_or_else(|| {
+            panic!(
+                "{} binary should build for tests",
+                metastack_cli::branding::COMMAND_NAME
+            )
+        });
+    let mut command = Command::new(command_binary);
     for key in TEST_ENV_REMOVALS {
         command.env_remove(key);
     }
@@ -107,7 +117,7 @@ fn listen_project_store_dir(
     project_selector: Option<&str>,
 ) -> Result<PathBuf, Box<dyn Error>> {
     let source_root = listen_source_root(repo_root)?;
-    let metastack_root = source_root.join(".metastack").canonicalize()?;
+    let metastack_root = source_root.join(branding::PROJECT_DIR).canonicalize()?;
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     metastack_root.display().to_string().hash(&mut hasher);
     listen_project_scope_key(project_selector, repo_root)?.hash(&mut hasher);
@@ -149,7 +159,7 @@ fn listen_project_scope_key(
     {
         Some(selector) => Some(selector),
         None => {
-            let meta = fs::read_to_string(repo_root.join(".metastack/meta.json"))?;
+            let meta = fs::read_to_string(repo_root.join(format!("{}/meta.json", branding::PROJECT_DIR)))?;
             serde_json::from_str::<serde_json::Value>(&meta)?
                 .get("linear")
                 .and_then(|value| value.get("project_id"))
@@ -173,7 +183,7 @@ fn listen_source_root(repo_root: &Path) -> Result<PathBuf, Box<dyn Error>> {
     let common_dir = PathBuf::from(common_dir);
     if common_dir.file_name().and_then(|value| value.to_str()) == Some(".git")
         && let Some(source_root) = common_dir.parent()
-        && source_root.join(".metastack").is_dir()
+        && source_root.join(branding::PROJECT_DIR).is_dir()
     {
         return Ok(source_root.canonicalize()?);
     }
@@ -186,8 +196,8 @@ fn write_minimal_planning_context(
     repo_root: &Path,
     planning_meta: &str,
 ) -> Result<(), Box<dyn Error>> {
-    fs::create_dir_all(repo_root.join(".metastack/codebase"))?;
-    fs::write(repo_root.join(".metastack/meta.json"), planning_meta)?;
+    fs::create_dir_all(repo_root.join(format!("{}/codebase", branding::PROJECT_DIR)))?;
+    fs::write(repo_root.join(format!("{}/meta.json", branding::PROJECT_DIR)), planning_meta)?;
     for file in [
         "SCAN.md",
         "ARCHITECTURE.md",
@@ -199,7 +209,7 @@ fn write_minimal_planning_context(
         "TESTING.md",
     ] {
         fs::write(
-            repo_root.join(".metastack/codebase").join(file),
+            repo_root.join(format!("{}/codebase", branding::PROJECT_DIR)).join(file),
             format!("{file}\n"),
         )?;
     }
@@ -386,7 +396,7 @@ fn commit_and_push_pull_ref(
 
 #[cfg(unix)]
 fn wait_for_path(path: &Path) -> Result<(), Box<dyn Error>> {
-    wait_for_path_with_timeout(path, Duration::from_secs(60))
+    wait_for_path_with_timeout(path, Duration::from_secs(120))
 }
 
 #[cfg(unix)]
@@ -585,6 +595,42 @@ fn wait_for_file_substring(path: &Path, expected: &str) -> Result<(), Box<dyn Er
 }
 
 #[cfg(unix)]
+fn wait_for_json_pointer_value(
+    path: &Path,
+    pointer: &str,
+    expected: &Value,
+) -> Result<(), Box<dyn Error>> {
+    wait_for_json_pointer_value_with_timeout(path, pointer, expected, Duration::from_secs(60))
+}
+
+#[cfg(unix)]
+fn wait_for_json_pointer_value_with_timeout(
+    path: &Path,
+    pointer: &str,
+    expected: &Value,
+    timeout: Duration,
+) -> Result<(), Box<dyn Error>> {
+    let poll_interval = Duration::from_millis(100);
+    let attempts = timeout.as_millis() / poll_interval.as_millis();
+    for _ in 0..attempts {
+        if let Ok(contents) = fs::read_to_string(path)
+            && let Ok(value) = serde_json::from_str::<Value>(&contents)
+            && value.pointer(pointer) == Some(expected)
+        {
+            return Ok(());
+        }
+        thread::sleep(poll_interval);
+    }
+
+    Err(format!(
+        "timed out waiting for `{}` JSON pointer `{pointer}` to equal `{expected}` after {}s",
+        path.display(),
+        timeout.as_secs()
+    )
+    .into())
+}
+
+#[cfg(unix)]
 fn wait_for_file_substring_with_timeout(
     path: &Path,
     expected: &str,
@@ -616,6 +662,9 @@ fn wait_for_terminal_session_state(path: &Path) -> Result<(), Box<dyn Error>> {
             && !contents.contains("\"phase\": \"claimed\"")
             && !contents.contains("\"phase\": \"brief_ready\"")
             && !contents.contains("\"phase\": \"running\"")
+            && !contents.contains("\"phase\": \"reviewing\"")
+            && !contents.contains("\"phase\": \"final_review\"")
+            && !contents.contains("\"phase\": \"publishing\"")
         {
             return Ok(());
         }

@@ -21,6 +21,7 @@ use ratatui::{Frame, Terminal};
 use serde::Serialize;
 
 use crate::backlog::template_seed_conflicts;
+use crate::branding;
 use crate::cli::{ConfigEventArg, SetupArgs};
 use crate::config::{
     AppConfig, DEFAULT_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT,
@@ -350,12 +351,13 @@ fn resolve_backlog_template_conflicts(
 
     Err(anyhow!(
         "repo setup found existing canonical backlog template files with local changes:\n{}\n\
-rerun `meta setup --root {}` in an interactive terminal to choose overwrite, skip, or cancel.",
+rerun `{} setup --root {}` in an interactive terminal to choose overwrite, skip, or cancel.",
         conflicts
             .iter()
-            .map(|path| format!("- .metastack/backlog/_TEMPLATE/{path}"))
+            .map(|path| format!("- {}/backlog/_TEMPLATE/{path}", branding::PROJECT_DIR))
             .collect::<Vec<_>>()
             .join("\n"),
+        branding::COMMAND_NAME,
         root.display()
     ))
 }
@@ -389,7 +391,11 @@ fn prompt_backlog_template_conflicts_with_io(
         "Canonical backlog template files already exist with local changes:"
     )?;
     for path in conflicts {
-        writeln!(writer, "  - .metastack/backlog/_TEMPLATE/{path}")?;
+        writeln!(
+            writer,
+            "  - {}/backlog/_TEMPLATE/{path}",
+            branding::PROJECT_DIR
+        )?;
     }
     writeln!(writer, "Choose [o]verwrite, [s]kip, or [c]ancel:")?;
     writer.flush()?;
@@ -587,7 +593,14 @@ fn render_summary(view: &SetupViewData, include_paths: bool) -> String {
 }
 
 fn listen_prerequisites_summary() -> &'static str {
-    "Built-in Codex listen runs require `~/.codex/config.toml` with `approval_policy = \"never\"` and `sandbox_mode = \"danger-full-access\"`, plus `[mcp_servers.linear]` removed or disabled. Built-in Claude listen runs require `claude` on PATH and no `ANTHROPIC_API_KEY` override. Use `meta agents listen --check --root .` to verify."
+    concat!(
+        "Built-in Codex listen runs require `~/.codex/config.toml` with ",
+        "`approval_policy = \"never\"` and `sandbox_mode = \"danger-full-access\"`, plus ",
+        "`[mcp_servers.linear]` removed or disabled. Built-in Claude listen runs require ",
+        "`claude` on PATH and no `ANTHROPIC_API_KEY` override. Use `",
+        env!("BRAND_COMMAND_NAME"),
+        " agents listen --check --root .` to verify."
+    )
 }
 
 fn has_direct_updates(args: &SetupArgs) -> bool {
@@ -1573,7 +1586,7 @@ fn render_setup_dashboard(frame: &mut Frame<'_>, app: &SetupApp) {
     let header = Paragraph::new(Text::from(vec![
         Line::from("Meta Setup"),
         Line::from(
-            "Configure repo-scoped defaults stored in `.metastack/meta.json` after install onboarding is complete.",
+            format!("Configure repo-scoped defaults stored in `{}/meta.json` after install onboarding is complete.", branding::PROJECT_DIR),
         ),
         Line::from(format!(
             "Detected supported agents on PATH: {}",
@@ -1763,7 +1776,11 @@ fn render_step_panel(frame: &mut Frame<'_>, app: &SetupApp, area: Rect) {
             area,
             &title,
             &app.interactive_plan_limit,
-            "Optional `meta backlog plan` interactive follow-up limit between 1 and 10.",
+            concat!(
+                "Optional `",
+                env!("BRAND_COMMAND_NAME"),
+                " backlog plan` interactive follow-up limit between 1 and 10."
+            ),
         ),
         SetupStep::PlanDefaultMode => {
             render_select_panel(frame, area, &title, &app.plan_default_mode)
@@ -1783,14 +1800,22 @@ fn render_step_panel(frame: &mut Frame<'_>, app: &SetupApp, area: Rect) {
             area,
             &title,
             &app.plan_label,
-            "Optional repo default label for `meta backlog plan` issues. Leave blank for `plan`.",
+            concat!(
+                "Optional repo default label for `",
+                env!("BRAND_COMMAND_NAME"),
+                " backlog plan` issues. Leave blank for `plan`."
+            ),
         ),
         SetupStep::TechnicalLabel => render_input_panel(
             frame,
             area,
             &title,
             &app.technical_label,
-            "Optional repo default label for `meta backlog tech` issues. Leave blank for `technical`.",
+            concat!(
+                "Optional repo default label for `",
+                env!("BRAND_COMMAND_NAME"),
+                " backlog tech` issues. Leave blank for `technical`."
+            ),
         ),
         SetupStep::Save => render_save_panel(frame, area),
     }
@@ -1886,7 +1911,10 @@ fn render_select_panel(frame: &mut Frame<'_>, area: Rect, title: &str, field: &S
 
 fn render_save_panel(frame: &mut Frame<'_>, area: Rect) {
     let paragraph = Paragraph::new(Text::from(vec![
-        Line::from("Press Enter to save repo-scoped defaults to `.metastack/meta.json`."),
+        Line::from(format!(
+            "Press Enter to save repo-scoped defaults to `{}/meta.json`.",
+            branding::PROJECT_DIR
+        )),
         Line::from("Project names are resolved before setup is persisted."),
     ]))
     .block(Block::default().borders(Borders::ALL).title("Save"))
@@ -2251,6 +2279,7 @@ mod tests {
         parse_backlog_template_conflict_action, parse_optional_listen_labels_input,
         prompt_backlog_template_conflicts_with_io, render_summary, summary_viewport,
     };
+    use crate::branding;
     use crate::config::{
         AgentSettings, AppConfig, ListenAssignmentScope, PlanningAgentSettings,
         PlanningListenSettings, PlanningMeta,
@@ -2265,7 +2294,10 @@ mod tests {
         let view = SetupViewData {
             root: PathBuf::from("/tmp/repo"),
             config_path: PathBuf::from("/tmp/metastack-config.toml"),
-            metastack_meta_path: PathBuf::from("/tmp/repo/.metastack/meta.json"),
+            metastack_meta_path: PathBuf::from(format!(
+                "/tmp/repo/{}/meta.json",
+                branding::PROJECT_DIR
+            )),
             app_config: AppConfig {
                 agents: AgentSettings {
                     default_agent: Some("codex".to_string()),
@@ -2326,7 +2358,10 @@ mod tests {
         let mut view = SetupViewData {
             root: PathBuf::from("/tmp/repo"),
             config_path: PathBuf::from("/tmp/metastack-config.toml"),
-            metastack_meta_path: PathBuf::from("/tmp/repo/.metastack/meta.json"),
+            metastack_meta_path: PathBuf::from(format!(
+                "/tmp/repo/{}/meta.json",
+                branding::PROJECT_DIR
+            )),
             app_config: AppConfig::default(),
             app_config_changed: false,
             planning_meta: PlanningMeta::default(),
@@ -2348,7 +2383,10 @@ mod tests {
         let mut view = SetupViewData {
             root: PathBuf::from("/tmp/repo"),
             config_path: PathBuf::from("/tmp/metastack-config.toml"),
-            metastack_meta_path: PathBuf::from("/tmp/repo/.metastack/meta.json"),
+            metastack_meta_path: PathBuf::from(format!(
+                "/tmp/repo/{}/meta.json",
+                branding::PROJECT_DIR
+            )),
             app_config: AppConfig::default(),
             app_config_changed: false,
             planning_meta: PlanningMeta::default(),
@@ -2388,7 +2426,10 @@ mod tests {
         let view = SetupViewData {
             root: PathBuf::from("/tmp/repo"),
             config_path: PathBuf::from("/tmp/metastack-config.toml"),
-            metastack_meta_path: PathBuf::from("/tmp/repo/.metastack/meta.json"),
+            metastack_meta_path: PathBuf::from(format!(
+                "/tmp/repo/{}/meta.json",
+                branding::PROJECT_DIR
+            )),
             app_config: AppConfig::default(),
             app_config_changed: false,
             planning_meta: PlanningMeta {
@@ -2433,8 +2474,14 @@ mod tests {
 
         assert_eq!(action, BacklogTemplateConflictAction::Overwrite);
         let output = String::from_utf8(writer)?;
-        assert!(output.contains(".metastack/backlog/_TEMPLATE/index.md"));
-        assert!(output.contains(".metastack/backlog/_TEMPLATE/validation.md"));
+        assert!(output.contains(&format!(
+            "{}/backlog/_TEMPLATE/index.md",
+            branding::PROJECT_DIR
+        )));
+        assert!(output.contains(&format!(
+            "{}/backlog/_TEMPLATE/validation.md",
+            branding::PROJECT_DIR
+        )));
         assert!(output.contains("Enter `o`, `s`, or `c`"));
 
         Ok(())

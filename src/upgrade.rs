@@ -17,6 +17,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tar::Archive;
 
+use crate::branding;
 use crate::cli::UpgradeArgs;
 
 const INSTALLER_URL: &str = "https://raw.githubusercontent.com/metastack-systems/metastack-cli/main/scripts/install-meta.sh";
@@ -87,7 +88,8 @@ pub(crate) async fn run_upgrade(args: &UpgradeArgs) -> Result<()> {
 
     if install.version == target_version {
         println!(
-            "meta {} at {} is already up to date",
+            "{} {} at {} is already up to date",
+            branding::COMMAND_NAME,
             install.version,
             executable_path.display()
         );
@@ -127,7 +129,8 @@ pub(crate) async fn run_upgrade(args: &UpgradeArgs) -> Result<()> {
     }
 
     println!(
-        "upgraded meta from {} to {} at {}",
+        "upgraded {} from {} to {} at {}",
+        branding::COMMAND_NAME,
         install.version,
         target_version,
         executable_path.display()
@@ -181,13 +184,15 @@ impl InstallOrigin {
         match self {
             Self::StandaloneRelease => Ok(()),
             Self::CargoInstall => bail!(
-                "self-update only supports GitHub Release installs, but '{}' looks like a Cargo install.\nUpgrade this install with Cargo, or reinstall from GitHub Releases to enable `meta upgrade`:\n  curl -fsSL {} | sh",
+                "self-update only supports GitHub Release installs, but '{}' looks like a Cargo install.\nUpgrade this install with Cargo, or reinstall from GitHub Releases to enable `{} upgrade`:\n  curl -fsSL {} | sh",
                 executable_path.display(),
+                branding::COMMAND_NAME,
                 INSTALLER_URL
             ),
             Self::SourceCheckoutBuild => bail!(
-                "self-update only supports GitHub Release installs, but '{}' looks like a source-checkout build under `target/`.\nRebuild from source in your checkout, or reinstall from GitHub Releases to enable `meta upgrade`:\n  curl -fsSL {} | sh",
+                "self-update only supports GitHub Release installs, but '{}' looks like a source-checkout build under `target/`.\nRebuild from source in your checkout, or reinstall from GitHub Releases to enable `{} upgrade`:\n  curl -fsSL {} | sh",
                 executable_path.display(),
+                branding::COMMAND_NAME,
                 INSTALLER_URL
             ),
         }
@@ -473,7 +478,8 @@ fn print_check_report(
     println!("status: {}", status);
     if origin != InstallOrigin::StandaloneRelease {
         println!(
-            "remediation: reinstall from GitHub Releases to enable `meta upgrade`: curl -fsSL {} | sh",
+            "remediation: reinstall from GitHub Releases to enable `{} upgrade`: curl -fsSL {} | sh",
+            branding::COMMAND_NAME,
             INSTALLER_URL
         );
     }
@@ -750,8 +756,9 @@ fn install_with_elevation(
     )
 }
 
-fn elevation_script() -> &'static str {
-    r#"#!/bin/sh
+fn elevation_script() -> String {
+    format!(
+        r#"#!/bin/sh
 set -eu
 
 staged=$1
@@ -760,9 +767,9 @@ pending=$3
 backup=$4
 expected=$5
 
-cleanup() {
+cleanup() {{
   rm -f "$pending"
-}
+}}
 trap cleanup EXIT INT TERM
 
 cp "$staged" "$pending"
@@ -774,7 +781,7 @@ if ! mv "$pending" "$target"; then
   exit 1
 fi
 
-if "$target" --version | grep -F "meta $expected" >/dev/null 2>&1; then
+if "$target" --version | grep -F "{} $expected" >/dev/null 2>&1; then
   rm -f "$backup"
   exit 0
 fi
@@ -783,7 +790,9 @@ rm -f "$target"
 mv "$backup" "$target"
 printf '%s\n' "post-install verification failed for '$target'" >&2
 exit 1
-"#
+"#,
+        branding::COMMAND_NAME
+    )
 }
 
 fn rollback_after_failed_verification(executable_path: &Path, backup_path: &Path) -> Result<()> {

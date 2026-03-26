@@ -1,6 +1,7 @@
 #![allow(dead_code, unused_imports)]
 
 include!("support/common.rs");
+use metastack_cli::branding;
 use walkdir::WalkDir;
 
 fn write_onboarded_config(config_path: &Path) -> Result<(), Box<dyn Error>> {
@@ -50,7 +51,13 @@ fn top_level_help_lists_primary_commands_and_examples() {
         .stdout(predicate::str::contains("\n  listen ").not())
         .stdout(predicate::str::contains("\n  scan ").not())
         .stdout(predicate::str::contains("\n  workflows ").not())
-        .stdout(predicate::str::contains("Compatibility alias for `meta backlog plan`").not())
+        .stdout(
+            predicate::str::contains(format!(
+                "Compatibility alias for `{} backlog plan`",
+                branding::COMMAND_NAME
+            ))
+            .not(),
+        )
         .stdout(predicate::str::contains("engineer:"))
         .stdout(predicate::str::contains("team lead:"))
         .stdout(predicate::str::contains("ops operator:"));
@@ -122,9 +129,10 @@ fn workspace_help_lists_lifecycle_commands() {
         .stdout(predicate::str::contains("\n  list "))
         .stdout(predicate::str::contains("\n  clean "))
         .stdout(predicate::str::contains("\n  prune "))
-        .stdout(predicate::str::contains(
-            "meta workspace prune --dry-run --root .",
-        ));
+        .stdout(predicate::str::contains(format!(
+            "{} workspace prune --dry-run --root .",
+            branding::COMMAND_NAME
+        )));
 }
 
 #[test]
@@ -137,7 +145,10 @@ fn agents_help_lists_listen_execute_and_workflows() {
         .stdout(predicate::str::contains("\n  execute "))
         .stdout(predicate::str::contains("\n  improve "))
         .stdout(predicate::str::contains("\n  workflows "))
-        .stdout(predicate::str::contains("meta agents execute MET-45"));
+        .stdout(predicate::str::contains(format!(
+            "{} agents execute MET-45",
+            branding::COMMAND_NAME
+        )));
 }
 
 #[test]
@@ -241,8 +252,14 @@ fn meta_backlog_spec_help_exposes_new_subcommand() {
         .stdout(predicate::str::contains("\n  plan "))
         .stdout(predicate::str::contains("\n  tech "))
         .stdout(predicate::str::contains("\n  sync "))
-        .stdout(predicate::str::contains("meta backlog spec --root ."))
-        .stdout(predicate::str::contains("meta backlog tech MET-35"));
+        .stdout(predicate::str::contains(format!(
+            "{} backlog spec --root .",
+            branding::COMMAND_NAME
+        )))
+        .stdout(predicate::str::contains(format!(
+            "{} backlog tech MET-35",
+            branding::COMMAND_NAME
+        )));
 }
 
 #[test]
@@ -263,9 +280,9 @@ fn backlog_improve_help_points_to_issue_refine_for_single_issue_rewrites() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Use `meta backlog improve` for a repo-scoped backlog sweep across existing issues in one state.",
+            format!("Use `{} backlog improve` for a repo-scoped backlog sweep across existing issues in one state.", branding::COMMAND_NAME),
         ))
-        .stdout(predicate::str::contains("meta linear issues refine"))
+        .stdout(predicate::str::contains(format!("{} linear issues refine", branding::COMMAND_NAME)))
         .stdout(predicate::str::contains(
             "the primary goal is improving that issue's description rather than scanning the backlog",
         ));
@@ -280,7 +297,10 @@ fn issue_refine_help_points_back_to_backlog_improve_for_sweeps() {
         .stdout(predicate::str::contains(
             "focused description-quality pass with auditable refinement artifacts",
         ))
-        .stdout(predicate::str::contains("meta backlog improve"))
+        .stdout(predicate::str::contains(format!(
+            "{} backlog improve",
+            branding::COMMAND_NAME
+        )))
         .stdout(predicate::str::contains(
             "parent-child structure opportunities",
         ));
@@ -303,9 +323,10 @@ fn legacy_config_alias_prints_runtime_hint() -> Result<(), Box<dyn Error>> {
         ])
         .assert()
         .success()
-        .stderr(predicate::str::contains(
-            "hint: `meta config` is a compatibility alias; prefer `meta runtime config`.",
-        ));
+        .stderr(predicate::str::contains(format!(
+            "hint: `{0} config` is a compatibility alias; prefer `{0} runtime config`.",
+            branding::COMMAND_NAME
+        )));
 
     Ok(())
 }
@@ -325,9 +346,22 @@ fn runtime_config_help_describes_precedence_catalog_and_dry_run_diagnostics() {
         .stdout(predicate::str::contains("codex: gpt-5.4"))
         .stdout(predicate::str::contains("claude: sonnet, opus"))
         .stdout(predicate::str::contains("--replay-onboarding"))
-        .stdout(predicate::str::contains(
-            "meta agents workflows run ticket-implementation --root . --dry-run",
-        ));
+        .stdout(predicate::str::contains(format!(
+            "Update how many times `{} merge` will ask the agent to repair failed validation by default.",
+            branding::COMMAND_NAME
+        )))
+        .stdout(predicate::str::contains(format!(
+            "Update how many transient validation reruns `{} merge` will allow before escalating.",
+            branding::COMMAND_NAME
+        )))
+        .stdout(predicate::str::contains(format!(
+            "Update how many times `{} merge` retries push and PR publication after transient remote failures.",
+            branding::COMMAND_NAME
+        )))
+        .stdout(predicate::str::contains(format!(
+            "{} agents workflows run ticket-implementation --root . --dry-run",
+            branding::COMMAND_NAME
+        )));
 }
 
 #[test]
@@ -358,9 +392,10 @@ fn merge_help_lists_discovery_and_execution_flags() {
         .stdout(predicate::str::contains("--render-once"))
         .stdout(predicate::str::contains("--no-interactive"))
         .stdout(predicate::str::contains("--pull-request"))
-        .stdout(predicate::str::contains(
-            "meta merge --render-once --events",
-        ))
+        .stdout(predicate::str::contains(format!(
+            "{} merge --render-once --events",
+            branding::COMMAND_NAME
+        )))
         .stdout(predicate::str::contains("one-shot dashboard"));
 }
 
@@ -492,19 +527,30 @@ fn scaffold_creates_planning_layout_and_is_repeat_safe() -> Result<(), Box<dyn E
         .success()
         .stdout(predicate::str::contains("\"metastack_meta_path\""));
 
-    assert!(repo_root.join(".metastack").is_dir());
-    assert!(repo_root.join(".metastack/backlog").is_dir());
-    assert!(repo_root.join(".metastack/backlog/README.md").is_file());
-    assert!(repo_root.join(".metastack/backlog/_TEMPLATE").is_dir());
-    let canonical_template_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("src")
+    assert!(repo_root.join(branding::PROJECT_DIR).is_dir());
+    assert!(
+        repo_root
+            .join(format!("{}/backlog", branding::PROJECT_DIR))
+            .is_dir()
+    );
+    assert!(
+        repo_root
+            .join(format!("{}/backlog/README.md", branding::PROJECT_DIR))
+            .is_file()
+    );
+    assert!(
+        repo_root
+            .join(format!("{}/backlog/_TEMPLATE", branding::PROJECT_DIR))
+            .is_dir()
+    );
+    let canonical_template_root = std::path::PathBuf::from(env!("OUT_DIR"))
         .join("artifacts")
         .join("BACKLOG_TEMPLATE");
     for entry in WalkDir::new(&canonical_template_root) {
         let entry = entry?;
         let relative_path = entry.path().strip_prefix(&canonical_template_root)?;
         let actual_path = repo_root
-            .join(".metastack/backlog/_TEMPLATE")
+            .join(format!("{}/backlog/_TEMPLATE", branding::PROJECT_DIR))
             .join(relative_path);
 
         if entry.file_type().is_dir() {
@@ -527,19 +573,71 @@ fn scaffold_creates_planning_layout_and_is_repeat_safe() -> Result<(), Box<dyn E
             );
         }
     }
-    assert!(repo_root.join(".metastack/agents").is_dir());
-    assert!(repo_root.join(".metastack/agents/README.md").is_file());
-    assert!(repo_root.join(".metastack/agents/briefs").is_dir());
-    assert!(repo_root.join(".metastack/agents/sessions").is_dir());
-    assert!(repo_root.join(".metastack/codebase").is_dir());
-    assert!(repo_root.join(".metastack/codebase/README.md").is_file());
-    assert!(!repo_root.join(".metastack/codebase/SCAN.md").exists());
-    assert!(repo_root.join(".metastack/workflows").is_dir());
-    assert!(repo_root.join(".metastack/workflows/README.md").is_file());
-    assert!(repo_root.join(".metastack/cron").is_dir());
-    assert!(repo_root.join(".metastack/cron/README.md").is_file());
-    assert!(repo_root.join(".metastack/meta.json").is_file());
-    assert!(repo_root.join(".metastack/README.md").is_file());
+    assert!(
+        repo_root
+            .join(format!("{}/agents", branding::PROJECT_DIR))
+            .is_dir()
+    );
+    assert!(
+        repo_root
+            .join(format!("{}/agents/README.md", branding::PROJECT_DIR))
+            .is_file()
+    );
+    assert!(
+        repo_root
+            .join(format!("{}/agents/briefs", branding::PROJECT_DIR))
+            .is_dir()
+    );
+    assert!(
+        repo_root
+            .join(format!("{}/agents/sessions", branding::PROJECT_DIR))
+            .is_dir()
+    );
+    assert!(
+        repo_root
+            .join(format!("{}/codebase", branding::PROJECT_DIR))
+            .is_dir()
+    );
+    assert!(
+        repo_root
+            .join(format!("{}/codebase/README.md", branding::PROJECT_DIR))
+            .is_file()
+    );
+    assert!(
+        !repo_root
+            .join(format!("{}/codebase/SCAN.md", branding::PROJECT_DIR))
+            .exists()
+    );
+    assert!(
+        repo_root
+            .join(format!("{}/workflows", branding::PROJECT_DIR))
+            .is_dir()
+    );
+    assert!(
+        repo_root
+            .join(format!("{}/workflows/README.md", branding::PROJECT_DIR))
+            .is_file()
+    );
+    assert!(
+        repo_root
+            .join(format!("{}/cron", branding::PROJECT_DIR))
+            .is_dir()
+    );
+    assert!(
+        repo_root
+            .join(format!("{}/cron/README.md", branding::PROJECT_DIR))
+            .is_file()
+    );
+    assert!(
+        repo_root
+            .join(format!("{}/meta.json", branding::PROJECT_DIR))
+            .is_file()
+    );
+    assert!(
+        repo_root
+            .join(format!("{}/README.md", branding::PROJECT_DIR))
+            .is_file()
+    );
 
     cli()
         .env("METASTACK_CONFIG", &config_path)

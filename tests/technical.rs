@@ -1,6 +1,7 @@
 #![allow(dead_code, unused_imports)]
 
 include!("support/common.rs");
+use metastack_cli::branding;
 
 #[cfg(unix)]
 fn write_onboarded_config(
@@ -56,23 +57,41 @@ fn technical_command_creates_a_child_issue_and_local_backlog_files() -> Result<(
 }
 "#,
     )?;
-    fs::remove_file(repo_root.join(".metastack/codebase/INTEGRATIONS.md"))?;
-    fs::create_dir_all(repo_root.join(".metastack/backlog/_TEMPLATE"))?;
+    fs::remove_file(repo_root.join(format!(
+        "{}/codebase/INTEGRATIONS.md",
+        branding::PROJECT_DIR
+    )))?;
+    fs::create_dir_all(repo_root.join(format!("{}/backlog/_TEMPLATE", branding::PROJECT_DIR)))?;
     fs::write(
-        repo_root.join(".metastack/backlog/_TEMPLATE/index.md"),
+        repo_root.join(format!(
+            "{}/backlog/_TEMPLATE/index.md",
+            branding::PROJECT_DIR
+        )),
         "# {{BACKLOG_TITLE}}\n\nLast updated: {{TODAY}}\n\nParent: {{parent_identifier}}\n",
     )?;
     fs::write(
-        repo_root.join(".metastack/backlog/_TEMPLATE/specification.md"),
+        repo_root.join(format!(
+            "{}/backlog/_TEMPLATE/specification.md",
+            branding::PROJECT_DIR
+        )),
         "# Specification: {{BACKLOG_TITLE}}\n\nSlug: {{BACKLOG_SLUG}}\n",
     )?;
     fs::write(
-        repo_root.join(".metastack/backlog/_TEMPLATE/implementation.md"),
+        repo_root.join(format!(
+            "{}/backlog/_TEMPLATE/implementation.md",
+            branding::PROJECT_DIR
+        )),
         "# Implementation\n\n- Fill in the workstream for {{BACKLOG_TITLE}}\n",
     )?;
     fs::write(
-        repo_root.join(".metastack/backlog/_TEMPLATE/validation.md"),
-        "# Validation\n\n- `meta backlog tech {{parent_identifier}}`\n- Generated on {{TODAY}}\n",
+        repo_root.join(format!(
+            "{}/backlog/_TEMPLATE/validation.md",
+            branding::PROJECT_DIR
+        )),
+        format!(
+            "# Validation\n\n- `{} backlog tech {{{{parent_identifier}}}}`\n- Generated on {{{{TODAY}}}}\n",
+            branding::COMMAND_NAME
+        ),
     )?;
     write_onboarded_config(
         &config_path,
@@ -89,29 +108,30 @@ transport = "stdin"
     )?;
     fs::write(
         &stub_path,
-        r##"#!/bin/sh
-cat > "$TEST_OUTPUT_DIR/payload.txt"
-cat <<'JSON'
-{"files":[
-  {"path":"index.md","contents":"# Technical: Create the technical and sync commands\n\nAgent-generated technical backlog for parent `MET-35`.\n"},
-  {"path":"README.md","contents":"# Backlog Item Template\n\nThis directory is the canonical backlog for the technical child ticket.\n"},
-  {"path":"checklist.md","contents":"# Checklist: Technical: Create the technical and sync commands\n\nLast updated: 2026-03-15\n"},
-  {"path":"contacts.md","contents":"# Contacts: Technical: Create the technical and sync commands\n\nLast updated: 2026-03-15\n"},
-  {"path":"decisions.md","contents":"# Decisions: Technical: Create the technical and sync commands\n\nLast updated: 2026-03-15\n"},
-  {"path":"specification.md","contents":"# Specification: Technical: Create the technical and sync commands\n\nSlug: technical-create-the-technical-and-sync-commands\n\n## Functional Requirements\n1. Inspect the parent Linear issue before creating the child.\n2. Generate backlog docs through the configured agent.\n"},
-  {"path":"implementation.md","contents":"# Implementation\n\n- Generate backlog docs from `.metastack/backlog/_TEMPLATE` through the configured agent.\n- Sync the generated docs back to Linear attachments.\n"},
-  {"path":"proposed-prs.md","contents":"# Proposed PRs: Technical: Create the technical and sync commands\n\nLast updated: 2026-03-15\n\n1. `technical-create-the-technical-and-sync-commands-01`\n"},
-  {"path":"risks.md","contents":"# Risks: Technical: Create the technical and sync commands\n\nLast updated: 2026-03-15\n"},
-  {"path":"validation.md","contents":"# Validation\n\n- `meta backlog tech MET-35`\n- `cargo test technical_command_creates_a_child_issue_and_local_backlog_files`\n"},
-  {"path":"context/README.md","contents":"# Context Index: Technical: Create the technical and sync commands\n\nLast updated: 2026-03-15\n"},
-  {"path":"context/context-note-template.md","contents":"# Context Note: Parent issue snapshot\n\nLast updated: 2026-03-15\n"},
-  {"path":"tasks/README.md","contents":"# Workstreams: Technical: Create the technical and sync commands\n\nLast updated: 2026-03-15\n"},
-  {"path":"tasks/workstream-template.md","contents":"# Workstream: sync-surface\n\nLast updated: 2026-03-15\n"},
-  {"path":"artifacts/README.md","contents":"# Artifact Index: Technical: Create the technical and sync commands\n\nLast updated: 2026-03-15\n"},
-  {"path":"artifacts/artifact-template.md","contents":"# Artifact: generated-proof\n\nLast updated: 2026-03-15\n"}
-]}
-JSON
-"##,
+        format!(
+            "#!/bin/sh\ncat > \"$TEST_OUTPUT_DIR/payload.txt\"\ncat <<'JSON'\n\
+Context {{not json}}\n\
+{{\"files\":[\n\
+  {{\"path\":\"index.md\",\"contents\":\"# Technical: Create the technical and sync commands\\n\\nAgent-generated technical backlog for parent `MET-35`.\\n\"}},\n\
+  {{\"path\":\"README.md\",\"contents\":\"# Backlog Item Template\\n\\nThis directory is the canonical backlog for the technical child ticket.\\n\"}},\n\
+  {{\"path\":\"checklist.md\",\"contents\":\"# Checklist: Technical: Create the technical and sync commands\\n\\nLast updated: 2026-03-15\\n\"}},\n\
+  {{\"path\":\"contacts.md\",\"contents\":\"# Contacts: Technical: Create the technical and sync commands\\n\\nLast updated: 2026-03-15\\n\"}},\n\
+  {{\"path\":\"decisions.md\",\"contents\":\"# Decisions: Technical: Create the technical and sync commands\\n\\nLast updated: 2026-03-15\\n\"}},\n\
+  {{\"path\":\"specification.md\",\"contents\":\"# Specification: Technical: Create the technical and sync commands\\n\\nSlug: technical-create-the-technical-and-sync-commands\\n\\n## Functional Requirements\\n1. Inspect the parent Linear issue before creating the child.\\n2. Generate backlog docs through the configured agent.\\n\"}},\n\
+  {{\"path\":\"implementation.md\",\"contents\":\"# Implementation\\n\\n- Generate backlog docs from `{dir}/backlog/_TEMPLATE` through the configured agent.\\n- Sync the generated docs back to Linear attachments.\\n\"}},\n\
+  {{\"path\":\"proposed-prs.md\",\"contents\":\"# Proposed PRs: Technical: Create the technical and sync commands\\n\\nLast updated: 2026-03-15\\n\\n1. `technical-create-the-technical-and-sync-commands-01`\\n\"}},\n\
+  {{\"path\":\"risks.md\",\"contents\":\"# Risks: Technical: Create the technical and sync commands\\n\\nLast updated: 2026-03-15\\n\"}},\n\
+  {{\"path\":\"validation.md\",\"contents\":\"# Validation\\n\\n- `{cmd} backlog tech MET-35`\\n- `cargo test technical_command_creates_a_child_issue_and_local_backlog_files`\\n\"}},\n\
+  {{\"path\":\"context/README.md\",\"contents\":\"# Context Index: Technical: Create the technical and sync commands\\n\\nLast updated: 2026-03-15\\n\"}},\n\
+  {{\"path\":\"context/context-note-template.md\",\"contents\":\"# Context Note: Parent issue snapshot\\n\\nLast updated: 2026-03-15\\n\"}},\n\
+  {{\"path\":\"tasks/README.md\",\"contents\":\"# Workstreams: Technical: Create the technical and sync commands\\n\\nLast updated: 2026-03-15\\n\"}},\n\
+  {{\"path\":\"tasks/workstream-template.md\",\"contents\":\"# Workstream: sync-surface\\n\\nLast updated: 2026-03-15\\n\"}},\n\
+  {{\"path\":\"artifacts/README.md\",\"contents\":\"# Artifact Index: Technical: Create the technical and sync commands\\n\\nLast updated: 2026-03-15\\n\"}},\n\
+  {{\"path\":\"artifacts/artifact-template.md\",\"contents\":\"# Artifact: generated-proof\\n\\nLast updated: 2026-03-15\\n\"}}\n\
+]}}\nJSON\n",
+            cmd = branding::COMMAND_NAME,
+            dir = branding::PROJECT_DIR,
+        ),
     )?;
     let mut permissions = fs::metadata(&stub_path)?.permissions();
     permissions.set_mode(0o755);
@@ -464,11 +484,11 @@ JSON
     assert_eq!(payload["result"]["parent_issue"]["identifier"], "MET-35");
     assert_eq!(
         payload["result"]["backlog_path"],
-        ".metastack/backlog/MET-36"
+        format!("{}/backlog/MET-36", branding::PROJECT_DIR)
     );
     assert_eq!(payload["result"]["cancelled"], false);
 
-    let issue_dir = repo_root.join(".metastack/backlog/MET-36");
+    let issue_dir = repo_root.join(format!("{}/backlog/MET-36", branding::PROJECT_DIR));
     let index = fs::read_to_string(issue_dir.join("index.md"))?;
     let readme = fs::read_to_string(issue_dir.join("README.md"))?;
     let checklist = fs::read_to_string(issue_dir.join("checklist.md"))?;
@@ -489,7 +509,7 @@ JSON
     assert!(proposed_prs.contains("technical-create-the-technical-and-sync-commands-01"));
     assert!(specification.contains("Slug: technical-create-the-technical-and-sync-commands"));
     assert!(!specification.contains("{{BACKLOG_SLUG}}"));
-    assert!(validation.contains("meta backlog tech MET-35"));
+    assert!(validation.contains(&format!("{} backlog tech MET-35", branding::COMMAND_NAME)));
     assert!(metadata.contains("\"identifier\": \"MET-36\""));
     assert!(metadata.contains("\"parent_identifier\": \"MET-35\""));
     assert!(ticket_images.contains("| `issue-diagram.png` | diagram | Issue description |"));
@@ -522,8 +542,11 @@ JSON
     assert!(payload.contains("## STACK.md"));
     assert!(payload.contains("## STRUCTURE.md"));
     assert!(payload.contains("## TESTING.md"));
-    assert!(payload.contains("_Missing `INTEGRATIONS.md`. Run `meta scan` to generate it._"));
-    assert!(!payload.contains("meta context reload"));
+    assert!(payload.contains(&format!(
+        "_Missing `INTEGRATIONS.md`. Run `{} scan` to generate it._",
+        branding::COMMAND_NAME
+    )));
+    assert!(!payload.contains(&format!("{} context reload", branding::COMMAND_NAME)));
     assert!(payload.contains("Selected acceptance criteria for this technical sub-ticket"));
     assert!(payload.contains("- Generate backlog docs from the template"));
     assert!(payload.contains("Parent issue context:"));
@@ -549,9 +572,10 @@ JSON
         ])
         .assert()
         .success()
-        .stderr(predicate::str::contains(
-            "hint: `meta sync` is a compatibility alias; prefer `meta backlog sync`.",
-        ))
+        .stderr(predicate::str::contains(format!(
+            "hint: `{0} sync` is a compatibility alias; prefer `{0} backlog sync`.",
+            branding::COMMAND_NAME
+        )))
         .stdout(predicate::str::contains("Backlog Search"))
         .stdout(predicate::str::contains("Ready to push MET-36"))
         .stdout(predicate::str::contains(
@@ -596,9 +620,12 @@ fn technical_command_requires_an_agent_to_generate_backlog_content() -> Result<(
 }
 "#,
     )?;
-    fs::create_dir_all(repo_root.join(".metastack/backlog/_TEMPLATE"))?;
+    fs::create_dir_all(repo_root.join(format!("{}/backlog/_TEMPLATE", branding::PROJECT_DIR)))?;
     fs::write(
-        repo_root.join(".metastack/backlog/_TEMPLATE/index.md"),
+        repo_root.join(format!(
+            "{}/backlog/_TEMPLATE/index.md",
+            branding::PROJECT_DIR
+        )),
         "# {{BACKLOG_TITLE}}\n",
     )?;
 

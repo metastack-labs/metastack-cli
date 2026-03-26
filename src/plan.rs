@@ -39,6 +39,7 @@ use crate::backlog_defaults::{
     PlanTicketResolutionInput, TicketOptionOverrides, load_remembered_backlog_selection,
     resolve_plan_ticket_defaults, save_remembered_backlog_selection,
 };
+use crate::branding;
 use crate::cli::{PlanArgs, RunAgentArgs};
 use crate::codebase_context::{
     CodebaseContextSection, MissingCodebaseContextHint, load_codebase_context_bundle,
@@ -132,6 +133,7 @@ struct QuestionAnswer {
 struct RequestApp {
     request: InputFieldState,
     error: Option<String>,
+    sticky_error: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -141,6 +143,7 @@ struct QuestionsApp {
     questions: Vec<QuestionAnswer>,
     selected: usize,
     error: Option<String>,
+    sticky_error: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -157,6 +160,7 @@ struct ReviewApp {
     selected_ticket_scroll: ScrollState,
     combination_scroll: ScrollState,
     error: Option<String>,
+    sticky_error: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -174,6 +178,7 @@ struct FastAddendumApp {
     follow_ups: Vec<FollowUpResponse>,
     addendum: InputFieldState,
     error: Option<String>,
+    sticky_error: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -184,6 +189,7 @@ struct FastReviewApp {
     plan: PlannedIssueSet,
     selected: usize,
     error: Option<String>,
+    sticky_error: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -311,7 +317,8 @@ pub async fn run_plan(args: &PlanArgs) -> Result<PlanReport> {
         PlanMode::Reshape { identifier } => {
             if args.fast || args.multi || args.questions.is_some() {
                 bail!(
-                    "`meta backlog plan <IDENTIFIER>` does not support `--fast`, `--multi`, or `--questions`; reshape mode keeps its existing flow"
+                    "`{} backlog plan <IDENTIFIER>` does not support `--fast`, `--multi`, or `--questions`; reshape mode keeps its existing flow",
+                    branding::COMMAND_NAME,
                 );
             }
             return run_reshape_plan(&root, &service, &identifier, args, &agent_overrides).await;
@@ -325,7 +332,8 @@ pub async fn run_plan(args: &PlanArgs) -> Result<PlanReport> {
         } else {
             let request = args.request.clone().ok_or_else(|| {
                 anyhow!(
-                    "`--request` is required when `--no-interactive` is used or when `meta plan` runs without a TTY"
+                    "`--request` is required when `--no-interactive` is used or when `{} plan` runs without a TTY",
+                    branding::COMMAND_NAME,
                 )
             })?;
             let mut continuation = None;
@@ -564,7 +572,8 @@ async fn run_reshape_plan(
     if !args.velocity {
         if args.no_interactive {
             bail!(
-                "`meta backlog plan {identifier}` requires diff confirmation unless `--velocity` is set; rerun without `--no-interactive` to review the preview or pass `--velocity` to auto-apply"
+                "`{} backlog plan {identifier}` requires diff confirmation unless `--velocity` is set; rerun without `--no-interactive` to review the preview or pass `--velocity` to auto-apply",
+                branding::COMMAND_NAME,
             );
         }
 
@@ -611,7 +620,8 @@ fn resolve_plan_mode(target: Option<&str>) -> Result<PlanMode> {
     }
 
     bail!(
-        "`meta backlog plan <IDENTIFIER>` only accepts existing issue identifiers like `ENG-10144`; use `--request` for new backlog planning"
+        "`{} backlog plan <IDENTIFIER>` only accepts existing issue identifiers like `ENG-10144`; use `--request` for new backlog planning",
+        branding::COMMAND_NAME,
     );
 }
 
@@ -669,7 +679,8 @@ fn run_fast_plan_non_interactive(
 ) -> Result<PlannedIssueSet> {
     let request = args.request.clone().ok_or_else(|| {
         anyhow!(
-            "`--request` is required when `--no-interactive` is used or when `meta plan` runs without a TTY"
+            "`--request` is required when `--no-interactive` is used or when `{} plan` runs without a TTY",
+            branding::COMMAND_NAME,
         )
     })?;
     let mut continuation = None;
@@ -1103,27 +1114,45 @@ where
     T: for<'de> Deserialize<'de>,
 {
     let trimmed = raw.trim();
-    let mut candidates = vec![trimmed.to_string()];
-
-    if let Some(stripped) = strip_code_fence(trimmed) {
-        candidates.push(stripped);
-    }
-    if let (Some(start), Some(end)) = (trimmed.find('{'), trimmed.rfind('}'))
-        && start <= end
-    {
-        candidates.push(trimmed[start..=end].to_string());
-    }
-
-    for candidate in candidates {
+    for candidate in parse_json_candidates(trimmed) {
         if let Ok(parsed) = serde_json::from_str::<T>(&candidate) {
             return Ok(parsed);
         }
     }
 
+    eprintln!("warning: planning JSON parse failed during {phase}; raw agent output:\n{trimmed}");
     bail!(
         "planning agent returned invalid JSON during {phase}: {}",
         preview_text(trimmed)
     )
+}
+
+fn parse_json_candidates(raw: &str) -> Vec<String> {
+    let mut candidates = Vec::new();
+    push_json_candidate(&mut candidates, raw);
+    if let Some(stripped) = strip_code_fence(raw) {
+        push_json_candidate(&mut candidates, &stripped);
+        append_progressive_json_candidates(&mut candidates, &stripped);
+    }
+    append_progressive_json_candidates(&mut candidates, raw);
+    candidates
+}
+
+fn append_progressive_json_candidates(candidates: &mut Vec<String>, raw: &str) {
+    let Some(end) = raw.rfind('}') else {
+        return;
+    };
+    for (start, character) in raw.char_indices() {
+        if character == '{' && start <= end {
+            push_json_candidate(candidates, &raw[start..=end]);
+        }
+    }
+}
+
+fn push_json_candidate(candidates: &mut Vec<String>, candidate: &str) {
+    if !candidate.is_empty() && !candidates.iter().any(|existing| existing == candidate) {
+        candidates.push(candidate.to_string());
+    }
 }
 
 fn strip_code_fence(raw: &str) -> Option<String> {
@@ -1218,8 +1247,12 @@ fn render_reshape_preview(
     );
 
     format!(
-        "`meta backlog plan {}` prepared an in-place reshape preview:\n\nTitle:\n{}\n\nDescription diff:\n{}\n\nMetadata preserved on apply: assignee, labels, project, state, priority, and cycle.\nLocal `.metastack/backlog/` files are unchanged in reshape mode.",
-        issue.identifier, title_status, description_diff
+        "`{} backlog plan {}` prepared an in-place reshape preview:\n\nTitle:\n{}\n\nDescription diff:\n{}\n\nMetadata preserved on apply: assignee, labels, project, state, priority, and cycle.\nLocal `{}/backlog/` files are unchanged in reshape mode.",
+        branding::COMMAND_NAME,
+        issue.identifier,
+        title_status,
+        description_diff,
+        branding::PROJECT_DIR
     )
 }
 
@@ -1240,7 +1273,8 @@ fn prompt_reshape_apply_with_io(
     writeln!(writer, "{preview}")?;
     writeln!(
         writer,
-        "Choose [a]pply or [c]ancel for `meta backlog plan {identifier}`:"
+        "Choose [a]pply or [c]ancel for `{} backlog plan {identifier}`:",
+        branding::COMMAND_NAME,
     )?;
     writer.flush()?;
 
@@ -1270,7 +1304,8 @@ fn render_reshape_workpad_comment(
         String::new(),
         format!("- Reshape applied: {}", reshape_timestamp()),
         format!(
-            "- Command: `meta backlog plan {}{}`",
+            "- Command: `{} backlog plan {}{}`",
+            branding::COMMAND_NAME,
             original_issue.identifier,
             if velocity { " --velocity" } else { "" }
         ),
@@ -1289,9 +1324,10 @@ fn render_reshape_workpad_comment(
         "- Metadata preserved: assignee, labels, project, state, priority, and cycle were left unchanged."
             .to_string(),
     );
-    lines.push(
-        "- Local `.metastack/backlog/` files were not modified by this reshape flow.".to_string(),
-    );
+    lines.push(format!(
+        "- Local `{}/backlog/` files were not modified by this reshape flow.",
+        branding::PROJECT_DIR
+    ));
 
     lines.join("\n")
 }
@@ -1315,6 +1351,7 @@ fn run_interactive_plan_session(
                 prefill.unwrap_or_default(),
             ),
             error: None,
+            sticky_error: false,
         }),
         agent_overrides,
         continuation: None,
@@ -1419,19 +1456,25 @@ fn run_interactive_plan_session(
                             if plan.issues.is_empty() {
                                 match &mut app.stage {
                                     PlanStage::Request(request_app) => {
-                                        request_app.error = Some(
+                                        set_transient_error(
+                                            &mut request_app.error,
+                                            &mut request_app.sticky_error,
                                             "planning agent returned no issues to create"
                                                 .to_string(),
                                         );
                                     }
                                     PlanStage::Questions(questions_app) => {
-                                        questions_app.error = Some(
+                                        set_transient_error(
+                                            &mut questions_app.error,
+                                            &mut questions_app.sticky_error,
                                             "planning agent returned no issues to create"
                                                 .to_string(),
                                         );
                                     }
                                     PlanStage::Review(review_app) => {
-                                        review_app.error = Some(
+                                        set_transient_error(
+                                            &mut review_app.error,
+                                            &mut review_app.sticky_error,
                                             "planning agent returned no issues to create"
                                                 .to_string(),
                                         );
@@ -1570,6 +1613,7 @@ fn run_fast_interactive_plan_session(
                 prefill.unwrap_or_default(),
             ),
             error: None,
+            sticky_error: false,
         }),
         agent_overrides,
         continuation: None,
@@ -1691,7 +1735,7 @@ fn run_fast_interactive_plan_session(
                     }
                     FastPlanStage::Addendum(addendum_app) => {
                         addendum_app.addendum.paste(&text);
-                        addendum_app.error = None;
+                        clear_error(&mut addendum_app.error, &mut addendum_app.sticky_error);
                     }
                     FastPlanStage::Review(_) | FastPlanStage::Loading(_) => {}
                 },
@@ -1722,6 +1766,7 @@ fn build_fast_addendum_app(
         follow_ups,
         addendum: InputFieldState::new(String::new()),
         error: None,
+        sticky_error: false,
     }
 }
 
@@ -1738,7 +1783,43 @@ fn build_fast_review_app(
         plan,
         selected: 0,
         error: None,
+        sticky_error: false,
     }
+}
+
+fn clear_error(error: &mut Option<String>, sticky_error: &mut bool) {
+    *error = None;
+    *sticky_error = false;
+}
+
+fn clear_error_for_navigation(error: &mut Option<String>, sticky_error: &bool) {
+    if !*sticky_error {
+        *error = None;
+    }
+}
+
+fn set_transient_error(error: &mut Option<String>, sticky_error: &mut bool, message: String) {
+    *error = Some(message);
+    *sticky_error = false;
+}
+
+fn set_sticky_error(error: &mut Option<String>, sticky_error: &mut bool, message: String) {
+    *error = Some(message);
+    *sticky_error = true;
+}
+
+fn input_key_clears_sticky_error(key: crossterm::event::KeyEvent) -> bool {
+    matches!(
+        key.code,
+        KeyCode::Backspace | KeyCode::Delete
+            | KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL)
+    ) || matches!(
+        key.code,
+        KeyCode::Char(_) if !key.modifiers.contains(KeyModifiers::CONTROL)
+    ) || matches!(
+        key.code,
+        KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT)
+    )
 }
 
 fn handle_fast_request_step_key(
@@ -1750,8 +1831,10 @@ fn handle_fast_request_step_key(
     match key.code {
         KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             match app.request.paste_clipboard_with_prompt_attachments() {
-                Ok(_) => app.error = None,
-                Err(error) => app.error = Some(error.to_string()),
+                Ok(_) => clear_error(&mut app.error, &mut app.sticky_error),
+                Err(error) => {
+                    set_transient_error(&mut app.error, &mut app.sticky_error, error.to_string())
+                }
             }
             FastSessionAction::None
         }
@@ -1759,10 +1842,14 @@ fn handle_fast_request_step_key(
             let request_value = app.request.display_value();
             let request = request_value.trim();
             if request.is_empty() {
-                app.error = Some("Enter a planning request before continuing.".to_string());
+                set_transient_error(
+                    &mut app.error,
+                    &mut app.sticky_error,
+                    "Enter a planning request before continuing.".to_string(),
+                );
                 FastSessionAction::None
             } else {
-                app.error = None;
+                clear_error(&mut app.error, &mut app.sticky_error);
                 if question_limit == 0 {
                     FastSessionAction::OpenAddendum {
                         request: request.to_string(),
@@ -1780,17 +1867,21 @@ fn handle_fast_request_step_key(
         KeyCode::Enter => {
             if key.modifiers.contains(KeyModifiers::SHIFT) {
                 if app.request.insert_newline() {
-                    app.error = None;
+                    clear_error(&mut app.error, &mut app.sticky_error);
                 }
                 return FastSessionAction::None;
             }
             let request_value = app.request.display_value();
             let request = request_value.trim();
             if request.is_empty() {
-                app.error = Some("Enter a planning request before continuing.".to_string());
+                set_transient_error(
+                    &mut app.error,
+                    &mut app.sticky_error,
+                    "Enter a planning request before continuing.".to_string(),
+                );
                 FastSessionAction::None
             } else {
-                app.error = None;
+                clear_error(&mut app.error, &mut app.sticky_error);
                 if question_limit == 0 {
                     FastSessionAction::OpenAddendum {
                         request: request.to_string(),
@@ -1807,7 +1898,11 @@ fn handle_fast_request_step_key(
         }
         _ => {
             if app.request.handle_key_with_width(key, input_width) {
-                app.error = None;
+                if input_key_clears_sticky_error(key) {
+                    clear_error(&mut app.error, &mut app.sticky_error);
+                } else {
+                    clear_error_for_navigation(&mut app.error, &app.sticky_error);
+                }
             }
             FastSessionAction::None
         }
@@ -1825,9 +1920,13 @@ fn handle_fast_questions_step_key(
                 match question.answer.paste_clipboard_with_prompt_attachments() {
                     Ok(_) => {
                         question.state = FollowUpAnswerState::Pending;
-                        app.error = None;
+                        clear_error(&mut app.error, &mut app.sticky_error);
                     }
-                    Err(error) => app.error = Some(error.to_string()),
+                    Err(error) => set_transient_error(
+                        &mut app.error,
+                        &mut app.sticky_error,
+                        error.to_string(),
+                    ),
                 }
             }
             FastSessionAction::None
@@ -1838,12 +1937,12 @@ fn handle_fast_questions_step_key(
             } else {
                 app.selected -= 1;
             }
-            app.error = None;
+            clear_error_for_navigation(&mut app.error, &app.sticky_error);
             FastSessionAction::None
         }
         KeyCode::Tab => {
             app.selected = (app.selected + 1) % app.questions.len();
-            app.error = None;
+            clear_error_for_navigation(&mut app.error, &app.sticky_error);
             FastSessionAction::None
         }
         KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -1857,7 +1956,7 @@ fn handle_fast_questions_step_key(
             };
 
             if app.questions.iter().all(question_is_completed) {
-                app.error = None;
+                clear_error(&mut app.error, &mut app.sticky_error);
                 FastSessionAction::OpenAddendum {
                     request: app.request.clone(),
                     request_attachments: app.request_attachments.clone(),
@@ -1867,7 +1966,7 @@ fn handle_fast_questions_step_key(
                 if let Some(index) = next_incomplete_question(&app.questions, app.selected) {
                     app.selected = index;
                 }
-                app.error = None;
+                clear_error_for_navigation(&mut app.error, &app.sticky_error);
                 FastSessionAction::None
             }
         }
@@ -1877,7 +1976,7 @@ fn handle_fast_questions_step_key(
                     && question.answer.insert_newline()
                 {
                     question.state = FollowUpAnswerState::Pending;
-                    app.error = None;
+                    clear_error(&mut app.error, &mut app.sticky_error);
                 }
                 return FastSessionAction::None;
             }
@@ -1892,7 +1991,7 @@ fn handle_fast_questions_step_key(
             };
 
             if app.questions.iter().all(question_is_completed) {
-                app.error = None;
+                clear_error(&mut app.error, &mut app.sticky_error);
                 FastSessionAction::OpenAddendum {
                     request: app.request.clone(),
                     request_attachments: app.request_attachments.clone(),
@@ -1902,7 +2001,7 @@ fn handle_fast_questions_step_key(
                 if let Some(index) = next_incomplete_question(&app.questions, app.selected) {
                     app.selected = index;
                 }
-                app.error = None;
+                clear_error_for_navigation(&mut app.error, &app.sticky_error);
                 FastSessionAction::None
             }
         }
@@ -1911,7 +2010,11 @@ fn handle_fast_questions_step_key(
                 && question.answer.handle_key_with_width(key, input_width)
             {
                 question.state = FollowUpAnswerState::Pending;
-                app.error = None;
+                if input_key_clears_sticky_error(key) {
+                    clear_error(&mut app.error, &mut app.sticky_error);
+                } else {
+                    clear_error_for_navigation(&mut app.error, &app.sticky_error);
+                }
             }
             FastSessionAction::None
         }
@@ -1925,7 +2028,7 @@ fn handle_fast_addendum_step_key(
 ) -> FastSessionAction {
     match key.code {
         KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.error = None;
+            clear_error(&mut app.error, &mut app.sticky_error);
             FastSessionAction::GeneratePlan {
                 request: app.request.clone(),
                 request_attachments: app.request_attachments.clone(),
@@ -1936,11 +2039,11 @@ fn handle_fast_addendum_step_key(
         KeyCode::Enter => {
             if key.modifiers.contains(KeyModifiers::SHIFT) {
                 if app.addendum.insert_newline() {
-                    app.error = None;
+                    clear_error(&mut app.error, &mut app.sticky_error);
                 }
                 return FastSessionAction::None;
             }
-            app.error = None;
+            clear_error(&mut app.error, &mut app.sticky_error);
             FastSessionAction::GeneratePlan {
                 request: app.request.clone(),
                 request_attachments: app.request_attachments.clone(),
@@ -1950,7 +2053,11 @@ fn handle_fast_addendum_step_key(
         }
         _ => {
             if app.addendum.handle_key_with_width(key, input_width) {
-                app.error = None;
+                if input_key_clears_sticky_error(key) {
+                    clear_error(&mut app.error, &mut app.sticky_error);
+                } else {
+                    clear_error_for_navigation(&mut app.error, &app.sticky_error);
+                }
             }
             FastSessionAction::None
         }
@@ -1964,14 +2071,14 @@ fn handle_fast_review_step_key(
     match key.code {
         KeyCode::Up => {
             app.selected = app.selected.saturating_sub(1);
-            app.error = None;
+            clear_error_for_navigation(&mut app.error, &app.sticky_error);
             FastSessionAction::None
         }
         KeyCode::Down => {
             if app.selected + 1 < app.plan.issues.len() {
                 app.selected += 1;
             }
-            app.error = None;
+            clear_error_for_navigation(&mut app.error, &app.sticky_error);
             FastSessionAction::None
         }
         KeyCode::Char('a') | KeyCode::Enter => FastSessionAction::Confirm(app.plan.clone()),
@@ -2401,10 +2508,22 @@ fn spawn_fast_plan_job(
 
 fn set_fast_stage_error(stage: &mut FastPlanStage, error: String) {
     match stage {
-        FastPlanStage::Request(request_app) => request_app.error = Some(error),
-        FastPlanStage::Questions(questions_app) => questions_app.error = Some(error),
-        FastPlanStage::Addendum(addendum_app) => addendum_app.error = Some(error),
-        FastPlanStage::Review(review_app) => review_app.error = Some(error),
+        FastPlanStage::Request(request_app) => {
+            set_sticky_error(&mut request_app.error, &mut request_app.sticky_error, error)
+        }
+        FastPlanStage::Questions(questions_app) => set_sticky_error(
+            &mut questions_app.error,
+            &mut questions_app.sticky_error,
+            error,
+        ),
+        FastPlanStage::Addendum(addendum_app) => set_sticky_error(
+            &mut addendum_app.error,
+            &mut addendum_app.sticky_error,
+            error,
+        ),
+        FastPlanStage::Review(review_app) => {
+            set_sticky_error(&mut review_app.error, &mut review_app.sticky_error, error)
+        }
         FastPlanStage::Loading(_) => {}
     }
 }
@@ -2450,6 +2569,7 @@ fn build_questions_app(
             .collect(),
         selected: 0,
         error: None,
+        sticky_error: false,
     }
 }
 
@@ -2474,6 +2594,7 @@ fn build_review_app(
         selected_ticket_scroll: ScrollState::default(),
         combination_scroll: ScrollState::default(),
         error: None,
+        sticky_error: false,
     }
 }
 
@@ -2700,8 +2821,10 @@ fn handle_request_step_key_with_viewport(
     match key.code {
         KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             match app.request.paste_clipboard_with_prompt_attachments() {
-                Ok(_) => app.error = None,
-                Err(error) => app.error = Some(error.to_string()),
+                Ok(_) => clear_error(&mut app.error, &mut app.sticky_error),
+                Err(error) => {
+                    set_transient_error(&mut app.error, &mut app.sticky_error, error.to_string())
+                }
             }
             SessionAction::None
         }
@@ -2709,10 +2832,14 @@ fn handle_request_step_key_with_viewport(
             let request_value = app.request.display_value();
             let request = request_value.trim();
             if request.is_empty() {
-                app.error = Some("Enter a planning request before continuing.".to_string());
+                set_transient_error(
+                    &mut app.error,
+                    &mut app.sticky_error,
+                    "Enter a planning request before continuing.".to_string(),
+                );
                 SessionAction::None
             } else {
-                app.error = None;
+                clear_error(&mut app.error, &mut app.sticky_error);
                 SessionAction::GenerateQuestions {
                     request: request.to_string(),
                     request_attachments: app.request.prompt_attachments().to_vec(),
@@ -2722,17 +2849,21 @@ fn handle_request_step_key_with_viewport(
         KeyCode::Enter => {
             if key.modifiers.contains(KeyModifiers::SHIFT) {
                 if app.request.insert_newline() {
-                    app.error = None;
+                    clear_error(&mut app.error, &mut app.sticky_error);
                 }
                 SessionAction::None
             } else {
                 let request_value = app.request.display_value();
                 let request = request_value.trim();
                 if request.is_empty() {
-                    app.error = Some("Enter a planning request before continuing.".to_string());
+                    set_transient_error(
+                        &mut app.error,
+                        &mut app.sticky_error,
+                        "Enter a planning request before continuing.".to_string(),
+                    );
                     SessionAction::None
                 } else {
-                    app.error = None;
+                    clear_error(&mut app.error, &mut app.sticky_error);
                     SessionAction::GenerateQuestions {
                         request: request.to_string(),
                         request_attachments: app.request.prompt_attachments().to_vec(),
@@ -2746,7 +2877,11 @@ fn handle_request_step_key_with_viewport(
                 input_viewport.width,
                 input_viewport.height,
             ) {
-                app.error = None;
+                if input_key_clears_sticky_error(key) {
+                    clear_error(&mut app.error, &mut app.sticky_error);
+                } else {
+                    clear_error_for_navigation(&mut app.error, &app.sticky_error);
+                }
             }
             SessionAction::None
         }
@@ -2755,8 +2890,8 @@ fn handle_request_step_key_with_viewport(
 
 fn handle_request_step_paste(app: &mut RequestApp, text: &str) {
     match app.request.paste_with_prompt_attachments(text) {
-        Ok(_) => app.error = None,
-        Err(error) => app.error = Some(error.to_string()),
+        Ok(_) => clear_error(&mut app.error, &mut app.sticky_error),
+        Err(error) => set_transient_error(&mut app.error, &mut app.sticky_error, error.to_string()),
     }
 }
 
@@ -2800,9 +2935,13 @@ fn handle_questions_step_key_with_viewport(
                 match question.answer.paste_clipboard_with_prompt_attachments() {
                     Ok(_) => {
                         question.state = FollowUpAnswerState::Pending;
-                        app.error = None;
+                        clear_error(&mut app.error, &mut app.sticky_error);
                     }
-                    Err(error) => app.error = Some(error.to_string()),
+                    Err(error) => set_transient_error(
+                        &mut app.error,
+                        &mut app.sticky_error,
+                        error.to_string(),
+                    ),
                 }
             }
             SessionAction::None
@@ -2813,12 +2952,12 @@ fn handle_questions_step_key_with_viewport(
             } else {
                 app.selected -= 1;
             }
-            app.error = None;
+            clear_error_for_navigation(&mut app.error, &app.sticky_error);
             SessionAction::None
         }
         KeyCode::Tab => {
             app.selected = (app.selected + 1) % app.questions.len();
-            app.error = None;
+            clear_error_for_navigation(&mut app.error, &app.sticky_error);
             SessionAction::None
         }
         KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -2832,7 +2971,7 @@ fn handle_questions_step_key_with_viewport(
             };
 
             if app.questions.iter().all(question_is_completed) {
-                app.error = None;
+                clear_error(&mut app.error, &mut app.sticky_error);
                 return SessionAction::GeneratePlan {
                     request: app.request.clone(),
                     request_attachments: app.request_attachments.clone(),
@@ -2843,7 +2982,7 @@ fn handle_questions_step_key_with_viewport(
             if let Some(index) = next_incomplete_question(&app.questions, app.selected) {
                 app.selected = index;
             }
-            app.error = None;
+            clear_error_for_navigation(&mut app.error, &app.sticky_error);
             SessionAction::None
         }
         KeyCode::Enter => {
@@ -2852,7 +2991,7 @@ fn handle_questions_step_key_with_viewport(
                     && question.answer.insert_newline()
                 {
                     question.state = FollowUpAnswerState::Pending;
-                    app.error = None;
+                    clear_error(&mut app.error, &mut app.sticky_error);
                 }
                 SessionAction::None
             } else {
@@ -2866,7 +3005,7 @@ fn handle_questions_step_key_with_viewport(
                 };
 
                 if app.questions.iter().all(question_is_completed) {
-                    app.error = None;
+                    clear_error(&mut app.error, &mut app.sticky_error);
                     SessionAction::GeneratePlan {
                         request: app.request.clone(),
                         request_attachments: app.request_attachments.clone(),
@@ -2876,7 +3015,7 @@ fn handle_questions_step_key_with_viewport(
                     if let Some(index) = next_incomplete_question(&app.questions, app.selected) {
                         app.selected = index;
                     }
-                    app.error = None;
+                    clear_error_for_navigation(&mut app.error, &app.sticky_error);
                     SessionAction::None
                 }
             }
@@ -2890,7 +3029,11 @@ fn handle_questions_step_key_with_viewport(
                 )
             {
                 question.state = FollowUpAnswerState::Pending;
-                app.error = None;
+                if input_key_clears_sticky_error(key) {
+                    clear_error(&mut app.error, &mut app.sticky_error);
+                } else {
+                    clear_error_for_navigation(&mut app.error, &app.sticky_error);
+                }
             }
             SessionAction::None
         }
@@ -2902,9 +3045,11 @@ fn handle_questions_step_paste(app: &mut QuestionsApp, text: &str) {
         match question.answer.paste_with_prompt_attachments(text) {
             Ok(_) => {
                 question.state = FollowUpAnswerState::Pending;
-                app.error = None;
+                clear_error(&mut app.error, &mut app.sticky_error);
             }
-            Err(error) => app.error = Some(error.to_string()),
+            Err(error) => {
+                set_transient_error(&mut app.error, &mut app.sticky_error, error.to_string())
+            }
         }
     }
 }
@@ -2937,12 +3082,12 @@ fn handle_review_step_key(
     match key.code {
         KeyCode::BackTab => {
             app.focus = app.focus.previous();
-            app.error = None;
+            clear_error_for_navigation(&mut app.error, &app.sticky_error);
             SessionAction::None
         }
         KeyCode::Tab => {
             app.focus = app.focus.next();
-            app.error = None;
+            clear_error_for_navigation(&mut app.error, &app.sticky_error);
             SessionAction::None
         }
         KeyCode::Up => {
@@ -2951,7 +3096,7 @@ fn handle_review_step_key(
             } else {
                 let _ = handle_review_scroll_key(app, key, layout);
             }
-            app.error = None;
+            clear_error_for_navigation(&mut app.error, &app.sticky_error);
             SessionAction::None
         }
         KeyCode::Down => {
@@ -2960,24 +3105,24 @@ fn handle_review_step_key(
             } else {
                 let _ = handle_review_scroll_key(app, key, layout);
             }
-            app.error = None;
+            clear_error_for_navigation(&mut app.error, &app.sticky_error);
             SessionAction::None
         }
         KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End => {
             let _ = handle_review_scroll_key(app, key, layout);
-            app.error = None;
+            clear_error_for_navigation(&mut app.error, &app.sticky_error);
             SessionAction::None
         }
         KeyCode::Char(' ') => {
             cycle_review_decision(app);
-            app.error = None;
+            clear_error(&mut app.error, &mut app.sticky_error);
             SessionAction::None
         }
         KeyCode::Char('u') => {
             for decision in &mut app.decisions {
                 *decision = 0;
             }
-            app.error = None;
+            clear_error(&mut app.error, &mut app.sticky_error);
             SessionAction::None
         }
         KeyCode::Enter => match review_submission_action(app) {
@@ -2985,13 +3130,13 @@ fn handle_review_step_key(
                 SessionAction::Confirm(selected_issue_plan(app))
             }
             Ok(ReviewSubmissionAction::RegeneratePreview) => {
-                app.error = None;
+                clear_error(&mut app.error, &mut app.sticky_error);
                 SessionAction::RegeneratePlan {
                     review: app.clone(),
                 }
             }
             Err(error) => {
-                app.error = Some(error);
+                set_transient_error(&mut app.error, &mut app.sticky_error, error);
                 SessionAction::None
             }
         },
@@ -3862,9 +4007,17 @@ fn spawn_plan_revision_job(
 
 fn set_stage_error(stage: &mut PlanStage, error: String) {
     match stage {
-        PlanStage::Request(request_app) => request_app.error = Some(error),
-        PlanStage::Questions(questions_app) => questions_app.error = Some(error),
-        PlanStage::Review(review_app) => review_app.error = Some(error),
+        PlanStage::Request(request_app) => {
+            set_sticky_error(&mut request_app.error, &mut request_app.sticky_error, error)
+        }
+        PlanStage::Questions(questions_app) => set_sticky_error(
+            &mut questions_app.error,
+            &mut questions_app.sticky_error,
+            error,
+        ),
+        PlanStage::Review(review_app) => {
+            set_sticky_error(&mut review_app.error, &mut review_app.sticky_error, error)
+        }
         PlanStage::Loading(_) => {}
     }
 }
@@ -3970,7 +4123,7 @@ mod tests {
     };
     use crate::config::DEFAULT_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT;
     use crate::tui::fields::InputFieldState;
-    use crossterm::event::{KeyModifiers, MouseEvent, MouseEventKind};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
@@ -4060,6 +4213,7 @@ mod tests {
         let snapshot = render_request_snapshot(&RequestApp {
             request: InputFieldState::multiline("Plan a dashboard for multi-ticket backlog work"),
             error: None,
+            sticky_error: false,
         });
 
         assert!(snapshot.contains("Planning Request [editing]"));
@@ -4078,6 +4232,7 @@ mod tests {
             ],
             selected: 1,
             error: None,
+            sticky_error: false,
         });
 
         assert!(snapshot.contains("Question 2 of 2 [active]"));
@@ -4099,6 +4254,7 @@ mod tests {
             ],
             selected: 3,
             error: None,
+            sticky_error: false,
         });
 
         assert!(snapshot.contains("Question 4 of 4 [active]"));
@@ -4112,6 +4268,7 @@ mod tests {
         let mut app = RequestApp {
             request: InputFieldState::multiline("Plan:"),
             error: Some("stale".to_string()),
+            sticky_error: false,
         };
 
         handle_request_step_paste(&mut app, " add dashboard flow\nand follow-up capture\n");
@@ -4136,6 +4293,7 @@ mod tests {
         let mut app = RequestApp {
             request: InputFieldState::multiline_with_prompt_attachments("Plan: "),
             error: Some("stale".to_string()),
+            sticky_error: false,
         };
 
         handle_request_step_paste(&mut app, image_path.to_str().expect("utf8"));
@@ -4168,6 +4326,7 @@ mod tests {
         let mut app = RequestApp {
             request: InputFieldState::multiline("Plan:"),
             error: Some("stale".to_string()),
+            sticky_error: false,
         };
 
         let action = handle_request_step_key(
@@ -4189,6 +4348,7 @@ mod tests {
         let mut app = RequestApp {
             request: InputFieldState::multiline("Plan a new command"),
             error: None,
+            sticky_error: false,
         };
 
         let action = handle_request_step_key(
@@ -4210,6 +4370,7 @@ mod tests {
         let mut app = RequestApp {
             request: InputFieldState::multiline("Plan a new command"),
             error: None,
+            sticky_error: false,
         };
 
         let action = handle_request_step_key(
@@ -4239,6 +4400,7 @@ mod tests {
                     .join("\n"),
             ),
             error: None,
+            sticky_error: false,
         };
 
         let action = handle_request_step_key_with_viewport(
@@ -4264,6 +4426,7 @@ mod tests {
                     .join("\n"),
             ),
             error: None,
+            sticky_error: false,
         };
         let viewport = request_input_viewport(Rect::new(0, 0, 120, 16));
         let mouse = MouseEvent {
@@ -4293,6 +4456,7 @@ mod tests {
             ],
             selected: 1,
             error: Some("stale".to_string()),
+            sticky_error: false,
         };
 
         handle_questions_step_paste(&mut app, "Many tickets\nif review requires it\n");
@@ -4332,6 +4496,7 @@ mod tests {
             questions: vec![pending_question("Attach the design reference?")],
             selected: 0,
             error: Some("stale".to_string()),
+            sticky_error: false,
         };
 
         handle_questions_step_paste(&mut app, answer_image_path.to_str().expect("utf8"));
@@ -4378,6 +4543,7 @@ mod tests {
             questions: vec![pending_question("How should it be validated?")],
             selected: 0,
             error: Some("stale".to_string()),
+            sticky_error: false,
         };
 
         let action = handle_questions_step_key(
@@ -4406,6 +4572,7 @@ mod tests {
             ],
             selected: 1,
             error: None,
+            sticky_error: false,
         };
 
         let action = handle_questions_step_key(
@@ -4455,6 +4622,7 @@ mod tests {
             }],
             selected: 0,
             error: None,
+            sticky_error: false,
         };
         let _ = app.questions[0]
             .answer
@@ -4491,6 +4659,7 @@ mod tests {
             }],
             selected: 0,
             error: None,
+            sticky_error: false,
         };
 
         let action = handle_questions_step_key_with_viewport(
@@ -4526,6 +4695,7 @@ mod tests {
             ],
             selected: 1,
             error: None,
+            sticky_error: false,
         };
         let viewport = questions_answer_input_viewport(Rect::new(0, 0, 120, 18));
         let mouse = MouseEvent {
@@ -4560,6 +4730,7 @@ mod tests {
             ],
             selected: 0,
             error: Some("stale".to_string()),
+            sticky_error: false,
         };
         let _ = app.questions[0]
             .answer
@@ -4588,6 +4759,7 @@ mod tests {
             ],
             selected: 1,
             error: Some("stale".to_string()),
+            sticky_error: false,
         };
         let _ = app.questions[1]
             .answer
@@ -4633,6 +4805,7 @@ mod tests {
             ],
             selected: 3,
             error: None,
+            sticky_error: false,
         };
 
         let action = handle_questions_step_key(
@@ -4671,6 +4844,7 @@ mod tests {
             ],
             selected: 1,
             error: None,
+            sticky_error: false,
         };
 
         let action = handle_questions_step_key(
@@ -4704,6 +4878,7 @@ mod tests {
             ],
             selected: 2,
             error: None,
+            sticky_error: false,
         };
 
         let action = handle_questions_step_key(
@@ -4734,7 +4909,7 @@ mod tests {
     #[test]
     fn review_dashboard_lists_generated_issues() {
         let mut app = build_review_app(
-            "Plan a meta plan command".to_string(),
+            format!("Plan a {} plan command", crate::branding::COMMAND_NAME),
             vec![],
             vec![],
             PlannedIssueSet {
@@ -4744,7 +4919,10 @@ mod tests {
                         title: "Add the plan command".to_string(),
                         description: "Wire the top-level command and non-interactive flow."
                             .to_string(),
-                        acceptance_criteria: vec!["`meta plan --help` works".to_string()],
+                        acceptance_criteria: vec![format!(
+                            "`{} plan --help` works",
+                            crate::branding::COMMAND_NAME
+                        )],
                         priority: Some(2),
                     },
                     PlannedIssueDraft {
@@ -4773,7 +4951,7 @@ mod tests {
     #[test]
     fn review_step_tab_focuses_scrollable_review_panes() {
         let mut app = build_review_app(
-            "Plan a meta plan command".to_string(),
+            format!("Plan a {} plan command", crate::branding::COMMAND_NAME),
             vec![],
             vec![],
             PlannedIssueSet {
@@ -4916,6 +5094,7 @@ mod tests {
                                 "Plan a dashboard for multi-ticket backlog work",
                             ),
                             error: None,
+                            sticky_error: false,
                         }),
                         agent_overrides: PlanningAgentOverrides::default(),
                         continuation: None,
@@ -4954,7 +5133,7 @@ mod tests {
     fn merge_prompt_includes_grouped_ticket_subset() {
         let temp = tempdir().expect("tempdir should create");
         let root = temp.path();
-        let metastack_dir = root.join(".metastack");
+        let metastack_dir = root.join(crate::branding::PROJECT_DIR);
         std::fs::create_dir_all(&metastack_dir).expect("planning dir should exist");
         for file in [
             "SCAN.md",
@@ -4985,7 +5164,10 @@ mod tests {
             ],
         };
         let mut review = build_review_app(
-            "Plan a better `meta plan` workflow".to_string(),
+            format!(
+                "Plan a better `{}` plan workflow",
+                crate::branding::COMMAND_NAME
+            ),
             vec![],
             vec![answered_follow_up("Who uses it?", "CLI maintainers")],
             plan,
@@ -4994,7 +5176,10 @@ mod tests {
         review.decisions = vec![2, 2];
         let prompt = render_issue_merge_prompt(
             root,
-            "Plan a better `meta plan` workflow",
+            &format!(
+                "Plan a better `{}` plan workflow",
+                crate::branding::COMMAND_NAME
+            ),
             &review.follow_ups,
             &review.plan,
             &review_kept_indices(&review),
@@ -5012,7 +5197,7 @@ mod tests {
     fn merge_prompt_mentions_selected_standalone_tickets_and_skipped_scope() {
         let temp = tempdir().expect("tempdir should create");
         let root = temp.path();
-        let metastack_dir = root.join(".metastack");
+        let metastack_dir = root.join(crate::branding::PROJECT_DIR);
         std::fs::create_dir_all(&metastack_dir).expect("planning dir should exist");
         for file in [
             "SCAN.md",
@@ -5055,7 +5240,10 @@ mod tests {
             ],
         };
         let mut review = build_review_app(
-            "Plan a better `meta plan` workflow".to_string(),
+            format!(
+                "Plan a better `{}` plan workflow",
+                crate::branding::COMMAND_NAME
+            ),
             vec![],
             vec![
                 answered_follow_up("Who uses it?", "CLI maintainers"),
@@ -5068,7 +5256,10 @@ mod tests {
 
         let prompt = render_issue_merge_prompt(
             root,
-            "Plan a better `meta plan` workflow",
+            &format!(
+                "Plan a better `{}` plan workflow",
+                crate::branding::COMMAND_NAME
+            ),
             &review.follow_ups,
             &review.plan,
             &review_kept_indices(&review),
@@ -5088,7 +5279,7 @@ mod tests {
     fn question_prompt_uses_the_default_interactive_follow_up_limit() {
         let temp = tempdir().expect("tempdir should create");
         let root = temp.path();
-        let metastack_dir = root.join(".metastack");
+        let metastack_dir = root.join(crate::branding::PROJECT_DIR);
         std::fs::create_dir_all(&metastack_dir).expect("planning dir should exist");
         for file in [
             "SCAN.md",
@@ -5119,7 +5310,7 @@ mod tests {
     fn question_prompt_uses_a_custom_interactive_follow_up_limit() {
         let temp = tempdir().expect("tempdir should create");
         let root = temp.path();
-        let metastack_dir = root.join(".metastack");
+        let metastack_dir = root.join(crate::branding::PROJECT_DIR);
         std::fs::create_dir_all(&metastack_dir).expect("planning dir should exist");
         for file in [
             "SCAN.md",
@@ -5172,6 +5363,7 @@ mod tests {
                 previous_stage: PlanStage::Request(RequestApp {
                     request: InputFieldState::multiline("Plan a dashboard flow"),
                     error: None,
+                    sticky_error: false,
                 }),
             }),
         };
@@ -5297,6 +5489,46 @@ mod tests {
         .expect("fenced JSON should parse");
 
         assert_eq!(parsed.questions, vec!["What repo area changes?"]);
+    }
+
+    #[test]
+    fn parse_agent_json_accepts_progressive_brace_scan() {
+        let parsed: FollowUpQuestions = parse_agent_json(
+            "Context {not json}\n{\"questions\":[\"What repo area changes?\"]}",
+            "follow-up question generation",
+        )
+        .expect("progressive brace scan should find the JSON payload");
+
+        assert_eq!(parsed.questions, vec!["What repo area changes?"]);
+    }
+
+    #[test]
+    fn request_step_keeps_sticky_recovered_error_visible_during_cursor_navigation() {
+        let mut app = RequestApp {
+            request: InputFieldState::multiline("Plan a new command"),
+            error: Some("recovered".to_string()),
+            sticky_error: true,
+        };
+
+        let action = handle_request_step_key_with_viewport(
+            &mut app,
+            KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+            request_input_viewport(Rect::new(0, 0, 120, 16)),
+        );
+
+        assert!(matches!(action, SessionAction::None));
+        assert_eq!(app.error.as_deref(), Some("recovered"));
+        assert!(app.sticky_error);
+
+        let action = handle_request_step_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE),
+            80,
+        );
+
+        assert!(matches!(action, SessionAction::None));
+        assert_eq!(app.error, None);
+        assert!(!app.sticky_error);
     }
 
     #[test]

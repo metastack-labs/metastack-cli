@@ -2,6 +2,8 @@
 
 include!("support/common.rs");
 
+use metastack_cli::branding;
+
 fn write_onboarded_config(
     config_path: &Path,
     config: impl AsRef<str>,
@@ -188,7 +190,10 @@ fn context_doctor_reports_missing_inputs() -> Result<(), Box<dyn Error>> {
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("Missing `.metastack/meta.json`"))
+        .stderr(predicate::str::contains(format!(
+            "Missing `{}/meta.json`",
+            branding::PROJECT_DIR
+        )))
         .stderr(predicate::str::contains(
             "No repo overlay files were found; relying on the injected workflow contract",
         ))
@@ -204,7 +209,7 @@ fn context_doctor_succeeds_without_repo_overlay_files_when_required_inputs_exist
     let repo_root = temp.path().join("repo");
     let config_path = temp.path().join("metastack.toml");
     let bin_dir = temp.path().join("bin");
-    fs::create_dir_all(repo_root.join(".metastack/codebase"))?;
+    fs::create_dir_all(repo_root.join(format!("{}/codebase", branding::PROJECT_DIR)))?;
     fs::create_dir_all(&bin_dir)?;
     write_onboarded_config(&config_path, "")?;
     fs::write(repo_root.join("README.md"), "# Context OK\n")?;
@@ -228,7 +233,9 @@ fn context_doctor_succeeds_without_repo_overlay_files_when_required_inputs_exist
         "TESTING.md",
     ] {
         fs::write(
-            repo_root.join(".metastack/codebase").join(file),
+            repo_root
+                .join(format!("{}/codebase", branding::PROJECT_DIR))
+                .join(file),
             format!("# {file}\n"),
         )?;
     }
@@ -299,24 +306,26 @@ transport = "arg"
     )?;
     fs::write(
         &stub_path,
-        r#"#!/bin/sh
-printf '%s' "$METASTACK_AGENT_PROVIDER_SOURCE" > "$TEST_OUTPUT_DIR/provider-source.txt"
-printf '%s' "$METASTACK_AGENT_ROUTE_KEY" > "$TEST_OUTPUT_DIR/route-key.txt"
-mkdir -p .metastack/codebase
-for pair in \
-  "ARCHITECTURE.md:# Architecture" \
-  "CONCERNS.md:# Codebase Concerns" \
-  "CONVENTIONS.md:# Coding Conventions" \
-  "INTEGRATIONS.md:# External Integrations" \
-  "STACK.md:# Technology Stack" \
-  "STRUCTURE.md:# Codebase Structure" \
-  "TESTING.md:# Testing Patterns"
-do
-  file="${pair%%:*}"
-  header="${pair#*:}"
-  printf '%s\n' "$header" > ".metastack/codebase/$file"
-done
-"#,
+        format!(
+            "#!/bin/sh\n\
+printf '%s' \"$METASTACK_AGENT_PROVIDER_SOURCE\" > \"$TEST_OUTPUT_DIR/provider-source.txt\"\n\
+printf '%s' \"$METASTACK_AGENT_ROUTE_KEY\" > \"$TEST_OUTPUT_DIR/route-key.txt\"\n\
+mkdir -p {0}/codebase\n\
+for pair in \\\n\
+  \"ARCHITECTURE.md:# Architecture\" \\\n\
+  \"CONCERNS.md:# Codebase Concerns\" \\\n\
+  \"CONVENTIONS.md:# Coding Conventions\" \\\n\
+  \"INTEGRATIONS.md:# External Integrations\" \\\n\
+  \"STACK.md:# Technology Stack\" \\\n\
+  \"STRUCTURE.md:# Codebase Structure\" \\\n\
+  \"TESTING.md:# Testing Patterns\"\n\
+do\n\
+  file=\"${{pair%%:*}}\"\n\
+  header=\"${{pair#*:}}\"\n\
+  printf '%s\\n' \"$header\" > \"{0}/codebase/$file\"\n\
+done\n",
+            branding::PROJECT_DIR
+        ),
     )?;
     let mut permissions = fs::metadata(&stub_path)?.permissions();
     permissions.set_mode(0o755);
@@ -335,11 +344,22 @@ done
         .assert()
         .success()
         .stdout(predicate::str::contains("Codebase scan completed"))
-        .stdout(predicate::str::contains(".metastack/codebase/STRUCTURE.md"));
+        .stdout(predicate::str::contains(format!(
+            "{}/codebase/STRUCTURE.md",
+            branding::PROJECT_DIR
+        )));
 
-    assert!(repo_root.join(".metastack/codebase/SCAN.md").is_file());
+    assert!(
+        repo_root
+            .join(format!("{}/codebase/SCAN.md", branding::PROJECT_DIR))
+            .is_file()
+    );
     assert_eq!(
-        fs::read_to_string(repo_root.join(".metastack/codebase/ARCHITECTURE.md"))?.trim(),
+        fs::read_to_string(repo_root.join(format!(
+            "{}/codebase/ARCHITECTURE.md",
+            branding::PROJECT_DIR
+        )))?
+        .trim(),
         "# Architecture"
     );
     assert_eq!(
@@ -350,7 +370,10 @@ done
         fs::read_to_string(output_dir.join("route-key.txt"))?,
         "context.reload"
     );
-    let scan_log = fs::read_to_string(repo_root.join(".metastack/agents/sessions/scan.log"))?;
+    let scan_log = fs::read_to_string(repo_root.join(format!(
+        "{}/agents/sessions/scan.log",
+        branding::PROJECT_DIR
+    )))?;
     assert!(scan_log.contains("Resolved provider: scan-stub"));
     assert!(scan_log.contains("Resolved route key: context.reload"));
     assert!(scan_log.contains("Provider source: explicit_override"));
@@ -411,45 +434,49 @@ transport = "arg"
     )?;
     fs::write(
         &scan_stub_path,
-        r#"#!/bin/sh
-printf 'scan-stub' > "$TEST_OUTPUT_DIR/scan-agent.txt"
-printf '%s' "$METASTACK_AGENT_ROUTE_KEY" > "$TEST_OUTPUT_DIR/scan-route.txt"
-mkdir -p .metastack/codebase
-for pair in \
-  "ARCHITECTURE.md:# Scan Architecture" \
-  "CONCERNS.md:# Scan Concerns" \
-  "CONVENTIONS.md:# Scan Conventions" \
-  "INTEGRATIONS.md:# Scan Integrations" \
-  "STACK.md:# Scan Stack" \
-  "STRUCTURE.md:# Scan Structure" \
-  "TESTING.md:# Scan Testing"
-do
-  file="${pair%%:*}"
-  header="${pair#*:}"
-  printf '%s\n' "$header" > ".metastack/codebase/$file"
-done
-"#,
+        format!(
+            "#!/bin/sh\n\
+printf 'scan-stub' > \"$TEST_OUTPUT_DIR/scan-agent.txt\"\n\
+printf '%s' \"$METASTACK_AGENT_ROUTE_KEY\" > \"$TEST_OUTPUT_DIR/scan-route.txt\"\n\
+mkdir -p {0}/codebase\n\
+for pair in \\\n\
+  \"ARCHITECTURE.md:# Scan Architecture\" \\\n\
+  \"CONCERNS.md:# Scan Concerns\" \\\n\
+  \"CONVENTIONS.md:# Scan Conventions\" \\\n\
+  \"INTEGRATIONS.md:# Scan Integrations\" \\\n\
+  \"STACK.md:# Scan Stack\" \\\n\
+  \"STRUCTURE.md:# Scan Structure\" \\\n\
+  \"TESTING.md:# Scan Testing\"\n\
+do\n\
+  file=\"${{pair%%:*}}\"\n\
+  header=\"${{pair#*:}}\"\n\
+  printf '%s\\n' \"$header\" > \"{0}/codebase/$file\"\n\
+done\n",
+            branding::PROJECT_DIR
+        ),
     )?;
     fs::write(
         &reload_stub_path,
-        r#"#!/bin/sh
-printf 'reload-stub' > "$TEST_OUTPUT_DIR/reload-agent.txt"
-printf '%s' "$METASTACK_AGENT_ROUTE_KEY" > "$TEST_OUTPUT_DIR/reload-route.txt"
-mkdir -p .metastack/codebase
-for pair in \
-  "ARCHITECTURE.md:# Reload Architecture" \
-  "CONCERNS.md:# Reload Concerns" \
-  "CONVENTIONS.md:# Reload Conventions" \
-  "INTEGRATIONS.md:# Reload Integrations" \
-  "STACK.md:# Reload Stack" \
-  "STRUCTURE.md:# Reload Structure" \
-  "TESTING.md:# Reload Testing"
-do
-  file="${pair%%:*}"
-  header="${pair#*:}"
-  printf '%s\n' "$header" > ".metastack/codebase/$file"
-done
-"#,
+        format!(
+            "#!/bin/sh\n\
+printf 'reload-stub' > \"$TEST_OUTPUT_DIR/reload-agent.txt\"\n\
+printf '%s' \"$METASTACK_AGENT_ROUTE_KEY\" > \"$TEST_OUTPUT_DIR/reload-route.txt\"\n\
+mkdir -p {0}/codebase\n\
+for pair in \\\n\
+  \"ARCHITECTURE.md:# Reload Architecture\" \\\n\
+  \"CONCERNS.md:# Reload Concerns\" \\\n\
+  \"CONVENTIONS.md:# Reload Conventions\" \\\n\
+  \"INTEGRATIONS.md:# Reload Integrations\" \\\n\
+  \"STACK.md:# Reload Stack\" \\\n\
+  \"STRUCTURE.md:# Reload Structure\" \\\n\
+  \"TESTING.md:# Reload Testing\"\n\
+do\n\
+  file=\"${{pair%%:*}}\"\n\
+  header=\"${{pair#*:}}\"\n\
+  printf '%s\\n' \"$header\" > \"{0}/codebase/$file\"\n\
+done\n",
+            branding::PROJECT_DIR
+        ),
     )?;
     let mut permissions = fs::metadata(&scan_stub_path)?.permissions();
     permissions.set_mode(0o755);
@@ -481,7 +508,11 @@ done
         "context.scan"
     );
     assert_eq!(
-        fs::read_to_string(repo_root.join(".metastack/codebase/ARCHITECTURE.md"))?.trim(),
+        fs::read_to_string(repo_root.join(format!(
+            "{}/codebase/ARCHITECTURE.md",
+            branding::PROJECT_DIR
+        )))?
+        .trim(),
         "# Scan Architecture"
     );
 
@@ -508,7 +539,11 @@ done
         "context.reload"
     );
     assert_eq!(
-        fs::read_to_string(repo_root.join(".metastack/codebase/ARCHITECTURE.md"))?.trim(),
+        fs::read_to_string(repo_root.join(format!(
+            "{}/codebase/ARCHITECTURE.md",
+            branding::PROJECT_DIR
+        )))?
+        .trim(),
         "# Reload Architecture"
     );
 

@@ -656,7 +656,7 @@ mod tests {
         ];
 
         let mut tracker = ProgressTracker::start(
-            "meta merge progress",
+            format!("{} merge progress", crate::branding::COMMAND_NAME),
             &artifact_path,
             &steps,
             ProgressOutputMode::Hidden,
@@ -685,7 +685,7 @@ mod tests {
     fn progress_dashboard_snapshot_shows_active_phase_and_details() {
         let snapshot = render_progress_snapshot(
             &ProgressViewData {
-                title: "meta merge progress".to_string(),
+                title: format!("{} merge progress", crate::branding::COMMAND_NAME),
                 status: ProgressRunState::Running,
                 status_line: "Running phase 3/6: Merge application".to_string(),
                 active_detail: Some(
@@ -712,8 +712,14 @@ mod tests {
                     },
                 ],
                 notes: vec![
-                    "Run artifacts: .metastack/merge-runs/run".to_string(),
-                    "Progress JSON: .metastack/merge-runs/run/progress.json".to_string(),
+                    format!(
+                        "Run artifacts: {}/merge-runs/run",
+                        crate::branding::PROJECT_DIR
+                    ),
+                    format!(
+                        "Progress JSON: {}/merge-runs/run/progress.json",
+                        crate::branding::PROJECT_DIR
+                    ),
                 ],
             },
             120,
@@ -724,6 +730,9 @@ mod tests {
         assert!(snapshot.contains("Merge Run Status"));
         assert!(snapshot.contains("Running phase 3/6: Merge application"));
         assert!(snapshot.contains("Applying pull request #101"));
-        assert!(snapshot.contains("Progress JSON: .metastack/merge-runs/run/progress.json"));
+        assert!(snapshot.contains(&format!(
+            "Progress JSON: {}/merge-runs/run/progress.json",
+            crate::branding::PROJECT_DIR
+        )));
     }
 }

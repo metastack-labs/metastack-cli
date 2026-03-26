@@ -1,6 +1,7 @@
 #![allow(dead_code, unused_imports)]
 
 include!("support/common.rs");
+use metastack_cli::branding;
 
 #[cfg(unix)]
 fn write_onboarded_config(
@@ -21,7 +22,8 @@ fn write_onboarded_config(
 fn write_spec_agent_stub(stub_path: &Path) -> Result<(), Box<dyn Error>> {
     fs::write(
         stub_path,
-        r#"#!/bin/sh
+        format!(
+            r#"#!/bin/sh
 count_file="$TEST_OUTPUT_DIR/count.txt"
 count=0
 if [ -f "$count_file" ]; then
@@ -35,11 +37,18 @@ printf '%s' "$METASTACK_AGENT_INSTRUCTIONS" > "$TEST_OUTPUT_DIR/instructions-$co
 case "$METASTACK_AGENT_PROMPT" in
   *"Return JSON only using this exact shape"*)
     case "$METASTACK_AGENT_PROMPT" in
+      *"Wrap follow-up questions in prose"*)
+        printf '%s' 'Context {{not json}}
+{{"questions":["Who is the primary user for this workflow?","What should stay explicitly out of scope?"]}}'
+        ;;
+      *"Return empty follow-up output"*)
+        printf '%s' ''
+        ;;
       *"Skip follow-up questions entirely"*)
-        printf '%s' '{"questions":[]}'
+        printf '%s' '{{"questions":[]}}'
         ;;
       *)
-        printf '%s' '{"questions":["Who is the primary user for this workflow?","What should stay explicitly out of scope?"]}'
+        printf '%s' '{{"questions":["Who is the primary user for this workflow?","What should stay explicitly out of scope?"]}}'
         ;;
     esac
     ;;
@@ -69,13 +78,13 @@ Clarify the current repo-local contract and preserve the existing intent.
 
 ## FEATURES
 
-- Revise `.metastack/SPEC.md` in place.
+- Revise `{project_dir}/SPEC.md` in place.
 - Reuse the existing SPEC content when it is still valid.
 
 ## NON-GOALS
 
 - No Linear mutations.
-- No `.metastack/backlog/` packet writes.
+- No `{project_dir}/backlog/` packet writes.
 '
     ;;
   *)
@@ -86,7 +95,7 @@ Define a repo-local specification workflow for the active repository.
 ## GOALS
 
 - Capture build intent through a staged flow.
-- Persist only `.metastack/SPEC.md`.
+- Persist only `{project_dir}/SPEC.md`.
 
 ## FEATURES
 
@@ -101,6 +110,8 @@ Define a repo-local specification workflow for the active repository.
     ;;
 esac
 "#,
+            project_dir = branding::PROJECT_DIR,
+        ),
     )?;
     let mut permissions = fs::metadata(stub_path)?.permissions();
     permissions.set_mode(0o755);
@@ -162,14 +173,22 @@ fn spec_command_creates_repo_local_spec_on_first_run() -> Result<(), Box<dyn Err
         .success()
         .stdout(predicate::str::contains("Created repo-local spec"));
 
-    let spec_path = repo_root.join(".metastack/SPEC.md");
+    let spec_path = repo_root.join(format!("{}/SPEC.md", branding::PROJECT_DIR));
     let spec = fs::read_to_string(&spec_path)?;
     assert!(spec.contains("OVERVIEW"));
     assert!(spec.contains("GOALS"));
     assert!(spec.contains("FEATURES"));
     assert!(spec.contains("NON-GOALS"));
-    assert!(!repo_root.join(".metastack/backlog/MET-46").exists());
-    assert!(!repo_root.join(".metastack/backlog/_TEMPLATE").exists());
+    assert!(
+        !repo_root
+            .join(format!("{}/backlog/MET-46", branding::PROJECT_DIR))
+            .exists()
+    );
+    assert!(
+        !repo_root
+            .join(format!("{}/backlog/_TEMPLATE", branding::PROJECT_DIR))
+            .exists()
+    );
 
     Ok(())
 }
@@ -178,7 +197,7 @@ fn spec_command_creates_repo_local_spec_on_first_run() -> Result<(), Box<dyn Err
 #[test]
 fn spec_command_improves_existing_repo_local_spec() -> Result<(), Box<dyn Error>> {
     let (_temp, repo_root, config_path, output_dir) = setup_spec_repo()?;
-    let spec_path = repo_root.join(".metastack/SPEC.md");
+    let spec_path = repo_root.join(format!("{}/SPEC.md", branding::PROJECT_DIR));
     fs::write(
         &spec_path,
         "# OVERVIEW\n\nOld overview.\n\n## GOALS\n\n- Old goal.\n\n## FEATURES\n\n- Old feature.\n\n## NON-GOALS\n\n- Old non-goal.\n",
@@ -204,10 +223,17 @@ fn spec_command_improves_existing_repo_local_spec() -> Result<(), Box<dyn Error>
 
     let spec = fs::read_to_string(&spec_path)?;
     assert!(spec.contains("Clarify the current repo-local contract"));
-    assert!(spec.contains("Revise `.metastack/SPEC.md` in place."));
+    assert!(spec.contains(&format!(
+        "Revise `{}/SPEC.md` in place.",
+        branding::PROJECT_DIR
+    )));
     let prompt = fs::read_to_string(output_dir.join("prompt-1.txt"))?;
     assert!(prompt.contains("Old overview."));
-    assert!(!repo_root.join(".metastack/backlog").exists());
+    assert!(
+        !repo_root
+            .join(format!("{}/backlog", branding::PROJECT_DIR))
+            .exists()
+    );
 
     Ok(())
 }
@@ -235,7 +261,11 @@ fn spec_command_rejects_generated_spec_missing_required_headings() -> Result<(),
             "generated SPEC is missing the required `NON-GOALS` heading",
         ));
 
-    assert!(!repo_root.join(".metastack/SPEC.md").exists());
+    assert!(
+        !repo_root
+            .join(format!("{}/SPEC.md", branding::PROJECT_DIR))
+            .exists()
+    );
 
     Ok(())
 }
@@ -344,7 +374,69 @@ fn spec_command_render_once_covers_major_tui_states() -> Result<(), Box<dyn Erro
         .stdout(predicate::str::contains("SPEC Preview"))
         .stdout(predicate::str::contains("NON-GOALS"));
 
-    assert!(!repo_root.join(".metastack/SPEC.md").exists());
+    assert!(
+        !repo_root
+            .join(format!("{}/SPEC.md", branding::PROJECT_DIR))
+            .exists()
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn spec_render_once_accepts_prose_wrapped_follow_up_json() -> Result<(), Box<dyn Error>> {
+    let (_temp, repo_root, config_path, output_dir) = setup_spec_repo()?;
+
+    cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &output_dir)
+        .args([
+            "backlog",
+            "spec",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--render-once",
+            "--request",
+            "Wrap follow-up questions in prose",
+            "--events",
+            "enter,wait,wait",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Create SPEC follow-up interview"))
+        .stdout(predicate::str::contains(
+            "Who is the primary user for this workflow?",
+        ));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn spec_render_once_keeps_empty_response_error_sticky() -> Result<(), Box<dyn Error>> {
+    let (_temp, repo_root, config_path, output_dir) = setup_spec_repo()?;
+
+    cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &output_dir)
+        .args([
+            "backlog",
+            "spec",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--render-once",
+            "--request",
+            "Return empty follow-up output",
+            "--events",
+            "enter,wait,down",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("agent returned empty response"))
+        .stdout(predicate::str::contains(
+            "What should this repository build?",
+        ));
+
     Ok(())
 }
 
@@ -352,7 +444,7 @@ fn spec_command_render_once_covers_major_tui_states() -> Result<(), Box<dyn Erro
 #[test]
 fn spec_command_render_once_uses_improve_prompt_when_spec_exists() -> Result<(), Box<dyn Error>> {
     let (_temp, repo_root, config_path, output_dir) = setup_spec_repo()?;
-    let spec_path = repo_root.join(".metastack/SPEC.md");
+    let spec_path = repo_root.join(format!("{}/SPEC.md", branding::PROJECT_DIR));
     fs::write(
         &spec_path,
         "# OVERVIEW\n\nExisting overview.\n\n## GOALS\n\n- Existing goal.\n\n## FEATURES\n\n- Existing feature.\n\n## NON-GOALS\n\n- Existing non-goal.\n",
@@ -373,9 +465,10 @@ fn spec_command_render_once_uses_improve_prompt_when_spec_exists() -> Result<(),
         .stdout(predicate::str::contains(
             "What should be updated or improved?",
         ))
-        .stdout(predicate::str::contains(
-            "load the current `.metastack/SPEC.md` and revise it in place",
-        ))
+        .stdout(predicate::str::contains(format!(
+            "load the current `{}/SPEC.md` and revise it in place",
+            branding::PROJECT_DIR
+        )))
         .stdout(predicate::str::contains("What should this repository build?").not());
 
     let spec = fs::read_to_string(&spec_path)?;
