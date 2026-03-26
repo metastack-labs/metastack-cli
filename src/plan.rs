@@ -317,7 +317,8 @@ pub async fn run_plan(args: &PlanArgs) -> Result<PlanReport> {
         PlanMode::Reshape { identifier } => {
             if args.fast || args.multi || args.questions.is_some() {
                 bail!(
-                    "`meta backlog plan <IDENTIFIER>` does not support `--fast`, `--multi`, or `--questions`; reshape mode keeps its existing flow"
+                    "`{} backlog plan <IDENTIFIER>` does not support `--fast`, `--multi`, or `--questions`; reshape mode keeps its existing flow",
+                    branding::COMMAND_NAME,
                 );
             }
             return run_reshape_plan(&root, &service, &identifier, args, &agent_overrides).await;
@@ -331,7 +332,8 @@ pub async fn run_plan(args: &PlanArgs) -> Result<PlanReport> {
         } else {
             let request = args.request.clone().ok_or_else(|| {
                 anyhow!(
-                    "`--request` is required when `--no-interactive` is used or when `meta plan` runs without a TTY"
+                    "`--request` is required when `--no-interactive` is used or when `{} plan` runs without a TTY",
+                    branding::COMMAND_NAME,
                 )
             })?;
             let mut continuation = None;
@@ -570,7 +572,8 @@ async fn run_reshape_plan(
     if !args.velocity {
         if args.no_interactive {
             bail!(
-                "`meta backlog plan {identifier}` requires diff confirmation unless `--velocity` is set; rerun without `--no-interactive` to review the preview or pass `--velocity` to auto-apply"
+                "`{} backlog plan {identifier}` requires diff confirmation unless `--velocity` is set; rerun without `--no-interactive` to review the preview or pass `--velocity` to auto-apply",
+                branding::COMMAND_NAME,
             );
         }
 
@@ -617,7 +620,8 @@ fn resolve_plan_mode(target: Option<&str>) -> Result<PlanMode> {
     }
 
     bail!(
-        "`meta backlog plan <IDENTIFIER>` only accepts existing issue identifiers like `ENG-10144`; use `--request` for new backlog planning"
+        "`{} backlog plan <IDENTIFIER>` only accepts existing issue identifiers like `ENG-10144`; use `--request` for new backlog planning",
+        branding::COMMAND_NAME,
     );
 }
 
@@ -675,7 +679,8 @@ fn run_fast_plan_non_interactive(
 ) -> Result<PlannedIssueSet> {
     let request = args.request.clone().ok_or_else(|| {
         anyhow!(
-            "`--request` is required when `--no-interactive` is used or when `meta plan` runs without a TTY"
+            "`--request` is required when `--no-interactive` is used or when `{} plan` runs without a TTY",
+            branding::COMMAND_NAME,
         )
     })?;
     let mut continuation = None;
@@ -1242,7 +1247,8 @@ fn render_reshape_preview(
     );
 
     format!(
-        "`meta backlog plan {}` prepared an in-place reshape preview:\n\nTitle:\n{}\n\nDescription diff:\n{}\n\nMetadata preserved on apply: assignee, labels, project, state, priority, and cycle.\nLocal `{}/backlog/` files are unchanged in reshape mode.",
+        "`{} backlog plan {}` prepared an in-place reshape preview:\n\nTitle:\n{}\n\nDescription diff:\n{}\n\nMetadata preserved on apply: assignee, labels, project, state, priority, and cycle.\nLocal `{}/backlog/` files are unchanged in reshape mode.",
+        branding::COMMAND_NAME,
         issue.identifier,
         title_status,
         description_diff,
@@ -1267,7 +1273,8 @@ fn prompt_reshape_apply_with_io(
     writeln!(writer, "{preview}")?;
     writeln!(
         writer,
-        "Choose [a]pply or [c]ancel for `meta backlog plan {identifier}`:"
+        "Choose [a]pply or [c]ancel for `{} backlog plan {identifier}`:",
+        branding::COMMAND_NAME,
     )?;
     writer.flush()?;
 
@@ -1297,7 +1304,8 @@ fn render_reshape_workpad_comment(
         String::new(),
         format!("- Reshape applied: {}", reshape_timestamp()),
         format!(
-            "- Command: `meta backlog plan {}{}`",
+            "- Command: `{} backlog plan {}{}`",
+            branding::COMMAND_NAME,
             original_issue.identifier,
             if velocity { " --velocity" } else { "" }
         ),
@@ -4901,7 +4909,7 @@ mod tests {
     #[test]
     fn review_dashboard_lists_generated_issues() {
         let mut app = build_review_app(
-            "Plan a meta plan command".to_string(),
+            format!("Plan a {} plan command", crate::branding::COMMAND_NAME),
             vec![],
             vec![],
             PlannedIssueSet {
@@ -4911,7 +4919,10 @@ mod tests {
                         title: "Add the plan command".to_string(),
                         description: "Wire the top-level command and non-interactive flow."
                             .to_string(),
-                        acceptance_criteria: vec!["`meta plan --help` works".to_string()],
+                        acceptance_criteria: vec![format!(
+                            "`{} plan --help` works",
+                            crate::branding::COMMAND_NAME
+                        )],
                         priority: Some(2),
                     },
                     PlannedIssueDraft {
@@ -4940,7 +4951,7 @@ mod tests {
     #[test]
     fn review_step_tab_focuses_scrollable_review_panes() {
         let mut app = build_review_app(
-            "Plan a meta plan command".to_string(),
+            format!("Plan a {} plan command", crate::branding::COMMAND_NAME),
             vec![],
             vec![],
             PlannedIssueSet {
@@ -5153,7 +5164,10 @@ mod tests {
             ],
         };
         let mut review = build_review_app(
-            "Plan a better `meta plan` workflow".to_string(),
+            format!(
+                "Plan a better `{}` plan workflow",
+                crate::branding::COMMAND_NAME
+            ),
             vec![],
             vec![answered_follow_up("Who uses it?", "CLI maintainers")],
             plan,
@@ -5162,7 +5176,10 @@ mod tests {
         review.decisions = vec![2, 2];
         let prompt = render_issue_merge_prompt(
             root,
-            "Plan a better `meta plan` workflow",
+            &format!(
+                "Plan a better `{}` plan workflow",
+                crate::branding::COMMAND_NAME
+            ),
             &review.follow_ups,
             &review.plan,
             &review_kept_indices(&review),
@@ -5223,7 +5240,10 @@ mod tests {
             ],
         };
         let mut review = build_review_app(
-            "Plan a better `meta plan` workflow".to_string(),
+            format!(
+                "Plan a better `{}` plan workflow",
+                crate::branding::COMMAND_NAME
+            ),
             vec![],
             vec![
                 answered_follow_up("Who uses it?", "CLI maintainers"),
@@ -5236,7 +5256,10 @@ mod tests {
 
         let prompt = render_issue_merge_prompt(
             root,
-            "Plan a better `meta plan` workflow",
+            &format!(
+                "Plan a better `{}` plan workflow",
+                crate::branding::COMMAND_NAME
+            ),
             &review.follow_ups,
             &review.plan,
             &review_kept_indices(&review),

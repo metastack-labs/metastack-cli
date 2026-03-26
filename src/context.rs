@@ -221,8 +221,9 @@ fn diagnose_context(root: &Path) -> Result<DoctorReport> {
 
     if !paths.meta_path().is_file() {
         issues.push(format!(
-            "Missing `{}`. Run `meta runtime setup --root {}` to bootstrap repo-scoped defaults.",
+            "Missing `{}`. Run `{} runtime setup --root {}` to bootstrap repo-scoped defaults.",
             display_path(&paths.meta_path(), root),
+            branding::COMMAND_NAME,
             root.display()
         ));
     } else {
@@ -311,8 +312,10 @@ fn diagnose_context(root: &Path) -> Result<DoctorReport> {
         let detected_agents = detect_supported_agents();
         if detected_agents.is_empty() {
             issues.push(
-                "No default agent is configured and no supported built-in agents were found on `PATH`. Run `meta runtime config` before using agent-backed workflows."
-                    .to_string(),
+                format!(
+                    "No default agent is configured and no supported built-in agents were found on `PATH`. Run `{} runtime config` before using agent-backed workflows.",
+                    branding::COMMAND_NAME
+                ),
             );
         } else {
             notices.push(format!(

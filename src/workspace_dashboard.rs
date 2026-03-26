@@ -134,7 +134,8 @@ pub fn run_workspace_dashboard(
 
     if !io::stdout().is_terminal() {
         bail!(
-            "the interactive workspace dashboard requires a TTY; use `meta workspace list --root .` for scripted runs"
+            "the interactive workspace dashboard requires a TTY; use `{} workspace list --root .` for scripted runs",
+            branding::COMMAND_NAME,
         );
     }
 
@@ -319,7 +320,10 @@ fn render_workspace_list(frame: &mut Frame<'_>, area: Rect, app: &WorkspaceDashb
     let items = if app.data.entries.is_empty() {
         vec![ListItem::new(empty_state(
             "No workspace clones found.",
-            "Run `meta agents listen` to create workspace clones for tickets.",
+            format!(
+                "Run `{} agents listen` to create workspace clones for tickets.",
+                branding::COMMAND_NAME
+            ),
         ))]
     } else if results.is_empty() {
         vec![ListItem::new(empty_state(

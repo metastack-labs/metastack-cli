@@ -2586,7 +2586,10 @@ fn render_step_panel(frame: &mut Frame<'_>, app: &ConfigApp, area: Rect) {
             area,
             &title,
             &app.listen_label,
-            "Label that gates which Todo tickets `meta listen` picks up.",
+            &format!(
+                "Label that gates which Todo tickets `{} listen` picks up.",
+                crate::branding::COMMAND_NAME
+            ),
         ),
         ConfigStep::AssignmentScope => {
             render_select_panel(frame, area, &title, &app.assignment_scope)
@@ -2597,14 +2600,20 @@ fn render_step_panel(frame: &mut Frame<'_>, app: &ConfigApp, area: Rect) {
             area,
             &title,
             &app.poll_interval,
-            "Poll interval in seconds for `meta listen` (e.g. 7).",
+            &format!(
+                "Poll interval in seconds for `{} listen` (e.g. 7).",
+                crate::branding::COMMAND_NAME
+            ),
         ),
         ConfigStep::PlanFollowUpLimit => render_input_panel(
             frame,
             area,
             &title,
             &app.plan_follow_up_limit,
-            "Max follow-up questions for interactive `meta backlog plan` (e.g. 10).",
+            &format!(
+                "Max follow-up questions for interactive `{} backlog plan` (e.g. 10).",
+                crate::branding::COMMAND_NAME
+            ),
         ),
         ConfigStep::PlanDefaultMode => {
             render_select_panel(frame, area, &title, &app.plan_default_mode)
@@ -2749,7 +2758,10 @@ fn render_select_panel(frame: &mut Frame<'_>, area: Rect, title: &str, field: &S
 fn render_save_panel(frame: &mut Frame<'_>, area: Rect) {
     let paragraph = Paragraph::new(Text::from(vec![
         Line::from("Review the summary and press Enter to save the install-scoped configuration."),
-        Line::from("Repo defaults now live under `meta runtime setup`."),
+        Line::from(format!(
+            "Repo defaults now live under `{} runtime setup`.",
+            crate::branding::COMMAND_NAME
+        )),
     ]))
     .block(Block::default().borders(Borders::ALL).title("Save"))
     .wrap(Wrap { trim: false });

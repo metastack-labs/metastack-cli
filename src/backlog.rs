@@ -723,8 +723,8 @@ fn hex_digest(digest: impl AsRef<[u8]>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        BacklogIssueMetadata, BacklogSyncStatus, ManagedFileRecord, compute_local_sync_hash,
-        resolve_backlog_sync_status,
+        BacklogIssueMetadata, BacklogSyncStatus, ManagedFileRecord, canonical_template_files,
+        compute_local_sync_hash, resolve_backlog_sync_status,
     };
     use anyhow::Result;
     use std::fs;
@@ -775,5 +775,37 @@ mod tests {
         );
 
         assert_eq!(resolution.status, BacklogSyncStatus::Unlinked);
+    }
+
+    #[test]
+    fn canonical_template_files_use_branded_command_references() {
+        let files = canonical_template_files();
+        let readme = files
+            .iter()
+            .find(|file| file.relative_path == "README.md")
+            .expect("canonical README template should exist");
+        let validation = files
+            .iter()
+            .find(|file| file.relative_path == "validation.md")
+            .expect("canonical validation template should exist");
+
+        assert!(
+            readme
+                .contents
+                .contains(&format!("`{} setup`", crate::branding::COMMAND_NAME))
+        );
+        assert!(
+            readme
+                .contents
+                .contains(&format!("`{} backlog tech`", crate::branding::COMMAND_NAME))
+        );
+        assert!(validation.contents.contains(&format!(
+            "`{} backlog sync pull {{{{issue_identifier}}}}`",
+            crate::branding::COMMAND_NAME
+        )));
+        assert!(validation.contents.contains(&format!(
+            "`{} backlog sync push {{{{issue_identifier}}}}`",
+            crate::branding::COMMAND_NAME
+        )));
     }
 }

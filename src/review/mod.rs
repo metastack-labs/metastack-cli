@@ -5732,7 +5732,11 @@ fn print_dry_run_output(
     )?;
     let diagnostics = render_invocation_diagnostics(&invocation);
 
-    println!("--- dry-run: meta agents review #{} ---", pr.number);
+    println!(
+        "--- dry-run: {} agents review #{} ---",
+        crate::branding::COMMAND_NAME,
+        pr.number
+    );
     println!("PR: #{} — {}", pr.number, pr.title);
     println!("URL: {}", pr.url);
     println!("Author: {}", pr.author.login);
@@ -5984,12 +5988,13 @@ fn remediation_pull_request_body(
 ) -> String {
     format!(
         "## Summary\n\n\
-         Automated remediation PR for #{original_pr_number} based on `meta agents review` audit.\n\
+         Automated remediation PR for #{original_pr_number} based on `{} agents review` audit.\n\
          This follow-up PR targets the reviewed branch `{target_branch}` so it can merge into the original PR.\n\n\
          ## Review Findings\n\n\
          {review_output}\n\n\
          ## Linear Ticket\n\n\
-         {linear_identifier}\n"
+         {linear_identifier}\n",
+        crate::branding::COMMAND_NAME,
     )
 }
 
@@ -6190,7 +6195,10 @@ fn git_stdout(root: &Path, args: &[&str]) -> Result<String> {
 
 async fn run_review_listener(args: &ReviewRunArgs) -> Result<()> {
     if args.json && !args.once {
-        bail!("`--json` requires `--once` for `meta agents review`");
+        bail!(
+            "`--json` requires `--once` for `{} agents review`",
+            crate::branding::COMMAND_NAME
+        );
     }
 
     let root = canonicalize_existing_dir(&args.root)?;
@@ -6213,7 +6221,10 @@ async fn run_review_listener(args: &ReviewRunArgs) -> Result<()> {
 
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         bail!(
-            "the interactive review dashboard requires a TTY; use `meta agents review <PR_NUMBER> --dry-run`, `meta agents review --once`, or `meta agents review --once --json` for scripted runs"
+            "the interactive review dashboard requires a TTY; use `{} agents review <PR_NUMBER> --dry-run`, `{} agents review --once`, or `{} agents review --once --json` for scripted runs",
+            crate::branding::COMMAND_NAME,
+            crate::branding::COMMAND_NAME,
+            crate::branding::COMMAND_NAME,
         );
     }
 

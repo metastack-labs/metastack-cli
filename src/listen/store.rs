@@ -29,6 +29,14 @@ const LISTEN_SESSION_DETAIL_VERSION: u8 = 3;
 const LOG_EXCERPT_LIMIT: usize = 6;
 const LOG_EXCERPT_MAX_CHARS: usize = 120;
 
+fn listen_turn_log_prefix() -> String {
+    format!("--- {} listen turn ", crate::branding::COMMAND_NAME)
+}
+
+fn is_listen_turn_log_header(line: &str) -> bool {
+    line.starts_with(&listen_turn_log_prefix()) || line.starts_with("--- meta listen turn ")
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ListenProjectStore {
     identity: ListenProjectIdentity,
@@ -486,7 +494,8 @@ impl ListenProjectStore {
             if let Some(existing) = self.load_active_lock()? {
                 if pid_is_running(existing.pid) {
                     bail!(
-                        "another `meta listen` instance already owns project `{}` (pid {}); active lock: {}",
+                        "another `{} listen` instance already owns project `{}` (pid {}); active lock: {}",
+                        crate::branding::COMMAND_NAME,
                         self.identity.project_label,
                         existing.pid,
                         self.paths.lock_path.display()
@@ -1132,7 +1141,7 @@ fn repair_from_worker_log(path: Option<&Path>) -> Result<WorkerLogRecovery> {
 
     for raw_line in contents.lines() {
         let line = raw_line.trim();
-        if line.starts_with("--- meta listen turn ") {
+        if is_listen_turn_log_header(line) {
             if !current_turn.contents.is_empty() || current_turn.provider.is_some() {
                 turns.push(current_turn);
                 current_turn = WorkerLogTurn::default();
@@ -1994,14 +2003,15 @@ mod tests {
         fs::create_dir_all(store.paths().logs_dir.clone())?;
         fs::write(
             store.log_path(issue_identifier),
-            concat!(
-                "--- meta listen turn 1/20 @ 2026-03-23T12:00:00Z ---\n",
-                "Resolved provider: claude\n",
-                "Resolved model: sonnet\n",
-                "Resolved reasoning: high\n",
-                "{\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":210}}}\n",
-                "{\"type\":\"message_delta\",\"usage\":{\"output_tokens\":34}}\n",
-                "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"ok\",\"session_id\":\"session-123\"}\n",
+            format!(
+                "{}1/20 @ 2026-03-23T12:00:00Z ---\n\
+                 Resolved provider: claude\n\
+                 Resolved model: sonnet\n\
+                 Resolved reasoning: high\n\
+                 {{\"type\":\"message_start\",\"message\":{{\"usage\":{{\"input_tokens\":210}}}}}}\n\
+                 {{\"type\":\"message_delta\",\"usage\":{{\"output_tokens\":34}}}}\n\
+                 {{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"ok\",\"session_id\":\"session-123\"}}\n",
+                super::listen_turn_log_prefix(),
             ),
         )?;
         seed_state(&store, vec![session])?;
@@ -2094,11 +2104,13 @@ mod tests {
         fs::create_dir_all(store.paths().logs_dir.clone())?;
         fs::write(
             store.log_path(issue_identifier),
-            concat!(
-                "--- meta listen turn 1/20 @ 2026-03-23T12:00:00Z ---\n",
-                "Resolved provider: codex\n",
-                "--- meta listen turn 2/20 @ 2026-03-23T12:01:00Z ---\n",
-                "Resolved provider: claude\n",
+            format!(
+                "{}1/20 @ 2026-03-23T12:00:00Z ---\n\
+                 Resolved provider: codex\n\
+                 {}2/20 @ 2026-03-23T12:01:00Z ---\n\
+                 Resolved provider: claude\n",
+                super::listen_turn_log_prefix(),
+                super::listen_turn_log_prefix(),
             ),
         )?;
         seed_state(&store, vec![session])?;
@@ -2127,6 +2139,48 @@ mod tests {
                 .and_then(|repair| repair.note.as_deref())
                 .is_some_and(|note| note.contains("ambiguous provider evidence"))
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn load_state_repairs_canonical_metadata_from_legacy_meta_worker_log() -> Result<()> {
+        let temp = tempdir()?;
+        let repo_root = temp.path().join("repo");
+        let data_root = temp.path().join("data");
+        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
+        let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
+
+        let issue_identifier = "ENG-10172";
+        let mut session = default_session(issue_identifier, SessionPhase::Running, 100);
+        session.tokens = TokenUsage::default();
+        session.log_path = Some(store.log_path(issue_identifier).display().to_string());
+        fs::create_dir_all(store.paths().logs_dir.clone())?;
+        fs::write(
+            store.log_path(issue_identifier),
+            concat!(
+                "--- meta listen turn 1/20 @ 2026-03-23T12:00:00Z ---\n",
+                "Resolved provider: claude\n",
+                "Resolved model: sonnet\n",
+                "Resolved reasoning: high\n",
+                "{\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":210}}}\n",
+                "{\"type\":\"message_delta\",\"usage\":{\"output_tokens\":34}}\n",
+                "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"ok\",\"session_id\":\"session-123\"}\n",
+            ),
+        )?;
+        seed_state(&store, vec![session])?;
+
+        let state = store.load_state()?;
+        let repaired = state
+            .sessions
+            .iter()
+            .find(|session| session.issue_identifier == issue_identifier)
+            .context("expected repaired session to be present")?;
+        assert_eq!(repaired.tokens.input, Some(210));
+        assert_eq!(repaired.tokens.output, Some(34));
+        assert_eq!(repaired.canonical.provider.as_deref(), Some("claude"));
+        assert_eq!(repaired.canonical.model.as_deref(), Some("sonnet"));
+        assert_eq!(repaired.canonical.reasoning.as_deref(), Some("high"));
 
         Ok(())
     }

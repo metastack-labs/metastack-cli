@@ -1,6 +1,6 @@
 # Backlog Item Template
 
-This directory is the canonical backlog template embedded into `meta setup`, `meta plan`, and `meta backlog tech`.
+This directory is the canonical backlog template embedded into `{{brand.command_name}} setup`, `{{brand.command_name}} plan`, and `{{brand.command_name}} backlog tech`.
 
 ## Required Files
 

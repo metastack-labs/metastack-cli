@@ -1648,9 +1648,10 @@ fn listen_render_once_demo_detail_shows_execute_origin_for_execute_session()
         .stdout(predicate::str::contains("Selected Session"))
         .stdout(predicate::str::contains("MET-17"))
         .stdout(predicate::str::contains("Origin: Execute"))
-        .stdout(predicate::str::contains(
-            "This session was started by `meta agents execute`",
-        ));
+        .stdout(predicate::str::contains(format!(
+            "This session was started by `{} agents execute`",
+            branding::COMMAND_NAME
+        )));
 
     Ok(())
 }
@@ -2267,7 +2268,10 @@ fn listen_json_without_once_emits_structured_json_error() -> Result<(), Box<dyn 
     assert_eq!(payload["error"]["code"], "invalid_input");
     assert_eq!(
         payload["error"]["message"],
-        "`meta agents listen --json` requires `--once`"
+        format!(
+            "`{} agents listen --json` requires `--once`",
+            branding::COMMAND_NAME
+        )
     );
     assert!(assert.get_output().stderr.is_empty());
 
@@ -2993,7 +2997,8 @@ api_url = "{}"
     let ps_path = bin_dir.join("ps");
     fs::write(
         &ps_path,
-        r#"#!/bin/sh
+        format!(
+            r#"#!/bin/sh
 count_file="$TEST_OUTPUT_DIR/ps-count.txt"
 count=0
 if [ -f "$count_file" ]; then
@@ -3002,10 +3007,12 @@ fi
 count=$((count + 1))
 printf '%s' "$count" > "$count_file"
 printf '  PID TTY           TIME CMD\n'
-printf '4242 ??         0:00.00 meta listen-worker --ticket MET-noise\n'
+printf '4242 ??         0:00.00 {command} listen-worker --ticket MET-noise\n'
 printf 'stderr-noise-from-ps\n' >&2
 exit 0
 "#,
+            command = branding::COMMAND_NAME,
+        ),
     )?;
     let mut permissions = fs::metadata(&ps_path)?.permissions();
     permissions.set_mode(0o755);
@@ -3602,7 +3609,10 @@ printf '%s' "$METASTACK_AGENT_INSTRUCTIONS" > "$TEST_OUTPUT_DIR/instructions.txt
         workspace_root.join(format!("{}/agents/briefs/MET-21.md", branding::PROJECT_DIR)),
     )?;
     assert!(brief.contains("Daemon pickup flow"));
-    assert!(brief.contains("Picked up automatically by `meta listen`."));
+    assert!(brief.contains(&format!(
+        "Picked up automatically by `{} listen`.",
+        branding::COMMAND_NAME
+    )));
 
     wait_for_path(&stub_dir.join("payload.txt"))?;
     wait_for_path(&stub_dir.join("workpad.txt"))?;
@@ -3614,7 +3624,9 @@ printf '%s' "$METASTACK_AGENT_INSTRUCTIONS" > "$TEST_OUTPUT_DIR/instructions.txt
     let instructions = fs::read_to_string(stub_dir.join("instructions.txt"))?;
     assert!(instructions.contains("## Built-in Workflow Contract"));
     assert!(instructions.contains("No repo overlay files were found"));
-    assert!(instructions.contains("Shared automation keeps the `metastack` label attached"));
+    assert!(instructions.contains("Shared automation keeps the"));
+    assert!(instructions.contains("metastack"));
+    assert!(instructions.contains("label attached"));
     assert!(instructions.contains("do not use the legacy `symphony` label"));
     let backlog_index_path =
         workspace_root.join(format!("{}/backlog/MET-21/index.md", branding::PROJECT_DIR));

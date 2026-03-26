@@ -101,11 +101,13 @@ impl fmt::Display for NoAgentSelectedError {
         match self.route_key() {
             Some(route_key) => write!(
                 f,
-                "no agent was selected for route `{route_key}`. Pass `--agent <NAME>` or configure a route or global default with `meta runtime config`."
+                "no agent was selected for route `{route_key}`. Pass `--agent <NAME>` or configure a route or global default with `{} runtime config`.",
+                crate::branding::COMMAND_NAME,
             ),
             None => write!(
                 f,
-                "no agent was selected. Pass `--agent <NAME>` or run `meta runtime config` to configure a default agent."
+                "no agent was selected. Pass `--agent <NAME>` or run `{} runtime config` to configure a default agent.",
+                crate::branding::COMMAND_NAME,
             ),
         }
     }
@@ -151,7 +153,9 @@ pub fn load_required_planning_meta(root: &Path, command_name: &str) -> Result<Pl
     let meta_path = PlanningPaths::new(root).meta_path();
     if !meta_path.is_file() {
         return Err(anyhow!(
-            "`meta {command_name}` requires repo setup. Run `meta runtime setup --root {}` and rerun.",
+            "`{} {command_name}` requires repo setup. Run `{} runtime setup --root {}` and rerun.",
+            crate::branding::COMMAND_NAME,
+            crate::branding::COMMAND_NAME,
             root.display()
         ));
     }
@@ -259,7 +263,8 @@ impl LinearConfig {
     /// Returns the standard missing-auth error used by Linear-backed commands.
     pub fn missing_auth_error() -> anyhow::Error {
         anyhow!(
-            "Linear auth is required for this command. Set LINEAR_API_KEY, run `meta runtime config`, or pass `--api-key <token>`."
+            "Linear auth is required for this command. Set LINEAR_API_KEY, run `{} runtime config`, or pass `--api-key <token>`.",
+            crate::branding::COMMAND_NAME,
         )
     }
 }

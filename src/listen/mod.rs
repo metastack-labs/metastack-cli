@@ -299,8 +299,10 @@ impl ListenCycleData {
                     has_open_pr: false,
                     pr_url: None,
                     description: Some(
-                        "Add a --dry-run flag to `meta workspace prune` that lists what would be deleted without actually removing anything."
-                            .to_string(),
+                        format!(
+                            "Add a --dry-run flag to `{} workspace prune` that lists what would be deleted without actually removing anything.",
+                            crate::branding::COMMAND_NAME
+                        ),
                     ),
                     url: "https://linear.app/metastack-backlog/issue/MET-25/workspace-prune-dry-run"
                         .to_string(),
@@ -1135,8 +1137,10 @@ fn render_listen_backlog_file(
     }
 
     format!(
-        "# Validation Plan\n\n## Command Proofs\n\n- Run the changed CLI flow against a deterministic local or mocked setup\n- Verify the original Linear issue description for `{}` remains unchanged\n- Update the existing `## Codex Workpad` comment with validation notes instead of running `meta sync push`\n\n## Notes\n\n- `meta listen` must not overwrite the primary Linear issue description.\n",
-        parent_issue.identifier
+        "# Validation Plan\n\n## Command Proofs\n\n- Run the changed CLI flow against a deterministic local or mocked setup\n- Verify the original Linear issue description for `{}` remains unchanged\n- Update the existing `## Codex Workpad` comment with validation notes instead of running `{} sync push`\n\n## Notes\n\n- `{} listen` must not overwrite the primary Linear issue description.\n",
+        parent_issue.identifier,
+        crate::branding::COMMAND_NAME,
+        crate::branding::COMMAND_NAME,
     )
 }
 
@@ -1420,8 +1424,9 @@ where
                 ]);
                 session.updated_at_epoch_seconds = now_epoch_seconds();
                 notes.push(format!(
-                    "{} is execute-origin; skipping automatic resume — use `meta listen sessions resume` to adopt.",
-                    issue.identifier
+                    "{} is execute-origin; skipping automatic resume — use `{} listen sessions resume` to adopt.",
+                    issue.identifier,
+                    crate::branding::COMMAND_NAME,
                 ));
                 reconciled.push(session);
                 continue;
@@ -1702,7 +1707,10 @@ where
         let brief_request = AgentBriefRequest {
             ticket: detailed_issue.identifier.clone(),
             title_override: Some(detailed_issue.title.clone()),
-            goal: Some("Picked up automatically by `meta listen`.".to_string()),
+            goal: Some(format!(
+                "Picked up automatically by `{} listen`.",
+                crate::branding::COMMAND_NAME
+            )),
             metadata: brief_metadata,
             output: None,
         };
@@ -1921,8 +1929,12 @@ where
         workpad_comment_id: &str,
         backlog_issue_identifier: Option<&str>,
     ) -> Result<u32> {
-        let current_exe =
-            std::env::current_exe().context("failed to resolve the meta executable")?;
+        let current_exe = std::env::current_exe().with_context(|| {
+            format!(
+                "failed to resolve the {} executable",
+                crate::branding::COMMAND_NAME
+            )
+        })?;
         let log_path = self.agent_log_path(&issue.identifier);
         if let Some(parent) = log_path.parent() {
             fs::create_dir_all(parent)
@@ -2676,8 +2688,10 @@ pub async fn run_execute(args: &crate::cli::ExecuteArgs) -> Result<()> {
     let state = store.load_state()?;
     if state.blocks_pickup(&issue.identifier) {
         bail!(
-            "issue `{}` already has an active session; use `meta agents listen` to adopt it or `meta listen sessions clear {}` to remove the existing session first",
+            "issue `{}` already has an active session; use `{} agents listen` to adopt it or `{} listen sessions clear {}` to remove the existing session first",
             issue.identifier,
+            crate::branding::COMMAND_NAME,
+            crate::branding::COMMAND_NAME,
             issue.identifier,
         );
     }
@@ -2729,7 +2743,10 @@ pub async fn run_execute(args: &crate::cli::ExecuteArgs) -> Result<()> {
         crate::agents::AgentBriefRequest {
             ticket: detailed_issue.identifier.clone(),
             title_override: Some(detailed_issue.title.clone()),
-            goal: Some("Dispatched by `meta agents execute`.".to_string()),
+            goal: Some(format!(
+                "Dispatched by `{} agents execute`.",
+                crate::branding::COMMAND_NAME
+            )),
             metadata: brief_metadata,
             output: None,
         },
@@ -2752,7 +2769,12 @@ pub async fn run_execute(args: &crate::cli::ExecuteArgs) -> Result<()> {
     let log_path = store.log_path(&detailed_issue.identifier);
     let updated_at_epoch_seconds = now_epoch_seconds();
 
-    let current_exe = std::env::current_exe().context("failed to resolve the meta executable")?;
+    let current_exe = std::env::current_exe().with_context(|| {
+        format!(
+            "failed to resolve the {} executable",
+            crate::branding::COMMAND_NAME
+        )
+    })?;
     if let Some(parent) = log_path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create `{}`", parent.display()))?;
@@ -2880,7 +2902,10 @@ pub async fn run_execute(args: &crate::cli::ExecuteArgs) -> Result<()> {
 
 pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
     if args.json && !args.once {
-        bail!("`meta agents listen --json` requires `--once`");
+        bail!(
+            "`{} agents listen --json` requires `--once`",
+            crate::branding::COMMAND_NAME
+        );
     }
 
     let requested_root = canonicalize_existing_dir(&args.root)?;
@@ -3734,7 +3759,7 @@ fn render_listen_backlog_description(
 
     lines.extend([
         String::new(),
-        "_Generated by `meta listen`._".to_string(),
+        format!("_Generated by `{} listen`._", crate::branding::COMMAND_NAME),
         String::new(),
         "## Source Issue".to_string(),
         String::new(),

@@ -803,7 +803,10 @@ fn step_copy(app: &OnboardingApp) -> Vec<Line<'static>> {
             Line::from(""),
             Line::from(Span::styled("What it does:", label_style())),
             Line::from("  Repo-scoped planning synced to Linear"),
-            Line::from("  Automated agent supervision via `meta listen`"),
+            Line::from(format!(
+                "  Automated agent supervision via `{} listen`",
+                branding::COMMAND_NAME
+            )),
             Line::from("  Workflow automation with labels, teams, and projects"),
             Line::from(""),
             Line::from(
@@ -846,7 +849,10 @@ fn step_copy(app: &OnboardingApp) -> Vec<Line<'static>> {
             ),
         ],
         OnboardingStep::ListenLabel => vec![
-            Line::from("This label gates which Todo tickets `meta listen` picks up by default."),
+            Line::from(format!(
+                "This label gates which Todo tickets `{} listen` picks up by default.",
+                branding::COMMAND_NAME
+            )),
             Line::from(
                 "Leave blank to keep the built-in fallback and avoid a global label requirement.",
             ),
@@ -861,24 +867,36 @@ fn step_copy(app: &OnboardingApp) -> Vec<Line<'static>> {
             "Reuse is faster. Recreate is stricter and useful when clone drift matters more than speed.",
         )],
         OnboardingStep::PollInterval => vec![
-            Line::from("This controls how often `meta listen` polls Linear."),
+            Line::from(format!(
+                "This controls how often `{} listen` polls Linear.",
+                branding::COMMAND_NAME
+            )),
             Line::from("CLI flags still override it for the active run."),
         ],
         OnboardingStep::PlanFollowUpLimit => vec![
-            Line::from("Interactive `meta backlog plan` follow-up questions are capped here."),
+            Line::from(format!(
+                "Interactive `{} backlog plan` follow-up questions are capped here.",
+                branding::COMMAND_NAME
+            )),
             Line::from(
                 "Set a small limit for tighter loops or a larger one for deeper planning passes.",
             ),
         ],
         OnboardingStep::PlanLabel => vec![
-            Line::from("Default label for issues created by `meta backlog plan`."),
+            Line::from(format!(
+                "Default label for issues created by `{} backlog plan`.",
+                branding::COMMAND_NAME
+            )),
             Line::from(format!(
                 "Repo defaults still win when `{}/meta.json` sets one.",
                 branding::PROJECT_DIR
             )),
         ],
         OnboardingStep::TechnicalLabel => vec![
-            Line::from("Default label for issues created by `meta backlog tech`."),
+            Line::from(format!(
+                "Default label for issues created by `{} backlog tech`.",
+                branding::COMMAND_NAME
+            )),
             Line::from("MetaStack will ensure the selected team has the chosen labels on save."),
         ],
         OnboardingStep::Review => vec![

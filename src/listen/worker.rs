@@ -59,6 +59,14 @@ const REQUIRED_LISTEN_PR_LABEL_DESCRIPTION: &str = "MetaStack automation";
 const LINEAR_IDENTIFIER_PR_LABEL_COLOR: &str = "1d76db";
 const LISTEN_PULL_REQUEST_BASE_BRANCH: &str = "main";
 
+fn listen_preflight_failure_header(timestamp: &str) -> String {
+    format!(
+        "\n--- {} listen preflight failed @ {} ---\n",
+        crate::branding::COMMAND_NAME,
+        timestamp
+    )
+}
+
 pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
     let source_root = canonicalize_existing_dir(&args.source_root)?;
     let workspace_path = canonicalize_existing_dir(&args.workspace)?;
@@ -903,8 +911,9 @@ fn listener_pull_request_body(issue: &IssueSummary) -> String {
         "## Summary".to_string(),
         format!("- Linear issue: {}", issue.url),
         format!(
-            "- Published automatically by `meta agents listen` for `{}`",
-            issue.identifier
+            "- Published automatically by `{} agents listen` for `{}`",
+            crate::branding::COMMAND_NAME,
+            issue.identifier,
         ),
         String::new(),
         "## Lifecycle".to_string(),
@@ -1153,9 +1162,9 @@ pub(super) fn write_preflight_failure(log_path: &Path, error: &anyhow::Error) ->
         .with_context(|| format!("failed to open `{}`", log_path.display()))?;
     writeln!(
         log,
-        "\n--- meta listen preflight failed @ {} ---\n{}\n",
-        now_timestamp(),
-        error
+        "{}{}\n",
+        listen_preflight_failure_header(&now_timestamp()),
+        error,
     )
     .with_context(|| format!("failed to write `{}`", log_path.display()))
 }
@@ -1236,7 +1245,8 @@ fn execute_agent_turn(
             .with_context(|| format!("failed to open `{}`", log_path.display()))?;
         writeln!(
             log,
-            "\n--- meta listen turn {}/{} @ {} ---",
+            "\n--- {} listen turn {}/{} @ {} ---",
+            crate::branding::COMMAND_NAME,
             turn_number,
             context.max_turns,
             now_timestamp()
@@ -1715,7 +1725,10 @@ fn build_agent_instructions(
     let workflow_contract = render_workflow_contract(context.source_root, repo_target)?;
     let mut sections = vec![
         workflow_contract,
-        "You are running inside `meta listen`, an unattended orchestration session.".to_string(),
+        format!(
+            "You are running inside `{}` listen, an unattended orchestration session.",
+            crate::branding::COMMAND_NAME
+        ),
         "Never ask a human to perform follow-up actions. Only stop early for a true blocker such as missing required auth, permissions, or secrets.".to_string(),
         "Work only in the provided workspace checkout and do not edit any other filesystem path.".to_string(),
         format!(
@@ -1727,7 +1740,10 @@ fn build_agent_instructions(
             "Reconcile the existing `## Codex Workpad` comment `{}` before doing new work and keep that single comment updated in place.",
             context.workpad_comment_id
         ),
-        "Never overwrite the primary Linear issue description during `meta listen`. Put planning, progress, validation, and status updates in the workpad comment instead.".to_string(),
+        format!(
+            "Never overwrite the primary Linear issue description during `{}` listen. Put planning, progress, validation, and status updates in the workpad comment instead.",
+            crate::branding::COMMAND_NAME
+        ),
         "Reproduce the issue before changing code, refine the workpad plan and acceptance criteria, then implement and validate the fix.".to_string(),
         format!("Each turn must either leave meaningful non-`{}/` workspace updates or stop with a concrete blocker. Merely rewriting backlog files, briefs, or workpad notes is not enough.", crate::branding::PROJECT_DIR),
         "If the Linear ticket contains `Validation`, `Test Plan`, or `Testing` sections, mirror them into the workpad and execute them as required checks.".to_string(),

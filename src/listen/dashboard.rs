@@ -1057,7 +1057,10 @@ fn render_session_detail_text(
     if session.origin.is_execute() {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            "This session was started by `meta agents execute`. Use R to resume/adopt or clear it to re-pick.",
+            format!(
+                "This session was started by `{} agents execute`. Use R to resume/adopt or clear it to re-pick.",
+                crate::branding::COMMAND_NAME
+            ),
             Style::default().fg(Color::Yellow),
         )));
     }

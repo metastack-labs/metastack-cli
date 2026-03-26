@@ -134,10 +134,11 @@ fn read_context(path: &PathBuf) -> Result<String> {
     match fs::read_to_string(path) {
         Ok(contents) => Ok(contents),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(format!(
-            "_Missing `{}`. Run `metastack-cli scan` to generate it._",
+            "_Missing `{}`. Run `{} scan` to generate it._",
             path.file_name()
                 .map(|value| value.to_string_lossy())
-                .unwrap_or_default()
+                .unwrap_or_default(),
+            crate::branding::COMMAND_NAME,
         )),
         Err(error) => Err(error).with_context(|| format!("failed to read `{}`", path.display())),
     }

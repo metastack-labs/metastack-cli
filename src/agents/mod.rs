@@ -84,6 +84,34 @@ mod tests {
     }
 
     #[test]
+    fn write_agent_brief_missing_context_uses_branded_scan_hint() -> Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path();
+        let paths = PlanningPaths::new(root);
+        ensure_dir(&paths.codebase_dir)?;
+        write_text_file(&paths.scan_path(), "# Scan", true)?;
+
+        let output = write_agent_brief(
+            root,
+            AgentBriefRequest {
+                ticket: "MET-12".to_string(),
+                title_override: Some("Missing context".to_string()),
+                goal: None,
+                metadata: TicketMetadata::default(),
+                output: None,
+            },
+        )?;
+
+        let brief = fs::read_to_string(output)?;
+        assert!(brief.contains(&format!(
+            "_Missing `ARCHITECTURE.md`. Run `{} scan` to generate it._",
+            crate::branding::COMMAND_NAME
+        )));
+
+        Ok(())
+    }
+
+    #[test]
     fn resolve_agent_invocation_uses_configured_default_agent_command() -> Result<()> {
         let mut commands = BTreeMap::new();
         commands.insert(

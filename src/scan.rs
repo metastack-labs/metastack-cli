@@ -493,7 +493,7 @@ fn run_scan_agent_with_dashboard(
         .truncate(true)
         .open(&log_path)
         .with_context(|| format!("failed to open `{}`", log_path.display()))?;
-    writeln!(log, "# meta scan agent log")?;
+    writeln!(log, "# {} scan agent log", crate::branding::COMMAND_NAME)?;
     writeln!(log, "agent: {}", invocation.agent)?;
     writeln!(
         log,
@@ -840,7 +840,10 @@ fn resolve_scan_agent_name(root: &Path, route_key: &str) -> Result<String> {
         .next()
         .ok_or_else(|| {
             anyhow!(
-                "`meta scan` requires a local agent. Run `meta config` or `meta setup` to configure one, or install a supported agent such as `codex` or `claude`."
+                "`{} scan` requires a local agent. Run `{} config` or `{} setup` to configure one, or install a supported agent such as `codex` or `claude`.",
+                crate::branding::COMMAND_NAME,
+                crate::branding::COMMAND_NAME,
+                crate::branding::COMMAND_NAME,
             )
         })
 }
