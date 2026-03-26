@@ -1681,6 +1681,7 @@ for arg in "$@"; do
   last="$arg"
 done > "$TEST_OUTPUT_DIR/args-$count.txt"
 printf '%s' "$last" > "$TEST_OUTPUT_DIR/payload-$count.txt"
+cat > "$TEST_OUTPUT_DIR/stdin-$count.txt"
 
 if [ "$count" -eq 1 ]; then
   printf '%s\n' '{"type":"thread.started","thread_id":"thread-codex-1"}'
@@ -1826,8 +1827,8 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{
     assert!(second_args.contains("thread-codex-1"));
     assert!(second_args.contains("--json"));
 
-    let second_payload = fs::read_to_string(stub_dir.join("payload-2.txt"))?;
-    assert!(second_payload.contains("Prioritize backlog planning first"));
+    let second_stdin = fs::read_to_string(stub_dir.join("stdin-2.txt"))?;
+    assert!(second_stdin.contains("Prioritize backlog planning first"));
 
     Ok(())
 }
@@ -1905,6 +1906,7 @@ for arg in "$@"; do
   fi
 done > "$TEST_OUTPUT_DIR/args-$count.txt"
 printf '%s' "$last" > "$TEST_OUTPUT_DIR/payload-$count.txt"
+cat > "$TEST_OUTPUT_DIR/stdin-$count.txt"
 
 if [ "$count" -eq 1 ]; then
   printf '%s' '{"type":"result","subtype":"success","result":"{\"questions\":[\"Which ticket should land first?\"]}","session_id":"stale-session"}'

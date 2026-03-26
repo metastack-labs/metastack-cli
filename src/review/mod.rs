@@ -6715,6 +6715,49 @@ impl Drop for ReviewTerminalDashboard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+
+    use anyhow::Result;
+
+    use crate::agents::{command_args_for_invocation, resolve_agent_invocation_for_planning};
+    use crate::cli::RunAgentArgs;
+    use crate::config::{AgentSettings, AppConfig, PlanningMeta, PromptTransport};
+
+    fn review_test_config() -> AppConfig {
+        AppConfig {
+            agents: AgentSettings {
+                default_agent: None,
+                default_model: Some("gpt-5.4".to_string()),
+                default_reasoning: None,
+                routing: Default::default(),
+                commands: BTreeMap::new(),
+            },
+            ..AppConfig::default()
+        }
+    }
+
+    fn review_test_pr() -> GhPrMetadata {
+        GhPrMetadata {
+            number: 42,
+            title: "MET-42: Review flow".to_string(),
+            url: "https://example.test/pull/42".to_string(),
+            body: Some("Implements MET-42".to_string()),
+            author: GhPrAuthor {
+                login: "metasudo".to_string(),
+            },
+            head_ref_name: "met-42-review".to_string(),
+            base_ref_name: "main".to_string(),
+            changed_files: 1,
+            additions: 10,
+            deletions: 2,
+            state: "OPEN".to_string(),
+            labels: vec![GhPrLabel {
+                name: "metastack".to_string(),
+            }],
+            assignees: Vec::new(),
+            review_decision: Some("REVIEW_REQUIRED".to_string()),
+        }
+    }
 
     #[test]
     fn extract_linear_identifier_from_branch() {
@@ -7883,5 +7926,94 @@ mod tests {
         let parsed = parse_follow_up_ticket_set(&input).unwrap();
         assert_eq!(parsed.summary, "summary");
         assert_eq!(parsed.tickets[0].title, "T");
+    }
+
+    #[test]
+    fn retro_invocation_uses_stdin_transport_without_payload_argv() -> Result<()> {
+        let pr = review_test_pr();
+        let prompt = assemble_follow_up_linear_prompt(
+            &pr,
+            "MET-42",
+            "diff --git a/file b/file",
+            "",
+            "",
+            "",
+            "Identifier: MET-42",
+        );
+
+        let invocation = resolve_agent_invocation_for_planning(
+            &review_test_config(),
+            &PlanningMeta::default(),
+            &RunAgentArgs {
+                root: None,
+                route_key: Some(AGENT_ROUTE_AGENTS_REVIEW.to_string()),
+                agent: Some("codex".to_string()),
+                prompt,
+                instructions: Some(VIEW_LINEAR_INSTRUCTIONS.to_string()),
+                model: None,
+                reasoning: None,
+                transport: None,
+                attachments: Vec::new(),
+            },
+        )?;
+
+        assert_eq!(invocation.transport, PromptTransport::Stdin);
+        assert_eq!(
+            invocation.args,
+            vec!["exec".to_string(), "--model=gpt-5.4".to_string()]
+        );
+        assert!(invocation.payload.contains("MET-42"));
+
+        let command_args = command_args_for_invocation(&invocation, None)?;
+        assert!(!command_args.iter().any(|arg| arg.contains("MET-42")));
+
+        Ok(())
+    }
+
+    #[test]
+    fn remediation_invocation_uses_stdin_transport_without_payload_argv() -> Result<()> {
+        let prompt = remediation_fix_prompt(
+            "### Remediation Required\nYES",
+            1,
+            Some("previous attempt failed"),
+            false,
+        );
+
+        let invocation = resolve_agent_invocation_for_planning(
+            &review_test_config(),
+            &PlanningMeta::default(),
+            &RunAgentArgs {
+                root: None,
+                route_key: Some(AGENT_ROUTE_AGENTS_REVIEW.to_string()),
+                agent: Some("codex".to_string()),
+                prompt,
+                instructions: None,
+                model: None,
+                reasoning: None,
+                transport: None,
+                attachments: Vec::new(),
+            },
+        )?;
+
+        assert_eq!(invocation.transport, PromptTransport::Stdin);
+        assert_eq!(
+            invocation.args,
+            vec!["exec".to_string(), "--model=gpt-5.4".to_string()]
+        );
+        assert!(invocation.payload.contains("### Remediation Required"));
+        assert!(
+            invocation
+                .payload
+                .contains("This is remediation attempt #1.")
+        );
+
+        let command_args = command_args_for_invocation(&invocation, None)?;
+        assert!(
+            !command_args
+                .iter()
+                .any(|arg| arg.contains("This is remediation attempt #1."))
+        );
+
+        Ok(())
     }
 }

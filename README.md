@@ -1088,7 +1088,7 @@ meta agents review --root . --skip-pr 42
 meta agents review --root . --skip-pr 42 --json
 ```
 
-The review instructions are stored as source-controlled artifacts at `src/artifacts/REVIEW.md` and `src/artifacts/VIEW_LINEAR.md`, and loaded at compile time via `include_str!`.
+The review instructions are stored as source-controlled artifacts at `src/artifacts/REVIEW.md` and `src/artifacts/VIEW_LINEAR.md`, and loaded at compile time via `include_str!`. `--dry-run` and `--check` now print the resolved transport alongside provider, model, reasoning, route key, and config-source diagnostics so stdin-vs-argv behavior is visible before launch.
 
 #### Review-to-fix-PR lifecycle
 
@@ -1383,7 +1383,7 @@ Agent-backed commands use stable route keys so different workflows can resolve d
 
 Workflow playbooks can still declare a built-in provider, but that value is now only used as the final fallback when the explicit, route, repo, and global config layers do not select one.
 
-The built-in provider adapters are the single source of truth for metadata and launch behavior. They run `codex exec` and `claude -p`, pass `--model=<value>` automatically when a model is configured, validate reasoning against the selected provider/model, and expose resolution diagnostics before launch. Before spawning a built-in provider, the CLI now checks the installed shell help surface for the emitted flags and fails fast with the resolved provider/model/reasoning plus the exact attempted command if the local binary has drifted. Codex reasoning is passed as `-c reasoning.effort="<value>"`; Claude reasoning is passed as `--effort=<value>`.
+The built-in provider adapters are the single source of truth for metadata and launch behavior. They run `codex exec` and `claude -p`, pass `--model=<value>` automatically when a model is configured, validate reasoning against the selected provider/model, and expose resolution diagnostics before launch. Built-in `codex` and `claude` now default to stdin prompt delivery, so large review-family payloads stay off argv unless an explicit transport override selects `arg`. Before spawning a built-in provider, the CLI now checks the installed shell help surface for the emitted flags and fails fast with the resolved provider/model/reasoning plus transport and the exact attempted command if the local binary has drifted. Codex reasoning is passed as `-c reasoning.effort="<value>"`; Claude reasoning is passed as `--effort=<value>`.
 
 For capture-oriented non-interactive runs such as `meta backlog plan`, the runtime requests machine-readable built-in output, unwraps the final assistant text before returning it to the caller, captures provider-native session IDs, and can resume the next phase inside the same command. If a resumed built-in launch fails with a narrow invalid-resume signal, the runtime clears that handle and retries the phase once as a fresh launch.
 

@@ -32,7 +32,7 @@ mod tests {
         AgentBriefRequest, TicketMetadata, command_args_for_invocation,
         resolve_agent_invocation_for_planning, write_agent_brief,
     };
-    use crate::cli::RunAgentArgs;
+    use crate::cli::{PromptTransportArg, RunAgentArgs};
     use crate::config::{
         AGENT_ROUTE_AGENTS_LISTEN, AgentCommandConfig, AgentSettings, AppConfig, PlanningMeta,
         PromptTransport,
@@ -193,8 +193,10 @@ mod tests {
         assert_eq!(invocation.command, "codex");
         assert_eq!(invocation.args[0], "exec");
         assert_eq!(invocation.args[1], "--model=gpt-5.3-codex");
-        assert!(invocation.args[2].contains("Ship setup flow"));
-        assert!(invocation.args[2].contains("Use concise output"));
+        assert_eq!(invocation.transport, PromptTransport::Stdin);
+        assert_eq!(invocation.args.len(), 2);
+        assert!(invocation.payload.contains("Ship setup flow"));
+        assert!(invocation.payload.contains("Use concise output"));
 
         Ok(())
     }
@@ -469,7 +471,51 @@ mod tests {
         assert_eq!(invocation.command, "claude");
         assert_eq!(invocation.args[0], "-p");
         assert_eq!(invocation.args[1], "--model=sonnet");
-        assert!(invocation.args[2].contains("Draft the review summary"));
+        assert_eq!(invocation.transport, PromptTransport::Stdin);
+        assert_eq!(invocation.args.len(), 2);
+        assert!(invocation.payload.contains("Draft the review summary"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn builtin_transport_override_to_arg_still_wins() -> Result<()> {
+        let config = AppConfig {
+            agents: AgentSettings {
+                default_agent: None,
+                default_model: Some("gpt-5.4".to_string()),
+                default_reasoning: None,
+                routing: Default::default(),
+                commands: BTreeMap::new(),
+            },
+            ..AppConfig::default()
+        };
+
+        let invocation = resolve_agent_invocation_for_planning(
+            &config,
+            &PlanningMeta::default(),
+            &RunAgentArgs {
+                root: None,
+                route_key: None,
+                agent: Some("codex".to_string()),
+                prompt: "Ship setup flow".to_string(),
+                instructions: Some("Use concise output".to_string()),
+                model: None,
+                reasoning: None,
+                transport: Some(PromptTransportArg::Arg),
+                attachments: Vec::new(),
+            },
+        )?;
+
+        assert_eq!(invocation.transport, PromptTransport::Arg);
+        assert_eq!(invocation.args[0], "exec");
+        assert_eq!(invocation.args[1], "--model=gpt-5.4");
+        assert!(
+            invocation
+                .args
+                .last()
+                .is_some_and(|arg| arg.contains("Ship setup flow"))
+        );
 
         Ok(())
     }

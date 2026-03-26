@@ -205,6 +205,7 @@ fn review_check_reports_gh_auth_ok_and_origin() -> Result<(), Box<dyn Error>> {
         .assert()
         .success()
         .stdout(predicate::str::contains("gh auth: ok"))
+        .stdout(predicate::str::contains("Resolved transport: stdin"))
         .stdout(predicate::str::contains("origin:"));
 
     Ok(())
@@ -297,6 +298,7 @@ exit 1
         .stdout(predicate::str::contains("Resolved provider: claude"))
         .stdout(predicate::str::contains("Resolved model: haiku"))
         .stdout(predicate::str::contains("Resolved reasoning: high"))
+        .stdout(predicate::str::contains("Resolved transport: stdin"))
         .stdout(predicate::str::contains("No mutations"));
 
     Ok(())

@@ -214,6 +214,7 @@ EOF
   exit 0
 fi
 printf '%s\n' "$@" > "$TEST_OUTPUT_DIR/args.txt"
+cat > "$TEST_OUTPUT_DIR/stdin.txt"
 printf '%s' "$METASTACK_AGENT_NAME" > "$TEST_OUTPUT_DIR/agent.txt"
 printf '%s' "$METASTACK_AGENT_MODEL" > "$TEST_OUTPUT_DIR/model.txt"
 printf '%s' "$METASTACK_AGENT_REASONING" > "$TEST_OUTPUT_DIR/reasoning.txt"
@@ -254,7 +255,8 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"c
     assert!(args.contains("-c"));
     assert!(args.contains("reasoning.effort=\"medium\""));
     assert!(!args.contains("--reasoning="));
-    assert!(args.contains("Summarize the builtin provider launch behavior."));
+    let stdin = fs::read_to_string(stub_dir.join("stdin.txt"))?;
+    assert!(stdin.contains("Summarize the builtin provider launch behavior."));
     assert_eq!(fs::read_to_string(stub_dir.join("agent.txt"))?, "codex");
     assert_eq!(fs::read_to_string(stub_dir.join("model.txt"))?, "gpt-5.4");
     assert_eq!(
@@ -317,6 +319,7 @@ EOF
   exit 0
 fi
 printf '%s\n' "$@" > "$TEST_OUTPUT_DIR/args.txt"
+cat > "$TEST_OUTPUT_DIR/stdin.txt"
 printf '%s' "$METASTACK_AGENT_NAME" > "$TEST_OUTPUT_DIR/agent.txt"
 printf '%s' "$METASTACK_AGENT_MODEL" > "$TEST_OUTPUT_DIR/model.txt"
 printf '%s' "$METASTACK_AGENT_REASONING" > "$TEST_OUTPUT_DIR/reasoning.txt"
@@ -351,7 +354,8 @@ printf '%s' '{"type":"result","subtype":"success","result":"claude builtin ok","
     assert!(args.contains("--model=sonnet"));
     assert!(args.contains("--effort=high"));
     assert!(!args.contains("--reasoning="));
-    assert!(args.contains("Summarize the builtin provider launch behavior."));
+    let stdin = fs::read_to_string(stub_dir.join("stdin.txt"))?;
+    assert!(stdin.contains("Summarize the builtin provider launch behavior."));
     assert_eq!(fs::read_to_string(stub_dir.join("agent.txt"))?, "claude");
     assert_eq!(fs::read_to_string(stub_dir.join("model.txt"))?, "sonnet");
     assert_eq!(fs::read_to_string(stub_dir.join("reasoning.txt"))?, "high");

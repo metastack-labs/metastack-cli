@@ -55,7 +55,7 @@ impl BuiltinProviderAdapter for ClaudeProviderAdapter {
     }
 
     fn transport(&self) -> PromptTransport {
-        PromptTransport::Arg
+        PromptTransport::Stdin
     }
 
     fn prepare_command_args(
@@ -260,6 +260,39 @@ mod tests {
         assert!(args.contains(&"--resume".to_string()));
         assert!(args.contains(&"session-123".to_string()));
         assert_eq!(args.last().map(String::as_str), Some("plan the work"));
+    }
+
+    #[test]
+    fn claude_default_transport_uses_stdin() {
+        let adapter = ClaudeProviderAdapter;
+        assert_eq!(adapter.transport(), PromptTransport::Stdin);
+    }
+
+    #[test]
+    fn claude_stdin_transport_omits_prompt_argument() {
+        let adapter = ClaudeProviderAdapter;
+        let args = adapter
+            .prepare_command_args(
+                &[
+                    "-p".to_string(),
+                    "--model=haiku".to_string(),
+                    "--effort=low".to_string(),
+                ],
+                None,
+                BuiltinInvocationContext::Planning,
+                PromptTransport::Stdin,
+                true,
+                Some("session-123"),
+            )
+            .expect("claude args should render");
+
+        assert_eq!(args[0], "-p");
+        assert!(args.contains(&"--output-format=json".to_string()));
+        assert!(args.contains(&"--resume".to_string()));
+        assert!(args.contains(&"session-123".to_string()));
+        assert!(args.contains(&"--model=haiku".to_string()));
+        assert!(args.contains(&"--effort=low".to_string()));
+        assert!(!args.iter().any(|arg| arg == "plan the work"));
     }
 
     #[test]
