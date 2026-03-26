@@ -38,7 +38,7 @@ use crate::linear::{
     ReqwestLinearClient, WorkflowState,
 };
 use crate::repo_target::RepoTarget;
-use crate::workflow_contract::render_workflow_contract;
+use crate::workflow_contract::render_workflow_contract_for_listen;
 use crate::workspace::{AutoCleanOutcome, try_auto_clean_workspace};
 
 use super::{
@@ -58,6 +58,25 @@ const REQUIRED_LISTEN_PR_LABEL_COLOR: &str = "0e8a16";
 const REQUIRED_LISTEN_PR_LABEL_DESCRIPTION: &str = "MetaStack automation";
 const LINEAR_IDENTIFIER_PR_LABEL_COLOR: &str = "1d76db";
 const LISTEN_PULL_REQUEST_BASE_BRANCH: &str = "main";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ListenTaskMode {
+    Implementation,
+    Planning,
+}
+
+impl ListenTaskMode {
+    fn allows_planning_artifacts(self) -> bool {
+        matches!(self, Self::Planning)
+    }
+
+    fn guidance_label(self) -> &'static str {
+        match self {
+            Self::Implementation => "implementation",
+            Self::Planning => "planning/specification",
+        }
+    }
+}
 
 fn listen_preflight_failure_header(timestamp: &str) -> String {
     format!(
@@ -145,7 +164,9 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
         load_existing_session_tokens(&source_root, project_selector, &args.issue)?;
     let mut provider_session_id =
         load_existing_provider_session_id(&source_root, project_selector, &args.issue)?;
-    let mut saw_implementation_progress = workspace_has_meaningful_progress(&workspace_path)?;
+    let task_mode = classify_listen_task_mode(&issue, &app_config, &planning_meta);
+    let mut saw_meaningful_progress =
+        workspace_has_meaningful_progress(&workspace_path, task_mode.allows_planning_artifacts())?;
     let mut stalled_turns = 0u32;
     if let Err(error) = preflight::run_listen_preflight(
         &service,
@@ -535,8 +556,13 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                 backlog_progress_for_issue_dir(&workspace_path, &backlog_issue.identifier)
             })
             .transpose()?;
-        if turn_progress.implementation_changed() {
-            saw_implementation_progress = true;
+        let meaningful_turn_progress = if task_mode.allows_planning_artifacts() {
+            turn_progress.implementation_changed() || turn_progress.planning_changed()
+        } else {
+            turn_progress.implementation_changed()
+        };
+        if meaningful_turn_progress {
+            saw_meaningful_progress = true;
             stalled_turns = 0;
         } else {
             stalled_turns += 1;
@@ -544,7 +570,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
 
         if let Some(progress) = backlog_progress {
             if progress.is_complete() {
-                if !saw_implementation_progress {
+                if !saw_meaningful_progress {
                     write_listen_session(
                         &source_root,
                         project_selector,
@@ -552,7 +578,10 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                             &issue,
                             SessionPhase::Blocked,
                             compact_blocked_summary(
-                                "Blocked | backlog complete without code changes",
+                                &format!(
+                                    "Blocked | backlog complete without {} changes",
+                                    task_mode.guidance_label()
+                                ),
                                 Some(&progress),
                                 &log_path,
                             ),
@@ -1721,8 +1750,12 @@ fn build_agent_instructions(
     turn_number: u32,
     context: &ListenTurnContext<'_>,
 ) -> Result<String> {
+    let task_mode = classify_listen_task_mode(issue, context.app_config, context.planning_meta);
     let repo_target = RepoTarget::with_workspace(context.source_root, context.workspace_path);
-    let workflow_contract = render_workflow_contract(context.source_root, repo_target)?;
+    let workflow_contract = render_workflow_contract_for_listen(context.source_root, repo_target)?;
+    let brief_path = PlanningPaths::new(context.workspace_path)
+        .agent_briefs_dir
+        .join(format!("{}.md", issue.identifier));
     let mut sections = vec![
         workflow_contract,
         format!(
@@ -1735,7 +1768,12 @@ fn build_agent_instructions(
             "Use `{}` as the repository root for implementation, validation, commits, pushes, and PR creation.",
             context.workspace_path.display()
         ),
-        "Keep implementation, validation, and local backlog updates anchored to the provided workspace checkout for the active repository.".to_string(),
+        "Treat the Linear ticket title, description, labels, and attached instructions as the primary work contract. Execute that work directly instead of expanding it into extra planning unless the ticket explicitly asks for that.".to_string(),
+        format!(
+            "A generated brief is available at `{}` if you need repo context, but do not spend time restating or expanding it unless the ticket requires that depth.",
+            brief_path.display()
+        ),
+        "Keep implementation, validation, and any local tracking updates anchored to the provided workspace checkout for the active repository.".to_string(),
         format!(
             "Reconcile the existing `## Codex Workpad` comment `{}` before doing new work and keep that single comment updated in place.",
             context.workpad_comment_id
@@ -1744,10 +1782,19 @@ fn build_agent_instructions(
             "Never overwrite the primary Linear issue description during `{}` listen. Put planning, progress, validation, and status updates in the workpad comment instead.",
             crate::branding::COMMAND_NAME
         ),
-        "Reproduce the issue before changing code, refine the workpad plan and acceptance criteria, then implement and validate the fix.".to_string(),
-        format!("Each turn must either leave meaningful non-`{}/` workspace updates or stop with a concrete blocker. Merely rewriting backlog files, briefs, or workpad notes is not enough.", crate::branding::PROJECT_DIR),
+        match task_mode {
+            ListenTaskMode::Implementation => "Execute the requested work directly, validate what you changed, and avoid adding extra planning or analysis artifacts unless the ticket explicitly asks for them.".to_string(),
+            ListenTaskMode::Planning => "This ticket is plan/spec oriented. Shipping the requested plan, spec, or proposal is sufficient; do not invent extra implementation work or deeper technical decomposition unless the ticket explicitly asks for it.".to_string(),
+        },
+        match task_mode {
+            ListenTaskMode::Implementation => format!("Each turn must either leave meaningful non-`{}/` workspace updates or stop with a concrete blocker. Do not burn turns rewriting backlog files, briefs, or workpad notes when the ticket asks for execution.", crate::branding::PROJECT_DIR),
+            ListenTaskMode::Planning => "Each turn must either leave meaningful ticket deliverables in the workspace or stop with a concrete blocker. When the ticket asks for a plan/spec/proposal, those deliverables count as the work.".to_string(),
+        },
         "If the Linear ticket contains `Validation`, `Test Plan`, or `Testing` sections, mirror them into the workpad and execute them as required checks.".to_string(),
-        "Do not consider the task complete until the code is committed and pushed. Shared automation will create or update the branch PR as a draft, attach it to Linear, and promote it to ready during the review handoff.".to_string(),
+        match task_mode {
+            ListenTaskMode::Implementation => "Do not consider the task complete until the code is committed and pushed. Shared automation will create or update the branch PR as a draft, attach it to Linear, and promote it to ready during the review handoff.".to_string(),
+            ListenTaskMode::Planning => "Do not consider the task complete until the requested planning/spec outputs are committed and pushed. Shared automation will create or update the branch PR as a draft, attach it to Linear, and promote it to ready during the review handoff.".to_string(),
+        },
         format!(
             "Shared automation keeps the `{}` label attached when it publishes or updates the GitHub PR for this ticket. If you touch PR metadata directly, preserve that label and do not use the legacy `{}` label.",
             REQUIRED_LISTEN_PR_LABEL, LEGACY_LISTEN_PR_LABEL
@@ -1756,7 +1803,7 @@ fn build_agent_instructions(
 
     if let Some(backlog_issue) = context.backlog_issue {
         sections.push(format!(
-            "A local backlog exists for `{}` in `{}`. Use those files as the task list source of truth, keep them current as you work, and keep the original Linear issue comment updated in place.",
+            "A local backlog exists for `{}` in `{}`. Use it only as lightweight tracking. Do not expand, rewrite, or improve backlog files unless the ticket explicitly asks for that. If checklist items already exist, mark off only the work you actually completed.",
             backlog_issue.identifier,
             PlanningPaths::new(context.workspace_path)
                 .backlog_issue_dir(&backlog_issue.identifier)
@@ -1793,6 +1840,31 @@ fn build_agent_instructions(
     }
 
     Ok(sections.join("\n\n"))
+}
+
+fn classify_listen_task_mode(
+    issue: &IssueSummary,
+    app_config: &AppConfig,
+    planning_meta: &PlanningMeta,
+) -> ListenTaskMode {
+    let plan_label = planning_meta.effective_plan_label(app_config);
+    if issue
+        .labels
+        .iter()
+        .any(|label| label.name.eq_ignore_ascii_case(&plan_label))
+    {
+        return ListenTaskMode::Planning;
+    }
+
+    let title = issue.title.trim().to_ascii_lowercase();
+    if ["plan:", "planning:", "spec:"]
+        .iter()
+        .any(|prefix| title.starts_with(prefix))
+    {
+        return ListenTaskMode::Planning;
+    }
+
+    ListenTaskMode::Implementation
 }
 
 fn build_worker_session(
@@ -2433,6 +2505,85 @@ mod tests {
             result.instructions.is_some(),
             "turn 1 should always include instructions"
         );
+    }
+
+    #[test]
+    fn classify_listen_task_mode_detects_plan_label() {
+        let app_config = crate::config::AppConfig::default();
+        let mut planning_meta = crate::config::PlanningMeta::default();
+        planning_meta.issue_labels.plan = Some("plan".to_string());
+        let mut issue = test_issue("MET-57");
+        issue.labels.push(crate::linear::LabelRef {
+            id: "label-plan".to_string(),
+            name: "plan".to_string(),
+        });
+
+        assert_eq!(
+            super::classify_listen_task_mode(&issue, &app_config, &planning_meta),
+            super::ListenTaskMode::Planning
+        );
+    }
+
+    #[test]
+    fn build_agent_instructions_for_planning_ticket_allows_planning_outputs() {
+        let temp = tempdir().expect("tempdir should build");
+        let workspace = temp.path();
+        let source_root = temp.path();
+        fs::create_dir_all(workspace.join(".metastack/agents/briefs"))
+            .expect("brief dir should build");
+        fs::create_dir_all(workspace.join(".metastack")).expect("metastack dir should build");
+        fs::write(workspace.join("AGENTS.md"), "legacy").expect("agents should write");
+
+        let app_config = crate::config::AppConfig::default();
+        let mut planning_meta = crate::config::PlanningMeta::default();
+        planning_meta.issue_labels.plan = Some("plan".to_string());
+        let args = crate::cli::ListenWorkerArgs {
+            source_root: source_root.to_path_buf(),
+            project: None,
+            workspace: workspace.to_path_buf(),
+            issue: "MET-57".to_string(),
+            workpad_comment_id: "comment-1".to_string(),
+            backlog_issue: None,
+            max_turns: 20,
+            api_key: None,
+            api_url: None,
+            profile: None,
+            team: None,
+            agent: None,
+            model: None,
+            reasoning: None,
+        };
+        let mut issue = test_issue("MET-57");
+        issue.labels.push(crate::linear::LabelRef {
+            id: "label-plan".to_string(),
+            name: "plan".to_string(),
+        });
+        let context = super::ListenTurnContext {
+            app_config: &app_config,
+            planning_meta: &planning_meta,
+            args: &args,
+            source_root,
+            project_selector: None,
+            workspace_path: workspace,
+            workpad_comment_id: "comment-1",
+            backlog_issue: None,
+            max_turns: 20,
+        };
+
+        let instructions = super::build_agent_instructions(&issue, 1, &context)
+            .expect("instructions should build");
+
+        assert!(instructions.contains("Treat the Linear ticket title, description, labels, and attached instructions as the primary work contract."));
+        assert!(
+            instructions.contains("Shipping the requested plan, spec, or proposal is sufficient")
+        );
+        assert!(
+            instructions.contains(
+                "do not invent extra implementation work or deeper technical decomposition"
+            )
+        );
+        assert!(instructions.contains("WORKFLOW.md"));
+        assert!(!instructions.contains("refine the workpad plan and acceptance criteria"));
     }
 
     #[test]

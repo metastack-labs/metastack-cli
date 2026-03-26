@@ -920,12 +920,17 @@ impl BacklogProgress {
 
 #[derive(Debug, Clone, Default)]
 struct TurnProgress {
+    planning_entries: Vec<String>,
     implementation_entries: Vec<String>,
 }
 
 impl TurnProgress {
     fn implementation_changed(&self) -> bool {
         !self.implementation_entries.is_empty()
+    }
+
+    fn planning_changed(&self) -> bool {
+        !self.planning_entries.is_empty()
     }
 }
 
@@ -2092,12 +2097,13 @@ fn compare_workspace_snapshots(
     changed_entries.sort();
     changed_entries.dedup();
 
-    let (_, implementation_entries): (Vec<_>, Vec<_>) = changed_entries
+    let (planning_entries, implementation_entries): (Vec<_>, Vec<_>) = changed_entries
         .iter()
         .cloned()
         .partition(|entry| workspace_entry_is_planning_artifact(entry));
 
     Ok(TurnProgress {
+        planning_entries,
         implementation_entries,
     })
 }
@@ -2129,7 +2135,10 @@ fn workspace_entry_is_planning_artifact(entry: &str) -> bool {
     path.starts_with(&format!("{}/", crate::branding::PROJECT_DIR))
 }
 
-fn workspace_has_meaningful_progress(workspace_path: &Path) -> Result<bool> {
+fn workspace_has_meaningful_progress(
+    workspace_path: &Path,
+    allow_planning_artifacts: bool,
+) -> Result<bool> {
     let ahead_count = git_stdout(
         workspace_path,
         &["rev-list", "--count", "origin/main..HEAD"],
@@ -2146,7 +2155,7 @@ fn workspace_has_meaningful_progress(workspace_path: &Path) -> Result<bool> {
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
-        .any(|line| !workspace_entry_is_planning_artifact(line)))
+        .any(|line| allow_planning_artifacts || !workspace_entry_is_planning_artifact(line)))
 }
 
 fn active_workpad_comment(issue: &IssueSummary) -> Option<IssueComment> {
@@ -3648,6 +3657,9 @@ fn render_agent_prompt(
         String::new()
     };
     let state = issue_state_label(issue);
+    let brief_path = PlanningPaths::new(workspace_path)
+        .agent_briefs_dir
+        .join(format!("{}.md", issue.identifier));
     let backlog_context = backlog_issue.map_or_else(String::new, |backlog_issue| {
         format!(
             "\nLocal backlog path: {}\nBacklog identifier: {}",
@@ -3692,7 +3704,7 @@ fn render_agent_prompt(
         .unwrap_or_default();
 
     format!(
-        "You are working on Linear ticket `{identifier}`\n\n{continuation}Issue context:\nIdentifier: {identifier}\nTitle: {title}\nCurrent status: {state}\nAssignee: {assignee}\nLabels: {labels}\nURL: {url}\nWorkspace: {workspace}\nTracking workpad comment ID: {comment_id}{backlog_context}{attachment_context}{discussion_context}\n\nDescription:\n\n{description}",
+        "You are working on Linear ticket `{identifier}`\n\n{continuation}Issue context:\nIdentifier: {identifier}\nTitle: {title}\nCurrent status: {state}\nAssignee: {assignee}\nLabels: {labels}\nURL: {url}\nWorkspace: {workspace}\nPrimary brief: {brief_path}\nTracking workpad comment ID: {comment_id}{backlog_context}{attachment_context}{discussion_context}\n\nDescription:\n\n{description}",
         identifier = issue.identifier,
         title = issue.title,
         state = state,
@@ -3700,6 +3712,7 @@ fn render_agent_prompt(
         labels = labels,
         url = issue.url,
         workspace = workspace_path.display(),
+        brief_path = brief_path.display(),
         comment_id = workpad_comment_id,
         backlog_context = backlog_context,
         attachment_context = attachment_context,
