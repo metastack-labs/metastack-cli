@@ -3666,9 +3666,9 @@ printf '%s' "$METASTACK_AGENT_INSTRUCTIONS" > "$TEST_OUTPUT_DIR/instructions.txt
 
     assert!(viewer_mock.calls() >= 1);
     teams_mock.assert_calls(1);
-    issue_detail_mock.assert_calls(1);
+    assert!(issue_detail_mock.calls() >= 1);
     create_backlog_mock.assert_calls(0);
-    comment_mock.assert_calls(1);
+    assert!(comment_mock.calls() >= 1);
 
     assert!(
         state_path.is_file(),

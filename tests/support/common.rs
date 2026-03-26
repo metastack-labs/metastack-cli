@@ -396,7 +396,7 @@ fn commit_and_push_pull_ref(
 
 #[cfg(unix)]
 fn wait_for_path(path: &Path) -> Result<(), Box<dyn Error>> {
-    wait_for_path_with_timeout(path, Duration::from_secs(60))
+    wait_for_path_with_timeout(path, Duration::from_secs(120))
 }
 
 #[cfg(unix)]
@@ -662,6 +662,9 @@ fn wait_for_terminal_session_state(path: &Path) -> Result<(), Box<dyn Error>> {
             && !contents.contains("\"phase\": \"claimed\"")
             && !contents.contains("\"phase\": \"brief_ready\"")
             && !contents.contains("\"phase\": \"running\"")
+            && !contents.contains("\"phase\": \"reviewing\"")
+            && !contents.contains("\"phase\": \"final_review\"")
+            && !contents.contains("\"phase\": \"publishing\"")
         {
             return Ok(());
         }

@@ -46,10 +46,10 @@ use super::{
     PullRequestSummary, ResumeProvider, SessionPhase, TokenUsage, TurnPromptMode,
     TurnTokenSnapshot, agent_log_path, backlog_progress_for_issue_dir, capture_workspace_snapshot,
     compact_blocked_summary, compact_completed_summary, compact_running_summary,
-    compare_workspace_snapshots, current_workspace_branch, issue_state_label, issue_team_key,
-    listen_issue_is_active, now_epoch_seconds, now_timestamp, preflight, render_agent_prompt,
-    render_continuation_prompt, try_transition_issue_to_review_state,
-    workspace_has_meaningful_progress, write_listen_session,
+    compact_session_summary, compare_workspace_snapshots, current_workspace_branch,
+    issue_state_label, issue_team_key, listen_issue_is_active, now_epoch_seconds, now_timestamp,
+    preflight, render_agent_prompt, render_continuation_prompt,
+    try_transition_issue_to_review_state, workspace_has_meaningful_progress, write_listen_session,
 };
 
 const REQUIRED_LISTEN_PR_LABEL: &str = "metastack";
@@ -58,25 +58,6 @@ const REQUIRED_LISTEN_PR_LABEL_COLOR: &str = "0e8a16";
 const REQUIRED_LISTEN_PR_LABEL_DESCRIPTION: &str = "MetaStack automation";
 const LINEAR_IDENTIFIER_PR_LABEL_COLOR: &str = "1d76db";
 const LISTEN_PULL_REQUEST_BASE_BRANCH: &str = "main";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ListenTaskMode {
-    Implementation,
-    Planning,
-}
-
-impl ListenTaskMode {
-    fn allows_planning_artifacts(self) -> bool {
-        matches!(self, Self::Planning)
-    }
-
-    fn guidance_label(self) -> &'static str {
-        match self {
-            Self::Implementation => "implementation",
-            Self::Planning => "planning/specification",
-        }
-    }
-}
 
 fn listen_preflight_failure_header(timestamp: &str) -> String {
     format!(
@@ -164,10 +145,9 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
         load_existing_session_tokens(&source_root, project_selector, &args.issue)?;
     let mut provider_session_id =
         load_existing_provider_session_id(&source_root, project_selector, &args.issue)?;
-    let task_mode = classify_listen_task_mode(&issue, &app_config, &planning_meta);
-    let mut saw_meaningful_progress =
-        workspace_has_meaningful_progress(&workspace_path, task_mode.allows_planning_artifacts())?;
+    let _initial_meaningful_progress = workspace_has_meaningful_progress(&workspace_path, true)?;
     let mut stalled_turns = 0u32;
+    let mut last_review: Option<ReviewReport> = None;
     if let Err(error) = preflight::run_listen_preflight(
         &service,
         &linear_config,
@@ -304,6 +284,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
             &issue,
             turn_number,
             &turn_context,
+            last_review.as_ref(),
             session_context.latest_resume_handle.as_ref(),
             |current_session_id| {
                 if provider_session_id_state.borrow().as_deref() == Some(current_session_id) {
@@ -380,6 +361,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     &issue,
                     turn_number,
                     &turn_context,
+                    last_review.as_ref(),
                     None,
                     |current_session_id| {
                         if provider_session_id_retry.borrow().as_deref() == Some(current_session_id)
@@ -556,44 +538,62 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                 backlog_progress_for_issue_dir(&workspace_path, &backlog_issue.identifier)
             })
             .transpose()?;
-        let meaningful_turn_progress = if task_mode.allows_planning_artifacts() {
-            turn_progress.implementation_changed() || turn_progress.planning_changed()
-        } else {
-            turn_progress.implementation_changed()
-        };
+        let meaningful_turn_progress =
+            turn_progress.implementation_changed() || turn_progress.planning_changed();
+        let review = run_review_phase(
+            &service,
+            &issue,
+            turn_number,
+            meaningful_turn_progress,
+            &turn_context,
+            WorkerPhaseContext {
+                source_root: &source_root,
+                project_selector,
+                session_context: &session_context,
+                provider_session_id: provider_session_id.as_deref(),
+                log_path: &log_path,
+            },
+        )
+        .await?;
+        last_review = Some(review.clone());
         if meaningful_turn_progress {
-            saw_meaningful_progress = true;
             stalled_turns = 0;
         } else {
             stalled_turns += 1;
         }
 
-        if let Some(progress) = backlog_progress {
-            if progress.is_complete() {
-                if !saw_meaningful_progress {
-                    write_listen_session(
-                        &source_root,
-                        project_selector,
-                        build_worker_session(
-                            &issue,
-                            SessionPhase::Blocked,
-                            compact_blocked_summary(
-                                &format!(
-                                    "Blocked | backlog complete without {} changes",
-                                    task_mode.guidance_label()
-                                ),
-                                Some(&progress),
-                                &log_path,
-                            ),
-                            &session_context,
-                            turns_completed,
-                            provider_session_id.as_deref(),
-                            &session_context.canonical,
-                        ),
-                    )?;
-                    return Ok(());
-                }
-
+        if review.complete {
+            let final_review = run_final_review_phase(
+                &issue,
+                turn_number,
+                &turn_context,
+                &review,
+                WorkerPhaseContext {
+                    source_root: &source_root,
+                    project_selector,
+                    session_context: &session_context,
+                    provider_session_id: provider_session_id.as_deref(),
+                    log_path: &log_path,
+                },
+            )
+            .await?;
+            if final_review.approved {
+                write_listen_session(
+                    &source_root,
+                    project_selector,
+                    build_worker_session(
+                        &issue,
+                        SessionPhase::Publishing,
+                        compact_session_summary([
+                            Some("Publishing review-ready handoff".to_string()),
+                            Some(format!("see {}", log_path.display())),
+                        ]),
+                        &session_context,
+                        turns_completed,
+                        provider_session_id.as_deref(),
+                        &session_context.canonical,
+                    ),
+                )?;
                 let branch = branch.as_deref().ok_or_else(|| {
                     anyhow!("failed to inspect the workspace branch before promoting the review PR")
                 })?;
@@ -630,7 +630,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
 
                 if review_transition_applied {
                     let summary = compact_completed_summary(
-                        Some(&progress),
+                        backlog_progress.as_ref(),
                         turns_completed,
                         &issue_state_label(&refreshed_issue),
                     );
@@ -663,8 +663,8 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                         &refreshed_issue,
                         SessionPhase::Blocked,
                         compact_blocked_summary(
-                            "Blocked | backlog complete but review transition failed",
-                            Some(&progress),
+                            "Blocked | final review passed but review transition failed",
+                            backlog_progress.as_ref(),
                             &log_path,
                         ),
                         &session_context,
@@ -675,7 +675,21 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                 )?;
                 return Ok(());
             }
+            let follow_up_review = ReviewReport {
+                summary: final_review.summary.clone(),
+                complete: false,
+                completed_items: review.completed_items.clone(),
+                remaining_items: final_review.missing_items.clone(),
+                validation_completed: review.validation_completed.clone(),
+                validation_remaining: final_review.validation_gaps.clone(),
+                risks: final_review.risks.clone(),
+                notes: final_review.notes.clone(),
+            };
+            sync_review_tracking(&service, &issue, &turn_context, &follow_up_review).await?;
+            last_review = Some(follow_up_review);
+        }
 
+        if let Some(progress) = backlog_progress {
             if let Some(branch) = branch.as_deref() {
                 if let Some(pull_request) = publish_listener_pull_request(
                     &service,
@@ -824,6 +838,23 @@ struct WorkerSessionContext<'a> {
     origin: super::state::SessionOrigin,
 }
 
+struct AgentPhaseInvocation<'a> {
+    issue: &'a IssueSummary,
+    context: &'a ListenTurnContext<'a>,
+    turn_number: u32,
+    phase_label: &'a str,
+    prompt_mode: TurnPromptMode,
+    continuation_handle: Option<&'a LatestResumeHandle>,
+}
+
+struct WorkerPhaseContext<'a> {
+    source_root: &'a Path,
+    project_selector: Option<&'a str>,
+    session_context: &'a WorkerSessionContext<'a>,
+    provider_session_id: Option<&'a str>,
+    log_path: &'a Path,
+}
+
 #[derive(Debug, Default)]
 struct TurnExecutionResult {
     session_id: Option<String>,
@@ -833,6 +864,43 @@ struct TurnExecutionResult {
     provider: Option<String>,
     model: Option<String>,
     reasoning: Option<String>,
+    response_text: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ReviewReport {
+    #[serde(default)]
+    summary: String,
+    #[serde(default)]
+    complete: bool,
+    #[serde(default)]
+    completed_items: Vec<String>,
+    #[serde(default)]
+    remaining_items: Vec<String>,
+    #[serde(default)]
+    validation_completed: Vec<String>,
+    #[serde(default)]
+    validation_remaining: Vec<String>,
+    #[serde(default)]
+    risks: Vec<String>,
+    #[serde(default)]
+    notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct FinalReviewReport {
+    #[serde(default)]
+    approved: bool,
+    #[serde(default)]
+    summary: String,
+    #[serde(default)]
+    missing_items: Vec<String>,
+    #[serde(default)]
+    validation_gaps: Vec<String>,
+    #[serde(default)]
+    risks: Vec<String>,
+    #[serde(default)]
+    notes: Vec<String>,
 }
 
 impl From<PullRequestLifecycleResult> for PullRequestSummary {
@@ -1143,12 +1211,19 @@ fn build_listen_run_args(
     issue: &IssueSummary,
     turn_number: u32,
     context: &ListenTurnContext<'_>,
+    previous_review: Option<&ReviewReport>,
     has_resume_handle: bool,
 ) -> Result<RunAgentArgs> {
     let use_continuation = has_resume_handle && turn_number > 1;
 
-    let prompt = if use_continuation {
-        render_continuation_prompt(issue, turn_number, context.max_turns)
+    let prompt = if turn_number > 1 {
+        render_execution_delta_prompt(
+            issue,
+            turn_number,
+            context.max_turns,
+            previous_review,
+            use_continuation,
+        )
     } else {
         render_agent_prompt(
             issue,
@@ -1179,6 +1254,43 @@ fn build_listen_run_args(
     })
 }
 
+fn build_review_run_args(
+    issue: &IssueSummary,
+    turn_number: u32,
+    context: &ListenTurnContext<'_>,
+) -> RunAgentArgs {
+    RunAgentArgs {
+        root: Some(context.source_root.to_path_buf()),
+        route_key: Some(AGENT_ROUTE_AGENTS_LISTEN.to_string()),
+        agent: context.args.agent.clone(),
+        prompt: render_review_prompt(issue, turn_number, context),
+        instructions: Some(build_review_instructions(context)),
+        model: context.args.model.clone(),
+        reasoning: context.args.reasoning.clone(),
+        transport: None,
+        attachments: Vec::new(),
+    }
+}
+
+fn build_final_review_run_args(
+    issue: &IssueSummary,
+    turn_number: u32,
+    context: &ListenTurnContext<'_>,
+    review: &ReviewReport,
+) -> RunAgentArgs {
+    RunAgentArgs {
+        root: Some(context.source_root.to_path_buf()),
+        route_key: Some(AGENT_ROUTE_AGENTS_LISTEN.to_string()),
+        agent: context.args.agent.clone(),
+        prompt: render_final_review_prompt(issue, turn_number, context, review),
+        instructions: Some(build_final_review_instructions(context)),
+        model: context.args.model.clone(),
+        reasoning: context.args.reasoning.clone(),
+        transport: None,
+        attachments: Vec::new(),
+    }
+}
+
 pub(super) fn write_preflight_failure(log_path: &Path, error: &anyhow::Error) -> Result<()> {
     if let Some(parent) = log_path.parent() {
         fs::create_dir_all(parent)
@@ -1202,6 +1314,7 @@ fn execute_agent_turn(
     issue: &IssueSummary,
     turn_number: u32,
     context: &ListenTurnContext<'_>,
+    previous_review: Option<&ReviewReport>,
     continuation_handle: Option<&LatestResumeHandle>,
     mut on_session_started: impl FnMut(&str) -> Result<()>,
     mut on_usage: impl FnMut(&AgentTokenUsage) -> Result<()>,
@@ -1230,7 +1343,43 @@ fn execute_agent_turn(
         issue.identifier,
         prompt_mode.label(),
     );
-    let run_args = build_listen_run_args(issue, turn_number, context, has_resume_handle)?;
+    let run_args = build_listen_run_args(
+        issue,
+        turn_number,
+        context,
+        previous_review,
+        has_resume_handle,
+    )?;
+    execute_agent_run(
+        AgentPhaseInvocation {
+            issue,
+            context,
+            turn_number,
+            phase_label: "execute",
+            prompt_mode,
+            continuation_handle: if use_continuation {
+                continuation_handle
+            } else {
+                None
+            },
+        },
+        run_args,
+        &mut on_session_started,
+        &mut on_usage,
+    )
+}
+
+fn execute_agent_run(
+    phase: AgentPhaseInvocation<'_>,
+    run_args: RunAgentArgs,
+    mut on_session_started: impl FnMut(&str) -> Result<()>,
+    mut on_usage: impl FnMut(&AgentTokenUsage) -> Result<()>,
+) -> Result<TurnExecutionResult> {
+    let issue = phase.issue;
+    let context = phase.context;
+    let turn_number = phase.turn_number;
+    let phase_label = phase.phase_label;
+    let prompt_mode = phase.prompt_mode;
     let invocation = resolve_agent_invocation_for_planning(
         context.app_config,
         context.planning_meta,
@@ -1238,12 +1387,8 @@ fn execute_agent_turn(
     )?;
     let capture_output = invocation.builtin_provider;
     let command_args = if capture_output {
-        // Only pass --resume on turn 2+; turn 1 must always cold-start even with a stale handle.
-        let continuation = if use_continuation {
-            continuation_id_for_invocation(&invocation.agent, continuation_handle)
-        } else {
-            None
-        };
+        let continuation =
+            continuation_id_for_invocation(&invocation.agent, phase.continuation_handle);
         command_args_for_invocation_with_options(
             &invocation,
             AgentExecutionOptions {
@@ -1274,8 +1419,9 @@ fn execute_agent_turn(
             .with_context(|| format!("failed to open `{}`", log_path.display()))?;
         writeln!(
             log,
-            "\n--- {} listen turn {}/{} @ {} ---",
+            "\n--- {} listen {} turn {}/{} @ {} ---",
             crate::branding::COMMAND_NAME,
+            phase_label,
             turn_number,
             context.max_turns,
             now_timestamp()
@@ -1475,6 +1621,7 @@ fn execute_agent_turn(
         let parsed = provider.parse_capture_output(&raw_stdout)?;
         let turn_finished_at = now_epoch_seconds();
         return Ok(TurnExecutionResult {
+            response_text: parsed.response_text.clone(),
             session_id: parsed.continuation.or(continuation),
             usage: parsed.usage.or(usage),
             latest_resume_handle: latest_resume_handle.or_else(|| {
@@ -1750,7 +1897,6 @@ fn build_agent_instructions(
     turn_number: u32,
     context: &ListenTurnContext<'_>,
 ) -> Result<String> {
-    let task_mode = classify_listen_task_mode(issue, context.app_config, context.planning_meta);
     let repo_target = RepoTarget::with_workspace(context.source_root, context.workspace_path);
     let workflow_contract = render_workflow_contract_for_listen(context.source_root, repo_target)?;
     let brief_path = PlanningPaths::new(context.workspace_path)
@@ -1773,7 +1919,7 @@ fn build_agent_instructions(
             "A generated brief is available at `{}` if you need repo context, but do not spend time restating or expanding it unless the ticket requires that depth.",
             brief_path.display()
         ),
-        "Keep implementation, validation, and any local tracking updates anchored to the provided workspace checkout for the active repository.".to_string(),
+        "Keep implementation, validation, and local backlog updates anchored to the provided workspace checkout for the active repository.".to_string(),
         format!(
             "Reconcile the existing `## Codex Workpad` comment `{}` before doing new work and keep that single comment updated in place.",
             context.workpad_comment_id
@@ -1782,19 +1928,13 @@ fn build_agent_instructions(
             "Never overwrite the primary Linear issue description during `{}` listen. Put planning, progress, validation, and status updates in the workpad comment instead.",
             crate::branding::COMMAND_NAME
         ),
-        match task_mode {
-            ListenTaskMode::Implementation => "Execute the requested work directly, validate what you changed, and avoid adding extra planning or analysis artifacts unless the ticket explicitly asks for them.".to_string(),
-            ListenTaskMode::Planning => "This ticket is plan/spec oriented. Shipping the requested plan, spec, or proposal is sufficient; do not invent extra implementation work or deeper technical decomposition unless the ticket explicitly asks for it.".to_string(),
-        },
-        match task_mode {
-            ListenTaskMode::Implementation => format!("Each turn must either leave meaningful non-`{}/` workspace updates or stop with a concrete blocker. Do not burn turns rewriting backlog files, briefs, or workpad notes when the ticket asks for execution.", crate::branding::PROJECT_DIR),
-            ListenTaskMode::Planning => "Each turn must either leave meaningful ticket deliverables in the workspace or stop with a concrete blocker. When the ticket asks for a plan/spec/proposal, those deliverables count as the work.".to_string(),
-        },
+        "Execute the requested work directly, validate what you changed, and avoid adding extra planning, analysis, or decomposition unless the ticket explicitly asks for them.".to_string(),
+        format!(
+            "Each turn must either leave meaningful workspace updates or stop with a concrete blocker. Do not burn turns rewriting `{}/` files, briefs, or workpad notes unless that is part of the ticket's requested deliverable.",
+            crate::branding::PROJECT_DIR
+        ),
         "If the Linear ticket contains `Validation`, `Test Plan`, or `Testing` sections, mirror them into the workpad and execute them as required checks.".to_string(),
-        match task_mode {
-            ListenTaskMode::Implementation => "Do not consider the task complete until the code is committed and pushed. Shared automation will create or update the branch PR as a draft, attach it to Linear, and promote it to ready during the review handoff.".to_string(),
-            ListenTaskMode::Planning => "Do not consider the task complete until the requested planning/spec outputs are committed and pushed. Shared automation will create or update the branch PR as a draft, attach it to Linear, and promote it to ready during the review handoff.".to_string(),
-        },
+        "Do not consider the task complete until the requested ticket deliverables are committed and pushed. Shared automation will create or update the branch PR as a draft, attach it to Linear, and promote it to ready during the review handoff.".to_string(),
         format!(
             "Shared automation keeps the `{}` label attached when it publishes or updates the GitHub PR for this ticket. If you touch PR metadata directly, preserve that label and do not use the legacy `{}` label.",
             REQUIRED_LISTEN_PR_LABEL, LEGACY_LISTEN_PR_LABEL
@@ -1842,29 +1982,605 @@ fn build_agent_instructions(
     Ok(sections.join("\n\n"))
 }
 
-fn classify_listen_task_mode(
+fn build_review_instructions(_: &ListenTurnContext<'_>) -> String {
+    format!(
+        "You are the review phase for `{}` listen. Review the current workspace against the Linear ticket and return JSON only.\n\nReturn an object with this exact shape:\n{{\n  \"summary\": \"short review summary\",\n  \"complete\": true,\n  \"completed_items\": [\"ticket requirement or deliverable completed\"],\n  \"remaining_items\": [\"specific remaining work item\"],\n  \"validation_completed\": [\"validation step completed\"],\n  \"validation_remaining\": [\"validation still required\"],\n  \"risks\": [\"risk or likely mistake\"],\n  \"notes\": [\"short operator note\"]\n}}\n\nUse the Linear ticket acceptance criteria and validation sections as the source of truth. Mark `complete` true only when the requested deliverables are done, validation is sufficient, and the branch is ready for final review.",
+        crate::branding::COMMAND_NAME
+    )
+}
+
+fn build_final_review_instructions(_: &ListenTurnContext<'_>) -> String {
+    format!(
+        "You are the final review phase for `{}` listen. Perform a fast safety review of the current workspace and return JSON only.\n\nReturn an object with this exact shape:\n{{\n  \"approved\": true,\n  \"summary\": \"short final review summary\",\n  \"missing_items\": [\"anything still missing from the ticket\"],\n  \"validation_gaps\": [\"validation still missing\"],\n  \"risks\": [\"residual risk or likely mistake\"],\n  \"notes\": [\"short operator note\"]\n}}\n\nSet `approved` true only if the work matches the Linear ticket, acceptance criteria are satisfied, and no material validation gaps remain.",
+        crate::branding::COMMAND_NAME
+    )
+}
+
+fn render_execution_delta_prompt(
     issue: &IssueSummary,
-    app_config: &AppConfig,
-    planning_meta: &PlanningMeta,
-) -> ListenTaskMode {
-    let plan_label = planning_meta.effective_plan_label(app_config);
-    if issue
-        .labels
+    turn_number: u32,
+    max_turns: u32,
+    previous_review: Option<&ReviewReport>,
+    use_continuation: bool,
+) -> String {
+    let header = if use_continuation {
+        render_continuation_prompt(issue, turn_number, max_turns)
+    } else {
+        format!(
+            "Execution continuation for `{}` turn #{}/{}.\n\nThe previous execution/review cycle did not fully complete the ticket. Resume from the current workspace state using the remaining work below.\n",
+            issue.identifier, turn_number, max_turns
+        )
+    };
+    let review_block = previous_review.map(render_review_delta_block).unwrap_or_else(|| {
+        "- No prior structured review is available. Resume from the current workspace and workpad state.\n".to_string()
+    });
+    format!(
+        "{header}\nRemaining work for `{identifier}`:\n{review_block}\n\nIssue title: {title}\nURL: {url}",
+        header = header,
+        identifier = issue.identifier,
+        review_block = review_block,
+        title = issue.title,
+        url = issue.url
+    )
+}
+
+fn render_review_delta_block(review: &ReviewReport) -> String {
+    let mut lines = Vec::new();
+    if !review.completed_items.is_empty() {
+        lines.push("Completed:".to_string());
+        for item in &review.completed_items {
+            lines.push(format!("- {item}"));
+        }
+    }
+    if !review.remaining_items.is_empty() {
+        lines.push("Remaining:".to_string());
+        for item in &review.remaining_items {
+            lines.push(format!("- {item}"));
+        }
+    }
+    if !review.validation_remaining.is_empty() {
+        lines.push("Validation still required:".to_string());
+        for item in &review.validation_remaining {
+            lines.push(format!("- {item}"));
+        }
+    }
+    if !review.risks.is_empty() {
+        lines.push("Risks to address:".to_string());
+        for item in &review.risks {
+            lines.push(format!("- {item}"));
+        }
+    }
+    if lines.is_empty() {
+        "- No explicit remaining work captured.".to_string()
+    } else {
+        lines.join("\n")
+    }
+}
+
+fn render_review_prompt(
+    issue: &IssueSummary,
+    turn_number: u32,
+    context: &ListenTurnContext<'_>,
+) -> String {
+    let acceptance = extract_acceptance_criteria(issue.description.as_deref());
+    let validation = extract_validation_requirements(issue.description.as_deref());
+    let backlog_path = context.backlog_issue.map(|backlog_issue| {
+        PlanningPaths::new(context.workspace_path)
+            .backlog_issue_dir(&backlog_issue.identifier)
+            .join("index.md")
+    });
+    format!(
+        "Review the current workspace for Linear ticket `{identifier}` after execution turn #{turn_number}.\n\nTicket title: {title}\nTicket URL: {url}\nWorkspace: {workspace}\nWorkpad comment ID: {workpad}\n{backlog}\n\nAcceptance criteria:\n{acceptance}\n\nValidation requirements:\n{validation}\n\nReview the current branch/workspace state against the ticket. Return JSON only.",
+        identifier = issue.identifier,
+        turn_number = turn_number,
+        title = issue.title,
+        url = issue.url,
+        workspace = context.workspace_path.display(),
+        workpad = context.workpad_comment_id,
+        backlog = backlog_path
+            .map(|path| format!("Backlog index: {}", path.display()))
+            .unwrap_or_default(),
+        acceptance = render_string_list(
+            &acceptance,
+            "_No explicit acceptance criteria found in the ticket description._"
+        ),
+        validation = render_string_list(
+            &validation,
+            "_No explicit validation section found in the ticket description._"
+        ),
+    )
+}
+
+fn render_final_review_prompt(
+    issue: &IssueSummary,
+    turn_number: u32,
+    context: &ListenTurnContext<'_>,
+    review: &ReviewReport,
+) -> String {
+    format!(
+        "Perform a final safety review for Linear ticket `{identifier}` after execution turn #{turn_number}.\n\nTicket title: {title}\nTicket URL: {url}\nWorkspace: {workspace}\n\nLatest review summary: {summary}\n\nCompleted items:\n{completed}\n\nRemaining items from latest review:\n{remaining}\n\nValidation completed:\n{validation_completed}\n\nValidation remaining:\n{validation_remaining}\n\nReturn JSON only.",
+        identifier = issue.identifier,
+        turn_number = turn_number,
+        title = issue.title,
+        url = issue.url,
+        workspace = context.workspace_path.display(),
+        summary = review.summary,
+        completed = render_string_list(&review.completed_items, "_None recorded._"),
+        remaining = render_string_list(&review.remaining_items, "_None recorded._"),
+        validation_completed = render_string_list(&review.validation_completed, "_None recorded._"),
+        validation_remaining = render_string_list(&review.validation_remaining, "_None recorded._"),
+    )
+}
+
+fn render_string_list(values: &[String], empty: &str) -> String {
+    if values.is_empty() {
+        empty.to_string()
+    } else {
+        values
+            .iter()
+            .map(|value| format!("- {value}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+fn extract_acceptance_criteria(description: Option<&str>) -> Vec<String> {
+    extract_markdown_checklist_items(
+        description.unwrap_or_default(),
+        &["Acceptance Criteria", "Acceptance", "Requirements"],
+    )
+}
+
+fn extract_validation_requirements(description: Option<&str>) -> Vec<String> {
+    extract_markdown_checklist_items(
+        description.unwrap_or_default(),
+        &["Validation", "Test Plan", "Testing"],
+    )
+}
+
+fn extract_markdown_checklist_items(body: &str, headings: &[&str]) -> Vec<String> {
+    let section = extract_markdown_section(body, headings).unwrap_or_default();
+    section
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            trimmed
+                .strip_prefix("- ")
+                .or_else(|| trimmed.strip_prefix("* "))
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+fn extract_markdown_section(body: &str, headings: &[&str]) -> Option<String> {
+    let normalized_headings = headings
         .iter()
-        .any(|label| label.name.eq_ignore_ascii_case(&plan_label))
-    {
-        return ListenTaskMode::Planning;
+        .map(|heading| heading.trim().to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    let mut in_section = false;
+    let mut collected = Vec::new();
+
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if let Some(heading) = trimmed.strip_prefix("## ") {
+            let normalized = heading.trim().to_ascii_lowercase();
+            if normalized_headings
+                .iter()
+                .any(|candidate| candidate == &normalized)
+            {
+                in_section = true;
+                continue;
+            }
+            if in_section {
+                break;
+            }
+        }
+        if in_section {
+            collected.push(line.to_string());
+        }
     }
 
-    let title = issue.title.trim().to_ascii_lowercase();
-    if ["plan:", "planning:", "spec:"]
-        .iter()
-        .any(|prefix| title.starts_with(prefix))
-    {
-        return ListenTaskMode::Planning;
+    let section = collected.join("\n").trim().to_string();
+    (!section.is_empty()).then_some(section)
+}
+
+fn parse_agent_json<T>(raw: &str, phase: &str) -> Result<T>
+where
+    T: for<'de> serde::Deserialize<'de>,
+{
+    let trimmed = raw.trim();
+    for candidate in parse_json_candidates(trimmed) {
+        if let Ok(parsed) = serde_json::from_str::<T>(&candidate) {
+            return Ok(parsed);
+        }
     }
 
-    ListenTaskMode::Implementation
+    bail!(
+        "listen {phase} returned invalid JSON: {}",
+        preview_text(trimmed)
+    )
+}
+
+fn parse_json_candidates(raw: &str) -> Vec<String> {
+    let mut candidates = Vec::new();
+    push_json_candidate(&mut candidates, raw);
+    if let Some(stripped) = strip_code_fence(raw) {
+        push_json_candidate(&mut candidates, &stripped);
+        append_progressive_json_candidates(&mut candidates, &stripped);
+    }
+    append_progressive_json_candidates(&mut candidates, raw);
+    candidates
+}
+
+fn append_progressive_json_candidates(candidates: &mut Vec<String>, raw: &str) {
+    let Some(end) = raw.rfind('}') else {
+        return;
+    };
+    for (start, character) in raw.char_indices() {
+        if character == '{' && start <= end {
+            push_json_candidate(candidates, &raw[start..=end]);
+        }
+    }
+}
+
+fn push_json_candidate(candidates: &mut Vec<String>, candidate: &str) {
+    if !candidate.is_empty() && !candidates.iter().any(|existing| existing == candidate) {
+        candidates.push(candidate.to_string());
+    }
+}
+
+fn strip_code_fence(raw: &str) -> Option<String> {
+    let stripped = raw.strip_prefix("```")?;
+    let stripped = stripped
+        .strip_prefix("json\n")
+        .or_else(|| stripped.strip_prefix("JSON\n"))
+        .or_else(|| stripped.strip_prefix('\n'))
+        .unwrap_or(stripped);
+    let stripped = stripped.strip_suffix("```")?;
+    Some(stripped.trim().to_string())
+}
+
+fn preview_text(value: &str) -> String {
+    const MAX_PREVIEW_LEN: usize = 240;
+    if value.len() <= MAX_PREVIEW_LEN {
+        value.to_string()
+    } else {
+        format!("{}...", &value[..MAX_PREVIEW_LEN])
+    }
+}
+
+async fn run_review_phase(
+    service: &LinearService<ReqwestLinearClient>,
+    issue: &IssueSummary,
+    turn_number: u32,
+    meaningful_turn_progress: bool,
+    context: &ListenTurnContext<'_>,
+    phase_context: WorkerPhaseContext<'_>,
+) -> Result<ReviewReport> {
+    write_listen_session(
+        phase_context.source_root,
+        phase_context.project_selector,
+        build_worker_session(
+            issue,
+            SessionPhase::Reviewing,
+            compact_session_summary([
+                Some(format!("Reviewing execution turn {turn_number}")),
+                Some(format!("see {}", phase_context.log_path.display())),
+            ]),
+            phase_context.session_context,
+            turn_number,
+            phase_context.provider_session_id,
+            &phase_context.session_context.canonical,
+        ),
+    )?;
+    let report = if agent_backed_review_enabled() {
+        let run_args = build_review_run_args(issue, turn_number, context);
+        let result = execute_agent_run(
+            AgentPhaseInvocation {
+                issue,
+                context,
+                turn_number,
+                phase_label: "review",
+                prompt_mode: TurnPromptMode::Continuation,
+                continuation_handle: None,
+            },
+            run_args,
+            |_| Ok(()),
+            |_| Ok(()),
+        )?;
+        let raw = result
+            .response_text
+            .ok_or_else(|| anyhow!("listen review did not return any structured output"))?;
+        parse_agent_json(&raw, "review")?
+    } else {
+        heuristic_review_report(issue, context, meaningful_turn_progress)?
+    };
+    sync_review_tracking(service, issue, context, &report).await?;
+    Ok(report)
+}
+
+async fn run_final_review_phase(
+    issue: &IssueSummary,
+    turn_number: u32,
+    context: &ListenTurnContext<'_>,
+    review: &ReviewReport,
+    phase_context: WorkerPhaseContext<'_>,
+) -> Result<FinalReviewReport> {
+    write_listen_session(
+        phase_context.source_root,
+        phase_context.project_selector,
+        build_worker_session(
+            issue,
+            SessionPhase::FinalReview,
+            compact_session_summary([
+                Some(format!("Final review for execution turn {turn_number}")),
+                Some(format!("see {}", phase_context.log_path.display())),
+            ]),
+            phase_context.session_context,
+            turn_number,
+            phase_context.provider_session_id,
+            &phase_context.session_context.canonical,
+        ),
+    )?;
+    if agent_backed_review_enabled() {
+        let run_args = build_final_review_run_args(issue, turn_number, context, review);
+        let result = execute_agent_run(
+            AgentPhaseInvocation {
+                issue,
+                context,
+                turn_number,
+                phase_label: "final-review",
+                prompt_mode: TurnPromptMode::Continuation,
+                continuation_handle: None,
+            },
+            run_args,
+            |_| Ok(()),
+            |_| Ok(()),
+        )?;
+        let raw = result
+            .response_text
+            .ok_or_else(|| anyhow!("listen final review did not return any structured output"))?;
+        parse_agent_json(&raw, "final review")
+    } else {
+        heuristic_final_review_report(review)
+    }
+}
+
+async fn sync_review_tracking(
+    service: &LinearService<ReqwestLinearClient>,
+    issue: &IssueSummary,
+    context: &ListenTurnContext<'_>,
+    review: &ReviewReport,
+) -> Result<()> {
+    let body = render_review_workpad(issue, context, review);
+    let _ = service.upsert_workpad_comment(issue, body).await?;
+    if let Some(backlog_issue) = context.backlog_issue {
+        sync_backlog_progress_section(context.workspace_path, &backlog_issue.identifier, review)?;
+    }
+    Ok(())
+}
+
+fn render_review_workpad(
+    issue: &IssueSummary,
+    context: &ListenTurnContext<'_>,
+    review: &ReviewReport,
+) -> String {
+    let mut lines = vec![
+        "## Codex Workpad".to_string(),
+        String::new(),
+        format!("- Ticket: `{}`", issue.identifier),
+        format!("- Workspace: `{}`", context.workspace_path.display()),
+        format!("- Summary: {}", review.summary),
+        format!(
+            "- Completion status: {}",
+            if review.complete {
+                "complete"
+            } else {
+                "incomplete"
+            }
+        ),
+        String::new(),
+        "### Completed".to_string(),
+        String::new(),
+    ];
+    if review.completed_items.is_empty() {
+        lines.push("- [ ] No completed items recorded yet.".to_string());
+    } else {
+        for item in &review.completed_items {
+            lines.push(format!("- [x] {item}"));
+        }
+    }
+    lines.extend([String::new(), "### Remaining".to_string(), String::new()]);
+    if review.remaining_items.is_empty() {
+        lines.push("- [x] No remaining items identified.".to_string());
+    } else {
+        for item in &review.remaining_items {
+            lines.push(format!("- [ ] {item}"));
+        }
+    }
+    lines.extend([String::new(), "### Validation".to_string(), String::new()]);
+    for item in &review.validation_completed {
+        lines.push(format!("- [x] {item}"));
+    }
+    for item in &review.validation_remaining {
+        lines.push(format!("- [ ] {item}"));
+    }
+    if review.validation_completed.is_empty() && review.validation_remaining.is_empty() {
+        lines.push("- [ ] No explicit validation status recorded.".to_string());
+    }
+    if !review.risks.is_empty() || !review.notes.is_empty() {
+        lines.extend([String::new(), "### Review Notes".to_string(), String::new()]);
+        for item in &review.risks {
+            lines.push(format!("- Risk: {item}"));
+        }
+        for item in &review.notes {
+            lines.push(format!("- Note: {item}"));
+        }
+    }
+    lines.join("\n")
+}
+
+fn agent_backed_review_enabled() -> bool {
+    std::env::var("METASTACK_LISTEN_AGENT_REVIEW")
+        .ok()
+        .as_deref()
+        == Some("1")
+}
+
+fn heuristic_review_report(
+    issue: &IssueSummary,
+    context: &ListenTurnContext<'_>,
+    meaningful_turn_progress: bool,
+) -> Result<ReviewReport> {
+    let acceptance = extract_acceptance_criteria(issue.description.as_deref());
+    let validation = extract_validation_requirements(issue.description.as_deref());
+    let backlog_progress = context
+        .backlog_issue
+        .as_ref()
+        .map(|backlog_issue| {
+            backlog_progress_for_issue_dir(context.workspace_path, &backlog_issue.identifier)
+        })
+        .transpose()?;
+    let backlog_complete = backlog_progress
+        .as_ref()
+        .is_some_and(|progress| progress.total > 0 && progress.completed == progress.total);
+    let complete = backlog_complete || (meaningful_turn_progress && acceptance.is_empty());
+    let completed_items = if complete {
+        if acceptance.is_empty() {
+            vec![
+                "Workspace changes are present and no explicit acceptance criteria remain."
+                    .to_string(),
+            ]
+        } else {
+            acceptance.clone()
+        }
+    } else {
+        Vec::new()
+    };
+    let mut remaining_items = if complete {
+        Vec::new()
+    } else if let Some(progress) = backlog_progress.as_ref() {
+        progress.next_step.clone().into_iter().collect::<Vec<_>>()
+    } else {
+        acceptance.clone()
+    };
+    if remaining_items.is_empty() && !complete && !acceptance.is_empty() {
+        remaining_items = acceptance.clone();
+    }
+
+    Ok(ReviewReport {
+        summary: if complete {
+            "Heuristic review believes the ticket work is complete.".to_string()
+        } else {
+            "Heuristic review found remaining work.".to_string()
+        },
+        complete,
+        completed_items,
+        remaining_items,
+        validation_completed: if complete && !validation.is_empty() {
+            validation.clone()
+        } else {
+            Vec::new()
+        },
+        validation_remaining: if complete { Vec::new() } else { validation },
+        risks: Vec::new(),
+        notes: vec!["Using heuristic review; set `METASTACK_LISTEN_AGENT_REVIEW=1` to enable agent-backed review.".to_string()],
+    })
+}
+
+fn heuristic_final_review_report(review: &ReviewReport) -> Result<FinalReviewReport> {
+    Ok(FinalReviewReport {
+        approved: review.complete && review.validation_remaining.is_empty(),
+        summary: if review.complete && review.validation_remaining.is_empty() {
+            "Heuristic final review approved the ticket.".to_string()
+        } else {
+            "Heuristic final review found missing work or validation gaps.".to_string()
+        },
+        missing_items: review.remaining_items.clone(),
+        validation_gaps: review.validation_remaining.clone(),
+        risks: review.risks.clone(),
+        notes: vec!["Using heuristic final review; set `METASTACK_LISTEN_AGENT_REVIEW=1` to enable agent-backed review.".to_string()],
+    })
+}
+
+fn sync_backlog_progress_section(
+    workspace_path: &Path,
+    identifier: &str,
+    review: &ReviewReport,
+) -> Result<()> {
+    let path = PlanningPaths::new(workspace_path)
+        .backlog_issue_dir(identifier)
+        .join("index.md");
+    if !path.is_file() {
+        return Ok(());
+    }
+    let existing = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read `{}`", path.display()))?;
+    let rendered = render_backlog_progress_section(review);
+    let updated = upsert_marked_section(&existing, "metastack-listen-progress", &rendered);
+    write_text_file(&path, &updated, true)?;
+    Ok(())
+}
+
+fn render_backlog_progress_section(review: &ReviewReport) -> String {
+    let mut lines = vec![
+        "## Listener Progress Checklist".to_string(),
+        String::new(),
+        "### Completed".to_string(),
+        String::new(),
+    ];
+    if review.completed_items.is_empty() {
+        lines.push("- [ ] No completed items recorded yet.".to_string());
+    } else {
+        for item in &review.completed_items {
+            lines.push(format!("- [x] {item}"));
+        }
+    }
+    lines.extend([String::new(), "### Remaining".to_string(), String::new()]);
+    if review.remaining_items.is_empty() {
+        lines.push("- [x] No remaining items identified.".to_string());
+    } else {
+        for item in &review.remaining_items {
+            lines.push(format!("- [ ] {item}"));
+        }
+    }
+    lines.extend([String::new(), "### Validation".to_string(), String::new()]);
+    for item in &review.validation_completed {
+        lines.push(format!("- [x] {item}"));
+    }
+    for item in &review.validation_remaining {
+        lines.push(format!("- [ ] {item}"));
+    }
+    if review.validation_completed.is_empty() && review.validation_remaining.is_empty() {
+        lines.push("- [ ] No explicit validation status recorded.".to_string());
+    }
+    lines.join("\n")
+}
+
+fn upsert_marked_section(contents: &str, marker: &str, body: &str) -> String {
+    let start = format!("<!-- {marker}:start -->");
+    let end = format!("<!-- {marker}:end -->");
+    let replacement = format!("{start}\n{body}\n{end}");
+    if let Some(start_index) = contents.find(&start)
+        && let Some(end_index) = contents.find(&end)
+    {
+        let suffix_start = end_index + end.len();
+        return format!(
+            "{}{}{}",
+            &contents[..start_index],
+            replacement,
+            &contents[suffix_start..]
+        );
+    }
+    let mut updated = contents.trim_end().to_string();
+    if !updated.is_empty() {
+        updated.push_str("\n\n");
+    }
+    updated.push_str(&replacement);
+    updated.push('\n');
+    updated
 }
 
 fn build_worker_session(
@@ -1876,6 +2592,10 @@ fn build_worker_session(
     session_id: Option<&str>,
     canonical: &CanonicalSessionData,
 ) -> super::AgentSession {
+    let pid = match phase {
+        SessionPhase::Completed | SessionPhase::Blocked => None,
+        _ => context.pid.filter(|value| *value > 0),
+    };
     super::AgentSession {
         issue_id: Some(issue.id.clone()),
         issue_identifier: issue.identifier.clone(),
@@ -1909,7 +2629,7 @@ fn build_worker_session(
         pull_request: context.pull_request.clone(),
         workpad_comment_id: Some(context.workpad_comment_id.to_string()),
         updated_at_epoch_seconds: now_epoch_seconds(),
-        pid: context.pid.filter(|value| *value > 0),
+        pid,
         session_id: session_id.map(str::to_string),
         latest_resume_handle: context.latest_resume_handle.clone(),
         turns: Some(turns),
@@ -2432,7 +3152,7 @@ mod tests {
         };
 
         // Turn 2 with resume handle → continuation prompt, no instructions.
-        let resumed = super::build_listen_run_args(&issue, 2, &context, true)
+        let resumed = super::build_listen_run_args(&issue, 2, &context, None, true)
             .expect("build_listen_run_args should succeed");
         assert!(
             resumed.prompt.contains("Continuation guidance"),
@@ -2444,11 +3164,11 @@ mod tests {
         );
 
         // Turn 2 without resume handle → full prompt with instructions.
-        let cold = super::build_listen_run_args(&issue, 2, &context, false)
+        let cold = super::build_listen_run_args(&issue, 2, &context, None, false)
             .expect("build_listen_run_args should succeed");
         assert!(
-            cold.prompt.contains("You are working on Linear ticket"),
-            "cold turn 2 should use full prompt"
+            cold.prompt.contains("Execution continuation"),
+            "cold turn 2 should use compact continuation prompt"
         );
         assert!(
             cold.instructions.is_some(),
@@ -2495,7 +3215,7 @@ mod tests {
         };
 
         // Turn 1 with resume handle should still use full prompt (initial context load).
-        let result = super::build_listen_run_args(&issue, 1, &context, true)
+        let result = super::build_listen_run_args(&issue, 1, &context, None, true)
             .expect("build_listen_run_args should succeed");
         assert!(
             result.prompt.contains("You are working on Linear ticket"),
@@ -2508,24 +3228,7 @@ mod tests {
     }
 
     #[test]
-    fn classify_listen_task_mode_detects_plan_label() {
-        let app_config = crate::config::AppConfig::default();
-        let mut planning_meta = crate::config::PlanningMeta::default();
-        planning_meta.issue_labels.plan = Some("plan".to_string());
-        let mut issue = test_issue("MET-57");
-        issue.labels.push(crate::linear::LabelRef {
-            id: "label-plan".to_string(),
-            name: "plan".to_string(),
-        });
-
-        assert_eq!(
-            super::classify_listen_task_mode(&issue, &app_config, &planning_meta),
-            super::ListenTaskMode::Planning
-        );
-    }
-
-    #[test]
-    fn build_agent_instructions_for_planning_ticket_allows_planning_outputs() {
+    fn build_agent_instructions_executes_ticket_without_label_based_modes() {
         let temp = tempdir().expect("tempdir should build");
         let workspace = temp.path();
         let source_root = temp.path();
@@ -2535,8 +3238,7 @@ mod tests {
         fs::write(workspace.join("AGENTS.md"), "legacy").expect("agents should write");
 
         let app_config = crate::config::AppConfig::default();
-        let mut planning_meta = crate::config::PlanningMeta::default();
-        planning_meta.issue_labels.plan = Some("plan".to_string());
+        let planning_meta = crate::config::PlanningMeta::default();
         let args = crate::cli::ListenWorkerArgs {
             source_root: source_root.to_path_buf(),
             project: None,
@@ -2553,11 +3255,7 @@ mod tests {
             model: None,
             reasoning: None,
         };
-        let mut issue = test_issue("MET-57");
-        issue.labels.push(crate::linear::LabelRef {
-            id: "label-plan".to_string(),
-            name: "plan".to_string(),
-        });
+        let issue = test_issue("MET-57");
         let context = super::ListenTurnContext {
             app_config: &app_config,
             planning_meta: &planning_meta,
@@ -2574,16 +3272,39 @@ mod tests {
             .expect("instructions should build");
 
         assert!(instructions.contains("Treat the Linear ticket title, description, labels, and attached instructions as the primary work contract."));
-        assert!(
-            instructions.contains("Shipping the requested plan, spec, or proposal is sufficient")
-        );
-        assert!(
-            instructions.contains(
-                "do not invent extra implementation work or deeper technical decomposition"
-            )
-        );
+        assert!(instructions.contains("Execute the requested work directly"));
+        assert!(instructions.contains("meaningful workspace updates"));
         assert!(instructions.contains("WORKFLOW.md"));
         assert!(!instructions.contains("refine the workpad plan and acceptance criteria"));
+        assert!(!instructions.contains("plan/spec oriented"));
+    }
+
+    #[test]
+    fn parse_agent_json_accepts_fenced_payloads() {
+        let parsed: super::ReviewReport = super::parse_agent_json(
+            "```json\n{\"summary\":\"ok\",\"complete\":false,\"remaining_items\":[\"finish docs\"]}\n```",
+            "review",
+        )
+        .expect("review json should parse");
+
+        assert_eq!(parsed.summary, "ok");
+        assert_eq!(parsed.remaining_items, vec!["finish docs"]);
+    }
+
+    #[test]
+    fn upsert_marked_section_replaces_existing_managed_block() {
+        let original = "\
+# Title
+
+<!-- metastack-listen-progress:start -->
+old
+<!-- metastack-listen-progress:end -->
+";
+        let updated =
+            super::upsert_marked_section(original, "metastack-listen-progress", "new body");
+
+        assert!(updated.contains("new body"));
+        assert!(!updated.contains("\nold\n"));
     }
 
     #[test]

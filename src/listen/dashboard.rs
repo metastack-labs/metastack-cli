@@ -1208,6 +1208,15 @@ fn phase_style(phase: SessionPhase) -> Style {
         SessionPhase::Running => Style::default()
             .fg(Color::Green)
             .add_modifier(Modifier::BOLD),
+        SessionPhase::Reviewing => Style::default()
+            .fg(Color::Blue)
+            .add_modifier(Modifier::BOLD),
+        SessionPhase::FinalReview => Style::default()
+            .fg(Color::Blue)
+            .add_modifier(Modifier::BOLD),
+        SessionPhase::Publishing => Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
         SessionPhase::Paused => Style::default()
             .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD),

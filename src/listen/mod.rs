@@ -909,10 +909,6 @@ struct BacklogProgress {
 }
 
 impl BacklogProgress {
-    fn is_complete(&self) -> bool {
-        self.total > 0 && self.completed == self.total
-    }
-
     fn compact_label(&self) -> Option<String> {
         (self.total > 0).then(|| format!("{}/{} tasks", self.completed, self.total))
     }
