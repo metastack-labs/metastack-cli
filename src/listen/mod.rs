@@ -908,12 +908,6 @@ struct BacklogProgress {
     next_step: Option<String>,
 }
 
-impl BacklogProgress {
-    fn compact_label(&self) -> Option<String> {
-        (self.total > 0).then(|| format!("{}/{} tasks", self.completed, self.total))
-    }
-}
-
 #[derive(Debug, Clone, Default)]
 struct TurnProgress {
     planning_entries: Vec<String>,
@@ -976,16 +970,19 @@ fn compact_session_summary(parts: impl IntoIterator<Item = Option<String>>) -> S
     }
 }
 
-fn backlog_progress_summary(progress: Option<&BacklogProgress>) -> Option<String> {
-    progress.and_then(|progress| {
-        progress.compact_label().map(|label| {
-            if let Some(next_step) = progress.next_step.as_deref() {
-                format!("{label} - next: {}", truncate_summary(next_step, 56))
-            } else {
-                label
-            }
-        })
-    })
+fn ticket_progress_summary(description: Option<&str>) -> String {
+    let acceptance = extract_linear_acceptance_criteria(description);
+    if acceptance.is_empty() {
+        "Work in progress".to_string()
+    } else {
+        let count = acceptance.len();
+        let noun = if count == 1 {
+            "acceptance criterion"
+        } else {
+            "acceptance criteria"
+        };
+        format!("Linear: {count} {noun}")
+    }
 }
 
 fn turn_counter_summary(turn: u32, max_turns: u32) -> String {
@@ -1036,39 +1033,35 @@ fn compact_pickup_summary(
 }
 
 fn compact_running_summary(
-    progress: Option<&BacklogProgress>,
+    description: Option<&str>,
     turns_completed: u32,
     max_turns: u32,
     stalled_turns: u32,
 ) -> String {
     compact_session_summary([
-        backlog_progress_summary(progress),
+        Some(ticket_progress_summary(description)),
         Some(turn_counter_summary(turns_completed, max_turns)),
         stalled_turns_summary(stalled_turns),
     ])
 }
 
 fn compact_completed_summary(
-    progress: Option<&BacklogProgress>,
+    description: Option<&str>,
     turns_completed: u32,
     state_label: &str,
 ) -> String {
     compact_session_summary([
         Some("Complete".to_string()),
-        backlog_progress_summary(progress),
+        Some(ticket_progress_summary(description)),
         Some(format!("{turns_completed} turn(s)")),
         Some(format!("moved to `{state_label}`")),
     ])
 }
 
-fn compact_blocked_summary(
-    headline: &str,
-    progress: Option<&BacklogProgress>,
-    log_path: &Path,
-) -> String {
+fn compact_blocked_summary(headline: &str, description: Option<&str>, log_path: &Path) -> String {
     compact_session_summary([
         Some(headline.to_string()),
-        backlog_progress_summary(progress),
+        Some(ticket_progress_summary(description)),
         Some(log_reference_summary(log_path)),
     ])
 }
@@ -1308,7 +1301,7 @@ where
         let mut reconciled = Vec::with_capacity(existing_sessions.len());
 
         for mut session in existing_sessions {
-            let issue = match self.service.load_issue(&session.issue_identifier).await {
+            let mut issue = match self.service.load_issue(&session.issue_identifier).await {
                 Ok(issue) => issue,
                 Err(error) => {
                     notes.push(format!(
@@ -1325,6 +1318,50 @@ where
             session.project_name = issue.project.as_ref().map(|project| project.name.clone());
             session.team_key = issue.team.key.clone();
             session.issue_url = issue.url.clone();
+
+            if !matches!(session.phase, SessionPhase::Completed)
+                && normalize_issue_state_name(issue_state_label(&issue).as_str()) == "todo"
+                && self.session_drop_reason(&issue).is_none()
+            {
+                match self
+                    .service
+                    .edit_issue(IssueEditSpec {
+                        identifier: issue.identifier.clone(),
+                        title: None,
+                        description: None,
+                        project: None,
+                        state: Some(IN_PROGRESS_STATE.to_string()),
+                        priority: None,
+                        estimate: None,
+                        labels: None,
+                        parent_identifier: None,
+                    })
+                    .await
+                {
+                    Ok(updated_issue) => {
+                        issue = updated_issue;
+                        session.issue_title = issue.title.clone();
+                        session.project_name =
+                            issue.project.as_ref().map(|project| project.name.clone());
+                        session.team_key = issue.team.key.clone();
+                        session.issue_url = issue.url.clone();
+                        session.updated_at_epoch_seconds = now_epoch_seconds();
+                        notes.push(format!(
+                            "{} was observed back in Todo while a `{}` session existed; restored it to `{}`.",
+                            issue.identifier,
+                            session.phase.label(),
+                            IN_PROGRESS_STATE
+                        ));
+                    }
+                    Err(error) => {
+                        notes.push(format!(
+                            "Failed to restore {} from Todo to `{}` during session reconciliation: {error:#}.",
+                            issue.identifier,
+                            IN_PROGRESS_STATE
+                        ));
+                    }
+                }
+            }
 
             if !listen_issue_is_active(issue.state.as_ref().map(|state| state.name.as_str())) {
                 if !matches!(session.phase, SessionPhase::Completed) {
@@ -1365,10 +1402,11 @@ where
             ) {
                 if normalize_issue_state_name(issue_state_label(&issue).as_str()) == "todo" {
                     notes.push(format!(
-                        "{} returned to Todo; clearing the previous `{}` session so it can be picked up again.",
+                        "{} returned to Todo; retaining the previous `{}` session to avoid automatic re-pickup churn.",
                         issue.identifier,
                         session.phase.label()
                     ));
+                    reconciled.push(session);
                     continue;
                 }
 
@@ -2239,6 +2277,62 @@ fn checklist_item_label(line: &str) -> Option<String> {
         .trim_start_matches(|ch: char| ch.is_ascii_digit() || ch == '.' || ch == '\\')
         .trim();
     (!item.is_empty()).then(|| item.to_string())
+}
+
+fn extract_linear_acceptance_criteria(description: Option<&str>) -> Vec<String> {
+    extract_markdown_section_bullets(
+        description.unwrap_or_default(),
+        &["Acceptance Criteria", "Acceptance", "Requirements"],
+    )
+}
+
+fn extract_markdown_section_bullets(body: &str, headings: &[&str]) -> Vec<String> {
+    let section = extract_markdown_section(body, headings).unwrap_or_default();
+    section
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            trimmed
+                .strip_prefix("- ")
+                .or_else(|| trimmed.strip_prefix("* "))
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+fn extract_markdown_section(body: &str, headings: &[&str]) -> Option<String> {
+    let normalized_headings = headings
+        .iter()
+        .map(|heading| heading.trim().to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    let mut current_heading: Option<String> = None;
+    let mut section_lines = Vec::new();
+
+    for raw_line in body.lines() {
+        let trimmed = raw_line.trim();
+        if let Some(heading) = trimmed.strip_prefix('#') {
+            let normalized = heading.trim_matches('#').trim().to_ascii_lowercase();
+            if normalized_headings
+                .iter()
+                .any(|candidate| candidate == &normalized)
+            {
+                current_heading = Some(normalized);
+                section_lines.clear();
+                continue;
+            }
+            if current_heading.is_some() {
+                break;
+            }
+        }
+
+        if current_heading.is_some() {
+            section_lines.push(raw_line.to_string());
+        }
+    }
+
+    (!section_lines.is_empty()).then(|| section_lines.join("\n"))
 }
 
 async fn try_transition_issue_to_review_state<C>(
@@ -4041,11 +4135,12 @@ impl Drop for TerminalCleanup {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentDaemon, AgentSession, CanonicalSessionData, DashboardRuntimeContext, ListenCycleData,
-        ListenState, PullRequestSummary, SessionOrigin, SessionPhase, TODO_STATE, TokenUsage,
-        capture_workspace_snapshot, compact_identifier, format_duration, format_number,
-        listen_browser_action, listen_scope_label, mark_running_session_stale, render_agent_prompt,
-        render_continuation_prompt, required_label_skip_reason,
+        AgentDaemon, AgentSession, CanonicalSessionData, DashboardRuntimeContext,
+        IN_PROGRESS_STATE, ListenCycleData, ListenState, PullRequestSummary, SessionOrigin,
+        SessionPhase, TODO_STATE, TokenUsage, capture_workspace_snapshot, compact_identifier,
+        format_duration, format_number, listen_browser_action, listen_scope_label,
+        mark_running_session_stale, render_agent_prompt, render_continuation_prompt,
+        required_label_skip_reason,
     };
     use crate::config::{
         AppConfig, LinearConfig, ListenAssignmentScope, ListenRefreshPolicy,
@@ -4054,7 +4149,7 @@ mod tests {
     use crate::linear::{
         AttachmentCreateRequest, AttachmentSummary, IssueComment, IssueCreateRequest,
         IssueLabelCreateRequest, IssueListFilters, IssueSummary, IssueUpdateRequest, LabelRef,
-        LinearClient, LinearService, ProjectSummary, TeamRef, TeamSummary, UserRef,
+        LinearClient, LinearService, ProjectSummary, TeamRef, TeamSummary, UserRef, WorkflowState,
     };
     use crate::listen::dashboard::SessionBrowserAction;
     use crate::listen::store::ListenProjectStore;
@@ -5301,6 +5396,108 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn reconcile_sessions_restores_todo_issue_to_in_progress_when_session_exists()
+    -> Result<()> {
+        let temp = tempdir()?;
+        let repo = temp.path();
+        fs::create_dir_all(repo.join(crate::branding::PROJECT_DIR))?;
+        run_git(repo, &["init"])?;
+        run_git(repo, &["config", "user.email", "listen@example.com"])?;
+        run_git(repo, &["config", "user.name", "Listen Tests"])?;
+        fs::write(repo.join("README.md"), "# Demo\n")?;
+        run_git(repo, &["add", "README.md"])?;
+        run_git(repo, &["commit", "-m", "init"])?;
+
+        let store = ListenProjectStore::resolve(repo, None)?;
+        let issue = todo_issue();
+        let edits = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let client = TodoRecoveryClient {
+            issue: issue.clone(),
+            edits: edits.clone(),
+        };
+        let service = LinearService::new(client, Some("MET".to_string()));
+        let daemon = AgentDaemon {
+            root: repo.to_path_buf(),
+            store,
+            filters: IssueListFilters {
+                state: Some(TODO_STATE.to_string()),
+                limit: 25,
+                ..IssueListFilters::default()
+            },
+            max_pickups: 1,
+            linear_config: LinearConfig {
+                api_key: "token".to_string(),
+                api_url: "https://linear.example/graphql".to_string(),
+                default_team: Some("MET".to_string()),
+            },
+            app_config: AppConfig::default(),
+            planning_meta: PlanningMeta::default(),
+            worker_agent: None,
+            worker_model: None,
+            worker_reasoning: None,
+            listen_settings: PlanningListenSettings {
+                required_labels: None,
+                assignment_scope: Some(ListenAssignmentScope::ViewerOrUnassigned),
+                refresh_policy: Some(ListenRefreshPolicy::ReuseAndRefresh),
+                instructions_path: None,
+                poll_interval_seconds: None,
+                dashboard_active_issues: None,
+                dashboard_preview: None,
+            },
+            viewer: Some(UserRef {
+                id: "viewer-1".to_string(),
+                name: "Kames".to_string(),
+                email: Some("sudo@example.com".to_string()),
+            }),
+            service,
+        };
+        let mut state = ListenState::from_sessions(vec![super::AgentSession {
+            issue_id: Some(issue.id.clone()),
+            issue_identifier: issue.identifier.clone(),
+            issue_title: issue.title.clone(),
+            project_name: issue.project.as_ref().map(|project| project.name.clone()),
+            team_key: issue.team.key.clone(),
+            issue_url: issue.url.clone(),
+            phase: SessionPhase::Blocked,
+            summary: "Blocked | waiting for follow-up".to_string(),
+            brief_path: None,
+            backlog_issue_identifier: None,
+            backlog_issue_title: None,
+            backlog_path: None,
+            workspace_path: Some(repo.join("workspace").display().to_string()),
+            branch: Some("met-89-recovery".to_string()),
+            pull_request: PullRequestSummary::default(),
+            workpad_comment_id: Some("comment-89".to_string()),
+            updated_at_epoch_seconds: 1_773_575_000,
+            pid: None,
+            session_id: Some(issue.id.clone()),
+            turns: Some(1),
+            tokens: TokenUsage::default(),
+            turn_history: Vec::new(),
+            canonical: CanonicalSessionData::default(),
+            log_path: None,
+            latest_resume_handle: None,
+            origin: SessionOrigin::Listen,
+        }]);
+        let mut notes = Vec::new();
+
+        daemon.reconcile_sessions(&mut state, &mut notes).await?;
+
+        let edits = edits.lock().expect("edits lock should succeed");
+        assert_eq!(edits.as_slice(), &["state-2".to_string()]);
+        assert_eq!(state.sessions.len(), 1);
+        assert_eq!(state.sessions[0].phase, SessionPhase::Blocked);
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.contains("restored it to `In Progress`")),
+            "expected Todo recovery note, got {notes:?}"
+        );
+
+        Ok(())
+    }
+
     fn reassigned_issue() -> IssueSummary {
         IssueSummary {
             id: "issue-88".to_string(),
@@ -5331,6 +5528,43 @@ mod tests {
                 id: "state-2".to_string(),
                 name: "In Progress".to_string(),
                 kind: Some("started".to_string()),
+            }),
+            attachments: Vec::new(),
+            parent: None,
+            children: Vec::new(),
+        }
+    }
+
+    fn todo_issue() -> IssueSummary {
+        IssueSummary {
+            id: "issue-89".to_string(),
+            identifier: "MET-89".to_string(),
+            title: "Returned to todo".to_string(),
+            description: Some("Unexpectedly moved back to Todo".to_string()),
+            url: "https://linear.app/issues/89".to_string(),
+            priority: Some(2),
+            estimate: None,
+            updated_at: "2026-03-14T16:00:00Z".to_string(),
+            team: crate::linear::TeamRef {
+                id: "team-1".to_string(),
+                key: "MET".to_string(),
+                name: "Metastack".to_string(),
+            },
+            project: Some(crate::linear::ProjectRef {
+                id: "project-1".to_string(),
+                name: "MetaStack CLI".to_string(),
+            }),
+            assignee: Some(UserRef {
+                id: "viewer-1".to_string(),
+                name: "Kames".to_string(),
+                email: Some("sudo@example.com".to_string()),
+            }),
+            labels: Vec::new(),
+            comments: Vec::new(),
+            state: Some(crate::linear::WorkflowState {
+                id: "state-1".to_string(),
+                name: TODO_STATE.to_string(),
+                kind: Some("unstarted".to_string()),
             }),
             attachments: Vec::new(),
             parent: None,
@@ -5394,6 +5628,125 @@ mod tests {
             _request: IssueUpdateRequest,
         ) -> Result<IssueSummary> {
             unreachable!("update_issue is not used in this test")
+        }
+
+        async fn create_comment(&self, _issue_id: &str, _body: String) -> Result<IssueComment> {
+            unreachable!("create_comment is not used in this test")
+        }
+
+        async fn update_comment(&self, _comment_id: &str, _body: String) -> Result<IssueComment> {
+            unreachable!("update_comment is not used in this test")
+        }
+
+        async fn upload_file(
+            &self,
+            _filename: &str,
+            _content_type: &str,
+            _contents: Vec<u8>,
+        ) -> Result<String> {
+            unreachable!("upload_file is not used in this test")
+        }
+
+        async fn create_attachment(
+            &self,
+            _request: AttachmentCreateRequest,
+        ) -> Result<AttachmentSummary> {
+            unreachable!("create_attachment is not used in this test")
+        }
+
+        async fn delete_attachment(&self, _attachment_id: &str) -> Result<()> {
+            unreachable!("delete_attachment is not used in this test")
+        }
+
+        async fn download_file(&self, _url: &str) -> Result<Vec<u8>> {
+            unreachable!("download_file is not used in this test")
+        }
+    }
+
+    #[derive(Clone)]
+    struct TodoRecoveryClient {
+        issue: IssueSummary,
+        edits: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl LinearClient for TodoRecoveryClient {
+        async fn list_projects(&self, _limit: usize) -> Result<Vec<ProjectSummary>> {
+            unreachable!("list_projects is not used in this test")
+        }
+
+        async fn list_users(&self, _limit: usize) -> Result<Vec<UserRef>> {
+            unreachable!("list_users is not used in this test")
+        }
+
+        async fn list_issues(&self, _limit: usize) -> Result<Vec<IssueSummary>> {
+            Ok(vec![self.issue.clone()])
+        }
+
+        async fn list_filtered_issues(
+            &self,
+            _filters: &IssueListFilters,
+        ) -> Result<Vec<IssueSummary>> {
+            Ok(vec![self.issue.clone()])
+        }
+
+        async fn list_issue_labels(&self, _team: Option<&str>) -> Result<Vec<LabelRef>> {
+            unreachable!("list_issue_labels is not used in this test")
+        }
+
+        async fn get_issue(&self, _issue_id: &str) -> Result<IssueSummary> {
+            Ok(self.issue.clone())
+        }
+
+        async fn list_teams(&self) -> Result<Vec<TeamSummary>> {
+            Ok(vec![TeamSummary {
+                id: "team-1".to_string(),
+                key: "MET".to_string(),
+                name: "Metastack".to_string(),
+                states: vec![
+                    WorkflowState {
+                        id: "state-1".to_string(),
+                        name: TODO_STATE.to_string(),
+                        kind: Some("unstarted".to_string()),
+                    },
+                    WorkflowState {
+                        id: "state-2".to_string(),
+                        name: IN_PROGRESS_STATE.to_string(),
+                        kind: Some("started".to_string()),
+                    },
+                ],
+            }])
+        }
+
+        async fn viewer(&self) -> Result<UserRef> {
+            unreachable!("viewer is not used in this test")
+        }
+
+        async fn create_issue(&self, _request: IssueCreateRequest) -> Result<IssueSummary> {
+            unreachable!("create_issue is not used in this test")
+        }
+
+        async fn create_issue_label(&self, _request: IssueLabelCreateRequest) -> Result<LabelRef> {
+            unreachable!("create_issue_label is not used in this test")
+        }
+
+        async fn update_issue(
+            &self,
+            _issue_id: &str,
+            request: IssueUpdateRequest,
+        ) -> Result<IssueSummary> {
+            self.edits
+                .lock()
+                .expect("edits lock should succeed")
+                .push(request.state_id.unwrap_or_default());
+            Ok(IssueSummary {
+                state: Some(WorkflowState {
+                    id: "state-2".to_string(),
+                    name: IN_PROGRESS_STATE.to_string(),
+                    kind: Some("started".to_string()),
+                }),
+                ..self.issue.clone()
+            })
         }
 
         async fn create_comment(&self, _issue_id: &str, _body: String) -> Result<IssueComment> {

@@ -576,6 +576,8 @@ impl ListenState {
                         | SessionPhase::BriefReady
                         | SessionPhase::Running
                         | SessionPhase::Paused
+                        | SessionPhase::Completed
+                        | SessionPhase::Blocked
                 )
         })
     }

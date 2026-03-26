@@ -30,8 +30,7 @@ use crate::config_resolution::{AgentConfigOverrides, normalize_agent_name, resol
 use crate::fs::sibling_workspace_root;
 use crate::fs::{PlanningPaths, canonicalize_existing_dir, write_text_file};
 use crate::github_pr::{
-    GhCli, PullRequestLifecycleAction, PullRequestLifecycleResult, PullRequestPublishMode,
-    PullRequestPublishRequest,
+    GhCli, PullRequestLifecycleResult, PullRequestPublishMode, PullRequestPublishRequest,
 };
 use crate::linear::{
     AttachmentCreateRequest, IssueListFilters, IssueSummary, LinearClient, LinearService,
@@ -164,12 +163,6 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
     .await
     {
         write_preflight_failure(&log_path, &error)?;
-        let backlog_progress = backlog_issue
-            .as_ref()
-            .map(|backlog_issue| {
-                backlog_progress_for_issue_dir(&workspace_path, &backlog_issue.identifier)
-            })
-            .transpose()?;
         write_listen_session(
             &source_root,
             project_selector,
@@ -178,7 +171,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                 SessionPhase::Blocked,
                 compact_blocked_summary(
                     "Blocked | missing exec capability",
-                    backlog_progress.as_ref(),
+                    issue.description.as_deref(),
                     &log_path,
                 ),
                 &session_context,
@@ -197,7 +190,11 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                 build_worker_session(
                     &issue,
                     SessionPhase::Completed,
-                    compact_completed_summary(None, turns_completed, &issue_state_label(&issue)),
+                    compact_completed_summary(
+                        issue.description.as_deref(),
+                        turns_completed,
+                        &issue_state_label(&issue),
+                    ),
                     &session_context,
                     turns_completed,
                     provider_session_id.as_deref(),
@@ -209,12 +206,6 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
         }
 
         if turns_completed >= args.max_turns {
-            let backlog_progress = backlog_issue
-                .as_ref()
-                .map(|backlog_issue| {
-                    backlog_progress_for_issue_dir(&workspace_path, &backlog_issue.identifier)
-                })
-                .transpose()?;
             write_listen_session(
                 &source_root,
                 project_selector,
@@ -223,7 +214,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     SessionPhase::Blocked,
                     compact_blocked_summary(
                         "Blocked | turn limit reached",
-                        backlog_progress.as_ref(),
+                        issue.description.as_deref(),
                         &log_path,
                     ),
                     &session_context,
@@ -237,12 +228,6 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
 
         let turn_number = turns_completed + 1;
         let snapshot_before = capture_workspace_snapshot(&workspace_path, &args.issue)?;
-        let backlog_progress_before = backlog_issue
-            .as_ref()
-            .map(|backlog_issue| {
-                backlog_progress_for_issue_dir(&workspace_path, &backlog_issue.identifier)
-            })
-            .transpose()?;
         write_listen_session(
             &source_root,
             project_selector,
@@ -250,7 +235,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                 &issue,
                 SessionPhase::Running,
                 compact_running_summary(
-                    backlog_progress_before.as_ref(),
+                    issue.description.as_deref(),
                     turn_number,
                     args.max_turns,
                     0,
@@ -298,7 +283,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                         &issue,
                         SessionPhase::Running,
                         compact_running_summary(
-                            backlog_progress_before.as_ref(),
+                            issue.description.as_deref(),
                             turn_number,
                             args.max_turns,
                             0,
@@ -325,7 +310,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                         &issue,
                         SessionPhase::Running,
                         compact_running_summary(
-                            backlog_progress_before.as_ref(),
+                            issue.description.as_deref(),
                             turn_number,
                             args.max_turns,
                             0,
@@ -377,7 +362,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                                 &issue,
                                 SessionPhase::Running,
                                 compact_running_summary(
-                                    backlog_progress_before.as_ref(),
+                                    issue.description.as_deref(),
                                     turn_number,
                                     args.max_turns,
                                     0,
@@ -404,7 +389,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                                 &issue,
                                 SessionPhase::Running,
                                 compact_running_summary(
-                                    backlog_progress_before.as_ref(),
+                                    issue.description.as_deref(),
                                     turn_number,
                                     args.max_turns,
                                     0,
@@ -435,7 +420,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                                         "Blocked | turn {turn_number}/{} failed (resume retry)",
                                         args.max_turns
                                     ),
-                                    backlog_progress_before.as_ref(),
+                                    issue.description.as_deref(),
                                     &log_path,
                                 ),
                                 &session_context,
@@ -457,7 +442,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                         SessionPhase::Blocked,
                         compact_blocked_summary(
                             &format!("Blocked | turn {turn_number}/{} failed", args.max_turns),
-                            backlog_progress_before.as_ref(),
+                            issue.description.as_deref(),
                             &log_path,
                         ),
                         &session_context,
@@ -545,6 +530,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
             &issue,
             turn_number,
             meaningful_turn_progress,
+            &turn_progress,
             &turn_context,
             WorkerPhaseContext {
                 source_root: &source_root,
@@ -597,13 +583,38 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                 let branch = branch.as_deref().ok_or_else(|| {
                     anyhow!("failed to inspect the workspace branch before promoting the review PR")
                 })?;
-                let pull_request = prepare_listener_pull_request_for_review(
+                let pull_request = match prepare_listener_pull_request_for_review(
                     &service,
                     &issue,
                     &workspace_path,
                     branch,
+                    &session_context.pull_request,
+                    &review,
                 )
-                .await?;
+                .await
+                {
+                    Ok(pull_request) => pull_request,
+                    Err(error) => {
+                        write_listen_session(
+                            &source_root,
+                            project_selector,
+                            build_worker_session(
+                                &issue,
+                                SessionPhase::Blocked,
+                                compact_blocked_summary(
+                                    "Blocked | failed to prepare GitHub PR for review",
+                                    issue.description.as_deref(),
+                                    &log_path,
+                                ),
+                                &session_context,
+                                turns_completed,
+                                provider_session_id.as_deref(),
+                                &session_context.canonical,
+                            ),
+                        )?;
+                        return Err(error);
+                    }
+                };
                 session_context.pull_request = pull_request
                     .map(PullRequestSummary::from)
                     .unwrap_or_default();
@@ -630,7 +641,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
 
                 if review_transition_applied {
                     let summary = compact_completed_summary(
-                        backlog_progress.as_ref(),
+                        refreshed_issue.description.as_deref(),
                         turns_completed,
                         &issue_state_label(&refreshed_issue),
                     );
@@ -664,7 +675,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                         SessionPhase::Blocked,
                         compact_blocked_summary(
                             "Blocked | final review passed but review transition failed",
-                            backlog_progress.as_ref(),
+                            refreshed_issue.description.as_deref(),
                             &log_path,
                         ),
                         &session_context,
@@ -689,7 +700,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
             last_review = Some(follow_up_review);
         }
 
-        if let Some(progress) = backlog_progress {
+        if backlog_progress.is_some() {
             if let Some(branch) = branch.as_deref() {
                 if let Some(pull_request) = publish_listener_pull_request(
                     &service,
@@ -697,6 +708,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     &workspace_path,
                     branch,
                     PullRequestPublishMode::Draft,
+                    last_review.as_ref(),
                 )
                 .await?
                 .map(PullRequestSummary::from)
@@ -714,7 +726,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                         SessionPhase::Blocked,
                         compact_blocked_summary(
                             &format!("Blocked | stalled after {stalled_turns} turn(s)"),
-                            Some(&progress),
+                            issue.description.as_deref(),
                             &log_path,
                         ),
                         &session_context,
@@ -733,7 +745,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     &issue,
                     SessionPhase::Running,
                     compact_running_summary(
-                        Some(&progress),
+                        issue.description.as_deref(),
                         turns_completed,
                         args.max_turns,
                         stalled_turns,
@@ -751,7 +763,12 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                 build_worker_session(
                     &issue,
                     SessionPhase::Running,
-                    compact_running_summary(None, turns_completed, args.max_turns, stalled_turns),
+                    compact_running_summary(
+                        issue.description.as_deref(),
+                        turns_completed,
+                        args.max_turns,
+                        stalled_turns,
+                    ),
                     &session_context,
                     turns_completed,
                     provider_session_id.as_deref(),
@@ -1001,7 +1018,7 @@ fn listener_linear_identifier_pr_label(issue: &IssueSummary) -> String {
     format!("id-{}", issue.identifier)
 }
 
-fn listener_pull_request_body(issue: &IssueSummary) -> String {
+fn listener_pull_request_body(issue: &IssueSummary, review: Option<&ReviewReport>) -> String {
     let mut lines = vec![
         format!("# {}", listener_pull_request_title(issue)),
         String::new(),
@@ -1012,12 +1029,45 @@ fn listener_pull_request_body(issue: &IssueSummary) -> String {
             crate::branding::COMMAND_NAME,
             issue.identifier,
         ),
+    ];
+
+    if let Some(review) = review {
+        lines.push(format!("- Latest listener review: {}", review.summary));
+    }
+
+    lines.extend([
         String::new(),
         "## Lifecycle".to_string(),
         "- Initial publication uses a draft PR for unattended work in progress.".to_string(),
         "- The same PR is promoted to ready for review during the existing review handoff."
             .to_string(),
-    ];
+    ]);
+
+    if let Some(review) = review {
+        if !review.completed_items.is_empty() {
+            lines.extend([String::new(), "## Completed In This Branch".to_string()]);
+            for item in &review.completed_items {
+                lines.push(format!("- {item}"));
+            }
+        }
+
+        if !review.remaining_items.is_empty() {
+            lines.extend([String::new(), "## Remaining Work".to_string()]);
+            for item in &review.remaining_items {
+                lines.push(format!("- {item}"));
+            }
+        }
+
+        if !review.validation_completed.is_empty() || !review.validation_remaining.is_empty() {
+            lines.extend([String::new(), "## Validation".to_string()]);
+            for item in &review.validation_completed {
+                lines.push(format!("- Completed: {item}"));
+            }
+            for item in &review.validation_remaining {
+                lines.push(format!("- Remaining: {item}"));
+            }
+        }
+    }
 
     if let Some(description) = issue.description.as_deref()
         && !description.trim().is_empty()
@@ -1033,33 +1083,13 @@ fn listener_pull_request_body(issue: &IssueSummary) -> String {
 fn write_listener_pull_request_body(
     workspace_path: &Path,
     issue: &IssueSummary,
+    review: Option<&ReviewReport>,
 ) -> Result<std::path::PathBuf> {
     let path = PlanningPaths::new(workspace_path)
         .agent_dir
         .join(format!("{}-pull-request.md", issue.identifier));
-    write_text_file(&path, &listener_pull_request_body(issue), true)?;
+    write_text_file(&path, &listener_pull_request_body(issue, review), true)?;
     Ok(path)
-}
-
-fn workspace_branch_is_published(workspace_path: &Path, branch: &str) -> Result<bool> {
-    let remote_ref = format!("refs/remotes/origin/{branch}");
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(workspace_path)
-        .args(["show-ref", "--verify", "--quiet", &remote_ref])
-        .output()
-        .with_context(|| format!("failed to run `git show-ref --verify --quiet {remote_ref}`"))?;
-    if output.status.success() {
-        return Ok(true);
-    }
-    if output.status.code() == Some(1) {
-        return Ok(false);
-    }
-    bail!(
-        "git show-ref --verify --quiet {} failed: {}",
-        remote_ref,
-        String::from_utf8_lossy(&output.stderr).trim()
-    )
 }
 
 fn ensure_listener_pull_request_label(
@@ -1130,6 +1160,7 @@ async fn publish_listener_pull_request<C>(
     workspace_path: &Path,
     branch: &str,
     mode: PullRequestPublishMode,
+    review: Option<&ReviewReport>,
 ) -> Result<Option<PullRequestLifecycleResult>>
 where
     C: LinearClient,
@@ -1137,12 +1168,9 @@ where
     if branch.eq_ignore_ascii_case(LISTEN_PULL_REQUEST_BASE_BRANCH) {
         return Ok(None);
     }
-    if !workspace_branch_is_published(workspace_path, branch)? {
-        return Ok(None);
-    }
 
     let gh = GhCli;
-    let body_path = write_listener_pull_request_body(workspace_path, issue)?;
+    let body_path = write_listener_pull_request_body(workspace_path, issue, review)?;
     let title = listener_pull_request_title(issue);
     let pull_request = gh.publish_branch_pull_request(
         workspace_path,
@@ -1164,6 +1192,8 @@ async fn prepare_listener_pull_request_for_review<C>(
     issue: &IssueSummary,
     workspace_path: &Path,
     branch: &str,
+    existing_pull_request: &PullRequestSummary,
+    review: &ReviewReport,
 ) -> Result<Option<PullRequestLifecycleResult>>
 where
     C: LinearClient,
@@ -1171,14 +1201,14 @@ where
     if branch.eq_ignore_ascii_case(LISTEN_PULL_REQUEST_BASE_BRANCH) {
         return Ok(None);
     }
-    if !workspace_branch_is_published(workspace_path, branch)? {
-        return Ok(None);
-    }
 
     let gh = GhCli;
-    let body_path = write_listener_pull_request_body(workspace_path, issue)?;
+    let body_path = write_listener_pull_request_body(workspace_path, issue, Some(review))?;
     let title = listener_pull_request_title(issue);
-    let Some(_existing) = gh.refresh_existing_branch_pull_request(
+    let pull_request = if let Some(number) = existing_pull_request.number {
+        gh.refresh_pull_request_by_number(workspace_path, number, &title, &body_path)?;
+        gh.promote_pull_request_to_ready(workspace_path, number)?
+    } else if let Some(existing) = gh.refresh_existing_branch_pull_request(
         workspace_path,
         PullRequestPublishRequest {
             head_branch: branch,
@@ -1187,24 +1217,30 @@ where
             body_path: &body_path,
             mode: PullRequestPublishMode::Draft,
         },
-    )?
-    else {
-        return Ok(None);
+    )? {
+        gh.promote_pull_request_to_ready(workspace_path, existing.number)?
+    } else {
+        gh.publish_branch_pull_request(
+            workspace_path,
+            PullRequestPublishRequest {
+                head_branch: branch,
+                base_branch: LISTEN_PULL_REQUEST_BASE_BRANCH,
+                title: &title,
+                body_path: &body_path,
+                mode: PullRequestPublishMode::Ready,
+            },
+        )?
     };
-
-    let ready = gh.promote_branch_pull_request_to_ready(
-        workspace_path,
-        branch,
-        LISTEN_PULL_REQUEST_BASE_BRANCH,
-    )?;
-    ensure_listener_pull_request_label(&gh, workspace_path, issue, &ready)?;
-    ensure_listener_pull_request_attachment(service, issue, &ready).await?;
-    Ok(Some(match ready.action {
-        PullRequestLifecycleAction::PromotedToReady | PullRequestLifecycleAction::AlreadyReady => {
-            ready
-        }
-        _ => unreachable!("review handoff promotion should only return ready states"),
-    }))
+    if pull_request.is_draft {
+        bail!(
+            "pull request #{} for `{}` is still draft after review handoff",
+            pull_request.number,
+            issue.identifier
+        );
+    }
+    ensure_listener_pull_request_label(&gh, workspace_path, issue, &pull_request)?;
+    ensure_listener_pull_request_attachment(service, issue, &pull_request).await?;
+    Ok(Some(pull_request))
 }
 
 fn build_listen_run_args(
@@ -2256,6 +2292,7 @@ async fn run_review_phase(
     issue: &IssueSummary,
     turn_number: u32,
     meaningful_turn_progress: bool,
+    turn_progress: &super::TurnProgress,
     context: &ListenTurnContext<'_>,
     phase_context: WorkerPhaseContext<'_>,
 ) -> Result<ReviewReport> {
@@ -2295,7 +2332,16 @@ async fn run_review_phase(
             .ok_or_else(|| anyhow!("listen review did not return any structured output"))?;
         parse_agent_json(&raw, "review")?
     } else {
-        heuristic_review_report(issue, context, meaningful_turn_progress)?
+        heuristic_review_report(
+            issue,
+            context,
+            meaningful_turn_progress,
+            turn_progress,
+            matches!(
+                phase_context.session_context.pull_request.status,
+                PullRequestStatus::Draft
+            ),
+        )?
     };
     sync_review_tracking(service, issue, context, &report).await?;
     Ok(report)
@@ -2355,7 +2401,13 @@ async fn sync_review_tracking(
     review: &ReviewReport,
 ) -> Result<()> {
     let body = render_review_workpad(issue, context, review);
-    let _ = service.upsert_workpad_comment(issue, body).await?;
+    let _ = match service
+        .update_workpad_comment_by_id(context.workpad_comment_id, body.clone())
+        .await
+    {
+        Ok(comment) => comment,
+        Err(_) => service.upsert_workpad_comment(issue, body).await?,
+    };
     if let Some(backlog_issue) = context.backlog_issue {
         sync_backlog_progress_section(context.workspace_path, &backlog_issue.identifier, review)?;
     }
@@ -2410,12 +2462,18 @@ fn render_review_workpad(
     if review.validation_completed.is_empty() && review.validation_remaining.is_empty() {
         lines.push("- [ ] No explicit validation status recorded.".to_string());
     }
-    if !review.risks.is_empty() || !review.notes.is_empty() {
+    let visible_notes = review
+        .notes
+        .iter()
+        .filter(|note| !note.starts_with("Using heuristic review;"))
+        .filter(|note| !note.starts_with("Using heuristic final review;"))
+        .collect::<Vec<_>>();
+    if !review.risks.is_empty() || !visible_notes.is_empty() {
         lines.extend([String::new(), "### Review Notes".to_string(), String::new()]);
         for item in &review.risks {
             lines.push(format!("- Risk: {item}"));
         }
-        for item in &review.notes {
+        for item in visible_notes {
             lines.push(format!("- Note: {item}"));
         }
     }
@@ -2433,6 +2491,8 @@ fn heuristic_review_report(
     issue: &IssueSummary,
     context: &ListenTurnContext<'_>,
     meaningful_turn_progress: bool,
+    turn_progress: &super::TurnProgress,
+    has_existing_draft_pr: bool,
 ) -> Result<ReviewReport> {
     let acceptance = extract_acceptance_criteria(issue.description.as_deref());
     let validation = extract_validation_requirements(issue.description.as_deref());
@@ -2446,18 +2506,36 @@ fn heuristic_review_report(
     let backlog_complete = backlog_progress
         .as_ref()
         .is_some_and(|progress| progress.total > 0 && progress.completed == progress.total);
-    let complete = backlog_complete || (meaningful_turn_progress && acceptance.is_empty());
+    let complete = if backlog_progress
+        .as_ref()
+        .is_some_and(|progress| progress.total > 0)
+    {
+        backlog_complete
+            || (has_existing_draft_pr && acceptance.is_empty() && validation.is_empty())
+    } else {
+        meaningful_turn_progress && acceptance.is_empty()
+    };
+    let changed_items = turn_progress
+        .implementation_entries
+        .iter()
+        .chain(turn_progress.planning_entries.iter())
+        .map(|entry| format!("Changed `{entry}`"))
+        .collect::<Vec<_>>();
     let completed_items = if complete {
         if acceptance.is_empty() {
-            vec![
-                "Workspace changes are present and no explicit acceptance criteria remain."
-                    .to_string(),
-            ]
+            if changed_items.is_empty() {
+                vec![
+                    "Workspace changes are present and no explicit acceptance criteria remain."
+                        .to_string(),
+                ]
+            } else {
+                changed_items.clone()
+            }
         } else {
             acceptance.clone()
         }
     } else {
-        Vec::new()
+        changed_items.clone()
     };
     let mut remaining_items = if complete {
         Vec::new()
@@ -2473,6 +2551,9 @@ fn heuristic_review_report(
     Ok(ReviewReport {
         summary: if complete {
             "Heuristic review believes the ticket work is complete.".to_string()
+        } else if !changed_items.is_empty() {
+            "Heuristic review detected branch changes, but additional ticket work remains."
+                .to_string()
         } else {
             "Heuristic review found remaining work.".to_string()
         },
